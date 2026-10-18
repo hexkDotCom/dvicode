@@ -48,7 +48,7 @@ impl Analysis {
         let path = self.vfs.path(file);
         for (f, line, msg) in &self.setup.config.problems {
             if *f == path {
-                if let (Some(text), Some(li)) = (self.vfs.text(file), self.vfs.line_index(file)) {
+                if let (Some(text), Some(li)) = (self.file_text(file), self.file_lines(file)) {
                     let start = li.offset(&text, *line, 0);
                     let end = li.offset(&text, *line, u32::MAX);
                     push(Diag::warning(dvi_syntax::Span::new(file, start, end), "BUILD_CONFIG", msg.clone()), &mut out);

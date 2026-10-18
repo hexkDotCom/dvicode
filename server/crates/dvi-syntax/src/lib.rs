@@ -21,7 +21,8 @@ pub trait SourceProvider: Sync {
     fn file_id(&self, path: &Path) -> FileId;
     fn path(&self, id: FileId) -> PathBuf;
     fn text(&self, id: FileId) -> Option<Arc<str>>;
-    /// Lexed tokens of a file (cached by the implementation).
-    fn tokens(&self, id: FileId) -> Option<Arc<Vec<Token>>>;
+    /// Text of a file and its tokens, lexed from exactly that text (cached by the
+    /// implementation).
+    fn source(&self, id: FileId) -> Option<(Arc<str>, Arc<Vec<Token>>)>;
     fn is_file(&self, path: &Path) -> bool;
 }

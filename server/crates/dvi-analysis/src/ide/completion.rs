@@ -4,7 +4,7 @@ use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefKind, RefSeg, Sep};
 use dvi_syntax::lexer::lex;
 use dvi_syntax::token::{TokKind, KEYWORDS};
-use dvi_syntax::{FileId, SourceProvider, Span};
+use dvi_syntax::{FileId, Span};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Documentation, InsertTextFormat, MarkupContent, MarkupKind,
     ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
@@ -51,7 +51,7 @@ struct Ctx {
 
 impl Analysis {
     fn completion_ctx(&self, file: FileId, off: u32) -> Option<Ctx> {
-        let text = self.vfs.text(file)?;
+        let text = self.file_text(file)?;
         let before = text.get(..off as usize)?;
         let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
         let line = before[line_start..].to_string();
@@ -453,7 +453,7 @@ impl Analysis {
     // ------------------------------------------------------------ signature help
 
     pub fn signature_help(&self, file: FileId, off: u32) -> Option<SignatureHelp> {
-        let text = self.vfs.text(file)?;
+        let text = self.file_text(file)?;
         let start = (off as usize).saturating_sub(4000);
         let start = (start..off as usize).find(|i| text.is_char_boundary(*i)).unwrap_or(off as usize);
         let window = text.get(start..off as usize)?;

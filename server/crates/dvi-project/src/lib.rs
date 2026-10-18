@@ -432,7 +432,10 @@ impl Builder {
         let home = home
             .and_then(|h| self.expand(&h, true))
             .or_else(|| self.env.get("UVM_HOME").cloned())
-            .or_else(|| self.env.get("DVICODE_UVM_HOME").cloned());
+            .or_else(|| std::env::var("UVM_HOME").ok())
+            .or_else(|| self.env.get("DVICODE_UVM_HOME").cloned())
+            .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
+            .filter(|h| !h.is_empty());
         let Some(home) = home else {
             self.problem(file, line, "-uvm: set UVM_HOME or DVICODE_UVM_HOME to the UVM library location".into());
             return;
@@ -527,7 +530,7 @@ impl Builder {
 pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Option<String> {
     let lookup = |name: &str| -> Option<String> { env.get(name).cloned().or_else(|| std::env::var(name).ok()) };
     let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
@@ -552,14 +555,14 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
                 (&s[i + 1..e], e)
             };
             if name.is_empty() {
-                out.push('$');
+                out.push(b'$');
                 i += 1;
                 continue;
             }
             match lookup(name) {
-                Some(v) => out.push_str(&v),
+                Some(v) => out.extend_from_slice(v.as_bytes()),
                 None if strict => return None,
-                None => out.push_str(&s[i..end]),
+                None => out.extend_from_slice(&b[i..end]),
             }
             i = end;
             continue;
@@ -569,17 +572,17 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
                 let name = &s[i + 1..i + 1 + e];
                 if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
                     if let Some(v) = lookup(name) {
-                        out.push_str(&v);
+                        out.extend_from_slice(v.as_bytes());
                         i += e + 2;
                         continue;
                     }
                 }
             }
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    Some(out)
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn absolutize(p: &str, base: &Path) -> PathBuf {
@@ -667,27 +670,28 @@ fn split_words(text: &str) -> Vec<Word> {
         }
         at_line_start = false;
         let start_line = line;
-        let mut w = String::new();
+        // Bytes, decoded at the end: every split point is ASCII, so UTF-8 stays intact.
+        let mut wb: Vec<u8> = Vec::new();
         while i < b.len() && !b[i].is_ascii_whitespace() {
             let c = b[i];
             if c == b'"' || c == b'\'' {
                 // Quoted text is kept with its quotes for defines, without them for paths.
                 let q = c;
-                w.push(c as char);
+                wb.push(c);
                 i += 1;
                 while i < b.len() && b[i] != q {
                     if b[i] == b'\\' && i + 1 < b.len() {
-                        w.push(b[i] as char);
+                        wb.push(b[i]);
                         i += 1;
                     }
                     if b[i] == b'\n' {
                         line += 1;
                     }
-                    w.push(b[i] as char);
+                    wb.push(b[i]);
                     i += 1;
                 }
                 if i < b.len() {
-                    w.push(q as char);
+                    wb.push(q);
                     i += 1;
                 }
                 continue;
@@ -695,9 +699,10 @@ fn split_words(text: &str) -> Vec<Word> {
             if c == b'/' && b.get(i + 1) == Some(&b'/') {
                 break;
             }
-            w.push(c as char);
+            wb.push(c);
             i += 1;
         }
+        let w = String::from_utf8_lossy(&wb).into_owned();
         // Whole-word quotes around a path: strip them.
         let w = if w.len() >= 2 && (w.starts_with('"') && w.ends_with('"') || w.starts_with('\'') && w.ends_with('\'')) && !w.contains('=') {
             w[1..w.len() - 1].to_string()
@@ -772,6 +777,21 @@ mod tests {
         let auto = load_auto(&dir, &env);
         assert!(auto.build_file.is_none() && auto.problems.is_empty());
         assert_eq!(auto.invocations[0].files, vec![dir.join("x.sv")]);
+    }
+
+    #[test]
+    fn non_ascii_paths_and_values() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_utf8");
+        std::fs::create_dir_all(dir.join("rtl")).unwrap();
+        std::fs::write(dir.join("rtl/müller.sv"), "").unwrap();
+        let mut env = FxHashMap::default();
+        env.insert("NAME".to_string(), "größe".to_string());
+        let text = "rtl/müller.sv\n+define+MSG=\"héllo wörld\"\n+define+N=$NAME\n";
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), text, &env);
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        assert_eq!(cfg.invocations[0].files, vec![dir.join("rtl/müller.sv")]);
+        assert_eq!(cfg.invocations[0].defines[0].1.as_deref(), Some("\"héllo wörld\""));
+        assert_eq!(cfg.invocations[0].defines[1].1.as_deref(), Some("größe"));
     }
 
     #[test]

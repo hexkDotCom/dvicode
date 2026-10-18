@@ -163,6 +163,8 @@ pub struct PpResult {
     /// Regions removed by `` `ifdef `` and friends.
     pub inactive: Vec<Span>,
     pub macros_after: MacroTable,
+    /// The text of every file read, exactly as it was lexed.
+    pub sources: Vec<(FileId, Arc<str>)>,
 }
 
 pub fn preprocess(
@@ -279,12 +281,24 @@ impl<'a> Pp<'a> {
     }
 
     fn enter_file(&mut self, id: FileId) {
-        if self.file_set.insert(id, ()).is_none() {
+        let first = self.file_set.insert(id, ()).is_none();
+        if first {
             self.res.files.push(id);
         }
-        let toks = self.src.tokens(id).unwrap_or_default();
+        let (text, toks) = match self.src.source(id) {
+            Some((t, k)) => (t, k),
+            None => (Arc::from(""), Arc::default()),
+        };
+        if first {
+            self.res.sources.push((id, text));
+        }
         let depth = self.conds.len();
         self.frames.push(Frame { toks, pos: 0, kind: FrameKind::File(id), cond_depth: depth });
+    }
+
+    /// Text a file was lexed from in this run (falls back to the provider).
+    fn read_text(&self, file: FileId) -> Option<Arc<str>> {
+        self.res.sources.iter().find(|(f, _)| *f == file).map(|(_, t)| t.clone()).or_else(|| self.src.text(file))
     }
 
     fn macro_depth(&self) -> usize {
@@ -470,8 +484,7 @@ impl<'a> Pp<'a> {
             "__LINE__" => {
                 let span = self.real_span(&tok);
                 let line = self
-                    .src
-                    .text(span.file)
+                    .read_text(span.file)
                     .map(|t| t[..(span.start as usize).min(t.len())].bytes().filter(|b| *b == b'\n').count() + 1)
                     .unwrap_or(0);
                 self.emit_generated(&tok, TokKind::Number, SmolStr::new(line.to_string()));
@@ -646,8 +659,7 @@ impl<'a> Pp<'a> {
         let body = self.rest_of_line();
         let body_text = match (body.first(), body.last()) {
             (Some(a), Some(b)) if a.span.file == b.span.file && a.is_real() => self
-                .src
-                .text(a.span.file)
+                .read_text(a.span.file)
                 .and_then(|t| t.get(a.span.start as usize..b.span.end as usize).map(|s| s.to_string()))
                 .unwrap_or_else(|| join_tokens(&body)),
             _ => join_tokens(&body),
@@ -673,15 +685,37 @@ impl<'a> Pp<'a> {
         let (path_text, span) = match t.kind {
             TokKind::String => (t.text.trim_matches('"').to_string(), t.span),
             TokKind::Directive => {
-                // `include `FILE where FILE expands to a string.
-                let s = self
-                    .macros
-                    .get(&t.text)
-                    .and_then(|m| m.body.iter().find(|b| b.kind == TokKind::String).map(|b| b.text.trim_matches('"').to_string()));
-                match s {
+                // `include `FILE or `include `FILE(args): expand the operand like any other
+                // macro use (nested macros, arguments), then take the file name it produces.
+                let mut call = vec![t.clone()];
+                if self.frames.last().and_then(|f| f.toks.get(f.pos)).is_some_and(|n| n.is_punct("(")) {
+                    let mut depth = 0i32;
+                    while let Some(x) = self.take_same_line() {
+                        if x.is_punct("(") {
+                            depth += 1;
+                        } else if x.is_punct(")") {
+                            depth -= 1;
+                        }
+                        call.push(x);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                let file = self.current_file().unwrap_or(t.span.file);
+                let out = expand_snippet(self.src, self.cfg, file, call, self.macros.clone(), usize::MAX);
+                let name = match out.iter().position(|x| x.kind == TokKind::String || x.is_punct("<")) {
+                    Some(i) if out[i].kind == TokKind::String => Some(out[i].text.trim_matches('"').to_string()),
+                    Some(i) => {
+                        let s: String = out[i + 1..].iter().take_while(|x| !x.is_punct(">")).map(|x| x.text.as_str()).collect();
+                        (!s.is_empty()).then_some(s)
+                    }
+                    None => None,
+                };
+                match name {
                     Some(s) => (s, t.span),
                     None => {
-                        self.res.diags.push(Diag::error(t.span, "INCLUDE_SYNTAX", "`include macro does not expand to a file name"));
+                        self.res.diags.push(Diag::error(t.span, "INCLUDE_SYNTAX", format!("`{} does not expand to a file name", t.text)));
                         return;
                     }
                 }

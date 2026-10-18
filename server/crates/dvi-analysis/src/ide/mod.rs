@@ -52,8 +52,8 @@ pub enum Target {
 
 impl Analysis {
     pub fn to_range(&self, span: Span) -> Option<Range> {
-        let text = self.vfs.text(span.file)?;
-        let li = self.vfs.line_index(span.file)?;
+        let src = self.source(span.file)?;
+        let (text, li) = (&src.text, src.lines());
         let (l1, c1) = li.position(&text, span.start);
         let (l2, c2) = li.position(&text, span.end);
         Some(Range::new(Position::new(l1, c1), Position::new(l2, c2)))
@@ -67,8 +67,8 @@ impl Analysis {
     }
 
     pub fn offset_at(&self, file: FileId, pos: Position) -> Option<u32> {
-        let text = self.vfs.text(file)?;
-        let li = self.vfs.line_index(file)?;
+        let src = self.source(file)?;
+        let (text, li) = (&src.text, src.lines());
         Some(li.offset(&text, pos.line, pos.character))
     }
 
@@ -146,7 +146,34 @@ impl Analysis {
         self.to_location(self.decl(r).name_span)
     }
 
+    /// Edits as a workspace edit in which every document carries the version this snapshot
+    /// saw, so the editor refuses them if the document changed since the request was made.
+    pub fn versioned_edit(&self, edits: Vec<(Span, String)>) -> Option<lsp_types::WorkspaceEdit> {
+        use lsp_types::{DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, TextDocumentEdit, TextEdit};
+        let mut by_file: Vec<(FileId, Vec<OneOf<TextEdit, lsp_types::AnnotatedTextEdit>>)> = Vec::new();
+        for (span, text) in edits {
+            let range = self.to_location(span)?.range;
+            let e = OneOf::Left(TextEdit::new(range, text));
+            match by_file.iter_mut().find(|(f, _)| *f == span.file) {
+                Some((_, v)) => v.push(e),
+                None => by_file.push((span.file, vec![e])),
+            }
+        }
+        let docs = by_file
+            .into_iter()
+            .map(|(f, edits)| TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: url_of(&self.vfs.path(f)),
+                    version: self.source(f).and_then(|s| s.lsp_version),
+                },
+                edits,
+            })
+            .collect();
+        Some(lsp_types::WorkspaceEdit { changes: None, document_changes: Some(DocumentChanges::Edits(docs)), change_annotations: None })
+    }
+
+    /// The snapshot text of a file (see [`Analysis::source`]).
     pub fn file_text(&self, file: FileId) -> Option<Arc<str>> {
-        self.vfs.text(file)
+        self.source(file).map(|s| s.text.clone())
     }
 }

@@ -977,6 +977,15 @@ impl<'t> Parser<'t> {
                 });
             let id = match existing {
                 Some(id) => {
+                    // The name in the header becomes a reference to the port declared here, so
+                    // rename and references cover both occurrences.
+                    let header = self.u.decls[id as usize].name_span;
+                    let from_macro = self.u.decls[id as usize].has(dflags::FROM_MACRO);
+                    self.u.refs.push(RefChain {
+                        segs: vec![RefSeg { name: n.text.clone(), span: header, sep: Sep::None, called: false, selects: 0, from_macro }],
+                        scope,
+                        kind: RefKind::Loose,
+                    });
                     let d = &mut self.u.decls[id as usize];
                     // Navigation goes to the declaration with the direction.
                     d.name_span = n.span;

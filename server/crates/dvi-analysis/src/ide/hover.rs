@@ -149,7 +149,7 @@ impl Analysis {
         if d.span.file != d.name_span.file || d.has(dflags::FROM_MACRO) {
             return None;
         }
-        let text = self.vfs.text(d.span.file)?;
+        let text = self.file_text(d.span.file)?;
         let start = d.span.start as usize;
         let rest = text.get(start..)?;
         let mut depth = 0i32;
@@ -237,7 +237,7 @@ impl Analysis {
 
     /// Comment block right above `offset` (contiguous `//` lines or one `/* */` block).
     pub fn doc_comment(&self, file: FileId, offset: u32) -> Option<String> {
-        let text = self.vfs.text(file)?;
+        let text = self.file_text(file)?;
         let before = text.get(..offset as usize)?;
         // Start of the declaration's line; text before it on the same line must be blank.
         let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -293,7 +293,7 @@ impl Analysis {
 
     /// `// comment` after the declaration on the same line.
     pub fn trailing_comment(&self, file: FileId, offset: u32) -> Option<String> {
-        let text = self.vfs.text(file)?;
+        let text = self.file_text(file)?;
         let rest = text.get(offset as usize..)?;
         let line = rest.lines().next()?;
         let i = line.find("//")?;
@@ -305,7 +305,7 @@ impl Analysis {
     pub fn expand_macro_use(&self, unit: u32, idx: usize, levels: usize) -> Option<String> {
         let u = self.unit(unit);
         let mu = u.macro_uses.get(idx)?;
-        let text = self.vfs.text(mu.call_span.file)?;
+        let text = self.file_text(mu.call_span.file)?;
         let call = text.get(mu.call_span.start as usize..mu.call_span.end as usize)?;
         let toks = dvi_syntax::lexer::lex(call, mu.call_span.file);
         let cfg = self.setup.pp_configs.get(u.invocation).cloned().unwrap_or_default();
@@ -315,7 +315,7 @@ impl Analysis {
 }
 
 fn line_start_of(a: &Analysis, span: Span) -> u32 {
-    let Some(text) = a.vfs.text(span.file) else { return span.start };
+    let Some(text) = a.file_text(span.file) else { return span.start };
     text.get(..span.start as usize).and_then(|b| b.rfind('\n')).map(|i| i as u32 + 1).unwrap_or(0)
 }
 

@@ -558,7 +558,7 @@ impl Analysis {
         if d.has(dflags::FROM_MACRO) || d.has(dflags::PROTOTYPE) {
             return Vec::new();
         }
-        let Some(toks) = self.vfs.tokens(d.span.file) else { return Vec::new() };
+        let Some(toks) = self.file_tokens(d.span.file) else { return Vec::new() };
         let lo = toks.partition_point(|t| t.span.start < d.span.start);
         let hi = toks.partition_point(|t| t.span.start < d.span.end);
         let t = &toks[lo..hi];
@@ -628,7 +628,7 @@ impl Analysis {
 
     /// Text for a whole file with every macro expanded (for "expand all").
     pub fn source_text(&self, file: FileId) -> Option<std::sync::Arc<str>> {
-        self.vfs.text(file)
+        self.file_text(file)
     }
 }
 

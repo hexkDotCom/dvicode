@@ -99,7 +99,7 @@ impl LineIndex {
             .map(|e| e - 1)
             .unwrap_or(text.len() as u32);
         if self.ascii {
-            return (start + col).min(end);
+            return start.saturating_add(col).min(end);
         }
         let mut units = 0u32;
         for (i, ch) in text[start as usize..end as usize].char_indices() {
@@ -125,6 +125,13 @@ fn floor_char_boundary(text: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn end_of_line_does_not_overflow() {
+        let text = "ab\ncdef\n";
+        let li = LineIndex::new(text);
+        assert_eq!(li.offset(text, 1, u32::MAX), 7);
+    }
 
     #[test]
     fn positions_round_trip() {

@@ -1,4 +1,7 @@
 //! In-memory view of source files: disk contents, editor overlays, lexing cache.
+//!
+//! The store is shared and mutable; analysis snapshots copy what they need (see
+//! [`crate::world::Source`]) so that a snapshot never mixes its syntax with newer text.
 
 use dvi_syntax::lexer::lex;
 use dvi_syntax::preproc::normalize;
@@ -12,30 +15,13 @@ struct Entry {
     disk: Option<Arc<str>>,
     disk_loaded: bool,
     overlay: Option<Arc<str>>,
+    /// Editor (LSP) version of the overlay text.
+    overlay_version: Option<i32>,
+    /// Changes with every edit, invalidation or overlay change.
     version: u64,
-    tokens: Option<(u64, Arc<Vec<Token>>)>,
+    /// Tokens and the exact text they were lexed from.
+    tokens: Option<(u64, Arc<str>, Arc<Vec<Token>>)>,
     lines: Option<(u64, Arc<LineIndex>)>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn caches_follow_the_latest_text() {
-        let vfs = Vfs::new();
-        let p = Path::new("/__dvicode_test__/a.sv");
-        let id = vfs.set_overlay(p, Arc::from("module a;"));
-        let (t1, v1) = vfs.text_versioned(id).unwrap();
-        assert_eq!(&*t1, "module a;");
-        assert_eq!(vfs.tokens(id).unwrap()[1].text, "a");
-        vfs.set_overlay(p, Arc::from("module bb;\nendmodule"));
-        let (t2, v2) = vfs.text_versioned(id).unwrap();
-        assert!(v2 > v1);
-        assert_eq!(&*t2, "module bb;\nendmodule");
-        assert_eq!(vfs.tokens(id).unwrap()[1].text, "bb");
-        assert_eq!(vfs.line_index(id).unwrap().line_count(), 2);
-    }
 }
 
 #[derive(Default)]
@@ -66,10 +52,16 @@ impl Vfs {
 
     /// Sets the editor contents of a file.
     pub fn set_overlay(&self, path: &Path, text: Arc<str>) -> FileId {
+        self.set_overlay_versioned(path, text, None)
+    }
+
+    /// Sets the editor contents of a file with the editor's document version.
+    pub fn set_overlay_versioned(&self, path: &Path, text: Arc<str>, lsp_version: Option<i32>) -> FileId {
         let id = self.file_id(path);
         let mut g = self.inner.write().unwrap();
         let e = &mut g.entries[id as usize];
         e.overlay = Some(text);
+        e.overlay_version = lsp_version;
         e.version += 1;
         id
     }
@@ -78,6 +70,7 @@ impl Vfs {
         if let Some(id) = self.lookup(path) {
             let mut g = self.inner.write().unwrap();
             let e = &mut g.entries[id as usize];
+            e.overlay_version = None;
             if e.overlay.take().is_some() {
                 e.version += 1;
             }
@@ -86,6 +79,16 @@ impl Vfs {
 
     pub fn has_overlay(&self, id: FileId) -> bool {
         self.inner.read().unwrap().entries.get(id as usize).is_some_and(|e| e.overlay.is_some())
+    }
+
+    /// The editor version of `text` if it is the current editor contents of the file.
+    pub fn lsp_version_for(&self, id: FileId, text: &Arc<str>) -> Option<i32> {
+        let g = self.inner.read().unwrap();
+        let e = g.entries.get(id as usize)?;
+        match &e.overlay {
+            Some(o) if Arc::ptr_eq(o, text) => e.overlay_version,
+            _ => None,
+        }
     }
 
     /// Forgets cached disk contents (after a change on disk).
@@ -103,6 +106,7 @@ impl Vfs {
         self.inner.read().unwrap().entries.get(id as usize).map_or(0, |e| e.version)
     }
 
+    /// Line index of the current text. Analysis code uses the snapshot's line index instead.
     pub fn line_index(&self, id: FileId) -> Option<Arc<LineIndex>> {
         {
             let g = self.inner.read().unwrap();
@@ -190,13 +194,13 @@ impl SourceProvider for Vfs {
         self.text_versioned(id).map(|(t, _)| t)
     }
 
-    fn tokens(&self, id: FileId) -> Option<Arc<Vec<Token>>> {
+    fn source(&self, id: FileId) -> Option<(Arc<str>, Arc<Vec<Token>>)> {
         {
             let g = self.inner.read().unwrap();
             let e = g.entries.get(id as usize)?;
-            if let Some((v, t)) = &e.tokens {
+            if let Some((v, text, toks)) = &e.tokens {
                 if *v == e.version {
-                    return Some(t.clone());
+                    return Some((text.clone(), toks.clone()));
                 }
             }
         }
@@ -205,9 +209,9 @@ impl SourceProvider for Vfs {
         let mut g = self.inner.write().unwrap();
         let e = &mut g.entries[id as usize];
         if e.version == version {
-            e.tokens = Some((version, toks.clone()));
+            e.tokens = Some((version, text.clone(), toks.clone()));
         }
-        Some(toks)
+        Some((text, toks))
     }
 
     fn is_file(&self, path: &Path) -> bool {
@@ -218,5 +222,32 @@ impl SourceProvider for Vfs {
             }
         }
         path.is_file()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caches_follow_the_latest_text() {
+        let vfs = Vfs::new();
+        let p = Path::new("/__dvicode_test__/a.sv");
+        let id = vfs.set_overlay_versioned(p, Arc::from("module a;"), Some(1));
+        let (t1, v1) = vfs.text_versioned(id).unwrap();
+        assert_eq!(&*t1, "module a;");
+        let (st1, toks1) = vfs.source(id).unwrap();
+        assert_eq!(toks1[1].text, "a");
+        assert_eq!(vfs.lsp_version_for(id, &st1), Some(1));
+        vfs.set_overlay_versioned(p, Arc::from("module bb;\nendmodule"), Some(2));
+        let (t2, v2) = vfs.text_versioned(id).unwrap();
+        assert!(v2 > v1);
+        assert_eq!(&*t2, "module bb;\nendmodule");
+        let (st2, toks2) = vfs.source(id).unwrap();
+        assert_eq!(toks2[1].text, "bb");
+        assert_eq!(&*st2, &*t2);
+        // The old text is no longer the editor's text.
+        assert_eq!(vfs.lsp_version_for(id, &st1), None);
+        assert_eq!(vfs.line_index(id).unwrap().line_count(), 2);
     }
 }

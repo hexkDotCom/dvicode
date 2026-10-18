@@ -377,9 +377,18 @@ impl Server {
             }
             next
         }));
+        let mut interface_changed = false;
         match r {
-            Ok(next) => self.analysis = Arc::new(next),
+            Ok(next) => {
+                interface_changed = next.interface_changed(&a);
+                self.analysis = Arc::new(next);
+            }
             Err(_) => log::error!("incremental update panicked for {:?}", files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
+        }
+        if interface_changed {
+            // Declarations or macros other files use changed: their problems may have too.
+            self.publish_all();
+            return;
         }
         log::debug!("incremental update of {} file(s) in {} ms", files.len(), t0.elapsed().as_millis());
         // Problems of the changed files and of the other open files of the same units.
@@ -482,7 +491,9 @@ impl Server {
                 } else {
                     st.published.insert(uri.clone());
                 }
-                let p = PublishDiagnosticsParams { uri, diagnostics: lsp, version: None };
+                // The document version these problems belong to (open files only).
+                let version = a.source(f).and_then(|s| s.lsp_version);
+                let p = PublishDiagnosticsParams { uri, diagnostics: lsp, version };
                 let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
             }
             if full {
@@ -510,7 +521,7 @@ impl Server {
             "textDocument/didOpen" => {
                 let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
-                let id = self.vfs.set_overlay(&path, Arc::from(p.text_document.text));
+                let id = self.vfs.set_overlay_versioned(&path, Arc::from(p.text_document.text), Some(p.text_document.version));
                 self.open.insert(id, p.text_document.uri);
                 self.note_change(id);
                 // Make the file available right away.
@@ -522,7 +533,7 @@ impl Server {
                 let id = self.vfs.file_id(&path);
                 let old = self.vfs.text(id).unwrap_or_else(|| Arc::from(""));
                 let new = util::apply_changes(&old, p.content_changes);
-                self.vfs.set_overlay(&path, Arc::from(new));
+                self.vfs.set_overlay_versioned(&path, Arc::from(new), Some(p.text_document.version));
                 self.note_change(id);
                 self.pending_since = Some(Instant::now());
             }
@@ -749,16 +760,12 @@ impl Server {
                     .quick_fixes(f, start, end)
                     .into_iter()
                     .filter_map(|q| {
-                        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = Default::default();
-                        for (span, text) in &q.edits {
-                            let loc = a.to_location(*span)?;
-                            changes.entry(loc.uri).or_default().push(TextEdit::new(loc.range, text.clone()));
-                        }
+                        let edit = a.versioned_edit(q.edits.clone())?;
                         Some(CodeActionOrCommand::CodeAction(CodeAction {
                             title: q.title,
                             kind: Some(CodeActionKind::QUICKFIX),
                             diagnostics: util::to_lsp_diag(a, &q.diag).map(|d| vec![d]),
-                            edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                            edit: Some(edit),
                             is_preferred: q.preferred.then_some(true),
                             ..Default::default()
                         }))

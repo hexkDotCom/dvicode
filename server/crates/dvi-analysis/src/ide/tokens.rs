@@ -2,7 +2,7 @@
 
 use crate::world::{Analysis, DeclRef};
 use dvi_syntax::ast::{dflags, Decl, DeclKind};
-use dvi_syntax::{FileId, SourceProvider, Span};
+use dvi_syntax::{FileId, Span};
 use lsp_types::{FoldingRange, FoldingRangeKind, SemanticToken, SemanticTokenModifier, SemanticTokenType};
 
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -81,8 +81,8 @@ fn classify(a: &Analysis, r: DeclRef) -> Option<(u32, u32)> {
 impl Analysis {
     /// Semantic tokens of a file, already delta-encoded.
     pub fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
-        let Some(text) = self.vfs.text(file) else { return Vec::new() };
-        let Some(li) = self.vfs.line_index(file) else { return Vec::new() };
+        let Some(text) = self.file_text(file) else { return Vec::new() };
+        let Some(li) = self.file_lines(file) else { return Vec::new() };
         let mut raw: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // line, col, len, type, mods
         let push_span = |span: Span, ty: u32, m: u32, raw: &mut Vec<(u32, u32, u32, u32, u32)>| {
             let (l1, c1) = li.position(&text, span.start);
@@ -162,8 +162,8 @@ impl Analysis {
     }
 
     pub fn folding_ranges(&self, file: FileId) -> Vec<FoldingRange> {
-        let Some(text) = self.vfs.text(file) else { return Vec::new() };
-        let Some(li) = self.vfs.line_index(file) else { return Vec::new() };
+        let Some(text) = self.file_text(file) else { return Vec::new() };
+        let Some(li) = self.file_lines(file) else { return Vec::new() };
         let mut out = Vec::new();
         let add = |s: u32, e: u32, kind: Option<FoldingRangeKind>, out: &mut Vec<FoldingRange>| {
             let (l1, _) = li.position(&text, s);

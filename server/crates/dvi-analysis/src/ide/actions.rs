@@ -2,7 +2,7 @@
 
 use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, ParsedUnit, RefId, RefKind, Sep};
-use dvi_syntax::{Diag, FileId, SourceProvider, Span};
+use dvi_syntax::{Diag, FileId, Span};
 use rustc_hash::FxHashSet;
 use smol_str::SmolStr;
 
@@ -228,7 +228,7 @@ impl Analysis {
     /// The `;` that ends the header of a declaration (`module m (...);`, `function f();`).
     fn header_end(&self, r: DeclRef) -> Option<Span> {
         let d = self.decl(r);
-        let toks = self.vfs.tokens(d.span.file)?;
+        let toks = self.file_tokens(d.span.file)?;
         let lo = toks.partition_point(|t| t.span.start < d.span.start);
         let mut depth = 0i32;
         for t in &toks[lo..] {
@@ -247,14 +247,14 @@ impl Analysis {
     }
 
     fn line_start(&self, file: FileId, off: u32) -> Option<u32> {
-        let text = self.vfs.text(file)?;
+        let text = self.file_text(file)?;
         let before = text.get(..off as usize)?;
         Some(before.rfind('\n').map_or(0, |i| i as u32 + 1))
     }
 
     /// Leading whitespace of the line starting at `line_start`.
     fn indent_at(&self, file: FileId, line_start: u32) -> String {
-        let Some(text) = self.vfs.text(file) else { return String::new() };
+        let Some(text) = self.file_text(file) else { return String::new() };
         text[line_start as usize..].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
     }
 }

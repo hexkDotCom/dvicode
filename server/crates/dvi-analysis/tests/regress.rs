@@ -121,3 +121,113 @@ fn library_modules_are_found_while_editing() {
     let a2 = a.update(&[ft]);
     assert!(codes(&a2, "top.sv").is_empty(), "{:?}", codes(&a2, "top.sv"));
 }
+
+#[test]
+fn include_operand_macros_are_expanded() {
+    let (a, _) = project(
+        "incmacro",
+        &[
+            ("inc/defs.svh", "`define FROM_DEFS 1\n"),
+            ("inc/other.svh", "`define FROM_OTHER 1\n"),
+            (
+                "top.sv",
+                "`define HEADER \"inc/defs.svh\"\n`define ALIAS `HEADER\n`define PATH(f) `\"inc/f.svh`\"\n`include `ALIAS\n`include `PATH(other)\nmodule top;\n  int a = `FROM_DEFS + `FROM_OTHER;\nendmodule\n",
+            ),
+        ],
+    );
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn non_ansi_port_header_is_renamed_too() {
+    use dvi_syntax::SourceProvider;
+    let (a, root) = project("nonansi", &[("m.sv", "module m(a, b);\n  input a;\n  output b;\n  assign b = a;\nendmodule\n")]);
+    let f = a.vfs.file_id(&root.join("m.sv"));
+    let text = a.vfs.text(f).unwrap();
+    let off = text.find("input a").unwrap() as u32 + 6;
+    let mut lines: Vec<u32> = a.references(f, off, true).iter().map(|l| l.range.start.line + 1).collect();
+    lines.sort();
+    assert_eq!(lines, vec![1, 2, 4]);
+    // Navigation from the header reaches the declaration.
+    let hdr = text.find("(a,").unwrap() as u32 + 1;
+    let d: Vec<u32> = a.goto_definition(f, hdr).iter().map(|l| l.range.start.line + 1).collect();
+    assert_eq!(d, vec![2]);
+}
+
+#[test]
+fn macro_rename_keeps_the_backtick() {
+    use dvi_syntax::SourceProvider;
+    let (a, root) = project("macrorename", &[("t.sv", "`define OLD(x) (x)\nmodule t;\n  int a = `OLD(1) + `OLD(2);\nendmodule\n")]);
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let text = a.vfs.text(f).unwrap();
+    let li = a.vfs.line_index(f).unwrap();
+    let off = text.find("`OLD(1)").unwrap() as u32 + 2;
+    let edit = a.rename(f, off, "NEW").unwrap();
+    let edits = all_edits(edit);
+    assert_eq!(edits.len(), 3);
+    for (_, r) in edits {
+        let s = li.offset(&text, r.start.line, r.start.character) as usize;
+        let t = li.offset(&text, r.end.line, r.end.character) as usize;
+        assert_eq!(&text[s..t], "OLD");
+    }
+}
+
+fn all_edits(edit: lsp_types::WorkspaceEdit) -> Vec<(Option<i32>, lsp_types::Range)> {
+    let Some(lsp_types::DocumentChanges::Edits(docs)) = edit.document_changes else { panic!("expected document changes") };
+    docs.into_iter()
+        .flat_map(|d| {
+            let v = d.text_document.version;
+            d.edits.into_iter().map(move |e| match e {
+                lsp_types::OneOf::Left(t) => (v, t.range),
+                lsp_types::OneOf::Right(t) => (v, t.text_edit.range),
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn snapshots_keep_their_own_text_and_version() {
+    use dvi_syntax::SourceProvider;
+    let (a0, root) = project("snapshot", &[("s.sv", "module s;
+  int count;
+  initial count = 1;
+endmodule
+")]);
+    let path = root.join("s.sv");
+    let f = a0.vfs.file_id(&path);
+    // The editor opens the file (version 7) and the analysis catches up.
+    a0.vfs.set_overlay_versioned(&path, Arc::from("module s;
+  int count;
+  initial count = 1;
+endmodule
+"), Some(7));
+    let a = a0.update(&[f]);
+    let off = a.file_text(f).unwrap().find("count = 1").unwrap() as u32;
+    // Then the editor changes the text (version 8) before this snapshot answers.
+    a.vfs.set_overlay_versioned(&path, Arc::from("// a new first line
+module s;
+  int count;
+  initial count = 1;
+endmodule
+"), Some(8));
+    let d = a.goto_definition(f, off);
+    assert_eq!(d[0].range.start.line, 1, "position from the snapshot's text, not the new one");
+    let edits = all_edits(a.rename(f, off, "total").unwrap());
+    assert_eq!(edits.len(), 2);
+    assert!(edits.iter().all(|(v, _)| *v == Some(7)), "edits carry the snapshot's version: {edits:?}");
+}
+
+#[test]
+fn interface_changes_are_detected() {
+    use dvi_syntax::SourceProvider;
+    let (a, root) = project("iface", &[("p.sv", "package p;\n  function automatic int f();\n    return 1;\n  endfunction\nendpackage\n")]);
+    let f = a.vfs.file_id(&root.join("p.sv"));
+    // A local change inside a function body: other files cannot see it.
+    a.vfs.set_overlay(&root.join("p.sv"), Arc::from("package p;\n  function automatic int f();\n    int k = 2;\n    return k;\n  endfunction\nendpackage\n"));
+    let b = a.update(&[f]);
+    assert!(!b.interface_changed(&a));
+    // A new package item: other files can see it.
+    b.vfs.set_overlay(&root.join("p.sv"), Arc::from("package p;\n  int g;\n  function automatic int f();\n    int k = 2;\n    return k;\n  endfunction\nendpackage\n"));
+    let c = b.update(&[f]);
+    assert!(c.interface_changed(&b));
+}

@@ -56,7 +56,28 @@ pub struct Unit {
     pub positions: FxHashMap<FileId, FilePositions>,
     /// Name -> reference segments with that name.
     pub names: FxHashMap<SmolStr, Vec<(RefId, u16)>>,
+    /// The text of each file exactly as this unit was compiled from it.
+    pub sources: FxHashMap<FileId, Arc<Source>>,
     pub parse_ms: u128,
+}
+
+/// A file's text as an analysis snapshot saw it. Positions in the snapshot are converted with
+/// this text, never with the (possibly newer) text in the file store.
+pub struct Source {
+    pub text: Arc<str>,
+    /// Editor document version of this text, when it came from an open editor.
+    pub lsp_version: Option<i32>,
+    lines: std::sync::OnceLock<Arc<dvi_syntax::LineIndex>>,
+}
+
+impl Source {
+    pub fn new(text: Arc<str>, lsp_version: Option<i32>) -> Source {
+        Source { text, lsp_version, lines: std::sync::OnceLock::new() }
+    }
+
+    pub fn lines(&self) -> Arc<dvi_syntax::LineIndex> {
+        self.lines.get_or_init(|| Arc::new(dvi_syntax::LineIndex::new(&self.text))).clone()
+    }
 }
 
 impl Unit {
@@ -154,7 +175,11 @@ fn make_unit(
         p.refs.sort_by_key(|(s, _, _)| (s.start, s.end));
         p.decls.sort_by_key(|d| parsed.decls[*d as usize].name_span.start);
     }
-    let _ = vfs;
+    let sources = pp
+        .sources
+        .iter()
+        .map(|(f, text)| (*f, Arc::new(Source::new(text.clone(), vfs.lsp_version_for(*f, text)))))
+        .collect();
     Unit {
         id,
         root,
@@ -171,8 +196,39 @@ fn make_unit(
         macros_after: pp.macros_after,
         positions,
         names,
+        sources,
         parse_ms: t0.elapsed().as_millis(),
     }
+}
+
+/// Hash of a unit's declarations that other files can refer to.
+fn interface_fingerprint(u: &Unit) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    for d in &u.parsed.decls {
+        // Skip anything inside a subroutine, block, constraint or covergroup body.
+        let mut p = d.parent;
+        let mut local = false;
+        while let Some(x) = p {
+            let pd = u.parsed.decl(x);
+            if matches!(pd.kind, DeclKind::Function | DeclKind::Task | DeclKind::Block | DeclKind::Constraint | DeclKind::Covergroup) {
+                local = true;
+                break;
+            }
+            p = pd.parent;
+        }
+        if local {
+            continue;
+        }
+        // Names, not ids: ids shift when a local declaration is added above.
+        let parent = d.parent.map(|x| u.parsed.decl(x).name.as_str());
+        (d.name.as_str(), d.kind as u8, d.flags, parent).hash(&mut h);
+        d.ty.as_ref().map(|t| t.text.as_str()).hash(&mut h);
+        d.extends.as_ref().map(|t| t.text.as_str()).hash(&mut h);
+        d.dir.map(|x| x as u8).hash(&mut h);
+        d.detail.as_str().hash(&mut h);
+    }
+    h.finish()
 }
 
 impl Analysis {
@@ -509,6 +565,41 @@ impl Analysis {
 
     pub fn decl_count(&self) -> usize {
         self.units.iter().flatten().map(|u| u.parsed.decls.len()).sum()
+    }
+
+    /// Whether units recompiled since `old` changed anything other files can see: declarations
+    /// outside subroutine bodies and blocks (names, kinds, types, bases, ports) or the macros
+    /// they leave behind. When not, only the edited files' problems can have changed.
+    pub fn interface_changed(&self, old: &Analysis) -> bool {
+        let n = self.units.len().max(old.units.len());
+        (0..n).any(|i| match (self.units.get(i).and_then(|u| u.as_ref()), old.units.get(i).and_then(|u| u.as_ref())) {
+            (Some(a), Some(b)) if Arc::ptr_eq(a, b) => false,
+            (Some(a), Some(b)) => interface_fingerprint(a) != interface_fingerprint(b) || !a.macros_after.same_definitions(&b.macros_after),
+            (None, None) => false,
+            _ => true,
+        })
+    }
+
+    /// The text of a file as this snapshot compiled it; for files no unit read (build files,
+    /// for example), the current text.
+    pub fn source(&self, f: FileId) -> Option<Arc<Source>> {
+        for uid in self.units_of_file(f) {
+            if let Some(s) = self.try_unit(*uid).and_then(|u| u.sources.get(&f)) {
+                return Some(s.clone());
+            }
+        }
+        let (text, _) = self.vfs.text_versioned(f)?;
+        let v = self.vfs.lsp_version_for(f, &text);
+        Some(Arc::new(Source::new(text, v)))
+    }
+
+    pub fn file_lines(&self, f: FileId) -> Option<Arc<dvi_syntax::LineIndex>> {
+        self.source(f).map(|s| s.lines())
+    }
+
+    /// Tokens of a file's snapshot text.
+    pub fn file_tokens(&self, f: FileId) -> Option<Arc<Vec<dvi_syntax::Token>>> {
+        self.source(f).map(|s| Arc::new(dvi_syntax::lexer::lex(&s.text, f)))
     }
 
     pub fn path(&self, f: FileId) -> PathBuf {

@@ -5,7 +5,7 @@ use super::{Hit, Target};
 use crate::world::{Analysis, DeclRef, UnitKind};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind};
 use dvi_syntax::{FileId, Span};
-use lsp_types::{Location, SymbolKind, TextEdit, TypeHierarchyItem, Url, WorkspaceEdit};
+use lsp_types::{Location, SymbolKind, TypeHierarchyItem, WorkspaceEdit};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 impl Analysis {
@@ -127,7 +127,7 @@ impl Analysis {
                 for u in self.units.iter().flatten() {
                     for mu in &u.macro_uses {
                         if mu.name == m.name && mu.def.as_ref().is_some_and(|d| d.name_span == m.name_span) && seen.insert(mu.name_span) {
-                            out.push(mu.name_span);
+                            out.push(macro_name(mu.name_span));
                         }
                     }
                 }
@@ -246,7 +246,10 @@ impl Analysis {
                 }
                 Some(hit.span())
             }
-            (_, Target::Macro(m)) => (m.name_span.file != dvi_syntax::preproc::COMMAND_LINE_FILE).then(|| hit.span()),
+            (_, Target::Macro(m)) => (m.name_span.file != dvi_syntax::preproc::COMMAND_LINE_FILE).then(|| match hit {
+                Hit::MacroUse { span, .. } => macro_name(span),
+                _ => hit.span(),
+            }),
             _ => None,
         }
     }
@@ -259,17 +262,13 @@ impl Analysis {
             return Err("This element cannot be renamed".into());
         }
         let spans = self.reference_spans(file, off, true);
-        let mut changes: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         let mut seen = FxHashSet::default();
-        for s in spans {
-            if !seen.insert(s) {
-                continue;
-            }
-            if let Some(loc) = self.to_location(s) {
-                changes.entry(loc.uri).or_default().push(TextEdit::new(loc.range, new_name.to_string()));
-            }
-        }
-        Ok(WorkspaceEdit { changes: Some(changes.into_iter().collect()), document_changes: None, change_annotations: None })
+        let edits: Vec<(Span, String)> = spans
+            .into_iter()
+            .filter(|s| seen.insert(*s) && !self.vfs.is_builtin(s.file))
+            .map(|s| (s, new_name.to_string()))
+            .collect();
+        self.versioned_edit(edits).ok_or_else(|| "The files to edit are not available".to_string())
     }
 
     // ------------------------------------------------------------ type hierarchy
@@ -326,6 +325,11 @@ impl Analysis {
 
 fn serde_json_value(r: DeclRef) -> lsp_types::LSPAny {
     lsp_types::LSPAny::Array(vec![lsp_types::LSPAny::from(r.unit), lsp_types::LSPAny::from(r.decl)])
+}
+
+/// The name part of a macro use span, which starts with the backtick: `` `NAME `` -> `NAME`.
+fn macro_name(use_span: Span) -> Span {
+    Span::new(use_span.file, use_span.start + 1, use_span.end.max(use_span.start + 1))
 }
 
 pub fn is_identifier(s: &str) -> bool {
