@@ -1,0 +1,457 @@
+{
+  "name": "dvicode",
+  "displayName": "DVICode - DV Intelligence",
+  "description": "SystemVerilog/UVM IDE features (navigation, problems, design and UVM hierarchies, call hierarchy, quick fixes, macros) backed by a fast Rust language server that can run locally, in WSL2 or on a remote Linux host.",
+  "version": "0.1.0",
+  "publisher": "hexk",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hexkDotCom/hexk-dvicode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hexkDotCom/hexk-dvicode/issues"
+  },
+  "homepage": "https://github.com/hexkDotCom/hexk-dvicode#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Snippets"
+  ],
+  "keywords": [
+    "systemverilog",
+    "verilog",
+    "uvm",
+    "verification",
+    "hdl"
+  ],
+  "icon": "images/icon.png",
+  "extensionKind": [
+    "workspace",
+    "ui"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:systemverilog",
+    "onLanguage:verilog",
+    "workspaceContains:.dvicode",
+    "workspaceContains:**/*.{sv,svh}",
+    "onFileSystem:dvicode"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "systemverilog",
+        "aliases": [
+          "SystemVerilog",
+          "systemverilog"
+        ],
+        "extensions": [
+          ".sv",
+          ".svh",
+          ".svi",
+          ".svp",
+          ".sva",
+          ".v",
+          ".vh",
+          ".vp",
+          ".vlib"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "dvicode-build",
+        "aliases": [
+          "DVICode Build Configuration",
+          "buildconfig"
+        ],
+        "extensions": [
+          ".build",
+          ".f"
+        ],
+        "configuration": "./build-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "systemverilog",
+        "scopeName": "source.systemverilog",
+        "path": "./syntaxes/systemverilog.tmLanguage.json"
+      },
+      {
+        "language": "dvicode-build",
+        "scopeName": "source.dvicode-build",
+        "path": "./syntaxes/build.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "systemverilog",
+        "path": "./snippets/systemverilog.json"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "module",
+        "superType": "class",
+        "description": "Module, program or checker"
+      }
+    ],
+    "semanticTokenModifiers": [
+      {
+        "id": "port",
+        "description": "Port of a module or interface"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "systemverilog",
+        "scopes": {
+          "module": [
+            "entity.name.type.module.systemverilog"
+          ],
+          "variable.readonly": [
+            "variable.other.constant.systemverilog"
+          ],
+          "parameter.port": [
+            "variable.parameter.port.systemverilog"
+          ]
+        }
+      }
+    ],
+    "configuration": {
+      "title": "DVICode",
+      "properties": {
+        "dvicode.server.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "local",
+            "wsl",
+            "ssh",
+            "tcp",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "WSL for \\\\wsl$ / \\\\wsl.localhost folders and on Windows when no local server binary exists; the remote host of a dvicode:// folder; otherwise local.",
+            "Run the server on this machine.",
+            "Run the server in a WSL distribution (Windows only).",
+            "Run the server on `#dvicode.server.sshHost#` over SSH (keys or an agent must be set up).",
+            "Connect to a running `dvicode-server --listen` at `#dvicode.server.tcpAddress#`.",
+            "Run `#dvicode.server.launchCommand#`, which must contain ${SERVER_CMD} (e.g. for bsub/qrsh)."
+          ],
+          "default": "auto",
+          "description": "Where the DVICode language server runs."
+        },
+        "dvicode.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path of dvicode-server on the machine where it runs. Empty: use the bundled binary (deployed to ~/.dvicode/server/<version> for WSL and SSH)."
+        },
+        "dvicode.server.autoDeploy": {
+          "type": "boolean",
+          "default": true,
+          "description": "Copy the bundled Linux server to the WSL distribution or SSH host when it is missing there."
+        },
+        "dvicode.server.wslDistro": {
+          "type": "string",
+          "default": "",
+          "description": "WSL distribution for the server. Empty: the distribution of a \\\\wsl$ folder, else the default distribution."
+        },
+        "dvicode.server.sshHost": {
+          "type": "string",
+          "default": "",
+          "description": "SSH destination for the server, e.g. `user@build-server` or a Host alias from ~/.ssh/config."
+        },
+        "dvicode.server.sshArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments for ssh, e.g. [\"-p\", \"2222\", \"-i\", \"~/.ssh/id_ed25519\"]."
+        },
+        "dvicode.server.sshCommand": {
+          "type": "string",
+          "default": "ssh",
+          "description": "The ssh executable."
+        },
+        "dvicode.server.launchCommand": {
+          "type": "string",
+          "default": "${SERVER_CMD}",
+          "description": "Command for the `custom` mode. ${SERVER_CMD} is replaced by the server command line, e.g. `ssh farm bsub -Is ${SERVER_CMD}`."
+        },
+        "dvicode.server.tcpAddress": {
+          "type": "string",
+          "default": "127.0.0.1:7777",
+          "description": "host:port of a server started with `dvicode-server --listen` (tcp mode). Use an SSH tunnel for remote hosts."
+        },
+        "dvicode.server.tcpToken": {
+          "type": "string",
+          "default": "",
+          "description": "Token of the server started with `--token` (tcp mode)."
+        },
+        "dvicode.server.logLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info",
+          "description": "Server log level (shown in the DVICode output channel)."
+        },
+        "dvicode.server.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments for dvicode-server."
+        },
+        "dvicode.pathMappings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "local": {
+                "type": "string",
+                "description": "Folder as seen by VS Code, e.g. Z:\\\\proj or /Volumes/proj"
+              },
+              "remote": {
+                "type": "string",
+                "description": "Same folder as seen by the server, e.g. /home/me/proj"
+              }
+            },
+            "required": [
+              "local",
+              "remote"
+            ]
+          },
+          "default": [],
+          "description": "Folder mappings between this machine and the server when they see the same files under different paths (Samba/NFS/SSHFS). WSL paths are mapped automatically."
+        },
+        "dvicode.buildFile": {
+          "type": "string",
+          "default": "",
+          "description": "Build configuration file (relative to the workspace folder). Empty: .dvicode/default.build, else auto-configuration."
+        },
+        "dvicode.env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variables for the build configuration ($VAR expansion), set on the server side."
+        },
+        "dvicode.uvmHome": {
+          "type": "string",
+          "default": "",
+          "description": "UVM library location on the server (used by -uvm and auto-configuration when $UVM_HOME is not set)."
+        },
+        "dvicode.maxProblems": {
+          "type": "number",
+          "default": 1000,
+          "description": "Maximum number of problems published after a full build (open files always get all of theirs). 0 means no limit."
+        },
+        "dvicode.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the LSP traffic in the DVICode trace output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "dvicode.restartServer",
+        "title": "Restart Language Server",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.rebuild",
+        "title": "Rebuild Project",
+        "category": "DVICode",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dvicode.showStatus",
+        "title": "Show Project Status",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.selectBuildConfig",
+        "title": "Set Current Build Configuration...",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.expandMacro",
+        "title": "Expand Macro One Level",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.expandMacroAll",
+        "title": "Expand Macro All Levels",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.showIncludingFiles",
+        "title": "Show Including File",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.openRemoteFolder",
+        "title": "Open Folder on the Server...",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.selectDesignTop",
+        "title": "Select Design Hierarchy Top...",
+        "category": "DVICode",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "dvicode.refreshViews",
+        "title": "Refresh",
+        "category": "DVICode",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dvicode.showOutput",
+        "title": "Show Server Output",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.copyHierarchyPath",
+        "title": "Copy Hierarchy Path",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.selectUvmTest",
+        "title": "Select UVM Test...",
+        "category": "DVICode",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "dvicode.openComponentClass",
+        "title": "Go to Component Class",
+        "category": "DVICode",
+        "icon": "$(symbol-class)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "dvicode.expandMacro",
+          "when": "editorLangId == systemverilog",
+          "group": "navigation@90"
+        },
+        {
+          "command": "dvicode.showIncludingFiles",
+          "when": "editorLangId == systemverilog",
+          "group": "navigation@91"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dvicode.selectUvmTest",
+          "when": "view == dvicode.verificationHierarchy",
+          "group": "navigation"
+        },
+        {
+          "command": "dvicode.selectDesignTop",
+          "when": "view == dvicode.designHierarchy",
+          "group": "navigation"
+        },
+        {
+          "command": "dvicode.refreshViews",
+          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy || view == dvicode.compiledFiles",
+          "group": "navigation"
+        },
+        {
+          "command": "dvicode.rebuild",
+          "when": "view == dvicode.compiledFiles",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dvicode.copyHierarchyPath",
+          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy"
+        },
+        {
+          "command": "dvicode.openComponentClass",
+          "when": "view == dvicode.verificationHierarchy && viewItem == dvicode.verifNode.class",
+          "group": "inline"
+        },
+        {
+          "command": "dvicode.openComponentClass",
+          "when": "view == dvicode.verificationHierarchy && viewItem == dvicode.verifNode.class"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "dvicode.copyHierarchyPath",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.openComponentClass",
+          "when": "false"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dvicode",
+          "title": "DVICode",
+          "icon": "images/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "dvicode": [
+        {
+          "id": "dvicode.designHierarchy",
+          "name": "Design Hierarchy"
+        },
+        {
+          "id": "dvicode.verificationHierarchy",
+          "name": "Verification Hierarchy"
+        },
+        {
+          "id": "dvicode.compiledFiles",
+          "name": "Compiled Files"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.mjs --production",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node out/test/runTest.js",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
+  }
+}

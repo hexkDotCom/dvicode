@@ -1,0 +1,67 @@
+# DVICode architecture
+
+DVICode (DV Intelligence) is a SystemVerilog/UVM IDE back end written in Rust
+(`dvicode-server`) plus a VS Code extension (`dvicode`). The main use case is a VS Code
+client on Windows or macOS with the server running on Linux: a remote machine over SSH, or
+WSL2.
+
+```
+ VS Code (Windows / macOS)                        Linux (WSL2 or remote host)
++--------------------------------+               +--------------------------------------+
+| dvicode extension (UI side)    |   LSP over    | dvicode-server                       |
+|  - launcher: local | wsl | ssh | stdio of the  |  project: build file -> compile list |
+|    | tcp (attach)              | launched      |  syntax: lexer, preprocessor, parser |
+|  - path mapping / dvicode-fs   | process       |  analysis: index, scopes, resolve    |
+|  - views: compiled files,      | <-----------> |  lsp: standard + dvicode/* requests  |
+|    design hierarchy, macros    |               |  fs:  dvicode/fs/* (remote files)    |
++--------------------------------+               +--------------------------------------+
+```
+
+## Transport
+
+The server talks LSP (JSON-RPC with `Content-Length` framing) over **stdio** by default.
+The client starts it with a launch command template and uses that process's
+stdio as the channel:
+
+| mode    | command the client spawns                                   |
+|---------|-------------------------------------------------------------|
+| `local` | `<server> --stdio`                                          |
+| `wsl`   | `wsl.exe -d <distro> --cd ~ -- <server> --stdio`            |
+| `ssh`   | `ssh -T [opts] <host> <server> --stdio`                     |
+| `custom`| `dvicode.server.launchCommand` with `${SERVER_CMD}` inside  |
+| `tcp`   | no spawn; connect to `host:port` of `dvicode-server --listen` (token auth) |
+
+`ssh` and `wsl.exe` already carry stdio, so there are no ports, registry files, or TLS
+certificates to manage. The extension can deploy the bundled Linux binary to
+`~/.dvicode/server/<version>/` on the target (`dvicode.server.autoDeploy`).
+
+## Where the files live
+
+1. **Shared/mapped files.** The workspace folder is visible to both sides (WSL `\\wsl.localhost\<distro>\...`,
+   a Samba/NFS/SSHFS mount). The client rewrites every URI that crosses the wire with
+   `dvicode.pathMappings` (WSL UNC paths are mapped automatically).
+2. **Remote files** (`dvicode://` scheme). The workspace folder exists only on the server.
+   The extension registers a `FileSystemProvider` backed by `dvicode/fs/*` requests to the
+   server (stat, readDirectory, readFile, writeFile, delete, rename, createDirectory), so
+   VS Code edits remote files directly; the server sees plain `file://` paths.
+
+## Server crates
+
+| crate | role |
+|---|---|
+| `dvi-syntax` | lexer, preprocessor (macros with arguments, `include`, conditionals, origin tracking for every token), error-tolerant recursive-descent parser producing a declaration-level AST plus identifier references in bodies |
+| `dvi-project` | build configuration (`.dvicode/default.build`): `-f`, `+incdir+`, `+define+`, `-y/-v/+libext+`, `-top`, env vars, `+dvicode_*` directives, see [build-files.md](build-files.md); auto-configuration when absent |
+| `dvi-analysis` | compilation of the project in order, global index (packages, modules, classes, macros), scopes and resolution (lexical, class inheritance, imports, `pkg::x`, `a.b.c` member chains), and the IDE features |
+| `dvicode-server` | binary: LSP loop, document store, transports (`--stdio`, `--listen`), remote file system |
+
+## Custom requests (`dvicode/*`)
+
+| method | purpose |
+|---|---|
+| `dvicode/status` | project, file and symbol counts, build-file path, timing |
+| `dvicode/compiledFiles` | ordered list of compiled files with include children |
+| `dvicode/designHierarchy` | module instance tree from the top (auto-detected or `-top`) |
+| `dvicode/expandMacro` | macro text at a position, one level or all levels |
+| `dvicode/includingFiles` | files that include the given file |
+| `dvicode/rebuild` | re-read the build file and recompile |
+| `dvicode/fs/*` | remote file system for the `dvicode://` scheme |

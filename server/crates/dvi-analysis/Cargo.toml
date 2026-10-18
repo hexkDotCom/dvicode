@@ -1,0 +1,19 @@
+[package]
+name = "dvi-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+
+[dependencies]
+dvi-syntax.workspace = true
+dvi-project.workspace = true
+smol_str.workspace = true
+rustc-hash.workspace = true
+im.workspace = true
+rayon.workspace = true
+lsp-types.workspace = true
+url.workspace = true
+log.workspace = true
+serde.workspace = true

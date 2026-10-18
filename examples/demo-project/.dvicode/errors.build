@@ -1,0 +1,14 @@
+// The demo plus a file with deliberate mistakes (for testing problem reporting).
+// Note: paths inside a -f file are relative to that file (the default mode), so the list is
+// repeated here instead of using -f .dvicode/default.build.
++incdir+tb
++incdir+tb/uvm
++define+DEMO_WIDTH=16
+rtl/demo_pkg.sv
+rtl/fifo.sv
+rtl/top.sv
+tb/tb_pkg.sv
+tb/tb_top.sv
+tb/uvm/uvm_pkg.sv
+tb/demo_env_pkg.sv
+rtl/broken.sv

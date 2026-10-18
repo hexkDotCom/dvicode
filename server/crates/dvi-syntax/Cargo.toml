@@ -1,0 +1,10 @@
+[package]
+name = "dvi-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+smol_str.workspace = true
+rustc-hash.workspace = true
+im.workspace = true

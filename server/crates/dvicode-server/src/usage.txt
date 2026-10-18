@@ -1,0 +1,18 @@
+dvicode-server - SystemVerilog language server (DVICode)
+
+USAGE:
+  dvicode-server [--stdio]                      LSP over stdin/stdout (default)
+  dvicode-server --listen HOST:PORT [--token T] LSP over TCP for one client; the client must
+                                                send "DVICODE-TOKEN <T>\n" first. The token can
+                                                also come from $DVICODE_TOKEN.
+  dvicode-server check <dir> [--build FILE] [-q] [--max N]
+                                                Compile a project and print its problems.
+                                                Queries: --goto/--hover/--refs/--impl/--sig/
+                                                --complete/--calls F:LINE:COL, --outline F,
+                                                --fixes F, --hier TOP|-, --uvm TEST|-,
+                                                --symbols Q, --expand F:LINE:COL
+  dvicode-server --version
+
+OPTIONS:
+  --log FILE          Write the log to FILE instead of stderr
+  --log-level LEVEL   error | warn | info | debug | trace (default info)

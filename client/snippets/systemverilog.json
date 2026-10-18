@@ -1,0 +1,72 @@
+{
+  "module": {
+    "prefix": "module",
+    "body": ["module ${1:name} #(", "  parameter int ${2:W} = ${3:8}", ") (", "  input  logic clk,", "  input  logic rst_n$0", ");", "", "endmodule : $1"],
+    "description": "Module with parameters and ports"
+  },
+  "class": {
+    "prefix": "class",
+    "body": ["class ${1:name} extends ${2:base};", "", "  function new(string name = \"$1\");", "    super.new(name);", "  endfunction", "$0", "endclass : $1"],
+    "description": "Class with a constructor"
+  },
+  "uvm_object": {
+    "prefix": "uvm_object",
+    "body": [
+      "class ${1:my_item} extends ${2:uvm_sequence_item};",
+      "  `uvm_object_utils($1)",
+      "",
+      "  rand bit [${3:7}:0] ${4:addr};",
+      "",
+      "  function new(string name = \"$1\");",
+      "    super.new(name);",
+      "  endfunction",
+      "",
+      "  virtual function string convert2string();",
+      "    return \\$sformatf(\"$4=%0h\", $4);",
+      "  endfunction",
+      "endclass : $1"
+    ],
+    "description": "UVM object/sequence item"
+  },
+  "uvm_component": {
+    "prefix": "uvm_component",
+    "body": [
+      "class ${1:my_comp} extends ${2:uvm_component};",
+      "  `uvm_component_utils($1)",
+      "",
+      "  function new(string name, uvm_component parent);",
+      "    super.new(name, parent);",
+      "  endfunction",
+      "",
+      "  virtual function void build_phase(uvm_phase phase);",
+      "    super.build_phase(phase);",
+      "    $0",
+      "  endfunction",
+      "",
+      "  virtual task run_phase(uvm_phase phase);",
+      "  endtask",
+      "endclass : $1"
+    ],
+    "description": "UVM component with build and run phases"
+  },
+  "always_ff": {
+    "prefix": "always_ff",
+    "body": ["always_ff @(posedge ${1:clk} or negedge ${2:rst_n}) begin", "  if (!$2) begin", "    $3", "  end else begin", "    $0", "  end", "end"],
+    "description": "Flip-flop process with asynchronous reset"
+  },
+  "always_comb": {
+    "prefix": "always_comb",
+    "body": ["always_comb begin", "  $0", "end"],
+    "description": "Combinational process"
+  },
+  "covergroup": {
+    "prefix": "covergroup",
+    "body": ["covergroup ${1:cg} @(posedge ${2:clk});", "  ${3:cp}: coverpoint ${4:sig};", "endgroup : $1"],
+    "description": "Covergroup"
+  },
+  "property": {
+    "prefix": "property",
+    "body": ["property ${1:p_name};", "  @(posedge ${2:clk}) disable iff (!${3:rst_n})", "  ${4:req} |-> ##[1:${5:3}] ${6:ack};", "endproperty", "${7:a_name}: assert property ($1);"],
+    "description": "Concurrent assertion"
+  }
+}

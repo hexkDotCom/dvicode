@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["HEXK"]
+repository = "https://github.com/hexkDotCom/hexk-dvicode"
+
+[workspace.dependencies]
+smol_str = "0.3"
+rustc-hash = "2"
+im = "15"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crossbeam-channel = "0.5"
+lsp-server = "0.7"
+lsp-types = "0.95"
+url = "2"
+log = { version = "0.4", features = ["std"] }
+dvi-syntax = { path = "crates/dvi-syntax" }
+dvi-project = { path = "crates/dvi-project" }
+dvi-analysis = { path = "crates/dvi-analysis" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "unwind"

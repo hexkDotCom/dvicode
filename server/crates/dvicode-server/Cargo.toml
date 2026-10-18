@@ -1,0 +1,25 @@
+[package]
+name = "dvicode-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dvicode-server"
+path = "src/main.rs"
+
+[dependencies]
+dvi-syntax.workspace = true
+dvi-project.workspace = true
+dvi-analysis.workspace = true
+smol_str.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crossbeam-channel.workspace = true
+lsp-server.workspace = true
+lsp-types.workspace = true
+url.workspace = true
+log.workspace = true
+rayon.workspace = true
+base64 = "0.22"

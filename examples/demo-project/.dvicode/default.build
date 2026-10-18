@@ -1,0 +1,14 @@
+// DVICode demo project. Syntax reference: docs/build-files.md
++dvicode_setenv+TB=$DVICODE_PROJECT_LOC/tb
++incdir+$TB
++incdir+$TB/uvm
++define+DEMO_WIDTH=16
+rtl/demo_pkg.sv
+rtl/fifo.sv
+rtl/top.sv
+$TB/tb_pkg.sv
+$TB/tb_top.sv
+$TB/uvm/uvm_pkg.sv
+$TB/demo_env_pkg.sv
+// The UVM test shown in the Verification Hierarchy view.
++UVM_TESTNAME=demo_full_test
