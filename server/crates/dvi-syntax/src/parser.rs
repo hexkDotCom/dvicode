@@ -88,7 +88,7 @@ struct Parser<'t> {
 
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
 /// broken) code would overflow the stack, which ends the process.
-const MAX_STMT_DEPTH: u32 = 2000;
+const MAX_STMT_DEPTH: u32 = 1000;
 
 struct TypeInfo {
     tref: TypeRef,
@@ -3254,10 +3254,15 @@ fn is_item_kw(k: &str) -> bool {
 mod tests {
     #[test]
     fn deeply_nested_statements_do_not_overflow() {
-        let n = 100_000;
-        let text = format!("module m; initial {}x = 1; {}endmodule\n", "begin ".repeat(n), "end ".repeat(n));
-        let u = super::parse(&crate::lexer::lex(&text, 0), 0);
-        let deep: Vec<_> = u.diags.iter().filter(|d| d.message.contains("nested too deeply")).collect();
-        assert_eq!(deep.len(), 1, "{:?}", u.diags.iter().take(5).collect::<Vec<_>>());
+        // On a stack the size of the engine's worker threads; debug builds use more of it
+        // per level than release builds.
+        let parse = || {
+            let n = 100_000;
+            let text = format!("module m; initial {}x = 1; {}endmodule\n", "begin ".repeat(n), "end ".repeat(n));
+            let u = super::parse(&crate::lexer::lex(&text, 0), 0);
+            u.diags.iter().filter(|d| d.message.contains("nested too deeply")).count()
+        };
+        let deep = std::thread::Builder::new().stack_size(16 << 20).spawn(parse).unwrap().join().unwrap();
+        assert_eq!(deep, 1);
     }
 }
