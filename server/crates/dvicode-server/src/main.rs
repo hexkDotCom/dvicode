@@ -7,6 +7,7 @@
 //!   dvicode-server --version
 
 mod check;
+mod crash;
 mod fs;
 mod logger;
 mod server;
@@ -16,6 +17,13 @@ mod util;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
+    crash::install_hook();
+    // Parsing and analysis run on these threads; the default 2 MB stack is too small for
+    // deeply nested code.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(16 << 20)
+        .thread_name(|i| format!("dvicode-worker-{i}"))
+        .build_global();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut log_level = log::LevelFilter::Info;
     let mut log_file: Option<String> = None;

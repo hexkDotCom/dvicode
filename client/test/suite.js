@@ -250,6 +250,29 @@ async function run() {
     return titles.join(' | ');
   });
 
+  await test('internal error: notice, issue text, engine keeps working', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    const c = await api.ready();
+    let failed = '';
+    try {
+      await c.sendRequest('dvicode/debug/fail', {});
+    } catch (e) {
+      failed = e.message;
+    }
+    if (!failed.includes('failed')) throw new Error(`request did not fail: '${failed}'`);
+    await waitFor('internal error notice', async () => api.lastInternalError() !== undefined, 10000);
+    const e = api.lastInternalError();
+    if (e.feature !== 'dvicode/debug/fail' || !e.location.includes('server.rs')) throw new Error(JSON.stringify(e));
+    const body = api.issueBody();
+    for (const want of ['### Setup', 'test failure requested by the client', 'Backtrace', 'Log (last']) {
+      if (!body.includes(want)) throw new Error(`issue text lacks '${want}'`);
+    }
+    // The engine still answers.
+    const h = await c.sendRequest('dvicode/designTops');
+    if (!h.includes('tb_top')) throw new Error(`after the failure: ${JSON.stringify(h)}`);
+    return `${e.feature} at ${e.location}; issue text ${body.length} chars`;
+  });
+
   fs.writeFileSync(process.env.DVICODE_E2E_RESULT, JSON.stringify({ target, tests: results }, null, 2));
 }
 

@@ -73,6 +73,13 @@ It covers preprocessing, parsing and indexing, not problem checking (printed sep
 Measured with a release build on Linux (WSL2) on an Intel Core Ultra 9 285K (24 cores),
 files already in the operating system's cache: 46 to 56 ms over three runs.
 
+## Internal errors
+
+`dvicode/debug/fail` makes the engine fail on purpose, which exercises the whole path: the
+log entry with a backtrace, the error response, the `dvicode/internalError` notice and the
+issue text (see the last end-to-end test). Code that may panic in a new place should run
+under `crash::catch` like its neighbours.
+
 ## End-to-end tests
 
 The end-to-end tests start the installed VS Code (isolated profile, other extensions

@@ -22,6 +22,8 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         end_stack: Vec::new(),
         genblk: Vec::new(),
         kind_override: None,
+        stmt_depth: 0,
+        too_deep: false,
     };
     p.u.decls.push(Decl {
         kind: DeclKind::Unit,
@@ -78,7 +80,15 @@ struct Parser<'t> {
     genblk: Vec<u32>,
     /// Reference kind forced inside `with` clauses.
     kind_override: Option<RefKind>,
+    /// Statements being parsed inside each other.
+    stmt_depth: u32,
+    /// "Nested too deeply" was reported.
+    too_deep: bool,
 }
+
+/// Statements nest at most this deep. Real code stays far below; much deeper (generated or
+/// broken) code would overflow the stack, which ends the process.
+const MAX_STMT_DEPTH: u32 = 2000;
 
 struct TypeInfo {
     tref: TypeRef,
@@ -2504,6 +2514,22 @@ impl<'t> Parser<'t> {
     }
 
     fn stmt(&mut self) {
+        if self.stmt_depth >= MAX_STMT_DEPTH {
+            // Skip one token per call; the levels above carry on with the rest.
+            if !self.too_deep {
+                self.too_deep = true;
+                let span = self.tok().span;
+                self.error(span, "Statements are nested too deeply; the rest of this block is skipped");
+            }
+            self.bump();
+            return;
+        }
+        self.stmt_depth += 1;
+        self.stmt_inner();
+        self.stmt_depth -= 1;
+    }
+
+    fn stmt_inner(&mut self) {
         self.skip_attributes();
         let t = self.tok().clone();
         match t.kind {
@@ -3222,4 +3248,16 @@ fn is_item_kw(k: &str) -> bool {
             | "clocking" | "covergroup" | "property" | "sequence" | "constraint" | "localparam"
             | "parameter" | "checker" | "primitive" | "specify"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn deeply_nested_statements_do_not_overflow() {
+        let n = 100_000;
+        let text = format!("module m; initial {}x = 1; {}endmodule\n", "begin ".repeat(n), "end ".repeat(n));
+        let u = super::parse(&crate::lexer::lex(&text, 0), 0);
+        let deep: Vec<_> = u.diags.iter().filter(|d| d.message.contains("nested too deeply")).collect();
+        assert_eq!(deep.len(), 1, "{:?}", u.diags.iter().take(5).collect::<Vec<_>>());
+    }
 }

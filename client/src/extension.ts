@@ -6,6 +6,7 @@ import { LanguageClient, LanguageClientOptions, RevealOutputChannelOn, State } f
 import { Launch, makeLaunch } from './launcher';
 import { Mapper } from './pathmap';
 import { RemoteFs } from './remotefs';
+import { InternalError, LogChannel, Reporter } from './report';
 import { CompiledFiles, DesignHierarchy, VerificationHierarchy, componentClassLocation, hierarchyPath } from './views';
 
 interface Status {
@@ -22,12 +23,15 @@ interface Status {
   modules: number;
   build_ms: number;
   problems_in_build_file: number;
+  /** Set when the full build failed and the project is empty. */
+  build_error?: string;
 }
 
 let client: LanguageClient | undefined;
 let launch: Launch | undefined;
 let starting: Promise<LanguageClient> | undefined;
-let output: vscode.OutputChannel;
+let output: LogChannel;
+let reporter: Reporter;
 let statusItem: vscode.StatusBarItem;
 let lastStatus: Status | undefined;
 let hierarchy: DesignHierarchy;
@@ -76,6 +80,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     documentSelector: SV_SELECTOR,
     outputChannel: output,
     revealOutputChannelOn: RevealOutputChannelOn.Never,
+    errorHandler: reporter.errorHandler(),
     initializationOptions: settingsForServer(),
     synchronize: {
       configurationSection: 'dvicode',
@@ -94,16 +99,23 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
       statusItem.command = 'dvicode.restartServer';
     }
   });
+  c.onNotification('dvicode/internalError', (e: InternalError) => reporter.onInternalError(e));
   await c.start();
   c.onNotification('dvicode/status', (s: Status) => {
     lastStatus = s;
-    statusItem.text = `$(circuit-board) DVICode`;
-    statusItem.tooltip = new vscode.MarkdownString(
-      `**DVICode** on ${launch?.target}\n\n${s.top_files} top files, ${s.files} files, ${s.declarations} declarations, ` +
-        `${s.packages} packages, ${s.classes} classes, ${s.modules} design elements\n\n` +
-        `Build: ${s.build_file ?? 'auto-configuration'} (${s.build_ms} ms)`,
-    );
-    statusItem.command = 'dvicode.showStatus';
+    if (s.build_error) {
+      statusItem.text = '$(warning) DVICode';
+      statusItem.tooltip = `${s.build_error}, so DVICode knows nothing about the project. Click to report it.`;
+      statusItem.command = 'dvicode.reportIssue';
+    } else {
+      statusItem.text = `$(circuit-board) DVICode`;
+      statusItem.tooltip = new vscode.MarkdownString(
+        `**DVICode** on ${launch?.target}\n\n${s.top_files} top files, ${s.files} files, ${s.declarations} declarations, ` +
+          `${s.packages} packages, ${s.classes} classes, ${s.modules} design elements\n\n` +
+          `Build: ${s.build_file ?? 'auto-configuration'} (${s.build_ms} ms)`,
+      );
+      statusItem.command = 'dvicode.showStatus';
+    }
     hierarchy.refresh();
     verification.refresh();
     compiled.refresh();
@@ -252,13 +264,20 @@ async function showStatus(): Promise<void> {
     `Full build ${s.build_ms} ms; path mapping: ${launch?.mapper.describe()}`,
   ];
   const pick = await vscode.window.showQuickPick(
-    [...lines.map((l) => ({ label: l })), { label: '$(output) Show server output' }, { label: '$(refresh) Rebuild project' }],
+    [
+      ...lines.map((l) => ({ label: l })),
+      { label: '$(output) Show server output' },
+      { label: '$(refresh) Rebuild project' },
+      { label: '$(report) Report an issue' },
+    ],
     { placeHolder: 'DVICode status' },
   );
   if (pick?.label.includes('Show server output')) {
     output.show();
   } else if (pick?.label.includes('Rebuild')) {
     await client.sendRequest('dvicode/rebuild');
+  } else if (pick?.label.includes('Report an issue')) {
+    await reporter.reportIssue();
   }
 }
 
@@ -308,10 +327,26 @@ export interface DvicodeApi {
   target(): string | undefined;
   toServer(uri: vscode.Uri): string | undefined;
   verification(): VerificationHierarchy;
+  /** The last internal error the engine reported. */
+  lastInternalError(): InternalError | undefined;
+  /** The text DVICode: Report Issue fills in. */
+  issueBody(): string;
 }
 
 export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi> {
-  output = vscode.window.createOutputChannel('DVICode');
+  output = new LogChannel(vscode.window.createOutputChannel('DVICode'));
+  reporter = new Reporter(
+    output,
+    () => ({
+      extensionVersion: String(ctx.extension.packageJSON.version),
+      engineVersion: client?.initializeResult?.serverInfo?.version,
+      target: launch?.target,
+      mode: launch?.mode,
+      buildFile: lastStatus?.build_file,
+      files: lastStatus?.files,
+    }),
+    ctx.extension.id,
+  );
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
   ctx.subscriptions.push(output, statusItem);
 
@@ -351,6 +386,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
       compiled.refresh();
     }),
     vscode.commands.registerCommand('dvicode.showOutput', () => output.show()),
+    vscode.commands.registerCommand('dvicode.reportIssue', () => reporter.reportIssue()),
     vscode.commands.registerCommand('dvicode.copyHierarchyPath', async (item: unknown) => {
       const p = hierarchyPath(item);
       if (p) {
@@ -372,6 +408,8 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     target: () => launch?.target,
     toServer: (uri) => launch?.mapper.toServer(uri),
     verification: () => verification,
+    lastInternalError: () => reporter.last,
+    issueBody: () => reporter.issueBody(),
   };
   try {
     await ensureClient(ctx);

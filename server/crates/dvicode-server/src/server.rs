@@ -1,6 +1,6 @@
 //! The LSP main loop.
 
-use crate::{fs, util};
+use crate::{crash, fs, util};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
@@ -13,7 +13,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
-use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -91,7 +90,9 @@ struct PubState {
 }
 
 enum Event {
-    Built(Box<Analysis>, u64),
+    /// A finished full build; the error message when it failed and fell back to an empty
+    /// project.
+    Built(Box<Analysis>, u64, Option<String>),
 }
 
 struct Server {
@@ -188,20 +189,26 @@ impl Server {
                             if conn.handle_shutdown(&req)? {
                                 return Ok(());
                             }
-                            self.on_request(req);
+                            let (id, method) = (req.id.clone(), req.method.clone());
+                            let tx = self.sender.clone();
+                            if crash::catch(&method, Some(&tx), || self.on_request(req)).is_none() {
+                                self.send(Message::Response(Response::new_err(id, ErrorCode::InternalError as i32, format!("{method} failed"))));
+                            }
                         }
                         Message::Notification(n) => {
                             if n.method == "exit" {
                                 return Ok(());
                             }
-                            self.on_notification(n);
+                            let method = n.method.clone();
+                            let tx = self.sender.clone();
+                            crash::catch(&method, Some(&tx), || self.on_notification(n));
                         }
                         Message::Response(_) => {}
                     }
                 }
                 recv(self.events_rx) -> ev => {
-                    if let Ok(Event::Built(a, generation)) = ev {
-                        self.on_built(*a, generation);
+                    if let Ok(Event::Built(a, generation, error)) = ev {
+                        self.on_built(*a, generation, error);
                     }
                 }
                 default(timeout) => {}
@@ -282,27 +289,29 @@ impl Server {
         let setup = self.setup();
         let vfs = self.vfs.clone();
         let tx = self.events_tx.clone();
+        let client = self.sender.clone();
         std::thread::Builder::new()
             .name("dvicode-build".into())
             .stack_size(64 << 20)
             .spawn(move || {
                 let t0 = Instant::now();
                 let setup = Arc::new(setup);
-                let r = std::panic::catch_unwind(AssertUnwindSafe(|| Analysis::build(vfs.clone(), setup.clone())));
-                let a = match r {
-                    Ok(a) => a,
-                    Err(_) => {
-                        log::error!("full build panicked; falling back to an empty project");
-                        Analysis::build(vfs, Arc::new(ProjectSetup::new(&setup.root, Default::default(), Default::default())))
+                let r = crash::catch("project build", Some(&client), || Analysis::build(vfs.clone(), setup.clone()));
+                let (a, error) = match r {
+                    Some(a) => (a, None),
+                    None => {
+                        log::error!("falling back to an empty project");
+                        let empty = Analysis::build(vfs, Arc::new(ProjectSetup::new(&setup.root, Default::default(), Default::default())));
+                        (empty, Some("The project build failed with an internal error".to_string()))
                     }
                 };
                 log::info!("full build: {} units in {} ms", a.units.len(), t0.elapsed().as_millis());
-                let _ = tx.send(Event::Built(Box::new(a), generation));
+                let _ = tx.send(Event::Built(Box::new(a), generation, error));
             })
             .expect("spawn build thread");
     }
 
-    fn on_built(&mut self, a: Analysis, _generation: u64) {
+    fn on_built(&mut self, a: Analysis, _generation: u64, error: Option<String>) {
         self.building = false;
         let mut a = a;
         // Open files that are not part of the build are compiled ad hoc.
@@ -319,11 +328,19 @@ impl Server {
         files.dedup();
         self.pending_since = None;
         if !files.is_empty() {
-            a = a.update(&files);
-            for f in &files {
-                if self.open.contains_key(f) && a.units_of_file(*f).is_empty() {
-                    a = a.add_adhoc(*f);
+            let open = &self.open;
+            let built = &a;
+            let replayed = crash::catch("update after an edit", Some(&self.sender), || {
+                let mut next = built.update(&files);
+                for f in &files {
+                    if open.contains_key(f) && next.units_of_file(*f).is_empty() {
+                        next = next.add_adhoc(*f);
+                    }
                 }
+                next
+            });
+            if let Some(next) = replayed {
+                a = next;
             }
         }
         self.analysis = Arc::new(a);
@@ -342,7 +359,12 @@ impl Server {
             "project ready: {} top files, {} files, {} declarations in {} ms",
             st.top_files, st.files, st.declarations, st.build_ms
         );
-        self.notify("dvicode/status", &st);
+        // The client shows a failed build in its status bar.
+        let mut status = serde_json::to_value(&st).unwrap_or_default();
+        if let (Some(e), Some(o)) = (error, status.as_object_mut()) {
+            o.insert("build_error".into(), Value::String(e));
+        }
+        self.notify("dvicode/status", &status);
         self.publish_all();
         if self.build_again {
             self.build_again = false;
@@ -368,22 +390,23 @@ impl Server {
         let files: Vec<FileId> = self.pending.drain().collect();
         let t0 = Instant::now();
         let a = self.analysis.clone();
-        let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let open = &self.open;
+        let r = crash::catch("update after an edit", Some(&self.sender), || {
             let mut next = a.update(&files);
             for f in &files {
-                if self.open.contains_key(f) && next.units_of_file(*f).is_empty() {
+                if open.contains_key(f) && next.units_of_file(*f).is_empty() {
                     next = next.add_adhoc(*f);
                 }
             }
             next
-        }));
+        });
         let mut interface_changed = false;
         match r {
-            Ok(next) => {
+            Some(next) => {
                 interface_changed = next.interface_changed(&a);
                 self.analysis = Arc::new(next);
             }
-            Err(_) => log::error!("incremental update panicked for {:?}", files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
+            None => log::error!("kept the previous analysis of {:?}", files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
         }
         if interface_changed {
             // Declarations or macros other files use changed: their problems may have too.
@@ -462,9 +485,8 @@ impl Server {
                 if a.vfs.is_builtin(f) {
                     continue;
                 }
-                let r = std::panic::catch_unwind(AssertUnwindSafe(|| a.file_diagnostics(f)));
-                let Ok(diags) = r else {
-                    log::error!("diagnostics panicked for {}", a.vfs.path(f).display());
+                let Some(diags) = crash::catch("problem check", Some(&sender), || a.file_diagnostics(f)) else {
+                    log::error!("no problems shown for {}", a.vfs.path(f).display());
                     continue;
                 };
                 let mut lsp: Vec<Diagnostic> = diags.iter().filter_map(|d| util::to_lsp_diag(&a, d)).collect();
@@ -629,14 +651,10 @@ impl Server {
         let method = req.method.clone();
         rayon::spawn(move || {
             let t0 = Instant::now();
-            let r = std::panic::catch_unwind(AssertUnwindSafe(|| f(&a, params)));
-            let resp = match r {
-                Ok(Ok(v)) => Response::new_ok(id, v),
-                Ok(Err(msg)) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
-                Err(_) => {
-                    log::error!("{method} panicked");
-                    Response::new_err(id, ErrorCode::InternalError as i32, format!("{method} failed"))
-                }
+            let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
+                Some(Ok(v)) => Response::new_ok(id, v),
+                Some(Err(msg)) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
+                None => Response::new_err(id, ErrorCode::InternalError as i32, format!("{method} failed")),
             };
             let ms = t0.elapsed().as_millis();
             if ms > 200 {
@@ -817,6 +835,8 @@ impl Server {
                     }))
                 })
             }
+            // Fails on purpose, to test how internal errors reach the user (docs/development.md).
+            "dvicode/debug/fail" => self.spawn(req, |_, _: Value| -> Result<Value, String> { panic!("test failure requested by the client") }),
             "dvicode/rebuild" => {
                 self.start_build();
                 self.send(Message::Response(Response::new_ok(req.id, Value::Null)));
@@ -827,9 +847,11 @@ impl Server {
                 let params = req.params;
                 let sender = self.sender.clone();
                 rayon::spawn(move || {
-                    let resp = match fs::handle(&op, params) {
-                        Ok(v) => Response::new_ok(id, v),
-                        Err(e) => Response { id, result: None, error: Some(lsp_server::ResponseError { code: ErrorCode::RequestFailed as i32, message: e.message, data: Some(json!({ "code": e.code })) }) },
+                    let feature = format!("remote file access ({op})");
+                    let resp = match crash::catch(&feature, Some(&sender), || fs::handle(&op, params)) {
+                        Some(Ok(v)) => Response::new_ok(id, v),
+                        Some(Err(e)) => Response { id, result: None, error: Some(lsp_server::ResponseError { code: ErrorCode::RequestFailed as i32, message: e.message, data: Some(json!({ "code": e.code })) }) },
+                        None => Response::new_err(id, ErrorCode::InternalError as i32, format!("{feature} failed")),
                     };
                     let _ = sender.send(Message::Response(resp));
                 });

@@ -22,7 +22,7 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Uses your existing file lists** (`-f` files), or configures the project by itself.
 - **Works where your sources live**: natively on Windows, Linux and macOS, in WSL, or on a
   Linux host over SSH, even for files that exist only on the server.
-- **Lightweight**: a single engine of about 3.5 MB, installed for you. No telemetry.
+- **Lightweight**: a single engine of about 5 MB, installed for you. No telemetry.
 
 ## Getting started
 
@@ -39,4 +39,5 @@ order, add `.dvicode/default.build` in the simulator's argument-file syntax (`-f
   option and `+dvicode_` directive
 - [Architecture](https://github.com/hexkDotCom/dvicode/blob/main/docs/architecture.md):
   remote setups, path mapping, launch modes
-- [Report a problem](https://github.com/hexkDotCom/dvicode/issues)
+- Something wrong? Run **DVICode: Report Issue**: it fills in your setup and the log for you
+  to review, or [open an issue](https://github.com/hexkDotCom/dvicode/issues).

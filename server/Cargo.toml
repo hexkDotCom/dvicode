@@ -28,5 +28,6 @@ dvi-analysis = { path = "crates/dvi-analysis" }
 opt-level = 3
 lto = "thin"
 codegen-units = 4
-strip = true
+# Keep function names so internal-error backtraces are readable.
+strip = "debuginfo"
 panic = "unwind"

@@ -1,0 +1,59 @@
+name: Bug report
+description: Something DVICode gets wrong, a false problem, a crash or an internal error.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **DVICode: Report Issue** in VS Code fills in the setup and the
+        log for you. Please check that nothing you paste here is confidential: code samples
+        and logs can contain file names and design details.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected to see, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Code sample
+      description: The smallest SystemVerilog code that shows the problem, if it is about your code.
+      render: systemverilog
+  - type: textarea
+    id: build
+    attributes:
+      label: Build file
+      description: Your `.dvicode/*.build` file (or "auto-configuration").
+      render: text
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Where the engine runs
+      options:
+        - On this computer (Windows)
+        - On this computer (macOS)
+        - On this computer (Linux)
+        - WSL
+        - SSH host (Open Folder on the Server)
+        - Remote-SSH or Remote-WSL window
+        - TCP or custom launch command
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Setup
+      description: DVICode version, VS Code version and operating system (**DVICode: Report Issue** fills this in).
+      placeholder: |
+        DVICode 0.1.0, engine 0.1.0
+        VS Code 1.96, Windows 11 x64
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: From **DVICode: Show Server Output**, especially lines with "internal error".
+      render: text

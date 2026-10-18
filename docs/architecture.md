@@ -68,3 +68,23 @@ the bundled Linux x64 engine to `~/.dvicode/server/<version>-<hash>/` on the tar
 | `dvicode/includingFiles` | files that include the given file |
 | `dvicode/rebuild` | re-read the build file and recompile |
 | `dvicode/fs/*` | remote file system for the `dvicode://` scheme |
+| `dvicode/internalError` | notification to the client: a feature failed (feature, message, source location, backtrace, engine version) |
+| `dvicode/debug/fail` | fails on purpose, to test the above |
+
+## Internal errors and crashes
+
+A bug in the engine must cost one answer, not the session:
+
+- Every request, notification, full build, incremental update and problem check runs under
+  `crash::catch` (`dvicode-server/src/crash.rs`). A panic there is logged with its location
+  and a backtrace (release builds keep function names for this), the request gets an error
+  response, and the client is sent `dvicode/internalError` once per feature and place. A
+  failed full build falls back to an empty project and the status says so (`build_error`).
+- Stack overflows cannot be caught, so the parser limits statement nesting
+  (`MAX_STMT_DEPTH`) and the worker threads have 16 MB stacks.
+- If the process dies anyway, the client restarts it up to 4 times in 3 minutes, then stops.
+
+The client (`client/src/report.ts`) shows a notice with **Report Issue** and **Show Log** for
+each of these, and the status bar shows a failed build. **DVICode: Report Issue** opens VS
+Code's issue reporter with the setup, the last internal error and the last 100 log lines
+filled in; the user reviews and submits it. Nothing is sent automatically.

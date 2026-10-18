@@ -352,6 +352,11 @@
         "title": "Go to Component Class",
         "category": "DVICode",
         "icon": "$(symbol-class)"
+      },
+      {
+        "command": "dvicode.reportIssue",
+        "title": "Report Issue",
+        "category": "DVICode"
       }
     ],
     "menus": {

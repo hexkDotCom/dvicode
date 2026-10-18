@@ -31,7 +31,7 @@ currently in preview.
 - **Works where your sources live**: natively on Windows, Linux and macOS, in WSL, or on a
   Linux host over SSH, even for files that exist only on the server. Runs through
   `bsub`/`qrsh` too.
-- **Lightweight**: a single engine of about 3.5 MB per platform, installed for you. It parses
+- **Lightweight**: a single engine of about 5 MB per platform, installed for you. It parses
   and indexes the whole UVM 1.2 library (142 files, 75,000 lines) in about 50 ms on a desktop
   PC ([how this was measured](docs/development.md#performance)).
 
@@ -93,6 +93,8 @@ testbench; it needs no UVM installation.
   File**; the first and last are also in the editor's context menu.
 - **DVICode: Set Current Build Configuration...** to switch between `.dvicode/*.build` files.
 - **DVICode: Show Project Status** (also the status bar item) and **Rebuild Project**.
+- **DVICode: Report Issue** opens VS Code's issue reporter with your setup and the log filled
+  in.
 - **DVICode: Open Folder on the Server...** to work on files that live on a Linux host.
 
 ## Settings
@@ -119,7 +121,14 @@ simulator's file lists are only used as input.
 
 **Where is my code processed?** Only by the engine, which runs where your files are: on your
 computer, in WSL, or on your server. The extension sends no telemetry and makes no network
-requests of its own; in SSH mode it uses your SSH connection.
+requests of its own; in SSH mode it uses your SSH connection. Problem reports are only sent
+when you submit one yourself.
+
+**What if something goes wrong inside DVICode?** The feature that failed reports an internal
+error, the rest keeps working, and a notice offers **Report Issue** and **Show Log**. If the
+engine itself stops, it is restarted (up to 4 times in 3 minutes). **DVICode: Report Issue**
+fills in the details; review them before you submit, since the log can contain file
+names.
 
 **How do I set up UVM?** Put `-uvm` in the build file and set `UVM_HOME` (or the
 `dvicode.uvmHome` setting, or `-uvmhome DIR` in the build file) to the UVM installation.
@@ -156,9 +165,9 @@ DVICode is young and moving fast. Not supported yet: VHDL, e and PSS; elaboratio
 parameter values and `generate` conditions; UVM factory overrides and config-db views;
 diagrams; code formatting; lint rules.
 
-**Help us improve it:** try it on your project, and when something is wrong, open an issue
-with a minimal code sample that shows it, your build file, your platform and setup (local,
-WSL or SSH), and what you expected to see.
+**Help us improve it:** try it on your project, and when something is wrong, run
+**DVICode: Report Issue** (or open an issue) with a minimal code sample that shows it, your
+build file, your platform and setup (local, WSL or SSH), and what you expected to see.
 
 ## Contributing
 
