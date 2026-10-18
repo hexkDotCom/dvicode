@@ -126,7 +126,8 @@ requests of its own; in SSH mode it uses your SSH connection.
 Auto-configuration adds UVM by itself when the sources use it.
 
 **Can it run next to another SystemVerilog extension?** Yes, but both will report problems
-and offer completions; disable the features you don't want in one of them.
+and offer completions. If that is noisy, turn those features off in the other extension's
+settings, or disable it for the workspace.
 
 **What doesn't it do yet?** See [Status](#status).
 
