@@ -21,10 +21,10 @@ scripts/third_party_notices.py   regenerate THIRD_PARTY_NOTICES.md
 
 ## Building
 
-The server builds on Linux or WSL with stable Rust:
+The server builds on Linux or WSL with stable Rust. Commands start in the repository root:
 
 ```bash
-cd server && cargo test                         # unit + integration tests
+(cd server && cargo test)                       # unit + integration tests
 scripts/package.sh                              # static musl server, notices, client/dvicode-*.vsix
 scripts/package.sh --server                     # only the server, copied into client/server/linux-x64
 ```
@@ -37,7 +37,7 @@ change.
 ## Testing on the command line
 
 `dvicode-server check <dir> [--build FILE]` compiles a project and prints its problems.
-IDE queries run without an editor:
+IDE queries run without an editor; `LINE` and `COL` count from 1, like in the editor:
 
 | Option | Query |
 |---|---|
@@ -58,6 +58,20 @@ IDE queries run without an editor:
 A good regression check is that clean libraries (UVM, your own verified code) report zero
 problems, and that `examples/demo-project` with `.dvicode/errors.build` reports exactly the
 mistakes marked in `rtl/broken.sv`.
+
+## Performance
+
+The figure in the README (UVM 1.2 in about 50 ms) is the `build` time that
+`dvicode-server check` prints for a project containing only UVM 1.2 (`uvm_pkg.sv`: 142
+files, 75,000 lines, 2.5 MB):
+
+```bash
+dvicode-server check <project> --env UVM_HOME=<uvm-1.2> -q
+```
+
+It covers preprocessing, parsing and indexing, not problem checking (printed separately).
+Measured with a release build on Linux (WSL2) on an Intel Core Ultra 9 285K (24 cores),
+files already in the operating system's cache: 46 to 56 ms over three runs.
 
 ## End-to-end tests
 

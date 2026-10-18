@@ -125,6 +125,8 @@ pub fn parse_build(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<S
         cur: None,
         env: env.clone(),
         comp_root: root.to_path_buf(),
+        base_change: None,
+        uvm: None,
         depth: 0,
     };
     b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
@@ -140,7 +142,23 @@ struct Builder {
     cur: Option<Invocation>,
     env: FxHashMap<String, String>,
     comp_root: PathBuf,
+    /// Set by `+dvicode_compilation_root+` (the new base) and `+dvicode_init` (back to the
+    /// file's own base) for the file being parsed.
+    base_change: Option<Option<PathBuf>>,
+    /// UVM requested in the current invocation.
+    uvm: Option<UvmRequest>,
     depth: usize,
+}
+
+/// `-uvm`, `-uvmhome` or `+dvicode_uvm_home+` in the current invocation. Applied when the
+/// invocation ends, so a location given anywhere in it is used; the library goes where UVM was
+/// first requested.
+struct UvmRequest {
+    file: PathBuf,
+    line: u32,
+    home: Option<String>,
+    files_at: usize,
+    incdirs_at: usize,
 }
 
 /// A word of an argument file and its zero-based line.
@@ -165,6 +183,8 @@ impl Builder {
     }
 
     fn start_invocation(&mut self, mode: &str, auto: bool) {
+        self.apply_uvm();
+        self.base_change = Some(None);
         if let Some(c) = self.cur.take() {
             self.cfg.invocations.push(c);
         }
@@ -173,6 +193,7 @@ impl Builder {
     }
 
     fn finish(mut self) -> BuildConfig {
+        self.apply_uvm();
         if let Some(c) = self.cur.take() {
             self.cfg.invocations.push(c);
         }
@@ -204,8 +225,9 @@ impl Builder {
         self.cfg.problems.push((file.to_path_buf(), line, msg));
     }
 
-    fn parse_text(&mut self, file: &Path, text: &str, base: PathBuf) {
+    fn parse_text(&mut self, file: &Path, text: &str, file_base: PathBuf) {
         let words = split_words(text);
+        let mut base = file_base.clone();
         let mut i = 0;
         while i < words.len() {
             let w = &words[i];
@@ -224,6 +246,9 @@ impl Builder {
                 let name = parts[0];
                 let args: Vec<String> = parts[1..].iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
                 self.plus_directive(file, line, name, &raw, args, &base);
+                if let Some(change) = self.base_change.take() {
+                    base = change.unwrap_or_else(|| file_base.clone());
+                }
                 continue;
             }
             if raw.starts_with('-') && raw.len() > 1 {
@@ -279,10 +304,10 @@ impl Builder {
                             self.setenv(&kv, true);
                         }
                     }
-                    "-uvm" | "-ovm" => self.add_uvm(file, line, None),
+                    "-uvm" | "-ovm" => self.request_uvm(file, line, None),
                     "-uvmhome" => {
                         if let Some(p) = next(&mut i) {
-                            self.add_uvm(file, line, Some(p));
+                            self.request_uvm(file, line, Some(p));
                         }
                     }
                     "-endlib" => {}
@@ -384,13 +409,14 @@ impl Builder {
             "compilation_root" => {
                 if let Some(a) = args.first() {
                     if let Some(p) = self.resolve(file, line, a, base) {
-                        self.comp_root = p;
+                        self.comp_root = p.clone();
+                        self.base_change = Some(Some(p));
                     }
                 }
             }
             "uvmhome_override" | "uvm_home" => {
                 if let Some(a) = args.first() {
-                    self.add_uvm(file, line, Some(a.clone()));
+                    self.request_uvm(file, line, Some(a.clone()));
                 }
             }
             "include_config" => {
@@ -428,25 +454,43 @@ impl Builder {
         }
     }
 
-    fn add_uvm(&mut self, file: &Path, line: u32, home: Option<String>) {
-        let home = home
-            .and_then(|h| self.expand(&h, true))
+    fn request_uvm(&mut self, file: &Path, line: u32, home: Option<String>) {
+        // Expanded now, with the variables set so far.
+        let home = home.and_then(|h| self.expand(&h, true));
+        let (files_at, incdirs_at) = {
+            let inv = self.inv();
+            (inv.files.len(), inv.incdirs.len())
+        };
+        let req = self.uvm.get_or_insert_with(|| UvmRequest { file: file.to_path_buf(), line, home: None, files_at, incdirs_at });
+        if home.is_some() {
+            req.home = home;
+        }
+    }
+
+    /// Adds the UVM library requested in the current invocation.
+    fn apply_uvm(&mut self) {
+        let Some(req) = self.uvm.take() else { return };
+        let home = req
+            .home
             .or_else(|| self.env.get("UVM_HOME").cloned())
             .or_else(|| std::env::var("UVM_HOME").ok())
             .or_else(|| self.env.get("DVICODE_UVM_HOME").cloned())
             .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
             .filter(|h| !h.is_empty());
         let Some(home) = home else {
-            self.problem(file, line, "-uvm: set UVM_HOME or DVICODE_UVM_HOME to the UVM library location".into());
+            self.problem(&req.file, req.line, "-uvm: set UVM_HOME or DVICODE_UVM_HOME to the UVM library location".into());
             return;
         };
         let home = PathBuf::from(home);
         let src = if home.join("src").is_dir() { home.join("src") } else { home };
         let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| p.is_file());
-        self.inv().incdirs.push(src.clone());
-        match pkg {
-            Some(p) => self.inv().files.push(p),
-            None => self.problem(file, line, format!("-uvm: no uvm_pkg.sv in {}", src.display())),
+        if pkg.is_none() {
+            self.problem(&req.file, req.line, format!("-uvm: no uvm_pkg.sv in {}", src.display()));
+        }
+        let inv = self.inv();
+        inv.incdirs.insert(req.incdirs_at.min(inv.incdirs.len()), src);
+        if let Some(p) = pkg {
+            inv.files.insert(req.files_at.min(inv.files.len()), p);
         }
     }
 
@@ -792,6 +836,36 @@ mod tests {
         assert_eq!(cfg.invocations[0].files, vec![dir.join("rtl/müller.sv")]);
         assert_eq!(cfg.invocations[0].defines[0].1.as_deref(), Some("\"héllo wörld\""));
         assert_eq!(cfg.invocations[0].defines[1].1.as_deref(), Some("größe"));
+    }
+
+    #[test]
+    fn uvmhome_after_uvm_sets_the_location() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_uvmhome");
+        std::fs::create_dir_all(dir.join("uvm/src")).unwrap();
+        std::fs::write(dir.join("uvm/src/uvm_pkg.sv"), "").unwrap();
+        std::fs::write(dir.join("tb.sv"), "").unwrap();
+        let text = "-uvm\ntb.sv\n-uvmhome $DVICODE_PROJECT_LOC/uvm\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        let inv = &cfg.invocations[0];
+        // The library comes where `-uvm` was, before the testbench, and only once.
+        assert_eq!(inv.files, vec![dir.join("uvm/src/uvm_pkg.sv"), dir.join("tb.sv")]);
+        assert_eq!(inv.incdirs, vec![dir.join("uvm/src")]);
+    }
+
+    #[test]
+    fn compilation_root_moves_relative_paths() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_comp_root");
+        std::fs::create_dir_all(dir.join("sub/inc")).unwrap();
+        std::fs::write(dir.join("sub/a.sv"), "").unwrap();
+        std::fs::write(dir.join("b.sv"), "").unwrap();
+        let text = "+dvicode_compilation_root+sub\na.sv\n+incdir+inc\n+dvicode_init\nb.sv\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        assert_eq!(cfg.invocations[0].files, vec![dir.join("sub/a.sv")]);
+        assert_eq!(cfg.invocations[0].incdirs, vec![dir.join("sub/inc")]);
+        // A new invocation starts from the project folder again.
+        assert_eq!(cfg.invocations[1].files, vec![dir.join("b.sv")]);
     }
 
     #[test]

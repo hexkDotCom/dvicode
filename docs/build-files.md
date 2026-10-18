@@ -2,8 +2,9 @@
 
 A build file tells DVICode which files to compile, in which order, and with which include
 directories and macros. It uses the argument-file syntax that simulators already understand
-(`-f`, `+incdir+`, `+define+`, ...), so the file lists of an existing simulation flow can be
-used as they are. DVICode adds a few directives of its own, all starting with `+dvicode_`.
+(`-f`, `+incdir+`, `+define+`, ...), so the file lists of an existing simulation flow can
+usually be used as they are: the options below are understood, and other options are
+skipped. DVICode adds a few directives of its own, all starting with `+dvicode_`.
 
 - [Where DVICode looks](#where-dvicode-looks)
 - [Syntax](#syntax)
@@ -58,8 +59,8 @@ rtl/top.sv                               anything else is a source file
 | `-v FILE` | Library file: compiled to provide modules that are used but not defined. |
 | `+libext+.v+.sv`, `-libext .v,.sv` | Extensions for `-y` lookups (default `.v`, `.sv`). |
 | `-top NAME`, `+xmtop+NAME`, `+nctop+NAME` | Design top for the Design Hierarchy view (otherwise every module that is never instantiated is a top). |
-| `-uvm`, `-ovm` | Compile the UVM library: adds `+incdir+$UVM/src` and `$UVM/src/uvm_pkg.sv`. `$UVM` is the `-uvmhome` argument, else `$UVM_HOME`, else `$DVICODE_UVM_HOME` (set by the `dvicode.uvmHome` setting). |
-| `-uvmhome DIR` | UVM location for `-uvm`. |
+| `-uvm`, `-ovm` | Compile the UVM library: adds `+incdir+$UVM/src` and `$UVM/src/uvm_pkg.sv` where the first of these options appears. `$UVM` is the `-uvmhome` argument, else `$UVM_HOME`, else `$DVICODE_UVM_HOME` (set by the `dvicode.uvmHome` setting). |
+| `-uvmhome DIR` | UVM location, used for the whole [invocation](#invocations) wherever it appears in it. Also compiles the library, like `-uvm`; using both compiles it once. |
 | `-setenv NAME=VALUE` | Same as `+dvicode_setenv+NAME=VALUE`. |
 | `-makelib LIB ... -endlib` | The files between are compiled; the library name is ignored. |
 
@@ -77,18 +78,19 @@ value. Other `+options+` and `-options` are skipped.
 | `+dvicode_setenv_no_override+NAME=VALUE` | Same, unless `NAME` is already set (in the environment, in `dvicode.env`, or earlier in the file). |
 | `+dvicode_undefine+NAME` | Same as `+undefine+NAME`. |
 | `+dvicode_skip_compile+PATTERN[+PATTERN...]` | Do not compile top files whose path matches a [wildcard](#paths-wildcards-and-environment-variables) pattern. A pattern without a leading `/` matches anywhere in the path: `*/obsolete/*`, `**/*_old.sv`. |
-| `+dvicode_compilation_root+DIR` | Directory that relative paths resolve against from here on (default: the project folder). |
-| `+dvicode_uvm_home+DIR` | UVM location; also compiles the library like `-uvm`. `+dvicode_uvmhome_override+DIR` is the same. |
+| `+dvicode_compilation_root+DIR` | Directory that relative paths resolve against for the rest of this file and in `-f` files read from here on in the `questa.*`, `ius.*` and `xcelium.*` modes (default: the project folder). Lasts until the next `+dvicode_init`. |
+| `+dvicode_uvm_home+DIR` | Same as `-uvmhome DIR`. `+dvicode_uvmhome_override+DIR` is the same. |
 | `+dvicode_include_config+FILE` | Read another build file here (its relative paths resolve against its own directory). |
 | `+dvicode_test+FILE` | Compile `FILE` like a top file (kept for compatibility with test lists). |
 
 ## Paths, wildcards and environment variables
 
-**Relative paths** resolve against the compilation root: the project folder unless
-`+dvicode_compilation_root+` changes it. Inside an `-f` file, they resolve against the
-directory of that `-f` file when the mode is `default`, a `vcs.*` mode, or when the
-file was read with `-F`. In the other modes (`questa.*`, `ius.*`, `xcelium.*`) they resolve
-against the compilation root, like those simulators do.
+**Relative paths** in the build file resolve against the project folder. Inside an `-f`
+file, they resolve against the directory of that `-f` file when the mode is `default`, a
+`vcs.*` mode, or when the file was read with `-F`. In the other modes (`questa.*`, `ius.*`,
+`xcelium.*`) they resolve against the compilation root, like those simulators do: the project
+folder, unless `+dvicode_compilation_root+` changed it. That directive also changes the base
+for the rest of the file it is in.
 
 **Wildcards** work in source files and include directories:
 

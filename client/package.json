@@ -263,7 +263,7 @@
         "dvicode.maxProblems": {
           "type": "number",
           "default": 1000,
-          "description": "Maximum number of problems published after a full build (open files always get all of theirs). 0 means no limit."
+          "description": "Maximum number of problems published after a full build. Open files are exempt from this limit; per-file limits (500 problems, of which 50 syntax errors) still apply. 0 means no limit."
         },
         "dvicode.trace.server": {
           "type": "string",

@@ -25,15 +25,18 @@ stdio as the channel:
 
 | mode    | command the client spawns                                   |
 |---------|-------------------------------------------------------------|
-| `local` | `<server> --stdio`                                          |
-| `wsl`   | `wsl.exe -d <distro> --cd ~ -- <server> --stdio`            |
-| `ssh`   | `ssh -T [opts] <host> <server> --stdio`                     |
+| `local` | `<server> --stdio ...` (the engine bundled for this platform) |
+| `wsl`   | `wsl.exe -d <distro> -e bash -lc 'exec "<server>" --stdio ...'` |
+| `ssh`   | `ssh [opts] -T -o BatchMode=yes <host> "bash -lc 'exec \"<server>\" --stdio ...'"` |
 | `custom`| `dvicode.server.launchCommand` with `${SERVER_CMD}` inside  |
 | `tcp`   | no spawn; connect to `host:port` of `dvicode-server --listen` (token auth) |
 
-`ssh` and `wsl.exe` already carry stdio, so there are no ports, registry files, or TLS
-certificates to manage. The extension can deploy the bundled Linux binary to
-`~/.dvicode/server/<version>/` on the target (`dvicode.server.autoDeploy`).
+The login shell (`bash -lc`) gives the engine the user's environment (`UVM_HOME`, tool
+paths). `ssh` and `wsl.exe` already carry stdio, so the language server needs no port of its
+own, and there are no registry files or TLS certificates to manage. The extension can deploy
+the bundled Linux x64 engine to `~/.dvicode/server/<version>-<hash>/` on the target
+(`dvicode.server.autoDeploy`); other Linux architectures need an engine built there and
+`dvicode.server.path`.
 
 ## Where the files live
 

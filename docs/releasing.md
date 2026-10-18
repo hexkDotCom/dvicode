@@ -12,14 +12,15 @@ platforms and packages one extension per platform, plus a universal one:
 | `dvicode-linux-arm64-<v>.vsix` | Linux ARM64 (static) | Linux runner, cross-compiled |
 | `dvicode-darwin-arm64-<v>.vsix` | macOS Apple Silicon | macOS runner |
 | `dvicode-darwin-x64-<v>.vsix` | macOS Intel | macOS runner, cross-compiled |
-| `dvicode-<v>.vsix` | none (WSL, SSH and other remote modes only) | |
+| `dvicode-<v>.vsix` (universal) | Linux x64 only; elsewhere WSL, SSH and the other remote modes | |
 
 Every package also contains the static Linux x64 engine, which the extension installs in WSL
 and on SSH hosts, and the license files (`LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` for
 exactly the engines it contains, and the Rust standard library notices).
 
 The VS Code Marketplace and Open VSX serve each user the package for their platform; the
-universal package covers any other platform.
+universal package covers any other platform. There, running locally needs an engine built
+for that platform (`dvicode.server.path`).
 
 ## Making a release
 
@@ -35,12 +36,13 @@ To build packages without a release (for testing), run the workflow by hand from
 
 ## Publishing
 
-The extension is published under the id `hexk` in both stores: the publisher `hexk` on the
-VS Code Marketplace and the namespace `hexk` on Open VSX. `publisher` in `client/package.json`
-must match it exactly, including case.
+The extension ID is `hexk.dvicode` (what users type in `code --install-extension`): the
+publisher `hexk` on the VS Code Marketplace, which is also the namespace `hexk` on Open VSX,
+followed by the extension name `dvicode`. `publisher` and `name` in `client/package.json`
+must match them exactly, including case.
 
-Every store version is permanent, so publish only packages you have tried (step 4 of
-[Making a release](#making-a-release)).
+Published version numbers cannot be reused, even after a version is removed, so publish only
+packages you have tried (step 4 of [Making a release](#making-a-release)).
 
 ### Open VSX
 
@@ -90,18 +92,23 @@ publisher page, <https://marketplace.visualstudio.com/manage/publishers/hexk>:
    package for their platform. Check the extension's page afterwards to confirm that all
    platforms are listed.
 
-Publishing from the workflow needs a personal access token, which needs an Azure DevOps
-organization (and so an Azure subscription). With one, create a token with organization **All
-accessible organizations** and scope **Marketplace > Manage**, store it as the secret
-`VSCE_PAT` of a GitHub environment with the same reviewer rule, and add a job in that
-environment that runs `npx vsce publish --packagePath <file>` for each package.
+Publishing from the workflow needs Azure. Azure DevOps retires global personal access
+tokens on December 1, 2026; Microsoft recommends publishing with a Microsoft Entra ID
+identity instead: a managed identity in an Azure subscription, added as a Contributor of the
+publisher. Microsoft's guide,
+[Publishing extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension),
+shows this for Azure Pipelines; from GitHub Actions, give the identity a federated credential
+for this repository, sign in with `azure/login`, and run
+`npx vsce publish --azure-credential --packagePath <file>` for each package (vsce 2.26.1 or
+later).
 
 ## Before the first public release
 
 - Publish from the public repository (or point `repository`, `bugs` and `homepage` in
   `client/package.json` at it): the Marketplace page links there, and links to a private
   repository do not work for users.
-- Add a screenshot or two to the README; the Marketplace page shows the README.
+- Add a short animation and a screenshot or two to the README (both READMEs: the
+  Marketplace page shows `client/README.md`), for example navigating a UVM method, expanding
+  a macro and opening the Verification Hierarchy on the demo project.
 - `"preview": true` in `client/package.json` shows a **Preview** badge; remove it when the
   extension is ready to be called stable.
-- Versions on the Marketplace are permanent: every publish needs a new version number.
