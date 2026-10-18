@@ -13,12 +13,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/hexkDotCom/hexk-dvicode.git"
+    "url": "https://github.com/hexkDotCom/dvicode.git"
   },
   "bugs": {
-    "url": "https://github.com/hexkDotCom/hexk-dvicode/issues"
+    "url": "https://github.com/hexkDotCom/dvicode/issues"
   },
-  "homepage": "https://github.com/hexkDotCom/hexk-dvicode#readme",
+  "homepage": "https://github.com/hexkDotCom/dvicode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },

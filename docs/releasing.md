@@ -3,7 +3,7 @@
 ## What a release contains
 
 The `Release` workflow (`.github/workflows/release.yml`) builds the engine for five
-platforms and packages one extension per platform, plus a universal one:
+platforms and packages one extension per platform, plus a universal one with all of them:
 
 | Package | Engine for local use | Built on |
 |---|---|---|
@@ -12,15 +12,16 @@ platforms and packages one extension per platform, plus a universal one:
 | `dvicode-linux-arm64-<v>.vsix` | Linux ARM64 (static) | Linux runner, cross-compiled |
 | `dvicode-darwin-arm64-<v>.vsix` | macOS Apple Silicon | macOS runner |
 | `dvicode-darwin-x64-<v>.vsix` | macOS Intel | macOS runner, cross-compiled |
-| `dvicode-<v>.vsix` (universal) | Linux x64 only; elsewhere WSL, SSH and the other remote modes | |
+| `dvicode-<v>.vsix` (universal) | all five of the above (about five times larger) | |
 
 Every package also contains the static Linux x64 engine, which the extension installs in WSL
 and on SSH hosts, and the license files (`LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` for
 exactly the engines it contains, and the Rust standard library notices).
 
-The VS Code Marketplace and Open VSX serve each user the package for their platform; the
-universal package covers any other platform. There, running locally needs an engine built
-for that platform (`dvicode.server.path`).
+The VS Code Marketplace and Open VSX serve each user the package for their platform when
+there is one, and the universal package otherwise. On a platform without an engine (Windows
+on ARM, for example), use WSL or SSH, or build the engine there and set
+`dvicode.server.path`.
 
 ## Making a release
 
@@ -88,9 +89,10 @@ publisher page, <https://marketplace.visualstudio.com/manage/publishers/hexk>:
    release).
 2. The first time, choose **New extension > Visual Studio Code** and upload a package. For
    later packages and versions, choose **Update** in the extension's **...** menu.
-3. Upload every platform package and the universal one. The Marketplace serves each user the
-   package for their platform. Check the extension's page afterwards to confirm that all
-   platforms are listed.
+3. Upload the universal package, `dvicode-<v>.vsix`: it contains every engine, so this one
+   file works on every platform. Optionally also upload the platform packages, which are
+   smaller downloads; the Marketplace serves each user the package for their platform when
+   there is one. Check the extension's page afterwards.
 
 Publishing from the workflow needs Azure. Azure DevOps retires global personal access
 tokens on December 1, 2026; Microsoft recommends publishing with a Microsoft Entra ID

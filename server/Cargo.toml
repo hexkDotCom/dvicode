@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["HEXK"]
-repository = "https://github.com/hexkDotCom/hexk-dvicode"
+repository = "https://github.com/hexkDotCom/dvicode"
 
 [workspace.dependencies]
 smol_str = "0.3"

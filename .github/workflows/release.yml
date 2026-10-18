@@ -93,7 +93,7 @@ jobs:
         run: |
           npm ci
           node esbuild.mjs --production
-      - name: Package one extension per platform
+      - name: Package one extension per platform, and one for all platforms
         run: |
           set -euo pipefail
           version=$(node -p "require('./client/package.json').version")
@@ -104,15 +104,24 @@ jobs:
             [win32-x64]=x86_64-pc-windows-msvc [darwin-arm64]=aarch64-apple-darwin
             [darwin-x64]=x86_64-apple-darwin
           )
+          # The universal package (no --target) carries every engine, so one file works
+          # everywhere; the stores prefer the smaller platform package when there is one.
           for platform in linux-x64 linux-arm64 win32-x64 darwin-arm64 darwin-x64 universal; do
-            rm -rf client/server && mkdir -p client/server/linux-x64
-            install -m 755 engines/engine-linux-x64/dvicode-server client/server/linux-x64/
-            targets=x86_64-unknown-linux-musl
-            if [ "$platform" != universal ] && [ "$platform" != linux-x64 ]; then
-              mkdir -p "client/server/$platform"
-              install -m 755 engines/engine-$platform/* "client/server/$platform/"
-              targets="$targets,${rust_target[$platform]}"
+            rm -rf client/server
+            # Every package has the Linux x64 engine, which is deployed to WSL and SSH hosts.
+            if [ "$platform" = universal ]; then
+              engines="${!rust_target[*]}"
+            elif [ "$platform" = linux-x64 ]; then
+              engines=linux-x64
+            else
+              engines="linux-x64 $platform"
             fi
+            targets=""
+            for e in $engines; do
+              mkdir -p "client/server/$e"
+              install -m 755 engines/engine-$e/* "client/server/$e/"
+              targets="$targets${targets:+,}${rust_target[$e]}"
+            done
             python3 scripts/third_party_notices.py --targets "$targets" \
               --out client/THIRD_PARTY_NOTICES.md --rust-std-copy client/licenses/rust-std-library.html
             if [ "$platform" = universal ]; then
