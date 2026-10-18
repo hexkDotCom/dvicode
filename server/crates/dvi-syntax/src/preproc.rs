@@ -100,6 +100,18 @@ impl MacroTable {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Same macro names with the same parameters and bodies (locations may differ): files
+    /// compiled after a table expand identically with either.
+    pub fn same_definitions(&self, other: &MacroTable) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(k, a)| {
+                other.0.get(k).is_some_and(|b| Arc::ptr_eq(a, b) || (a.body_text == b.body_text && a.signature() == b.signature()))
+            })
+    }
 }
 
 /// A `` `define `` given as `NAME` or `NAME=value`.

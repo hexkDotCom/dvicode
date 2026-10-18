@@ -245,7 +245,7 @@
         "dvicode.buildFile": {
           "type": "string",
           "default": "",
-          "description": "Build configuration file (relative to the workspace folder). Empty: .dvicode/default.build, else auto-configuration."
+          "description": "Build configuration file (relative to the workspace folder). Empty: .dvicode/default.build, else auto-configuration. `auto`: always auto-configure."
         },
         "dvicode.env": {
           "type": "object",

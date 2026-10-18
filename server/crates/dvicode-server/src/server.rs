@@ -80,6 +80,16 @@ fn capabilities() -> ServerCapabilities {
     }
 }
 
+/// What has been published, and which publishing job may publish each file.
+#[derive(Default)]
+struct PubState {
+    /// Files that currently show problems in the client.
+    published: FxHashSet<Url>,
+    /// File -> sequence number of the newest job that covers it.
+    latest: FxHashMap<Url, u64>,
+    next: u64,
+}
+
 enum Event {
     Built(Box<Analysis>, u64),
 }
@@ -96,11 +106,13 @@ struct Server {
     events_tx: Sender<Event>,
     events_rx: Receiver<Event>,
     building: bool,
+    /// Files changed since the running full build started; replayed onto its result.
+    changed_during_build: FxHashSet<FileId>,
     build_again: bool,
     build_generation: u64,
     rebuild_at: Option<Instant>,
     built_once: bool,
-    published: Arc<Mutex<FxHashSet<Url>>>,
+    published: Arc<Mutex<PubState>>,
     next_id: i32,
     progress: bool,
 }
@@ -145,11 +157,12 @@ pub fn run(conn: Connection) -> Res<()> {
         events_tx,
         events_rx,
         building: false,
+        changed_during_build: FxHashSet::default(),
         build_again: false,
         build_generation: 0,
         rebuild_at: None,
         built_once: false,
-        published: Arc::new(Mutex::new(FxHashSet::default())),
+        published: Arc::new(Mutex::new(PubState::default())),
         next_id: 1,
         progress,
     };
@@ -225,7 +238,12 @@ impl Server {
         if let Some(u) = &self.settings.uvm_home {
             env.insert("DVICODE_UVM_HOME".into(), u.clone());
         }
-        let bf = self.settings.build_file.as_ref().filter(|b| !b.is_empty()).map(|b| {
+        let wanted = self.settings.build_file.as_deref().map(str::trim).unwrap_or("");
+        if wanted == dvi_project::AUTO {
+            let cfg = if self.root.is_some() { dvi_project::load_auto(&root, &env) } else { Default::default() };
+            return ProjectSetup::new(&root, cfg, env);
+        }
+        let bf = self.settings.build_file.as_ref().filter(|b| !b.trim().is_empty()).map(|b| {
             let p = PathBuf::from(b);
             if p.is_absolute() {
                 p
@@ -243,6 +261,7 @@ impl Server {
             return;
         }
         self.building = true;
+        self.changed_during_build.clear();
         self.build_generation += 1;
         let generation = self.build_generation;
         if self.progress {
@@ -292,11 +311,20 @@ impl Server {
                 a = a.add_adhoc(*f);
             }
         }
-        // Edits made during the build.
-        if !self.pending.is_empty() {
-            let files: Vec<FileId> = self.pending.drain().collect();
+        // Edits made while the build ran, including those already applied to the previous
+        // snapshot by the debounce: the build may have read older text.
+        let mut files: Vec<FileId> = self.changed_during_build.drain().collect();
+        files.extend(self.pending.drain());
+        files.sort_unstable();
+        files.dedup();
+        self.pending_since = None;
+        if !files.is_empty() {
             a = a.update(&files);
-            self.pending_since = None;
+            for f in &files {
+                if self.open.contains_key(f) && a.units_of_file(*f).is_empty() {
+                    a = a.add_adhoc(*f);
+                }
+            }
         }
         self.analysis = Arc::new(a);
         self.built_once = true;
@@ -319,6 +347,16 @@ impl Server {
         if self.build_again {
             self.build_again = false;
             self.start_build();
+        }
+    }
+
+    /// Records that a file's text changed: analysed after the debounce, and replayed onto
+    /// the result of a running full build.
+    fn note_change(&mut self, id: FileId) {
+        self.pending.insert(id);
+        self.pending_since.get_or_insert_with(Instant::now);
+        if self.building {
+            self.changed_during_build.insert(id);
         }
     }
 
@@ -387,10 +425,22 @@ impl Server {
 
     /// Computes and publishes problems in the background. With `full`, files that had
     /// problems before and are not in `files` are cleared.
+    ///
+    /// Jobs run concurrently and may finish in any order, so each job gets a sequence number
+    /// and only publishes a file while it is the newest job covering that file.
     fn publish(&self, files: Vec<FileId>, full: bool) {
         let a = self.analysis.clone();
         let sender = self.sender.clone();
         let published = self.published.clone();
+        let generation = {
+            let mut st = published.lock().unwrap();
+            st.next += 1;
+            let g = st.next;
+            for f in &files {
+                st.latest.insert(url_of(&a.vfs.path(*f)), g);
+            }
+            g
+        };
         let open: FxHashSet<FileId> = self.open.keys().copied().collect();
         let limit = self.settings.max_problems.unwrap_or(1000);
         rayon::spawn(move || {
@@ -418,25 +468,34 @@ impl Server {
                 }
                 total += lsp.len();
                 let uri = url_of(&a.vfs.path(f));
-                let mut pubd = published.lock().unwrap();
-                if lsp.is_empty() && !pubd.contains(&uri) {
+                // Check and send under the lock, so a newer job cannot publish in between.
+                let mut st = published.lock().unwrap();
+                if st.latest.get(&uri) != Some(&generation) {
+                    continue; // a newer job owns this file
+                }
+                now.insert(uri.clone());
+                if lsp.is_empty() && !st.published.contains(&uri) {
                     continue;
                 }
-                if !lsp.is_empty() {
-                    pubd.insert(uri.clone());
-                    now.insert(uri.clone());
+                if lsp.is_empty() {
+                    st.published.remove(&uri);
                 } else {
-                    pubd.remove(&uri);
+                    st.published.insert(uri.clone());
                 }
-                drop(pubd);
                 let p = PublishDiagnosticsParams { uri, diagnostics: lsp, version: None };
                 let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
             }
             if full {
-                let mut pubd = published.lock().unwrap();
-                let stale: Vec<Url> = pubd.iter().filter(|u| !now.contains(*u)).cloned().collect();
+                let mut st = published.lock().unwrap();
+                let stale: Vec<Url> = st
+                    .published
+                    .iter()
+                    .filter(|u| !now.contains(*u) && st.latest.get(*u).map_or(true, |g| *g <= generation))
+                    .cloned()
+                    .collect();
                 for u in stale {
-                    pubd.remove(&u);
+                    st.published.remove(&u);
+                    st.latest.insert(u.clone(), generation);
                     let p = PublishDiagnosticsParams { uri: u, diagnostics: Vec::new(), version: None };
                     let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
                 }
@@ -453,8 +512,7 @@ impl Server {
                 let Some(path) = path_of(&p.text_document.uri) else { return };
                 let id = self.vfs.set_overlay(&path, Arc::from(p.text_document.text));
                 self.open.insert(id, p.text_document.uri);
-                self.pending.insert(id);
-                self.pending_since.get_or_insert_with(Instant::now);
+                self.note_change(id);
                 // Make the file available right away.
                 self.flush_pending();
             }
@@ -465,16 +523,16 @@ impl Server {
                 let old = self.vfs.text(id).unwrap_or_else(|| Arc::from(""));
                 let new = util::apply_changes(&old, p.content_changes);
                 self.vfs.set_overlay(&path, Arc::from(new));
-                self.pending.insert(id);
+                self.note_change(id);
                 self.pending_since = Some(Instant::now());
             }
             "textDocument/didSave" => {
                 let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
-                let is_build = path.extension().is_some_and(|e| e == "build" || e == "f");
-                let has_define = self.vfs.lookup(&path).and_then(|f| self.vfs.text(f)).is_some_and(|t| t.contains("`define"));
-                if is_build || has_define {
-                    // Macros flow into later files: recompile everything shortly.
+                // Macro changes reach later files through incremental updates; only a changed
+                // build configuration needs a full build.
+                let is_build = path.extension().is_some_and(|e| e == "build" || e == "f" || e == "F");
+                if is_build {
                     self.rebuild_at = Some(Instant::now() + Duration::from_millis(800));
                 }
             }
@@ -487,12 +545,18 @@ impl Server {
                     if self.analysis.is_adhoc_root(id) {
                         self.analysis = Arc::new(self.analysis.remove_adhoc(id));
                         let uri = p.text_document.uri;
-                        self.published.lock().unwrap().remove(&uri);
-                        self.notify("textDocument/publishDiagnostics", PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None });
+                        let mut st = self.published.lock().unwrap();
+                        // Supersede any job still computing problems for this file.
+                        st.next += 1;
+                        let g = st.next;
+                        st.latest.insert(uri.clone(), g);
+                        st.published.remove(&uri);
+                        let msg = PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None };
+                        let _ = self.sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), msg)));
+                        drop(st);
                     } else {
                         // Back to the disk contents.
-                        self.pending.insert(id);
-                        self.pending_since.get_or_insert_with(Instant::now);
+                        self.note_change(id);
                     }
                 }
             }
@@ -512,8 +576,7 @@ impl Server {
                     }
                     if let Some(id) = id {
                         if !self.vfs.has_overlay(id) && !self.analysis.units_of_file(id).is_empty() {
-                            self.pending.insert(id);
-                            self.pending_since.get_or_insert_with(Instant::now);
+                            self.note_change(id);
                         }
                     }
                 }

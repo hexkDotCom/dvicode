@@ -17,6 +17,27 @@ struct Entry {
     lines: Option<(u64, Arc<LineIndex>)>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caches_follow_the_latest_text() {
+        let vfs = Vfs::new();
+        let p = Path::new("/__dvicode_test__/a.sv");
+        let id = vfs.set_overlay(p, Arc::from("module a;"));
+        let (t1, v1) = vfs.text_versioned(id).unwrap();
+        assert_eq!(&*t1, "module a;");
+        assert_eq!(vfs.tokens(id).unwrap()[1].text, "a");
+        vfs.set_overlay(p, Arc::from("module bb;\nendmodule"));
+        let (t2, v2) = vfs.text_versioned(id).unwrap();
+        assert!(v2 > v1);
+        assert_eq!(&*t2, "module bb;\nendmodule");
+        assert_eq!(vfs.tokens(id).unwrap()[1].text, "bb");
+        assert_eq!(vfs.line_index(id).unwrap().line_count(), 2);
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     paths: Vec<PathBuf>,
@@ -87,17 +108,52 @@ impl Vfs {
             let g = self.inner.read().unwrap();
             let e = g.entries.get(id as usize)?;
             if let Some((v, li)) = &e.lines {
-                if *v == e.version && (e.overlay.is_some() || e.disk_loaded) {
+                if *v == e.version {
                     return Some(li.clone());
                 }
             }
         }
-        let text = self.text(id)?;
+        let (text, version) = self.text_versioned(id)?;
         let li = Arc::new(LineIndex::new(&text));
         let mut g = self.inner.write().unwrap();
         let e = &mut g.entries[id as usize];
-        e.lines = Some((e.version, li.clone()));
+        // Cache only if nothing changed meanwhile; otherwise the result is still correct for
+        // the text it was built from, but must not be reused for the newer one.
+        if e.version == version {
+            e.lines = Some((version, li.clone()));
+        }
         Some(li)
+    }
+
+    /// The text of a file and the version it belongs to, read consistently: a concurrent edit
+    /// or invalidation either happens entirely before (newer pair) or after (older pair).
+    pub fn text_versioned(&self, id: FileId) -> Option<(Arc<str>, u64)> {
+        loop {
+            let (path, version) = {
+                let g = self.inner.read().unwrap();
+                let e = g.entries.get(id as usize)?;
+                if let Some(o) = &e.overlay {
+                    return Some((o.clone(), e.version));
+                }
+                if e.disk_loaded {
+                    return e.disk.clone().map(|t| (t, e.version));
+                }
+                (g.paths[id as usize].clone(), e.version)
+            };
+            let text: Option<Arc<str>> = std::fs::read(&path).ok().map(|b| match String::from_utf8(b) {
+                Ok(s) => Arc::from(s),
+                Err(e) => Arc::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+            });
+            let mut g = self.inner.write().unwrap();
+            let e = &mut g.entries[id as usize];
+            if e.version != version {
+                // Edited or invalidated while reading the disk: read again.
+                continue;
+            }
+            e.disk = text.clone();
+            e.disk_loaded = true;
+            return text.map(|t| (t, version));
+        }
     }
 
     pub fn file_count(&self) -> usize {
@@ -131,29 +187,7 @@ impl SourceProvider for Vfs {
     }
 
     fn text(&self, id: FileId) -> Option<Arc<str>> {
-        let path = {
-            let g = self.inner.read().unwrap();
-            let e = g.entries.get(id as usize)?;
-            if let Some(o) = &e.overlay {
-                return Some(o.clone());
-            }
-            if e.disk_loaded {
-                return e.disk.clone();
-            }
-            g.paths[id as usize].clone()
-        };
-        let text: Option<Arc<str>> = std::fs::read(&path).ok().map(|b| match String::from_utf8(b) {
-            Ok(s) => Arc::from(s),
-            Err(e) => Arc::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
-        });
-        let mut g = self.inner.write().unwrap();
-        let e = &mut g.entries[id as usize];
-        if e.overlay.is_some() {
-            return e.overlay.clone();
-        }
-        e.disk = text.clone();
-        e.disk_loaded = true;
-        text
+        self.text_versioned(id).map(|(t, _)| t)
     }
 
     fn tokens(&self, id: FileId) -> Option<Arc<Vec<Token>>> {
@@ -166,8 +200,7 @@ impl SourceProvider for Vfs {
                 }
             }
         }
-        let text = self.text(id)?;
-        let version = self.version(id);
+        let (text, version) = self.text_versioned(id)?;
         let toks = Arc::new(lex(&text, id));
         let mut g = self.inner.write().unwrap();
         let e = &mut g.entries[id as usize];

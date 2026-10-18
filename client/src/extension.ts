@@ -195,7 +195,8 @@ async function selectBuildConfig(): Promise<void> {
   }
   const r = await client.sendRequest<{ current: string | null; available: string[] }>('dvicode/buildConfigs');
   const items: (vscode.QuickPickItem & { value: string })[] = [
-    { label: 'Auto-configuration', description: 'no build file', value: '' },
+    { label: 'Default', description: '.dvicode/default.build if it exists, else auto-configuration', value: '' },
+    { label: 'Auto-configuration', description: 'ignore build files and find the sources', value: 'auto' },
     ...r.available.map((p) => {
       const local = launch!.mapper.toClient(vscode.Uri.from({ scheme: 'file', path: p }).toString());
       return { label: p.split('/').slice(-2).join('/'), description: p === r.current ? 'current' : undefined, detail: local.fsPath, value: p };

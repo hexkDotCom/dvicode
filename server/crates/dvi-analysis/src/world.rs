@@ -388,17 +388,64 @@ impl Analysis {
             .par_iter()
             .map(|&uid| {
                 let old = self.unit(uid);
-                let cfg = self.pp_config_for(old);
-                let pp = preprocess(&*self.vfs, cfg, old.root, old.macros_before.clone());
-                make_unit(&self.vfs, uid, old.root, old.kind, old.invocation, pp, old.macros_before.clone())
+                self.recompile(old, old.macros_before.clone())
             })
             .collect();
         for u in rebuilt {
             let id = u.id as usize;
             next.units[id] = Some(Arc::new(u));
         }
+        next.propagate_macros(self, &affected);
         next.reindex();
+        next.add_library_units();
         next
+    }
+
+    fn recompile(&self, old: &Unit, macros_before: MacroTable) -> Unit {
+        let cfg = self.pp_config_for(old);
+        let pp = preprocess(&*self.vfs, cfg, old.root, macros_before.clone());
+        make_unit(&self.vfs, old.id, old.root, old.kind, old.invocation, pp, macros_before)
+    }
+
+    /// After `changed` units were recompiled: when one of them now leaves different macros
+    /// behind, the files compiled after it in the same invocation are recompiled with the new
+    /// macros, until the macro state is back to what it was.
+    fn propagate_macros(&mut self, before: &Analysis, changed: &[UnitId]) {
+        // Pending macro state per invocation, valid for the next unit of that invocation.
+        let mut carry: FxHashMap<usize, MacroTable> = FxHashMap::default();
+        let ids: Vec<UnitId> = self.units.iter().flatten().map(|u| u.id).collect();
+        for uid in ids {
+            let u = self.unit(uid).clone();
+            match u.kind {
+                UnitKind::Builtin => continue,
+                UnitKind::AdHoc => {
+                    // Ad-hoc files see the final state of their invocation.
+                    if let Some(m) = carry.get(&u.invocation) {
+                        let nu = self.recompile(&u, m.clone());
+                        self.units[uid as usize] = Some(Arc::new(nu));
+                    }
+                    continue;
+                }
+                UnitKind::Project => {}
+            }
+            let old_after = before.try_unit(uid).map(|o| o.macros_after.clone());
+            if let Some(m) = carry.get(&u.invocation).cloned() {
+                // A file before this one changed the macros: compile again with them.
+                let nu = self.recompile(&u, m);
+                let same = old_after.as_ref().is_some_and(|o| nu.macros_after.same_definitions(o));
+                if same {
+                    carry.remove(&u.invocation);
+                } else {
+                    carry.insert(u.invocation, nu.macros_after.clone());
+                }
+                self.units[uid as usize] = Some(Arc::new(nu));
+            } else if changed.contains(&uid) {
+                let same = old_after.as_ref().is_some_and(|o| u.macros_after.same_definitions(o));
+                if !same {
+                    carry.insert(u.invocation, u.macros_after.clone());
+                }
+            }
+        }
     }
 
     fn pp_config_for(&self, u: &Unit) -> &PpConfig {

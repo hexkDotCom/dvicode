@@ -94,6 +94,14 @@ pub fn list_build_files(root: &Path) -> Vec<PathBuf> {
 
 /// Loads the configuration of a project: the given build file, the default one, or an
 /// auto-configuration.
+/// Setting value that asks for auto-configuration even when a default build file exists.
+pub const AUTO: &str = "auto";
+
+/// Auto-configuration, ignoring any build file.
+pub fn load_auto(root: &Path, env: &FxHashMap<String, String>) -> BuildConfig {
+    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config(root, env)], problems: Vec::new() }
+}
+
 pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>) -> BuildConfig {
     let bf = build_file.map(|p| p.to_path_buf()).or_else(|| find_build_file(root));
     match bf {
@@ -751,6 +759,19 @@ mod tests {
         assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
         let cfg = parse_build(&dir, &dir.join("x.build"), "+dvicode_bogus\n", &FxHashMap::default());
         assert_eq!(cfg.problems.len(), 1, "{:?}", cfg.problems);
+    }
+
+    #[test]
+    fn auto_ignores_the_default_build_file() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_auto");
+        std::fs::create_dir_all(dir.join(".dvicode")).unwrap();
+        std::fs::write(dir.join("x.sv"), "module x; endmodule\n").unwrap();
+        std::fs::write(dir.join(".dvicode/default.build"), "missing.sv\n").unwrap();
+        let env = FxHashMap::default();
+        assert!(load(&dir, None, &env).build_file.is_some());
+        let auto = load_auto(&dir, &env);
+        assert!(auto.build_file.is_none() && auto.problems.is_empty());
+        assert_eq!(auto.invocations[0].files, vec![dir.join("x.sv")]);
     }
 
     #[test]

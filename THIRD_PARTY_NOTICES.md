@@ -142,9 +142,9 @@ THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
-## Language server (server/linux-x64/dvicode-server)
+## Language server (server/*/dvicode-server)
 
-These Rust crates are statically linked into the server binary (target `x86_64-unknown-linux-musl`).
+These Rust crates are statically linked into the server binaries (targets `x86_64-unknown-linux-musl`).
 
 | Package | Version | License |
 |---|---|---|
@@ -2311,8 +2311,8 @@ DEALINGS IN THE SOFTWARE.
 
 ## Rust standard library and C runtime
 
-The server binary statically links the Rust standard library (rustc 1.99.1 (58cf8f9c3 2026-10-13)) and,
-for the musl target, the musl C library and libunwind. Their copyright and license
+The server binaries statically link the Rust standard library (rustc 1.99.1 (58cf8f9c3 2026-10-13)) and,
+for the Linux (musl) targets, the musl C library and libunwind. Their copyright and license
 notices are published by the Rust project as COPYRIGHT-library.html; a copy ships
 with the extension as `licenses/rust-std-library.html` and is also available at
 https://github.com/rust-lang/rust/blob/master/COPYRIGHT.

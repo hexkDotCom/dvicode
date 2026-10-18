@@ -19,7 +19,8 @@ used as they are. DVICode adds a few directives of its own, all starting with `+
 ## Where DVICode looks
 
 1. The file set in the `dvicode.buildFile` setting (relative to the workspace folder, or
-   absolute on the server).
+   absolute on the server). The value `auto` skips build files and always
+   [auto-configures](#auto-configuration).
 2. `.dvicode/default.build`
 3. Nothing found: the project is [auto-configured](#auto-configuration).
 
