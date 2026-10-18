@@ -3,7 +3,8 @@
 # - Push a tag `v<version>` (matching client/package.json) to build and attach the packages
 #   to a GitHub release.
 # - Run the workflow by hand to build the packages as artifacts; tick "publish" to also
-#   publish them to the VS Code Marketplace (secret VSCE_PAT) and Open VSX (secret OVSX_PAT).
+#   publish them to Open VSX through trusted publishing (no stored token; see
+#   docs/releasing.md). The VS Code Marketplace is updated by uploading the packages by hand.
 #
 # Every package contains the engine for its own platform (local use) and the static Linux
 # x64 engine (deployed to WSL and SSH hosts).
@@ -16,12 +17,12 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish to the VS Code Marketplace and Open VSX
+        description: Publish to Open VSX
         type: boolean
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   engine:
@@ -68,6 +69,8 @@ jobs:
     name: Packages
     needs: engine
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -129,17 +132,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/*.vsix --title "DVICode $GITHUB_REF_NAME" --generate-notes --prerelease
-      - name: Publish to the VS Code Marketplace
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
-        working-directory: client
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  open-vsx:
+    name: Publish to Open VSX
+    needs: package
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    # Trusted publishing: Open VSX is registered to trust this workflow file, in this repository,
+    # in this environment, and exchanges the job's OIDC ID token for a token that can publish this
+    # one extension for a few minutes. No access token is stored.
+    environment: open-vsx
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+          path: dist
+      - name: Publish
         run: |
-          for f in ../dist/*.vsix; do npx vsce publish --packagePath "$f"; done
-      - name: Publish to Open VSX
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
-        working-directory: client
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: |
-          for f in ../dist/*.vsix; do npx --yes ovsx publish "$f" -p "$OVSX_PAT"; done
+          set -euo pipefail
+          for f in dist/*.vsix; do
+            npx --yes ovsx@1.2.0 publish "$f" --trusted-publishing --skip-duplicate
+          done

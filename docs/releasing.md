@@ -33,28 +33,68 @@ universal package covers any other platform.
 To build packages without a release (for testing), run the workflow by hand from the
 **Actions** tab; the packages are attached to the run as the `vsix` artifact.
 
-## Publishing to the VS Code Marketplace and Open VSX
+## Publishing
 
-Publishing is a manual step: run the `Release` workflow by hand with **publish** ticked. It
-publishes the packages built in that run. It needs a one-time setup:
+The extension is published under the id `hexk` in both stores: the publisher `hexk` on the
+VS Code Marketplace and the namespace `hexk` on Open VSX. `publisher` in `client/package.json`
+must match it exactly, including case.
 
-**VS Code Marketplace** (the extension store inside VS Code):
+Every store version is permanent, so publish only packages you have tried (step 4 of
+[Making a release](#making-a-release)).
 
-1. Sign in at <https://marketplace.visualstudio.com/manage> with a Microsoft account and create
-   a publisher. Its id must equal `publisher` in `client/package.json` (`hexk`); if that id is
-   taken, pick another and change `package.json`.
-2. In Azure DevOps (<https://dev.azure.com>, same account), create a personal access token
-   with organization **All accessible organizations** and scope **Marketplace > Manage**.
-3. Add it to the GitHub repository as the secret `VSCE_PAT` (Settings > Secrets and variables
-   > Actions).
+### Open VSX
 
-**Open VSX** (the store used by VSCodium, Cursor, Windsurf, Gitpod and other VS Code forks):
+Open VSX is the store used by VSCodium, Cursor, Windsurf, Gitpod and other VS Code forks. The
+`Release` workflow publishes to it with *trusted publishing*: Open VSX trusts the workflow
+itself, so no access token is stored in GitHub. Run the workflow by hand from the **Actions**
+tab with **publish** ticked; its `Publish to Open VSX` job publishes the packages built in that
+run. Re-running it skips versions that are already published.
 
-1. Sign in at <https://open-vsx.org> with GitHub and accept the publisher agreement in your
-   profile.
-2. Create an access token in your profile and the namespace once:
-   `npx ovsx create-namespace hexk -p <token>`.
-3. Add the token to the GitHub repository as the secret `OVSX_PAT`.
+One-time setup:
+
+1. Sign in at <https://open-vsx.org> with GitHub, link an Eclipse Foundation account and sign
+   the Publisher Agreement (Settings > Profile). Create the namespace `hexk` under Settings >
+   Namespaces, then use its **Claim Ownership** link and wait for the request to be approved.
+   Trusted publishing needs namespace *ownership*.
+2. Publish the first version by hand with an access token. Trusted publishing can only be
+   registered for an extension that already exists. Create a token under Settings > Access
+   Tokens, then, with Node.js 22 or later, run this in the folder with the downloaded packages
+   (it asks for the token once and saves it on this computer):
+
+   ```bash
+   for f in *.vsix; do npx --yes ovsx@1.2.0 publish "$f"; done
+   ```
+
+   Then remove the saved copy with `npx --yes ovsx@1.2.0 logout hexk` and delete the token on
+   the website.
+3. Under Settings > Trusted Publishers, register a publisher for the extension `hexk.dvicode`
+   with provider **GitHub Actions**: the repository the workflow runs in (owner and name),
+   workflow filename `release.yml`, environment `open-vsx`.
+4. In the GitHub repository, create the environment `open-vsx` (Settings > Environments) and
+   add yourself as a required reviewer, so every publish waits for your approval. Required
+   reviewers need a public repository or a paid GitHub plan.
+
+Anyone who can change `.github/workflows/release.yml` or run it in the `open-vsx` environment
+can publish, so protect the branch and keep the reviewer rule.
+
+### VS Code Marketplace
+
+The Marketplace is the extension store inside VS Code. Its packages are uploaded by hand on the
+publisher page, <https://marketplace.visualstudio.com/manage/publishers/hexk>:
+
+1. Download the `vsix` artifact of the workflow run (or the files attached to the GitHub
+   release).
+2. The first time, choose **New extension > Visual Studio Code** and upload a package. For
+   later packages and versions, choose **Update** in the extension's **...** menu.
+3. Upload every platform package and the universal one. The Marketplace serves each user the
+   package for their platform. Check the extension's page afterwards to confirm that all
+   platforms are listed.
+
+Publishing from the workflow needs a personal access token, which needs an Azure DevOps
+organization (and so an Azure subscription). With one, create a token with organization **All
+accessible organizations** and scope **Marketplace > Manage**, store it as the secret
+`VSCE_PAT` of a GitHub environment with the same reviewer rule, and add a job in that
+environment that runs `npx vsce publish --packagePath <file>` for each package.
 
 ## Before the first public release
 
