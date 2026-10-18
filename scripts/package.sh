@@ -14,6 +14,9 @@ mkdir -p "$HERE/client/server/linux-x64"
 cp "$CARGO_TARGET_DIR/$TARGET/release/dvicode-server" "$HERE/client/server/linux-x64/dvicode-server"
 chmod +x "$HERE/client/server/linux-x64/dvicode-server"
 echo "server: $HERE/client/server/linux-x64/dvicode-server"
+# Licenses shipped with the extension: ours, plus everything bundled or linked.
+python3 "$HERE/scripts/third_party_notices.py"
+cp "$HERE/LICENSE" "$HERE/NOTICE" "$HERE/THIRD_PARTY_NOTICES.md" "$HERE/client/"
 if [ "${1:-}" = "--server" ]; then exit 0; fi
 cd "$HERE/client"
 npm install --no-audit --no-fund

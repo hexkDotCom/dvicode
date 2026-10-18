@@ -123,4 +123,6 @@ code stays clean.
 
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party components and
+their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which
+`scripts/third_party_notices.py` regenerates; `scripts/package.sh` ships it in the extension.

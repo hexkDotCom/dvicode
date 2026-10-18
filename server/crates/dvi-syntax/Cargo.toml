@@ -7,4 +7,3 @@ license.workspace = true
 [dependencies]
 smol_str.workspace = true
 rustc-hash.workspace = true
-im.workspace = true

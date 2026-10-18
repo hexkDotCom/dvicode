@@ -54,7 +54,53 @@ impl MacroDef {
 /// File id used for macros defined on the command line (`+define+`).
 pub const COMMAND_LINE_FILE: FileId = u32::MAX;
 
-pub type MacroTable = im::HashMap<SmolStr, Arc<MacroDef>>;
+/// Macro definitions by name.
+///
+/// Every compilation root keeps a snapshot of the table it started with, so cloning must be
+/// cheap: clones share one map, and the first change after a clone copies it (copy-on-write),
+/// which happens at most once per root.
+#[derive(Clone, Debug, Default)]
+pub struct MacroTable(Arc<FxHashMap<SmolStr, Arc<MacroDef>>>);
+
+impl MacroTable {
+    pub fn new() -> MacroTable {
+        MacroTable::default()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Arc<MacroDef>> {
+        self.0.get(name)
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    pub fn insert(&mut self, name: SmolStr, def: Arc<MacroDef>) {
+        Arc::make_mut(&mut self.0).insert(name, def);
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        if self.0.contains_key(name) {
+            Arc::make_mut(&mut self.0).remove(name);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = Arc::default();
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&SmolStr, &Arc<MacroDef>)> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// A `` `define `` given as `NAME` or `NAME=value`.
 pub fn command_line_define(name: &str, value: Option<&str>) -> MacroDef {

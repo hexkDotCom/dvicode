@@ -4,3 +4,7 @@
 /client/dist/
 /client/server/
 *.vsix
+# Copied into the extension by scripts/package.sh
+/client/NOTICE
+/client/THIRD_PARTY_NOTICES.md
+/client/licenses/
