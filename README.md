@@ -1,128 +1,128 @@
-# DVICode (DV Intelligence)
+# DVICode: DV Intelligence for VS Code
 
-SystemVerilog/UVM IDE features for VS Code, backed by a Rust language server that runs where
-your files and tools are: on this machine, in WSL2, or on a remote Linux host over SSH.
+**Fast, accurate SystemVerilog and UVM intelligence in VS Code, wherever your code lives.**
 
-The server is a single 3 MB static binary: nothing to install on the Linux side, and the
-extension deploys it for you.
-
-```
- VS Code on Windows / macOS / Linux             Linux (WSL2, remote host, or local)
- ┌──────────────────────────────┐   LSP over    ┌───────────────────────────────────┐
- │ dvicode extension            │  stdio of     │ dvicode-server (Rust, static)     │
- │  launcher: local|wsl|ssh|tcp │  wsl.exe/ssh  │  build file → compile order       │
- │  path mapping, dvicode:// fs │ ────────────▶ │  preprocessor, tolerant parser    │
- │  hierarchy + files views     │               │  index, resolution, IDE features  │
- └──────────────────────────────┘               └───────────────────────────────────┘
-```
+DVICode understands your whole design and testbench (macros, includes, packages, class
+hierarchies, module ports) and keeps up as you type. Its small Rust engine runs on your
+laptop, in WSL, or directly on your Linux build server, so you can edit from Windows or a Mac
+at full speed.
 
 ## Features
 
-| Area | What works |
-|---|---|
-| Project | Build files in the simulator argument-file syntax (`.dvicode/default.build`): `-f/-F`, `+incdir+`, `+define+`, `-y/-v/+libext+`, `-top`, `-uvm`, plus `+dvicode_init`, `+dvicode_setenv`, `+dvicode_skip_compile` and other `+dvicode_*` directives, env vars, wildcards, several invocations and configurations. Auto-configuration when there is no build file. See [docs/build-files.md](docs/build-files.md). |
-| Preprocessor | `` `define `` with arguments/defaults, `` `` `` pasting, `` `" `` stringification, `` `include `` (incdirs, include guards), `` `ifdef/`ifndef/`elsif/`else `` (also 1800-2023 expressions), `` `undef ``, `` `__FILE__/`__LINE__ ``, encrypted `pragma protect` regions skipped. Every token remembers where it came from. |
-| Problems | Preprocessing (missing include, undefined macro, macro arguments), syntax (missing `;`, unbalanced `end*`), semantic: `NON_EXISTING_TYPE`, `UNDECLARED_IDENTIFIER`, `NOT_A_MEMBER`, `NON_EXISTING_PACKAGE`, `NON_EXISTING_PORT`, `NON_EXISTING_DESIGN_ELEMENT`. Zero false positives on UVM 1.2, the UBUS example and hexk-sv-lib. |
-| Navigation | Go to definition/declaration/type definition/implementation (extern bodies, overrides, subclasses), find references, document highlight, rename, macro definitions, `` `include `` targets, port connections (`.clk(...)`), hierarchical names, `this`/`super`, `pkg::name`, `C#(T)::type_id`, members through variables and function results, inheritance across packages. Call hierarchy (Show Call Hierarchy, incoming and outgoing calls) for functions and tasks, including extern method bodies, `super.f()` and calls from initial blocks. |
-| Editing | Hover with signature, container, location and doc comment (and macro expansions), completion (scope, members after `.`/`::`, macros after `` ` ``, module auto-instantiation template, keywords, snippets), signature help (functions, tasks, macros). Quick fixes for `UNDECLARED_IDENTIFIER`/`NON_EXISTING_TYPE`: "Did you mean" (visible names within a small edit distance, inherited members included), "Import package" (packages that declare the name), "Declare variable". |
-| Views | Outline, workspace symbols (`class:`, `module:`, `package:`, `macro:`, `extends:`, `file:` filters), semantic highlighting (inactive `` `ifdef `` code shown as comments), folding, type hierarchy, Design Hierarchy view, Verification Hierarchy view, Compiled Files view, Expand Macro, Show Including File. |
-| UVM | Verification Hierarchy view: the component tree of the `+UVM_TESTNAME` test (or of a test picked in the view, or of all tests), built from `T::type_id::create("name", this)` and `new("name", this)` in `build_phase` and constructors of each class and its base classes (extern bodies included). Components are labelled test/env/agent/driver/monitor/sequencer/scoreboard by their UVM base class; TLM ports are shown, configuration objects created with a parent are not. Click a component to go to where it is created, or to its class. |
-| Remote | Server in WSL (`\\wsl.localhost\...` folders, or Windows drive folders mapped to `/mnt/<d>`), over SSH, through a custom launch command (`bsub`, `qrsh`, ...), or attached over TCP. `dvicode://` folders: files that exist only on the server, edited through the server connection. The bundled Linux server is deployed automatically. |
+- **Errors as you type**: undeclared names, unknown types, members and ports, missing
+  includes and macros, syntax mistakes. Clean code stays clean: no false alarms on UVM and
+  other real-world libraries.
+- **Go anywhere**: definitions, references, implementations and overrides, through macros,
+  packages, class inheritance and port connections.
+- **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,
+  and complete module instantiations in one step.
+- **Hover documentation**: signatures, doc comments and what a macro expands to.
+- **Design Hierarchy**: browse the instance tree from your top module.
+- **UVM Verification Hierarchy**: see the component tree your test builds, from
+  `+UVM_TESTNAME`.
+- **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.
+- **Type and call hierarchies**, outline, workspace symbol search, rename and semantic
+  highlighting (inactive `` `ifdef `` code is dimmed).
+- **Quick fixes**: "did you mean", "import package", "declare variable".
+- **Uses your existing file lists**: point it at the simulator's `-f` files, or let it
+  configure the project by itself.
+- **Remote-ready**: VS Code on Windows or macOS with the engine in WSL or on a Linux host
+  over SSH, even for files that exist only on the server. Runs through `bsub`/`qrsh` too.
+- **Lightweight**: one 3 MB binary, installed for you; compiles the whole UVM library in
+  about 50 ms.
 
-## Quick start
+## Getting started
 
-1. Install the extension: `code --install-extension client/dvicode-0.1.0.vsix`.
-2. Open a folder with SystemVerilog sources.
-   - **Windows, files in WSL** (`\\wsl.localhost\Ubuntu\home\me\proj`): works out of the box.
-   - **Windows, files on a Windows drive**: the server runs in your default WSL distribution
-     and sees the folder as `/mnt/<drive>/...`.
-   - **Files on a remote Linux host**: run **DVICode: Open Folder on the Server...** and pick
-     an SSH host (key or agent authentication), or set `dvicode.server.mode` to `ssh` and
-     `dvicode.server.sshHost`, plus `dvicode.pathMappings` if the files are also mounted locally.
-   - **Remote-SSH / Remote-WSL windows**: the extension runs on the remote side next to the
-     server (no mapping needed).
-3. Optional: add `.dvicode/default.build`, see [docs/build-files.md](docs/build-files.md).
-   Without one,
-   the project is configured automatically.
+1. **Install** the extension: in VS Code open the Extensions view, choose **...** >
+   **Install from VSIX...** and pick the `.vsix` for your platform from the Releases page.
+2. **Open your project folder.** DVICode picks where to run:
 
-Try it on [examples/demo-project](examples/demo-project): `.dvicode/errors.build` adds a file
-with one deliberate mistake per line.
+   | Your setup | What happens |
+   |---|---|
+   | Files in WSL (`\\wsl.localhost\Ubuntu\home\me\proj`) | Runs in that WSL distribution. |
+   | Files on a Windows drive | Runs in your default WSL distribution and sees the folder as `/mnt/<drive>/...`. |
+   | Files on a Linux server | Run **DVICode: Open Folder on the Server...** and pick the SSH host. Needs SSH key or agent sign-in. |
+   | Remote-SSH or Remote-WSL window | Runs next to your files on the remote side. |
+   | Linux desktop | Runs locally. |
+
+3. **Optional: describe the build.** Without a build file, DVICode finds your sources and
+   works out the compile order. For full control, create `.dvicode/default.build` in the
+   simulator's argument-file syntax:
+
+   ```
+   -uvm
+   +incdir+tb/include
+   +define+SIMULATION
+   -f rtl/rtl.f
+   tb/tb_pkg.sv
+   tb/tb_top.sv
+   +UVM_TESTNAME=base_test
+   ```
+
+   Everything that works in a build file is described in
+   [docs/build-files.md](docs/build-files.md).
+
+Want to try it first? Open [examples/demo-project](examples/demo-project), a small design
+with a testbench. Switch to its `errors` build configuration (**DVICode: Set Current Build
+Configuration...**) to see problem reporting at work.
+
+## Commands and views
+
+- **DVICode** in the activity bar: Design Hierarchy (pick the top with **Select Design
+  Hierarchy Top...**), Verification Hierarchy (pick the test with **Select UVM Test...**) and
+  Compiled Files.
+- **DVICode: Expand Macro One Level**, **Expand Macro All Levels** and **Show Including
+  File**; the first and last are also in the editor's context menu.
+- **DVICode: Set Current Build Configuration...** to switch between `.dvicode/*.build` files.
+- **DVICode: Show Project Status** (also the status bar item) and **Rebuild Project**.
+- **DVICode: Open Folder on the Server...** to work on files that live on a Linux host.
 
 ## Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `dvicode.server.mode` | `auto` | `auto`, `local`, `wsl`, `ssh`, `tcp`, `custom` |
-| `dvicode.server.wslDistro` | | WSL distribution (default: the folder's or the default one) |
+| `dvicode.server.mode` | `auto` | Where the engine runs: `auto`, `local`, `wsl`, `ssh`, `tcp`, `custom` |
+| `dvicode.server.wslDistro` | | WSL distribution (default: the folder's, else the default one) |
 | `dvicode.server.sshHost`, `.sshArgs`, `.sshCommand` | | SSH destination and options |
 | `dvicode.server.launchCommand` | `${SERVER_CMD}` | Wrapper for `custom`, e.g. `ssh farm bsub -Is ${SERVER_CMD}` |
-| `dvicode.server.tcpAddress`, `.tcpToken` | `127.0.0.1:7777` | For `dvicode-server --listen HOST:PORT --token T` |
-| `dvicode.server.path` | | Server binary on the target (default: bundled, auto-deployed to `~/.dvicode/server/`) |
-| `dvicode.server.autoDeploy` | `true` | Copy the bundled server to WSL/SSH targets |
-| `dvicode.pathMappings` | `[]` | `[{ "local": "Z:\\proj", "remote": "/home/me/proj" }]` |
+| `dvicode.server.tcpAddress`, `.tcpToken` | `127.0.0.1:7777` | Attach to `dvicode-server --listen HOST:PORT --token T` |
+| `dvicode.server.path` | | Engine binary on the target (default: bundled, installed to `~/.dvicode/server/`) |
+| `dvicode.server.autoDeploy` | `true` | Install the bundled engine on WSL and SSH targets |
+| `dvicode.pathMappings` | `[]` | Same folder seen by both sides, e.g. `[{ "local": "Z:\\proj", "remote": "/home/me/proj" }]` |
 | `dvicode.buildFile` | | Build configuration (relative to the folder) |
-| `dvicode.env` | `{}` | Variables for `$VAR` expansion in build files |
+| `dvicode.env` | `{}` | Variables for `$VAR` in build files |
 | `dvicode.uvmHome` | | UVM location for `-uvm` when `$UVM_HOME` is not set |
-| `dvicode.maxProblems` | `1000` | Problems published after a full build (open files: all) |
+| `dvicode.maxProblems` | `1000` | Problems shown after a full build (open files always get all of theirs) |
 
-## Repository layout
+## How it works
 
 ```
-server/                    Rust workspace
-  crates/dvi-syntax        lexer, preprocessor, error-tolerant parser (declarations + references)
-  crates/dvi-project       build files, auto-configuration
-  crates/dvi-analysis      compilation, index, name resolution, IDE features
-  crates/dvicode-server    LSP server (stdio/TCP), remote file system, `check` CLI
-client/                    VS Code extension (TypeScript)
-  src/launcher.ts          where the server runs, deployment
-  src/pathmap.ts           URI mapping between VS Code and the server
-  src/remotefs.ts          dvicode:// file system over the LSP connection
-  test/                    end-to-end tests in a real VS Code
-docs/                      architecture and build file reference
-examples/demo-project      sample project used by the tests
-scripts/package.sh         build the static server and the VSIX
+ VS Code on Windows / macOS / Linux             Linux (WSL2, remote host, or local)
+ ┌──────────────────────────────┐   LSP over    ┌───────────────────────────────────┐
+ │ DVICode extension            │  stdio of     │ dvicode-server (Rust, static)     │
+ │  starts the engine where     │  wsl.exe/ssh  │  build file → compile order       │
+ │  your files are, maps paths  │ ────────────▶ │  preprocessor, tolerant parser    │
+ │  hierarchy and file views    │               │  index, resolution, IDE features  │
+ └──────────────────────────────┘               └───────────────────────────────────┘
 ```
 
-## Building and testing
+The extension starts the engine through `wsl.exe` or `ssh` and talks the Language Server
+Protocol over that connection, so no ports, firewalls or certificates are involved. See
+[docs/architecture.md](docs/architecture.md) for the details.
 
-The server builds on Linux or WSL (Rust stable):
+## Status
 
-```bash
-cd server && cargo test                         # unit + integration tests
-scripts/package.sh                              # static musl server + client/dvicode-*.vsix
-```
+DVICode is young and moving fast. Not supported yet: VHDL, e and PSS; elaboration of
+parameter values and `generate` conditions; UVM factory overrides and config-db views;
+diagrams; code formatting; lint rules. Bug reports and real-world code that trips it up are
+very welcome.
 
-`dvicode-server check <dir> [--build FILE]` compiles a project on the command line and
-prints its problems; `--goto/--hover/--refs/--complete/--sig/--impl F:LINE:COL`,
-`--outline F`, `--hier -`, `--uvm TEST|-` (verification hierarchy), `--calls F:LINE:COL`
-(call hierarchy), `--fixes F` (quick fixes of a file) and `--symbols Q` run IDE queries
-without an editor.
+## Contributing
 
-End-to-end tests start the installed VS Code (isolated profile, other extensions disabled)
-on the demo project and check navigation, hover, completion, problems, incremental edits,
-the design and verification hierarchies, call hierarchy, quick fixes and macro expansion
-through VS Code's own APIs:
-
-```bash
-cd client && npm install && node esbuild.mjs
-node test/runTest.js 'D:\path\to\examples\demo-project' win-drive         # Windows → WSL, /mnt/d mapping
-node test/runTest.js 'file://wsl.localhost/Ubuntu/home/me/demo' wsl-unc  # Windows → WSL folder
-node test/runTest.js 'dvicode://wsl+Ubuntu/home/me/demo' remote-fs       # files only in WSL
-node test/runTest.js 'dvicode://ssh+me%40host/home/me/demo' ssh          # files and server over SSH
-```
-
-## Status and limits
-
-DVICode is an early implementation. Not there yet: VHDL, e,
-PSS; elaboration (parameter values, generate conditions), factory overrides and
-config-db in the verification hierarchy (component arrays show as one node), factory/config-db
-views, diagrams; formatting; quick fixes beyond unknown names; linting rules.
-The parser models declarations exactly and treats statements and expressions loosely, which
-keeps it fast and robust while typing; checks are deliberately conservative so that valid
-code stays clean.
+Building, testing and the code layout are described in
+[docs/development.md](docs/development.md).
 
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party components and
-their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which
-`scripts/third_party_notices.py` regenerates; `scripts/package.sh` ships it in the extension.
+their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

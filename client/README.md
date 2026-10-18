@@ -1,19 +1,37 @@
-# DVICode - DV Intelligence
+# DVICode: DV Intelligence for VS Code
 
-SystemVerilog/UVM support for VS Code with a fast language server that can run locally, in
-WSL2 or on a remote Linux host.
+**Fast, accurate SystemVerilog and UVM intelligence in VS Code, wherever your code lives.**
 
-- Problems while you type: syntax, missing includes and macros, undeclared identifiers,
-  unknown types, members and ports.
-- Go to definition, find references, rename, hover with documentation, completion with module
-  auto-instantiation, signature help, outline, workspace symbols, type and call hierarchy.
-- Quick fixes: "Did you mean", "Import package", "Declare variable".
-- Design Hierarchy, UVM Verification Hierarchy (`+UVM_TESTNAME` or a picked test) and
-  Compiled Files views, Expand Macro, Show Including File.
-- Build files in the simulator argument-file syntax (`.dvicode/default.build`, `-f` file lists,
-  `+dvicode_*` directives), or automatic configuration.
-- Remote: `\\wsl.localhost` folders, Windows folders through WSL, SSH hosts, `dvicode://`
-  folders that live only on the server, custom launch commands (bsub/qrsh), TCP attach.
+DVICode understands your whole design and testbench (macros, includes, packages, class
+hierarchies, module ports) and keeps up as you type. Its small Rust engine runs on your
+laptop, in WSL, or directly on your Linux build server, so you can edit from Windows or a Mac
+at full speed.
 
-See **DVICode: Open Folder on the Server...** to work on files on a Linux host, and the
-`dvicode.server.*` settings to choose where the server runs.
+## Features
+
+- **Errors as you type**: undeclared names, unknown types, members and ports, missing
+  includes and macros, syntax mistakes. Clean code stays clean.
+- **Go anywhere**: definitions, references, implementations and overrides, through macros,
+  packages, class inheritance and port connections.
+- **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,
+  and complete module instantiations in one step.
+- **Hover documentation**: signatures, doc comments and what a macro expands to.
+- **Design Hierarchy** and **UVM Verification Hierarchy** views.
+- **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
+- **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
+- **Quick fixes**: "did you mean", "import package", "declare variable".
+- **Uses your existing file lists** (`-f` files), or configures the project by itself.
+- **Remote-ready**: the engine runs in WSL or on a Linux host over SSH, even for files that
+  exist only on the server, or through `bsub`/`qrsh`.
+- **Lightweight**: one 3 MB binary, installed for you.
+
+## Getting started
+
+Open a folder with SystemVerilog sources. On Windows the engine runs in WSL; for files on a
+Linux server, run **DVICode: Open Folder on the Server...** and pick the SSH host (SSH key or
+agent sign-in). To control the compile order, add `.dvicode/default.build` in the simulator's
+argument-file syntax (`-f`, `+incdir+`, `+define+`, `-uvm`, ...); without it the project is
+configured automatically.
+
+The `dvicode.server.*` settings choose where the engine runs. The project's documentation
+describes build files, settings and remote setups in detail.
