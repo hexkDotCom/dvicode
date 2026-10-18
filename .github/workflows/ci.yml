@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - name: Test
+        working-directory: server
+        run: cargo test --locked
+      - name: Demo project compiles cleanly
+        working-directory: server
+        run: cargo run --release --locked -p dvicode-server -- check ../examples/demo-project -q
+      - name: Deliberate mistakes are reported
+        working-directory: server
+        run: |
+          set +e
+          cargo run --release --locked -p dvicode-server -- check ../examples/demo-project \
+            --build ../examples/demo-project/.dvicode/errors.build -q 2> errors.txt
+          status=$?
+          cat errors.txt
+          test "$status" -eq 1
+
+  client:
+    name: Extension build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Bundle
+        run: node esbuild.mjs --production

@@ -251,6 +251,14 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
   switch (mode) {
     case 'local': {
       const bin = cfg.path || bundledServer(ctx, process.platform, process.arch);
+      if (!cfg.path && process.platform !== 'win32') {
+        // Archives do not always keep the execute bit.
+        try {
+          fs.chmodSync(bin, 0o755);
+        } catch {
+          // Reported when the process fails to start.
+        }
+      }
       const exe: Executable = { command: bin, args: serverArgs(cfg) };
       return { mode, serverOptions: exe, mapper: makeMapperFor(cfg, undefined, remoteAuthority), target: 'this machine' };
     }

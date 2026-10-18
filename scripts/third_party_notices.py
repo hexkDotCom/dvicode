@@ -9,8 +9,11 @@ Covers:
   - the Rust standard library and the C runtime it links statically (musl, libunwind),
     whose notices Rust publishes as COPYRIGHT-library.html (copied next to the output).
 
-Run where cargo works (Linux or WSL):
-  python3 scripts/third_party_notices.py [--out FILE] [--rust-std-copy FILE]
+Run where cargo works:
+  python3 scripts/third_party_notices.py [--targets T1,T2] [--out FILE] [--rust-std-copy FILE]
+
+--targets lists the Rust targets of the binaries shipped together (crates are combined);
+the default is the static Linux server only.
 """
 
 import argparse
@@ -57,10 +60,18 @@ def npm_packages():
     return sorted(pkgs, key=lambda p: p["name"])
 
 
-def rust_packages():
+def rust_packages(targets):
+    pkgs = {}
+    for target in targets:
+        for p in rust_packages_for(target):
+            pkgs[(p["name"], p["version"])] = p
+    return [pkgs[k] for k in sorted(pkgs)]
+
+
+def rust_packages_for(target):
     meta = json.loads(
         subprocess.check_output(
-            ["cargo", "metadata", "--format-version", "1", "--filter-platform", TARGET],
+            ["cargo", "metadata", "--format-version", "1", "--filter-platform", target],
             cwd=ROOT / "server",
         )
     )
@@ -127,13 +138,15 @@ def section(title, intro, pkgs, problems):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--targets", default=TARGET, help="comma-separated Rust targets")
     ap.add_argument("--out", default=str(ROOT / "THIRD_PARTY_NOTICES.md"))
     ap.add_argument("--rust-std-copy", default=str(ROOT / "client" / "licenses" / "rust-std-library.html"))
     args = ap.parse_args()
 
     problems = []
     npm = npm_packages()
-    rust = rust_packages()
+    targets = [t for t in args.targets.split(",") if t]
+    rust = rust_packages(targets)
     sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
     rustc_version = subprocess.check_output(["rustc", "--version"], text=True).strip()
     std_notice = Path(sysroot) / "share" / "doc" / "rust" / "COPYRIGHT-library.html"
@@ -159,16 +172,17 @@ def main():
         problems,
     )
     out += section(
-        "Language server (server/linux-x64/dvicode-server)",
-        f"These Rust crates are statically linked into the server binary (target `{TARGET}`).",
+        "Language server (server/*/dvicode-server)",
+        "These Rust crates are statically linked into the server binaries (targets "
+        + ", ".join(f"`{t}`" for t in targets) + ").",
         rust,
         problems,
     )
     out += [
         "## Rust standard library and C runtime",
         "",
-        f"The server binary statically links the Rust standard library ({rustc_version}) and,",
-        "for the musl target, the musl C library and libunwind. Their copyright and license",
+        f"The server binaries statically link the Rust standard library ({rustc_version}) and,",
+        "for the Linux (musl) targets, the musl C library and libunwind. Their copyright and license",
         "notices are published by the Rust project as COPYRIGHT-library.html; a copy ships",
         "with the extension as `licenses/rust-std-library.html` and is also available at",
         "https://github.com/rust-lang/rust/blob/master/COPYRIGHT.",

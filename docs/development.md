@@ -76,3 +76,8 @@ node test/runTest.js 'dvicode://ssh+me%40host/home/me/demo' ssh          # files
 
 For the SSH variant, pass the SSH options through the environment, for example
 `DVICODE_E2E_SETTINGS='{"dvicode.server.sshArgs": ["-p", "2222", "-i", "/path/key"]}'`.
+
+## Releasing
+
+See [releasing.md](releasing.md) for the platform packages, GitHub releases and publishing to the
+VS Code Marketplace and Open VSX.

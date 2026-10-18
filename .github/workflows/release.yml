@@ -1,0 +1,141 @@
+# Builds the engine for each platform and packages one VS Code extension per platform.
+#
+# - Push a tag `v<version>` (matching client/package.json) to build and attach the packages
+#   to a GitHub release.
+# - Run the workflow by hand to build the packages as artifacts; tick "publish" to also
+#   publish them to the VS Code Marketplace (secret VSCE_PAT) and Open VSX (secret OVSX_PAT).
+#
+# Every package contains the engine for its own platform (local use) and the static Linux
+# x64 engine (deployed to WSL and SSH hosts).
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to the VS Code Marketplace and Open VSX
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  engine:
+    name: Engine ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, exe: dvicode-server, run: true }
+          - { platform: linux-arm64, os: ubuntu-latest, target: aarch64-unknown-linux-musl, exe: dvicode-server, run: false }
+          - { platform: win32-x64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: dvicode-server.exe, run: true }
+          - { platform: darwin-arm64, os: macos-14, target: aarch64-apple-darwin, exe: dvicode-server, run: true }
+          - { platform: darwin-x64, os: macos-14, target: x86_64-apple-darwin, exe: dvicode-server, run: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        working-directory: server
+        env:
+          # Static C runtime on Windows (no Visual C++ redistributable needed); Rust's own
+          # linker for the cross-compiled Linux ARM build.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test
+        if: matrix.run
+        shell: bash
+        run: server/target/${{ matrix.target }}/release/${{ matrix.exe }} check examples/demo-project -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.platform }}
+          path: server/target/${{ matrix.target }}/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+  package:
+    name: Packages
+    needs: engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: engines
+      - name: Check the tag matches the extension version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(node -p "require('./client/package.json').version")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+      - name: Build the extension
+        working-directory: client
+        run: |
+          npm ci
+          node esbuild.mjs --production
+      - name: Package one extension per platform
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./client/package.json').version")
+          mkdir -p dist
+          cp LICENSE NOTICE client/
+          declare -A rust_target=(
+            [linux-x64]=x86_64-unknown-linux-musl [linux-arm64]=aarch64-unknown-linux-musl
+            [win32-x64]=x86_64-pc-windows-msvc [darwin-arm64]=aarch64-apple-darwin
+            [darwin-x64]=x86_64-apple-darwin
+          )
+          for platform in linux-x64 linux-arm64 win32-x64 darwin-arm64 darwin-x64 universal; do
+            rm -rf client/server && mkdir -p client/server/linux-x64
+            install -m 755 engines/engine-linux-x64/dvicode-server client/server/linux-x64/
+            targets=x86_64-unknown-linux-musl
+            if [ "$platform" != universal ] && [ "$platform" != linux-x64 ]; then
+              mkdir -p "client/server/$platform"
+              install -m 755 engines/engine-$platform/* "client/server/$platform/"
+              targets="$targets,${rust_target[$platform]}"
+            fi
+            python3 scripts/third_party_notices.py --targets "$targets" \
+              --out client/THIRD_PARTY_NOTICES.md --rust-std-copy client/licenses/rust-std-library.html
+            if [ "$platform" = universal ]; then
+              (cd client && npx vsce package --no-dependencies -o "../dist/dvicode-$version.vsix")
+            else
+              (cd client && npx vsce package --no-dependencies --target "$platform" -o "../dist/dvicode-$platform-$version.vsix")
+            fi
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: dist/*.vsix
+          if-no-files-found: error
+      - name: GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.vsix --title "DVICode $GITHUB_REF_NAME" --generate-notes --prerelease
+      - name: Publish to the VS Code Marketplace
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        working-directory: client
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          for f in ../dist/*.vsix; do npx vsce publish --packagePath "$f"; done
+      - name: Publish to Open VSX
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        working-directory: client
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          for f in ../dist/*.vsix; do npx --yes ovsx publish "$f" -p "$OVSX_PAT"; done

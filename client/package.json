@@ -5,6 +5,12 @@
   "version": "0.1.0",
   "publisher": "hexk",
   "license": "Apache-2.0",
+  "preview": true,
+  "pricing": "Free",
+  "galleryBanner": {
+    "color": "#182030",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/hexkDotCom/hexk-dvicode.git"
@@ -136,7 +142,7 @@
             "custom"
           ],
           "enumDescriptions": [
-            "WSL for \\\\wsl$ / \\\\wsl.localhost folders and on Windows when no local server binary exists; the remote host of a dvicode:// folder; otherwise local.",
+            "Use the engine bundled for this machine for local folders; WSL for \\wsl$ / \\wsl.localhost folders (and on Windows when no Windows engine is bundled); the host of a dvicode:// folder.",
             "Run the server on this machine.",
             "Run the server in a WSL distribution (Windows only).",
             "Run the server on `#dvicode.server.sshHost#` over SSH (keys or an agent must be set up).",

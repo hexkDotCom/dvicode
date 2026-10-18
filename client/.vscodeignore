@@ -7,3 +7,4 @@ test-workspace/**
 tsconfig.json
 esbuild.mjs
 .vscode/**
+test/**
