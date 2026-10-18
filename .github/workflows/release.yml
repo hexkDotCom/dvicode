@@ -53,7 +53,11 @@ jobs:
       - name: Smoke test
         if: matrix.run
         shell: bash
-        run: server/target/${{ matrix.target }}/release/${{ matrix.exe }} check examples/demo-project -q
+        run: |
+          server/target/${{ matrix.target }}/release/${{ matrix.exe }} check examples/demo-project -q 2> smoke.txt
+          cat smoke.txt
+          # Build-file warnings (unresolved paths) count as failures too.
+          ! grep -q "build config:" smoke.txt
       - uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.platform }}

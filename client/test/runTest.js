@@ -58,7 +58,8 @@ async function main() {
   try {
     await runTests({
       vscodeExecutablePath: code,
-      extensionDevelopmentPath: path.resolve(__dirname, '..'),
+      // DVICODE_E2E_EXTENSION: an unpacked VSIX (its extension/ folder) instead of the sources.
+      extensionDevelopmentPath: process.env.DVICODE_E2E_EXTENSION || path.resolve(__dirname, '..'),
       extensionTestsPath: path.resolve(__dirname, 'suite.js'),
       launchArgs: [
         ...folderArgs,

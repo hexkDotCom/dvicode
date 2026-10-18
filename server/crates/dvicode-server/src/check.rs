@@ -7,12 +7,25 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Absolute, normalized path; on Windows without the `\\?\` prefix that canonicalize adds.
+fn canonical(p: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = c.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => c,
+    }
+}
+
 fn parse_loc(s: &str) -> Option<(PathBuf, u32, u32)> {
     let mut parts = s.rsplitn(3, ':');
     let col: u32 = parts.next()?.parse().ok()?;
     let line: u32 = parts.next()?.parse().ok()?;
     let path = parts.next()?;
-    Some((std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)), line.saturating_sub(1), col.saturating_sub(1)))
+    Some((canonical(Path::new(path)), line.saturating_sub(1), col.saturating_sub(1)))
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -57,7 +70,7 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("usage: dvicode-server check <dir> [--build FILE] [-q] [--max N] [--goto F:L:C] ...");
         return 2;
     };
-    let root = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let root = canonical(&dir);
     let t0 = std::time::Instant::now();
     let cfg = dvi_project::load(&root, build.as_deref(), &env);
     let cfg_ms = t0.elapsed().as_millis();
@@ -121,7 +134,7 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
     println!("== {q} {arg}");
     match q {
         "--outline" => {
-            let p = std::fs::canonicalize(arg).unwrap_or_else(|_| PathBuf::from(arg));
+            let p = canonical(Path::new(arg));
             if let Some(f) = a.vfs.lookup(Path::new(&p)) {
                 fn pr(s: &[lsp_types::DocumentSymbol], d: usize) {
                     for x in s {
@@ -152,7 +165,7 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
             }
         }
         "--fixes" => {
-            let p = std::fs::canonicalize(arg).unwrap_or_else(|_| PathBuf::from(arg));
+            let p = canonical(Path::new(arg));
             if let Some(f) = a.vfs.lookup(Path::new(&p)) {
                 for q in a.quick_fixes(f, 0, u32::MAX) {
                     let line = a.to_range(q.diag.span).map_or(0, |r| r.start.line + 1);

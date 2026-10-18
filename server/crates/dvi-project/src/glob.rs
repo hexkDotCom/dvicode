@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 
 pub fn has_wildcard(s: &str) -> bool {
+    // A Windows extended-length prefix (`\\?\C:\...`) is not a wildcard.
+    let s = s.strip_prefix(r"\\?\").unwrap_or(s);
     s.contains('*') || s.contains('?')
 }
 
@@ -117,6 +119,12 @@ mod tests {
         assert!(match_component("*.sv", "a.sv"));
         assert!(match_component("a?c*", "abcdef"));
         assert!(!match_component("*.sv", "a.svh"));
+    }
+
+    #[test]
+    fn windows_extended_prefix_is_not_a_wildcard() {
+        assert!(!has_wildcard(r"\\?\D:\proj\a.sv"));
+        assert!(has_wildcard(r"\\?\D:\proj\*.sv"));
     }
 
     #[test]
