@@ -89,6 +89,12 @@ function E2e([string]$Target, [string]$Label, [hashtable]$Settings = @{}) {
   try {
     $out = node test/runTest.js $Target $Label 2>&1 | ForEach-Object { "$_" }
     $code = $LASTEXITCODE
+    if ($code -eq 3) {
+      # VS Code reported no result (it sometimes fails to start the first time): once more.
+      Write-Host "[$Label] no result from VS Code; retrying once" -ForegroundColor Yellow
+      $out = node test/runTest.js $Target $Label 2>&1 | ForEach-Object { "$_" }
+      $code = $LASTEXITCODE
+    }
   } finally {
     Pop-Location
   }
@@ -110,7 +116,7 @@ Step 'build' {
   Run 'Linux engine build' { wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/package.sh --server" }
   Push-Location $Client
   try {
-    if (-not (Test-Path node_modules)) { Run 'npm ci' { npm ci --no-audit --no-fund } }
+    Run 'npm ci' { npm ci --no-audit --no-fund }
     Run 'bundle' { node esbuild.mjs --production }
   } finally { Pop-Location }
   'Windows and Linux engines, bundle'
@@ -139,8 +145,9 @@ Step 'unit' {
 Step 'corpus' {
   $runner = Join-Path $Root 'scripts\corpus\run.sh'
   if (-not (Test-Path $runner)) { return 'SKIP: no corpus harness yet' }
-  Run 'corpus regression' { wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh --compare" }
-  'baseline comparison passed'
+  # Fetches the pinned projects, builds the engine, checks, sweeps the IDE queries, compares.
+  Run 'corpus regression' { wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh all" }
+  'no regression against scripts/corpus/baseline.json'
 }
 
 # The extension under test: the sources (default) or an unpacked VSIX.
