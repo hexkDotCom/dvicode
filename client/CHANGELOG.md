@@ -1,12 +1,42 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (preview)
+
+Tested in VS Code's Remote - WSL and Remote - SSH windows and on macOS, and with a new edit fuzzer
+that compares every incremental update with a full build.
+
+**Remote windows**
 
 - Remote - WSL and Remote - SSH windows: the server settings (`dvicode.server.*`,
   `dvicode.pathMappings`) of the local user settings no longer apply there; for example,
   `dvicode.server.mode: wsl` on Windows stopped the engine from starting in a Remote - WSL
   window. These settings are now per machine and no longer synchronized by Settings Sync;
   workspace settings still override them.
+
+**Rename and quick fixes**
+
+- Renaming a port or signal connected with an implicit `.name` makes the connection explicit
+  instead of breaking the instance.
+- Renaming a macro also changes its uses inside other macros, in macro-call arguments and in
+  `` `ifdef `` / `` `ifndef `` / `` `elsif `` / `` `undef `` (include guards too), and can start
+  from the `` `define `` line. Go to definition, hover and references work on names written in
+  macro arguments.
+- Rename refuses changes that would break code (a declaration used inside a macro body, a macro
+  called through a pasted name, elements of files outside the workspace such as the UVM library)
+  instead of making them.
+- "Did you mean" for types in parameter values and macro arguments and for misspelled packages
+  before `::`; "Import package" for anything the package declares.
+
+**While editing**
+
+- Problems no longer go stale after editing a header, after opening and closing files outside
+  the build, or after moving a `` `define ``; duplicate definitions resolve the same way as after
+  a full build; `-y`/`-v` library modules follow the build's own files.
+
+**Remote files (`dvicode://`)**
+
+- Renaming onto an existing folder replaces it, deleting a link to a folder removes the link, and
+  writing to a folder reports the right error on Windows.
 
 ## 0.1.1 (preview)
 
