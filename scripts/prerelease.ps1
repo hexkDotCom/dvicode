@@ -12,13 +12,17 @@
     e2e-native  end-to-end tests with the engine running on Windows
     e2e-wsl     end-to-end tests in WSL: Windows drive, \\wsl.localhost folder, WSL-only folder
     e2e-ssh     end-to-end tests over SSH against a second WSL distribution
+    e2e-remote-wsl  end-to-end tests in a VS Code Remote - WSL window (extension and engine in WSL)
+    e2e-remote-ssh  end-to-end tests in a VS Code Remote - SSH window to the second distribution
 
   Without -Vsix the end-to-end tests run the extension from client/ with the engines built here.
   With -Vsix they run a packaged extension (the universal package of a Release workflow run).
 
   Prerequisites (see docs/development.md, "Before a release"): Rust and the MSVC build tools on
   Windows, Rust and Python in the WSL distribution, Node.js, VS Code, and for e2e-ssh a WSL
-  distribution with sshd configured on -SshPort for key login with -SshKey.
+  distribution with sshd configured on -SshPort for key login with -SshKey. The remote-window
+  steps install Microsoft's Remote - WSL and Remote - SSH extensions into client/.vscode-test on
+  first use, and VS Code downloads its server into WSL and onto the SSH host.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1
@@ -82,9 +86,14 @@ function WslPath([string]$WinPath, [string]$D = $Distro) {
   (wsl.exe -d $D -e wslpath -u ($WinPath -replace '\\', '/')).Trim()
 }
 
-# One end-to-end run: folder or URI, label, settings; returns the "N/N passed" line.
-function E2e([string]$Target, [string]$Label, [hashtable]$Settings = @{}) {
+# One end-to-end run: folder or URI, label, settings; returns the "N/N passed" line. With
+# -Remote (wsl+<distro>, ssh-remote+<host>) it runs in a VS Code remote window and the target is
+# a path on that machine; -SshConfig is the ssh config file that defines <host>.
+function E2e([string]$Target, [string]$Label, [hashtable]$Settings = @{}, [string]$Remote = '', [string]$SshConfig = '') {
   $env:DVICODE_E2E_SETTINGS = ($Settings | ConvertTo-Json -Compress)
+  # An empty value removes the variable.
+  $env:DVICODE_E2E_REMOTE = $Remote
+  $env:DVICODE_E2E_SSH_CONFIG = $SshConfig
   Push-Location $Client
   try {
     $out = node test/runTest.js $Target $Label 2>&1 | ForEach-Object { "$_" }
@@ -98,13 +107,33 @@ function E2e([string]$Target, [string]$Label, [hashtable]$Settings = @{}) {
   } finally {
     Pop-Location
   }
-  $out | Where-Object { $_ -match '\] (FAIL|PASS)|passed;' } | Out-Host
+  $out | Where-Object { $_ -match '\] (FAIL|PASS)|passed;|extension host:|no result' } | Out-Host
   $summary = ($out | Where-Object { $_ -match 'passed;' } | Select-Object -Last 1)
   if ($code -ne 0) { throw "$Label failed: $summary" }
   return ($summary -replace '^\[[^\]]+\]\s*', '')
 }
 
 $RootWsl = WslPath $Root
+
+# Copies the demo project to ~/dvicode-demo in WSL; returns that path.
+function DemoToWsl {
+  $wslDemo = (wsl.exe -d $Distro -e sh -c 'echo $HOME/dvicode-demo').Trim()
+  $demoWsl = WslPath $Demo
+  Run 'copy the demo into WSL' { wsl.exe -d $Distro -e bash -c "rm -rf '$wslDemo' && mkdir -p '$wslDemo' && cp -r '$demoWsl/.' '$wslDemo/'" }
+  return $wslDemo
+}
+
+# Starts sshd in the SSH test distribution and copies the demo project to ~/demo there.
+function DemoToSsh {
+  if (-not (Test-Path $SshKey)) { throw "no SSH test key at $SshKey (see docs/development.md)" }
+  Run 'start sshd' { wsl.exe -d $SshDistro -u root -e sh -c 'mkdir -p /run/sshd; pgrep -f sshd_dvicode.conf >/dev/null || /usr/sbin/sshd -f /etc/ssh/sshd_dvicode.conf' }
+  $sshOpts = @('-p', "$SshPort", '-i', $SshKey, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
+  Push-Location (Split-Path $Demo)
+  try {
+    cmd /c "tar -cf - demo-project | ssh $($sshOpts -join ' ') $SshUser@127.0.0.1 ""rm -rf ~/demo && mkdir -p ~/demo && tar -C ~/demo --strip-components=1 -xf -"""
+    if ($LASTEXITCODE -ne 0) { throw "copying the demo to the SSH host failed (exit $LASTEXITCODE)" }
+  } finally { Pop-Location }
+}
 
 Step 'build' {
   $env:CARGO_TARGET_DIR = "$env:LOCALAPPDATA\dvicode-target"
@@ -167,9 +196,7 @@ Step 'e2e-native' {
 }
 
 Step 'e2e-wsl' {
-  $wslDemo = (wsl.exe -d $Distro -e sh -c 'echo $HOME/dvicode-demo').Trim()
-  $demoWsl = WslPath $Demo
-  Run 'copy the demo into WSL' { wsl.exe -d $Distro -e bash -c "rm -rf '$wslDemo' && mkdir -p '$wslDemo' && cp -r '$demoWsl/.' '$wslDemo/'" }
+  $wslDemo = DemoToWsl
   $a = E2e $Demo 'wsl-drive' @{ 'dvicode.server.mode' = 'wsl' }
   $b = E2e "file://wsl.localhost/$Distro$wslDemo" 'wsl-unc'
   $c = E2e "dvicode://wsl+$Distro$wslDemo" 'remote-fs'
@@ -177,18 +204,35 @@ Step 'e2e-wsl' {
 }
 
 Step 'e2e-ssh' {
-  if (-not (Test-Path $SshKey)) { throw "no SSH test key at $SshKey (see docs/development.md)" }
-  Run 'start sshd' { wsl.exe -d $SshDistro -u root -e sh -c 'mkdir -p /run/sshd; pgrep -f sshd_dvicode.conf >/dev/null || /usr/sbin/sshd -f /etc/ssh/sshd_dvicode.conf' }
-  $sshOpts = @('-p', "$SshPort", '-i', $SshKey, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
-  Push-Location (Split-Path $Demo)
-  try {
-    cmd /c "tar -cf - demo-project | ssh $($sshOpts -join ' ') $SshUser@127.0.0.1 ""rm -rf ~/demo && mkdir -p ~/demo && tar -C ~/demo --strip-components=1 -xf -"""
-    if ($LASTEXITCODE -ne 0) { throw "copying the demo to the SSH host failed (exit $LASTEXITCODE)" }
-  } finally { Pop-Location }
+  DemoToSsh
   $key = $SshKey -replace '\\', '/'
   E2e "dvicode://ssh+$SshUser%40127.0.0.1/home/$SshUser/demo" 'ssh' @{
     'dvicode.server.sshArgs' = @('-p', "$SshPort", '-i', $key, '-o', 'StrictHostKeyChecking=accept-new')
   }
+}
+
+# VS Code's own remote windows: the extension is installed on the remote side, runs in the remote
+# extension host and starts the Linux engine there (mode local). Each run also has a local user
+# setting meant for Windows, which VS Code must keep out of the remote window.
+Step 'e2e-remote-wsl' {
+  $wslDemo = DemoToWsl
+  E2e $wslDemo 'remote-wsl' @{ 'dvicode.server.mode' = 'wsl' } -Remote "wsl+$Distro"
+}
+
+Step 'e2e-remote-ssh' {
+  DemoToSsh
+  # Remote - SSH and the test runner reach the host through this alias.
+  $sshConfig = Join-Path $env:TEMP 'dvicode-e2e-ssh_config'
+  @(
+    'Host dvicode-e2e'
+    '  HostName 127.0.0.1'
+    "  Port $SshPort"
+    "  User $SshUser"
+    "  IdentityFile $($SshKey -replace '\\', '/')"
+    '  IdentitiesOnly yes'
+    '  StrictHostKeyChecking accept-new'
+  ) | Set-Content -Encoding ascii $sshConfig
+  E2e "/home/$SshUser/demo" 'remote-ssh' @{ 'dvicode.server.mode' = 'ssh'; 'dvicode.server.sshHost' = 'not-this-host.invalid' } -Remote 'ssh-remote+dvicode-e2e' -SshConfig $sshConfig
 }
 
 Write-Host "`n=== Summary" -ForegroundColor Cyan

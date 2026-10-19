@@ -9,7 +9,8 @@
 #               linux-local    engine on the runner, VS Code under xvfb;
 #               linux-ssh      engine over SSH to localhost (sshd started on the runner, a fresh
 #                              key); the extension deploys the engine itself;
-#               windows-local  the native Windows engine (the runners have no WSL).
+#               windows-local  the native Windows engine (the runners have no WSL);
+#               macos-local    the native macOS engine on Apple silicon.
 #             A run in which VS Code reports no result at all (exit code 3, seen now and then
 #             on a first start) is retried once, with a warning.
 # - coverage: line coverage of the Rust crates (cargo-llvm-cov): a per-crate table in the job
@@ -95,6 +96,7 @@ jobs:
           - { name: linux-local, os: ubuntu-latest, platform: linux-x64, exe: dvicode-server, target: this machine }
           - { name: linux-ssh, os: ubuntu-latest, platform: linux-x64, exe: dvicode-server, target: ssh localhost, ssh: true }
           - { name: windows-local, os: windows-latest, platform: win32-x64, exe: dvicode-server.exe, target: this machine }
+          - { name: macos-local, os: macos-latest, platform: darwin-arm64, exe: dvicode-server, target: this machine }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:

@@ -101,6 +101,35 @@ Without `DVICODE_E2E_EXTENSION` the extension runs from `client/` and uses the e
 `client/server/<platform>/`; set it to the `extension` folder of an unpacked `.vsix` to test a
 package instead.
 
+### Remote windows
+
+In VS Code's own Remote - WSL and Remote - SSH windows the extension is installed on the remote
+side (it prefers the workspace side, `extensionKind`), runs in the remote extension host and
+starts its Linux engine there in `local` mode. `DVICODE_E2E_REMOTE` runs the suite that way: it
+names the window's remote authority, the folder is a path on that machine, and the runner copies
+the extension and the suite to `~/.dvicode-e2e` there, opens a `vscode-remote://` window and
+reads the result back:
+
+```bash
+DVICODE_E2E_REMOTE=wsl+Ubuntu node test/runTest.js /home/me/demo remote-wsl
+DVICODE_E2E_REMOTE=ssh-remote+myhost DVICODE_E2E_SSH_CONFIG=/path/ssh_config node test/runTest.js /home/me/demo remote-ssh
+```
+
+The window needs Microsoft's resolver extension (Remote - WSL or Remote - SSH): the runner
+installs it into `client/.vscode-test/remote-extensions` on first use, the only extension of the
+test profile, and VS Code then downloads its server into WSL or onto the host. For SSH,
+`DVICODE_E2E_SSH_CONFIG` is an ssh config file that defines the host (port, user, key), used by
+both VS Code and the runner. The run fails unless the suite ran in the remote extension host on
+Linux (`extension host: wsl linux-x64` in the output). From Git Bash, set `MSYS_NO_PATHCONV=1`
+so that `/home/...` is not turned into a Windows path.
+
+The server settings (`dvicode.server.*`, `dvicode.pathMappings`) are machine settings: in a
+remote window VS Code ignores the values from the local user settings, which describe the local
+machine. It applies them for a moment while the remote extension host starts, so a first start
+that fails there is retried once they are gone. The `e2e-remote-*` steps of the pre-release
+script keep such a value in the local settings (`mode` `wsl`, or `ssh` with a host that does not
+exist) to check this.
+
 ## Before a release
 
 `scripts/prerelease.ps1` runs every check on a Windows machine with WSL and prints a summary;
@@ -120,6 +149,8 @@ powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloa
 | `e2e-native` | End-to-end tests with the engine on Windows |
 | `e2e-wsl` | End-to-end tests in WSL: a Windows-drive folder, a `\\wsl.localhost` folder and a WSL-only `dvicode://` folder |
 | `e2e-ssh` | End-to-end tests over SSH, with deployment of the engine, against a second WSL distribution |
+| `e2e-remote-wsl` | End-to-end tests in a VS Code Remote - WSL window: extension and engine in WSL |
+| `e2e-remote-ssh` | End-to-end tests in a VS Code Remote - SSH window to the second WSL distribution |
 
 Without `-Vsix` the end-to-end tests run the extension from the sources with the engines just
 built; with `-Vsix` they test a package, typically the universal `.vsix` of a Release workflow
@@ -147,7 +178,9 @@ One-time setup on the Windows machine:
   Create a key pair for the test (`ssh-keygen -t ed25519 -N "" -f
   %LOCALAPPDATA%\dvicode-test\e2e_key`), put the public key into `~dv/.ssh/authorized_keys` in that
   distribution, and allow only your user to read the private key (`icacls ... /inheritance:r
-  /grant:r %USERNAME%:R`). The script starts that `sshd` itself. A distribution of another Linux
+  /grant:r %USERNAME%:R`). The script starts that `sshd` itself. `e2e-remote-ssh` reaches the
+  same host through Remote - SSH (with an ssh config file the script writes); the distribution
+  needs `tar` and internet access (or a proxy) for VS Code to download its server. A distribution of another Linux
   family than the first one (for example a RHEL clone next to Ubuntu) also tests the engine on a
   second distribution.
 
