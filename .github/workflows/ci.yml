@@ -1,3 +1,20 @@
+# Checks every push to main and every pull request.
+#
+# - server:   `cargo test` for the Rust crates on Linux, Windows and macOS; on Linux also
+#             `dvicode-server check` on the demo project (clean, and with its deliberate errors).
+# - client:   type check, unit tests (`npm run unit`: path mapping, remote file system) and
+#             the bundle, on Linux and Windows.
+# - e2e:      the end-to-end suite (client/test/suite.js) in a downloaded VS Code against
+#             examples/demo-project, with an engine built in the job:
+#               linux-local    engine on the runner, VS Code under xvfb;
+#               linux-ssh      engine over SSH to localhost (sshd started on the runner, a fresh
+#                              key); the extension deploys the engine itself;
+#               windows-local  the native Windows engine (the runners have no WSL).
+#             A run in which VS Code reports no result at all (exit code 3, seen now and then
+#             on a first start) is retried once, with a warning.
+# - coverage: line coverage of the Rust crates (cargo-llvm-cov): a per-crate table in the job
+#             summary, and lcov plus HTML as the `rust-coverage` artifact. No threshold yet.
+
 name: CI
 
 on:
@@ -5,10 +22,21 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   server:
-    name: Server tests
-    runs-on: ubuntu-latest
+    name: Server tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,9 +47,11 @@ jobs:
         working-directory: server
         run: cargo test --locked
       - name: Demo project compiles cleanly
+        if: runner.os == 'Linux'
         working-directory: server
         run: cargo run --release --locked -p dvicode-server -- check ../examples/demo-project -q
       - name: Deliberate mistakes are reported
+        if: runner.os == 'Linux'
         working-directory: server
         run: |
           set +e
@@ -32,8 +62,12 @@ jobs:
           test "$status" -eq 1
 
   client:
-    name: Extension build
-    runs-on: ubuntu-latest
+    name: Extension (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: client
@@ -47,5 +81,119 @@ jobs:
       - run: npm ci
       - name: Type check
         run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm run unit
       - name: Bundle
         run: node esbuild.mjs --production
+
+  e2e:
+    name: End-to-end (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-local, os: ubuntu-latest, platform: linux-x64, exe: dvicode-server, target: this machine }
+          - { name: linux-ssh, os: ubuntu-latest, platform: linux-x64, exe: dvicode-server, target: ssh localhost, ssh: true }
+          - { name: windows-local, os: windows-latest, platform: win32-x64, exe: dvicode-server.exe, target: this machine }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: ${{ matrix.name }}
+      - name: Build the engine
+        working-directory: server
+        run: cargo build --release --locked -p dvicode-server
+      - name: Put the engine where the extension looks for it
+        run: |
+          mkdir -p client/server/${{ matrix.platform }}
+          cp server/target/release/${{ matrix.exe }} client/server/${{ matrix.platform }}/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Build the extension
+        working-directory: client
+        run: |
+          npm ci
+          node esbuild.mjs
+      - name: Prepare the display
+        if: runner.os == 'Linux'
+        run: |
+          command -v xvfb-run >/dev/null || { sudo apt-get update -q; sudo apt-get install -y -q xvfb; }
+          # Ubuntu 24.04 keeps Electron's sandbox from starting without this.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Start sshd with a key for localhost
+        if: matrix.ssh
+        run: |
+          set -euo pipefail
+          test -x /usr/sbin/sshd || { sudo apt-get update -q; sudo apt-get install -y -q openssh-server; }
+          sudo systemctl start ssh || sudo service ssh start
+          chmod go-w "$HOME"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_dvicode
+          cat ~/.ssh/id_dvicode.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/id_dvicode -o BatchMode=yes localhost 'echo "ssh to $(hostname): $(uname -sm)"'
+          printf 'DVICODE_E2E_SETTINGS={"dvicode.server.mode":"ssh","dvicode.server.sshHost":"localhost","dvicode.server.sshArgs":["-i","%s/.ssh/id_dvicode"]}\n' "$HOME" >> "$GITHUB_ENV"
+      - name: Run the end-to-end suite
+        working-directory: client
+        run: |
+          run() {
+            if [ "$RUNNER_OS" = Linux ]; then
+              xvfb-run -a node test/runTest.js "$GITHUB_WORKSPACE/examples/demo-project" ${{ matrix.name }}
+            else
+              node test/runTest.js "$GITHUB_WORKSPACE/examples/demo-project" ${{ matrix.name }}
+            fi
+          }
+          set +e
+          run 2>&1 | tee e2e.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::VS Code reported no result; running the end-to-end suite again"
+            run 2>&1 | tee e2e.log
+            status=${PIPESTATUS[0]}
+          fi
+          test "$status" -eq 0 || exit "$status"
+          # The engine ran where this job meant it to.
+          grep -q "server: ${{ matrix.target }}$" e2e.log || { echo "the engine did not run on '${{ matrix.target }}'"; exit 1; }
+      - name: The extension deployed the engine over SSH
+        if: matrix.ssh
+        run: ls -l ~/.dvicode/server/*/dvicode-server
+
+  coverage:
+    name: Rust coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: coverage
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Measure
+        working-directory: server
+        # cargo-llvm-cov leaves test files (tests/, tests.rs) out of the figures.
+        run: |
+          cargo llvm-cov --locked --workspace --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --html --output-dir coverage
+          cargo llvm-cov report --json --summary-only | python3 ../scripts/coverage_summary.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: |
+            server/lcov.info
+            server/coverage/html
+          if-no-files-found: error

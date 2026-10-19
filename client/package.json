@@ -469,6 +469,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node test/runTest.js",
+    "unit": "tsc -p tsconfig.unit.json && node --test test/unit/pathmap.test.js test/unit/remotefs.test.js",
     "package": "vsce package --no-dependencies"
   },
   "dependencies": {
@@ -480,6 +481,7 @@
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.20.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vscode-uri": "^3.2.0"
   }
 }

@@ -1,0 +1,10 @@
+{
+  // The modules that test/unit tests in plain Node, with `vscode` shimmed.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "out/unit",
+    "sourceMap": false
+  },
+  "include": [],
+  "files": ["src/pathmap.ts", "src/remotefs.ts"]
+}
