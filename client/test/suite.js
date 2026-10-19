@@ -1,8 +1,10 @@
 // Runs inside the VS Code extension host. Exercises DVICode through VS Code's own APIs on
-// examples/demo-project and writes the results to $DVICODE_E2E_RESULT.
+// examples/demo-project and writes the results to $DVICODE_E2E_RESULT (in a remote window,
+// where the variable does not reach the extension host, to result.json next to this file).
 
 const vscode = require('vscode');
 const fs = require('fs');
+const path = require('path');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -273,7 +275,9 @@ async function run() {
     return `${e.feature} at ${e.location}; issue text ${body.length} chars`;
   });
 
-  fs.writeFileSync(process.env.DVICODE_E2E_RESULT, JSON.stringify({ target, tests: results }, null, 2));
+  const host = `${vscode.env.remoteName || 'local'} ${process.platform}-${process.arch}`;
+  const out = process.env.DVICODE_E2E_RESULT || path.join(__dirname, 'result.json');
+  fs.writeFileSync(out, JSON.stringify({ target, host, tests: results }, null, 2));
 }
 
 module.exports = { run };

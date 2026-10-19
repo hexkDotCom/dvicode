@@ -167,11 +167,13 @@
             "Run `#dvicode.server.launchCommand#`, which must contain ${SERVER_CMD} (e.g. for bsub/qrsh)."
           ],
           "default": "auto",
+          "scope": "machine-overridable",
           "description": "Where the DVICode language server runs."
         },
         "dvicode.server.path": {
           "type": "string",
           "default": "",
+          "scope": "machine-overridable",
           "description": "Path of dvicode-server on the machine where it runs. Empty: use the bundled binary (deployed to ~/.dvicode/server/<version> for WSL and SSH)."
         },
         "dvicode.server.autoDeploy": {
@@ -182,11 +184,13 @@
         "dvicode.server.wslDistro": {
           "type": "string",
           "default": "",
+          "scope": "machine-overridable",
           "description": "WSL distribution for the server. Empty: the distribution of a \\\\wsl$ folder, else the default distribution."
         },
         "dvicode.server.sshHost": {
           "type": "string",
           "default": "",
+          "scope": "machine-overridable",
           "description": "SSH destination for the server, e.g. `user@build-server` or a Host alias from ~/.ssh/config."
         },
         "dvicode.server.sshArgs": {
@@ -195,26 +199,31 @@
             "type": "string"
           },
           "default": [],
+          "scope": "machine-overridable",
           "description": "Extra arguments for ssh, e.g. [\"-p\", \"2222\", \"-i\", \"~/.ssh/id_ed25519\"]."
         },
         "dvicode.server.sshCommand": {
           "type": "string",
           "default": "ssh",
+          "scope": "machine-overridable",
           "description": "The ssh executable."
         },
         "dvicode.server.launchCommand": {
           "type": "string",
           "default": "${SERVER_CMD}",
+          "scope": "machine-overridable",
           "description": "Command for the `custom` mode. ${SERVER_CMD} is replaced by the server command line, e.g. `ssh farm bsub -Is ${SERVER_CMD}`."
         },
         "dvicode.server.tcpAddress": {
           "type": "string",
           "default": "127.0.0.1:7777",
+          "scope": "machine-overridable",
           "description": "host:port of a server started with `dvicode-server --listen` (tcp mode). Use an SSH tunnel for remote hosts."
         },
         "dvicode.server.tcpToken": {
           "type": "string",
           "default": "",
+          "scope": "machine-overridable",
           "description": "Token of the server (tcp mode): the value of `DVICODE_TOKEN` (or `--token`) the server was started with."
         },
         "dvicode.server.logLevel": {
@@ -235,6 +244,7 @@
             "type": "string"
           },
           "default": [],
+          "scope": "machine-overridable",
           "description": "Extra arguments for dvicode-server."
         },
         "dvicode.pathMappings": {
@@ -257,6 +267,7 @@
             ]
           },
           "default": [],
+          "scope": "machine-overridable",
           "description": "Folder mappings between this machine and the server when they see the same files under different paths (Samba/NFS/SSHFS). WSL paths are mapped automatically."
         },
         "dvicode.buildFile": {

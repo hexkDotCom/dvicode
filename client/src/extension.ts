@@ -3,7 +3,7 @@
 
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, RevealOutputChannelOn, State } from 'vscode-languageclient/node';
-import { Launch, makeLaunch } from './launcher';
+import { Launch, makeLaunch, serverSettingsKey } from './launcher';
 import { Mapper } from './pathmap';
 import { RemoteFs } from './remotefs';
 import { InternalError, LogChannel, Reporter } from './report';
@@ -31,6 +31,9 @@ let client: LanguageClient | undefined;
 let launch: Launch | undefined;
 let starting: Promise<LanguageClient> | undefined;
 let restarting: Promise<void> | undefined;
+/** serverSettingsKey() of the last start, and of the last restart offered. */
+let startedWith: string | undefined;
+let offeredFor: string | undefined;
 /** File watcher of the current client; the language client does not dispose it. */
 let watcher: vscode.FileSystemWatcher | undefined;
 let output: LogChannel;
@@ -59,14 +62,44 @@ function settingsForServer(): object {
   };
 }
 
+/** Resolves true when the server settings differ from `key`, false after `timeoutMs`. */
+function serverSettingsChange(key: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const done = (changed: boolean): void => {
+      clearTimeout(t);
+      sub.dispose();
+      resolve(changed);
+    };
+    const sub = vscode.workspace.onDidChangeConfiguration(() => {
+      if (serverSettingsKey() !== key) {
+        done(true);
+      }
+    });
+    const t = setTimeout(() => done(serverSettingsKey() !== key), timeoutMs);
+    if (serverSettingsKey() !== key) {
+      done(true);
+    }
+  });
+}
+
 async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient> {
   statusItem.text = '$(sync~spin) DVICode';
   statusItem.tooltip = 'Starting the DVICode language server';
   statusItem.show();
+  const first = startedWith === undefined;
+  startedWith = serverSettingsKey();
   try {
     launch = await makeLaunch(ctx, output);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // In a remote window, the local user's values of the server settings (a Windows user's
+    // `dvicode.server.mode: wsl`, say) reach this extension host for a moment at startup, until
+    // VS Code drops them as machine settings of another machine. A first start that fails is
+    // tried again when the settings change soon after.
+    if (first && vscode.env.remoteName && (await serverSettingsChange(startedWith, 5000))) {
+      output.appendLine(`Cannot start the server (${msg}); the settings changed, starting again`);
+      return startClient(ctx);
+    }
     statusItem.text = '$(error) DVICode';
     statusItem.tooltip = msg;
     output.appendLine(`Cannot start the server: ${msg}`);
@@ -185,6 +218,33 @@ function restart(ctx: vscode.ExtensionContext): Promise<void> {
     restarting = undefined;
   });
   return restarting;
+}
+
+/**
+ * Offers a restart when the server settings differ from those the server started with. They are
+ * compared rather than asked for with affectsConfiguration: the change event with which VS Code
+ * drops another machine's settings in a remote window names no section.
+ */
+function offerRestart(ctx: vscode.ExtensionContext): void {
+  const busy = restarting ?? starting;
+  if (busy) {
+    // Checked again with the settings that start used.
+    void busy.then(
+      () => offerRestart(ctx),
+      () => offerRestart(ctx),
+    );
+    return;
+  }
+  const key = serverSettingsKey();
+  if (startedWith === undefined || key === startedWith || key === offeredFor) {
+    return;
+  }
+  offeredFor = key;
+  void vscode.window.showInformationMessage('DVICode: server settings changed.', 'Restart Server').then((a) => {
+    if (a) {
+      void restart(ctx);
+    }
+  });
 }
 
 function editorPosition(): { uri: string; position: vscode.Position } | undefined {
@@ -435,15 +495,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
         await vscode.env.clipboard.writeText(p);
       }
     }),
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('dvicode.server') || e.affectsConfiguration('dvicode.pathMappings')) {
-        void vscode.window.showInformationMessage('DVICode: server settings changed.', 'Restart Server').then((a) => {
-          if (a) {
-            void restart(ctx);
-          }
-        });
-      }
-    }),
+    vscode.workspace.onDidChangeConfiguration(() => offerRestart(ctx)),
   );
   const api: DvicodeApi = {
     ready: () => ensureClient(ctx),

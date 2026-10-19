@@ -60,6 +60,11 @@ function readCfg(): Cfg {
   };
 }
 
+/** The settings that decide where and how the server runs, to tell when they change. */
+export function serverSettingsKey(): string {
+  return JSON.stringify(readCfg());
+}
+
 /** `dvicode://wsl+Ubuntu/...` or `dvicode://ssh+host/...` folders say where they live. */
 export function parseRemoteAuthority(auth: string): { kind: 'wsl' | 'ssh' | 'tcp'; target: string } | undefined {
   const m = /^(wsl|ssh|tcp)\+(.+)$/.exec(auth);

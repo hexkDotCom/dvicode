@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Remote - WSL and Remote - SSH windows: the server settings (`dvicode.server.*`,
+  `dvicode.pathMappings`) of the local user settings no longer apply there; for example,
+  `dvicode.server.mode: wsl` on Windows stopped the engine from starting in a Remote - WSL
+  window. These settings are now per machine and no longer synchronized by Settings Sync;
+  workspace settings still override them.
+
 ## 0.1.1 (preview)
 
 Tested on large open-source projects (OpenTitan, Ibex, CV32E40P and core-v-verif, CVA6, PULP
