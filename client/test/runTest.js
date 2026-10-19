@@ -3,7 +3,9 @@
 //
 //   node test/runTest.js <folder-path-or-uri> [label]
 //
-// Uses an isolated user-data and extensions directory, with other extensions disabled.
+// Uses an isolated user-data and extensions directory, with other extensions disabled. Without
+// an installed VS Code (VSCODE_EXECUTABLE or a usual location), stable VS Code is downloaded
+// into .vscode-test. Exit codes: 0 all passed, 1 a test failed, 3 VS Code reported no result.
 
 const path = require('path');
 const fs = require('fs');
@@ -32,8 +34,7 @@ async function main() {
   }
   const code = findCode();
   if (!code) {
-    console.error('VS Code not found; set VSCODE_EXECUTABLE');
-    process.exit(2);
+    console.log(`[${label}] no VS Code installed (VSCODE_EXECUTABLE): downloading stable VS Code`);
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dvicode-e2e-'));
   const result = path.join(tmp, 'result.json');
@@ -87,7 +88,7 @@ async function main() {
     process.exit(r.tests.every((t) => t.ok) && !runFailed ? 0 : 1);
   }
   console.error(`[${label}] no result file`);
-  process.exit(1);
+  process.exit(3);
 }
 
 main();

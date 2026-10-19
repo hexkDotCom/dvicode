@@ -7,5 +7,6 @@ test-workspace/**
 tsconfig*.json
 esbuild.mjs
 .vscode/**
+.vscode-test/**
 test/**
 check-package.mjs
