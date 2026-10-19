@@ -91,6 +91,9 @@ impl DirListing {
             DirListing::Listed { entries, folded } => match entries.get(name) {
                 Some(k) => Some(*k),
                 None if folded.contains(&name.to_string_lossy().to_lowercase()) => Some(EntryKind::Unknown),
+                // A Windows 8.3 short name (`RUNNER~1`) is not in the listing, which has the long
+                // name: let the file system decide.
+                None if cfg!(windows) && name.to_string_lossy().contains('~') => Some(EntryKind::Unknown),
                 None => None,
             },
         }
