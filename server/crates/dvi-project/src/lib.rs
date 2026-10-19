@@ -579,6 +579,7 @@ impl Builder {
             if found.is_empty() {
                 self.problem(file, line, format!("No files match {e}"));
             }
+            found.retain(|f| !is_foreign_source(f));
             self.inv().files.extend(found);
             return;
         }
@@ -586,7 +587,9 @@ impl Builder {
         if !abs.is_file() {
             self.problem(file, line, format!("File not found: {}", abs.display()));
         }
-        self.inv().files.push(abs);
+        if !is_foreign_source(&abs) {
+            self.inv().files.push(abs);
+        }
     }
 
     fn resolve(&mut self, file: &Path, line: u32, p: &str, base: &Path) -> Option<PathBuf> {
@@ -662,6 +665,14 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
         i += 1;
     }
     Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// C/C++ (DPI) sources, object files, libraries and VHDL in a file list: the simulator hands
+/// them to another compiler, so they are not SystemVerilog sources.
+fn is_foreign_source(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(e.to_ascii_lowercase().as_str(), "c" | "cc" | "cpp" | "cxx" | "c++" | "o" | "a" | "so" | "vhd" | "vhdl")
+    })
 }
 
 fn absolutize(p: &str, base: &Path) -> PathBuf {
@@ -827,6 +838,32 @@ mod tests {
         assert_eq!(names, vec!["A", "B", "C", "FROM_F"]);
         assert_eq!(inv.defines[2].1.as_deref(), Some("\"x y\""));
         assert_eq!(inv.tops, vec!["top_tb".to_string()]);
+    }
+
+    #[test]
+    fn auto_finds_the_base_of_includes_with_a_directory() {
+        // CVA6 and PULP: `include "common_cells/registers.svh"` from common_cells/include.
+        let dir = std::env::temp_dir().join("dvicode_build_test_auto_incpath");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cc/include/common_cells")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("cc/include/common_cells/registers.svh"), "`define FF(q) q\n").unwrap();
+        std::fs::write(dir.join("src/a.sv"), "`include \"common_cells/registers.svh\"\nmodule a; endmodule\n").unwrap();
+        let auto = load_auto(&dir, &FxHashMap::default());
+        assert!(auto.invocations[0].incdirs.contains(&dir.join("cc/include")), "{:?}", auto.invocations[0].incdirs);
+    }
+
+    #[test]
+    fn dpi_c_and_vhdl_files_are_not_compiled() {
+        // Ibex's ibex_dv.f lists dv/uvm/core_ibex/common/date.c among the SystemVerilog files.
+        let dir = std::env::temp_dir().join("dvicode_build_test_foreign");
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        for f in ["a.sv", "c/date.c", "c/model.cpp", "c/lib.so", "c/e.vhd"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let cfg = parse_build(&dir, &dir.join("x.build"), "a.sv\nc/date.c\nc/model.cpp\nc/lib.so\nc/e.vhd\nc/*\n", &FxHashMap::default());
+        assert_eq!(cfg.invocations[0].files, vec![dir.join("a.sv")]);
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
     }
 
     #[test]

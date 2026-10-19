@@ -93,6 +93,11 @@ pub struct GlobalIndex {
     pub definitions: FxHashMap<SmolStr, Vec<DeclRef>>,
     /// Compilation-unit level declarations (classes, typedefs, functions outside packages).
     pub unit_items: FxHashMap<SmolStr, Vec<DeclRef>>,
+    /// Imports at compilation-unit level of project files: (unit, invocation, package, item).
+    /// Files compiled later in the same invocation see them (single compilation unit).
+    pub unit_imports: Vec<(UnitId, usize, SmolStr, Option<SmolStr>)>,
+    /// Target module name -> instances that `bind` adds to it.
+    pub binds: FxHashMap<SmolStr, Vec<DeclRef>>,
     pub macros: FxHashMap<SmolStr, Vec<Arc<MacroDef>>>,
     /// Base class name -> classes that extend a class of that name.
     pub subclasses: FxHashMap<SmolStr, Vec<DeclRef>>,
@@ -375,6 +380,14 @@ impl Analysis {
                 fu.entry(*f).or_default().push(u.id);
             }
             let root = u.parsed.decl(ParsedUnit::ROOT);
+            if u.kind == UnitKind::Project {
+                for imp in &root.imports {
+                    g.unit_imports.push((u.id, u.invocation, imp.pkg.clone(), imp.item.clone()));
+                }
+            }
+            for (target, inst) in &u.parsed.binds {
+                g.binds.entry(target.clone()).or_default().push(DeclRef { unit: u.id, decl: *inst });
+            }
             for &c in &root.children {
                 let d = u.parsed.decl(c);
                 if d.name.is_empty() || d.has(dvi_syntax::ast::dflags::OUT_OF_BLOCK) {

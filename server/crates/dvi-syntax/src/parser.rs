@@ -217,6 +217,24 @@ impl<'t> Parser<'t> {
         self.tok().kind == TokKind::Ident
     }
 
+    /// At an identifier in a port, parameter, argument or declaration list: true when it is
+    /// the name of the element (`a,` `a)` `a =` `a;` `a [3:0]` with an implicit type) rather
+    /// than its type (`data_t [3:0] a`, where the dimensions are followed by the name).
+    fn at_list_name(&self) -> bool {
+        if !self.at_ident() {
+            return false;
+        }
+        let n = self.nth(1);
+        if n.is_punct("[") {
+            let mut i = self.pos + 1;
+            while i < self.toks.len() && self.toks[i].is_punct("[") {
+                i = self.skip_group_from(i);
+            }
+            return !self.toks.get(i).is_some_and(|t| t.kind == TokKind::Ident);
+        }
+        matches!(n.text.as_str(), "," | ")" | "=" | ";")
+    }
+
     // ----------------------------------------------------------------- tree helpers
 
     fn scope(&self) -> DeclId {
@@ -429,8 +447,16 @@ impl<'t> Parser<'t> {
             TokKind::Ident => {
                 if self.nth(1).is_punct(":") && !self.nth(2).is_punct(":") {
                     // Label (assertion, generate construct).
+                    let label = t.clone();
                     self.bump();
                     self.bump();
+                    if self.tok().kind == TokKind::Keyword && matches!(self.tok().text.as_str(), "assert" | "assume" | "cover" | "restrict") {
+                        // A named assertion can be referenced hierarchically (`$assertoff(0, top.a1)`).
+                        let id = self.new_decl(DeclKind::Block, Some(&label), label.span);
+                        self.item();
+                        self.finish(id);
+                        return;
+                    }
                     self.item();
                     return;
                 }
@@ -466,9 +492,68 @@ impl<'t> Parser<'t> {
             "export" => self.export_item(),
             "typedef" => self.typedef(),
             "parameter" | "localparam" => self.param_decl(),
-            "specparam" | "defparam" | "timeunit" | "timeprecision" | "alias" | "nettype" | "bind" => {
+            "specparam" | "defparam" | "timeunit" | "timeprecision" | "alias" | "nettype" => {
                 self.bump();
                 self.scan_until_semi(RefKind::Loose);
+            }
+            "bind" => {
+                // Names in the instance's parameters and ports belong to the target module's
+                // scope (`bind m checker #(.W(W)) u (.*)`), so none of them is reported.
+                self.bump();
+                let saved = self.kind_override.replace(RefKind::Loose);
+                if self.at_ident() {
+                    // `bind module [: inst_path, ...] checker [#(...)] u (...);` or
+                    // `bind inst.path checker u (...);` (the target is kept as `inst.path`).
+                    let mut target = self.tok().text.to_string();
+                    self.bump();
+                    while (self.at_p(".") && self.nth(1).kind == TokKind::Ident) || self.at_p("[") {
+                        if self.at_p("[") {
+                            self.pos = self.skip_group_from(self.pos);
+                        } else {
+                            target.push('.');
+                            target.push_str(&self.nth(1).text);
+                            self.bump();
+                            self.bump();
+                        }
+                    }
+                    let target = SmolStr::new(target);
+                    if self.eat_p(":") {
+                        while self.at_ident() {
+                            self.bump();
+                            while self.at_p(".") || self.at_p("[") {
+                                if self.at_p("[") {
+                                    self.pos = self.skip_group_from(self.pos);
+                                } else {
+                                    self.bump();
+                                    if self.at_ident() {
+                                        self.bump();
+                                    }
+                                }
+                            }
+                            if !self.eat_p(",") {
+                                break;
+                            }
+                        }
+                    }
+                    let first = self.u.decls.len();
+                    let start = self.tok().span;
+                    if self.at_ident() {
+                        self.data_decl(DeclKind::Variable, 0, start);
+                    } else {
+                        self.scan_until_semi(RefKind::Loose);
+                    }
+                    let scope = self.scope();
+                    for id in first..self.u.decls.len() {
+                        let d = &mut self.u.decls[id];
+                        if d.kind == DeclKind::Instance && d.parent == Some(scope) {
+                            d.flags |= dflags::BOUND;
+                            self.u.binds.push((target.clone(), id as DeclId));
+                        }
+                    }
+                } else {
+                    self.scan_until_semi(RefKind::Loose);
+                }
+                self.kind_override = saved;
             }
             "constraint" => self.constraint(0, t.span),
             "covergroup" => self.covergroup(),
@@ -782,7 +867,7 @@ impl<'t> Parser<'t> {
                 is_type = true;
             }
             let mut ty = None;
-            if !is_type && !(self.at_ident() && matches!(self.nth(1).text.as_str(), "=" | "," | ")" | "[")) {
+            if !is_type && !self.at_list_name() {
                 ty = self.parse_type(false, RefKind::Type).map(|ti| {
                     self.scan_params(ti.params);
                     ti.tref
@@ -909,7 +994,7 @@ impl<'t> Parser<'t> {
                         self.bump();
                     }
                     ty = Some(TypeRef { text: SmolStr::new(text), ref_id: None, inline: None });
-                } else if !(self.at_ident() && matches!(self.nth(1).text.as_str(), "," | ")" | "[" | "=")) {
+                } else if !self.at_list_name() {
                     ty = self.parse_type(true, RefKind::Type).map(|ti| {
                         self.scan_params(ti.params);
                         ti.tref
@@ -959,7 +1044,7 @@ impl<'t> Parser<'t> {
         if is_net_type_kw(&self.tok().text) || self.at_kw("var") {
             self.bump();
         }
-        let ty = if self.at_ident() && matches!(self.nth(1).text.as_str(), "," | ";" | "[" | "=") {
+        let ty = if self.at_list_name() {
             None
         } else {
             self.parse_type(true, RefKind::Type).map(|ti| {
@@ -1211,7 +1296,7 @@ impl<'t> Parser<'t> {
             self.expect_p(";");
             return;
         }
-        let ty = if self.at_ident() && matches!(self.nth(1).text.as_str(), "=" | "," | "[") {
+        let ty = if self.at_list_name() {
             None
         } else {
             self.parse_type(false, RefKind::Type).map(|ti| {
@@ -1533,7 +1618,7 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
         }
-        let ty = if kind == DeclKind::Net && (self.at_ident() && matches!(self.nth(1).text.as_str(), ";" | "," | "=" | "[")) {
+        let ty = if kind == DeclKind::Net && self.at_list_name() {
             None
         } else if kind == DeclKind::Net && self.at_p("#") {
             None
@@ -1800,7 +1885,7 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
             let mut ty = None;
-            if !(self.at_ident() && matches!(self.nth(1).text.as_str(), "," | ")" | "=" | "[")) {
+            if !self.at_list_name() {
                 if self.at_kw("untyped") || self.at_kw("sequence") || self.at_kw("property") || self.at_kw("event") && kind != DeclKind::Argument {
                     self.bump();
                 } else {
@@ -1945,6 +2030,11 @@ impl<'t> Parser<'t> {
         // Array reference up to the first `[` of the loop variables.
         let mut segs = Vec::new();
         let mut sep = Sep::None;
+        if self.tok().kind == TokKind::SysIdent && self.tok().text == "$root" && self.nth(1).is_punct(".") {
+            // `$root.top.a[i]`: the path starts at a top-level module, as in expressions.
+            self.bump();
+            self.bump();
+        }
         while matches!(self.tok().kind, TokKind::Ident) || self.at_kw("this") || self.at_kw("super") {
             segs.push(Self::seg(self.tok(), sep));
             self.bump();
@@ -2067,6 +2157,17 @@ impl<'t> Parser<'t> {
             });
             let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false };
             loop {
+                if self.at_p("{") {
+                    // `coverpoint {a, b}`: a concatenation, not the bins block.
+                    self.bump();
+                    loop {
+                        self.scan_expr(STOP_NONE, RefKind::Loose);
+                        if self.eat_p("}") || self.at_eof() || self.at_p(";") {
+                            break;
+                        }
+                        self.bump();
+                    }
+                }
                 self.scan_expr(stop, RefKind::Loose);
                 if is_cross && self.eat_p(",") {
                     continue;

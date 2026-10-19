@@ -227,6 +227,17 @@ impl Analysis {
         if let Some(v) = self.global.packages.get(name) {
             return v.first().copied();
         }
+        // `import p::*;` outside any design element in an earlier file of the same invocation.
+        if let Some(inv) = self.units.get(unit as usize).and_then(|u| u.as_ref()).map(|u| u.invocation) {
+            for (u, i, pkg, item) in &self.global.unit_imports {
+                if *i != inv || *u >= unit || item.as_ref().is_some_and(|it| it != name) {
+                    continue;
+                }
+                if let Some(m) = self.global.packages.get(pkg).and_then(|v| v.first()).and_then(|p| self.member_of(*p, name)) {
+                    return Some(m);
+                }
+            }
+        }
         let std = self.global.std_pkg?;
         self.member_of(std, name)
     }
@@ -363,12 +374,49 @@ impl Analysis {
             _ => {
                 let u = self.unit(container.unit);
                 let own = pick(&u.parsed, u.parsed.lookup_member(container.decl, name)).map(|m| DeclRef { unit: container.unit, decl: m });
+                if own.is_none() && d.kind.is_definition() {
+                    if let Some(b) = self.bound_instance(container, &d.name, name) {
+                        return Some(b);
+                    }
+                }
                 if own.is_some() || d.kind != DeclKind::Package || depth > 8 {
                     return own;
                 }
                 self.exported_member(container, name, depth)
             }
         }
+    }
+
+    /// An instance called `name` that a `bind` adds to `module`: `bind module_name ...`, or
+    /// `bind inst.path ...` where the path, from the scope of the `bind`, names an instance of
+    /// the module.
+    fn bound_instance(&self, module: DeclRef, module_name: &str, name: &str) -> Option<DeclRef> {
+        if let Some(b) = self.global.binds.get(module_name).and_then(|v| v.iter().find(|b| self.decl(**b).name == name)) {
+            return Some(*b);
+        }
+        for (target, v) in &self.global.binds {
+            if self.global.definitions.contains_key(target) {
+                continue;
+            }
+            for b in v.iter().filter(|b| self.decl(**b).name == name) {
+                let scope = self.decl(*b).parent.unwrap_or(ParsedUnit::ROOT);
+                let mut segs = target.split('.');
+                let Some(mut inst) = segs.next().and_then(|s| self.lookup(b.unit, scope, s)) else { continue };
+                // Further segments go through declared instances only (not other binds).
+                for s in segs {
+                    let Some(m) = self.type_of(inst) else { break };
+                    let u = self.unit(m.unit);
+                    match pick(&u.parsed, u.parsed.lookup_member(m.decl, s)) {
+                        Some(d) => inst = DeclRef { unit: m.unit, decl: d },
+                        None => break,
+                    }
+                }
+                if self.decl(inst).kind == DeclKind::Instance && self.decl(inst).name == target.rsplit('.').next().unwrap_or("") && self.type_of(inst) == Some(module) {
+                    return Some(*b);
+                }
+            }
+        }
+        None
     }
 
     /// Names a package re-exports with `export other_pkg::name;`, `export other_pkg::*;` or

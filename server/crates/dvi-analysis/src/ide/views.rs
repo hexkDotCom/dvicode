@@ -280,6 +280,8 @@ impl Analysis {
         while let Some(c) = todo.pop() {
             let d = u.parsed.decl(c);
             match d.kind {
+                // A `bind` adds its instance to the target, not to the module it is written in.
+                DeclKind::Instance if d.has(dflags::BOUND) => {}
                 DeclKind::Instance => {
                     if *budget == 0 {
                         *truncated = true;

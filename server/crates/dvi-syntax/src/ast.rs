@@ -170,6 +170,9 @@ pub mod dflags {
     pub const ARRAY: u32 = 1 << 15;
     /// Number of unpacked dimensions, stored in bits 16..20.
     pub const DIMS_SHIFT: u32 = 16;
+    /// Instance created by `bind`: a member of the target module, not of the scope where the
+    /// `bind` is written (see [`ParsedUnit::binds`](super::ParsedUnit::binds)).
+    pub const BOUND: u32 = 1 << 21;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,6 +314,9 @@ pub struct ParsedUnit {
     pub members: FxHashMap<(DeclId, SmolStr), Vec<DeclId>>,
     /// Top-level declarations per file, for the outline.
     pub file_tops: FxHashMap<FileId, Vec<DeclId>>,
+    /// `bind target ... inst (...)`: the target (a module name, or an instance path such as
+    /// `dut.u_core`) and the instance.
+    pub binds: Vec<(SmolStr, DeclId)>,
 }
 
 impl ParsedUnit {
@@ -334,8 +340,9 @@ impl ParsedUnit {
         for (id, d) in self.decls.iter().enumerate() {
             let id = id as DeclId;
             let Some(parent) = d.parent else { continue };
-            // `function void C::f()` is a member of C, not of the enclosing package.
-            if d.has(dflags::OUT_OF_BLOCK) {
+            // `function void C::f()` is a member of C, not of the enclosing package; a bound
+            // instance is a member of the bind target.
+            if d.has(dflags::OUT_OF_BLOCK) || d.has(dflags::BOUND) {
                 continue;
             }
             if !d.name.is_empty() {
