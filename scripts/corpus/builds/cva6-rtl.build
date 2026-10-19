@@ -1,0 +1,7 @@
+// CVA6 core RTL: core/Flist.cva6 with the Makefile's default target configuration.
++dvicode_setenv+CVA6_REPO_DIR=$CORPUS/cva6
++dvicode_setenv+HPDCACHE_DIR=$CVA6_REPO_DIR/core/cache_subsystem/hpdcache
++dvicode_setenv+TARGET_CFG=cv64a6_imafdc_sv39
++dvicode_setenv+HPDCACHE_TARGET_CFG=$CVA6_REPO_DIR/core/include/cva6_hpdcache_default_config_pkg.sv
+-f $CVA6_REPO_DIR/core/Flist.cva6
+-top cva6

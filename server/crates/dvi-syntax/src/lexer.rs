@@ -198,6 +198,10 @@ impl<'a> Lexer<'a> {
                     self.pos += base_at + 1;
                     self.lex_based_value();
                     self.push(TokKind::Number, start, SmolStr::new(self.slice(start)), fl);
+                } else if matches!(b, b'b' | b'B' | b'o' | b'O' | b'd' | b'D' | b'h' | b'H') && self.peek(base_at + 1) == b'`' {
+                    // `32'h`ADDR`: the digits come from a macro; the preprocessor joins them.
+                    self.pos += base_at + 1;
+                    self.push(TokKind::Number, start, SmolStr::new(self.slice(start)), fl);
                 } else if matches!(n, b'0' | b'1' | b'x' | b'X' | b'z' | b'Z') && !is_ident_char(self.peek(2)) {
                     self.pos += 2;
                     self.push(TokKind::Number, start, SmolStr::new(self.slice(start)), fl);
@@ -217,6 +221,10 @@ impl<'a> Lexer<'a> {
                                 self.push(TokKind::Punct, s, SmolStr::new_static(q), if i == 0 { fl } else { 0 });
                             }
                             return;
+                        }
+                        // `3'b0://comment`: a ':' followed by a comment, not the `:/` of `dist`.
+                        if *p == ":/" && matches!(self.peek(2), b'/' | b'*') {
+                            continue;
                         }
                         self.pos += p.len();
                         self.push(TokKind::Punct, start, SmolStr::new_static(p), fl);

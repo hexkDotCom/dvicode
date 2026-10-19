@@ -98,6 +98,8 @@ pub fn collect_sources(root: &Path) -> Vec<PathBuf> {
 
 struct FileFacts {
     includes: Vec<String>,
+    /// Include operands with a directory part (`common_cells/registers.svh`).
+    include_paths: Vec<String>,
     packages: Vec<String>,
     uses: FxHashSet<String>,
     defines: usize,
@@ -106,7 +108,7 @@ struct FileFacts {
 
 fn scan(text: &str) -> FileFacts {
     let toks = lex(text, 0);
-    let mut f = FileFacts { includes: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0 };
+    let mut f = FileFacts { includes: Vec::new(), include_paths: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0 };
     for (i, t) in toks.iter().enumerate() {
         match t.kind {
             TokKind::Directive if t.text == "include" => {
@@ -114,6 +116,9 @@ fn scan(text: &str) -> FileFacts {
                     let p = n.text.trim_matches('"');
                     let base = p.rsplit(['/', '\\']).next().unwrap_or(p);
                     f.includes.push(base.to_string());
+                    if base.len() < p.len() {
+                        f.include_paths.push(p.replace('\\', "/"));
+                    }
                 }
             }
             TokKind::Directive if t.text == "define" => f.defines += 1,
@@ -151,6 +156,35 @@ pub fn auto_config(root: &Path, env: &FxHashMap<String, String>) -> Invocation {
         if let Some(d) = p.parent() {
             if seen_dirs.insert(d.to_path_buf()) {
                 incdirs.push(d.to_path_buf());
+            }
+        }
+    }
+    // `include "common_cells/registers.svh"` needs the directory that contains `common_cells/`:
+    // add it for every project file whose path ends with the include operand.
+    let mut include_paths: Vec<&String> = facts.iter().flat_map(|(_, f)| f.include_paths.iter()).collect();
+    include_paths.sort();
+    include_paths.dedup();
+    let mut files_by_name: FxHashMap<&std::ffi::OsStr, Vec<&PathBuf>> = FxHashMap::default();
+    for (p, _) in &facts {
+        if let Some(n) = p.file_name() {
+            files_by_name.entry(n).or_default().push(p);
+        }
+    }
+    for inc in include_paths {
+        let parts: Vec<&str> = inc.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+        if parts.is_empty() || parts.contains(&"..") || inc.starts_with('/') {
+            continue;
+        }
+        let Some(candidates) = files_by_name.get(std::ffi::OsStr::new(parts[parts.len() - 1])) else { continue };
+        for p in candidates {
+            let mut comps: Vec<_> = p.components().collect();
+            if comps.len() <= parts.len() || !comps.iter().rev().zip(parts.iter().rev()).all(|(c, s)| c.as_os_str() == *s) {
+                continue;
+            }
+            comps.truncate(comps.len() - parts.len());
+            let base: PathBuf = comps.iter().collect();
+            if seen_dirs.insert(base.clone()) {
+                incdirs.push(base);
             }
         }
     }

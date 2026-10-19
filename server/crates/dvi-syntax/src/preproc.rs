@@ -360,6 +360,19 @@ impl<'a> Pp<'a> {
         Some(t)
     }
 
+    /// In a `` `define `` parameter list, the next token if it starts the next line and can
+    /// continue the list (a parameter name or the closing parenthesis).
+    fn take_param_on_next_line(&mut self) -> Option<Token> {
+        let f = self.frames.last_mut()?;
+        let t = f.toks.get(f.pos)?;
+        if !(matches!(t.kind, TokKind::Ident | TokKind::Keyword) || t.is_punct(")")) {
+            return None;
+        }
+        let t = t.clone();
+        f.pos += 1;
+        Some(t)
+    }
+
     fn rest_of_line(&mut self) -> Vec<Token> {
         let mut v = Vec::new();
         while let Some(t) = self.take_same_line() {
@@ -375,7 +388,16 @@ impl<'a> Pp<'a> {
             } else if self.active() {
                 match t.kind {
                     TokKind::MacroPaste | TokKind::MacroQuote | TokKind::MacroEscQuote => {}
-                    _ => self.res.tokens.push(t),
+                    _ => {
+                        // `32'h`ADDR` with ADDR = 1A11_0000: the expansion is the number's value.
+                        if let Some(last) = self.res.tokens.last_mut() {
+                            if continues_based_number(last, &t) {
+                                last.text = SmolStr::new(format!("{}{}", last.text, t.text));
+                                continue;
+                            }
+                        }
+                        self.res.tokens.push(t)
+                    }
                 }
             }
         }
@@ -618,7 +640,9 @@ impl<'a> Pp<'a> {
             self.take_same_line();
             let mut ps: Vec<MacroParam> = Vec::new();
             loop {
-                let Some(t) = self.take_same_line() else {
+                // Simulators accept a parameter list that continues on the next lines without
+                // a backslash: `define m(a,\n b)`.
+                let Some(t) = self.take_same_line().or_else(|| self.take_param_on_next_line()) else {
                     self.res.diags.push(Diag::error(name.span, "MACRO_SYNTAX", "Unterminated macro parameter list"));
                     break;
                 };
@@ -998,6 +1022,33 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
         let mut it = out.into_iter().peekable();
         while let Some(t) = it.next() {
             if t.kind == TokKind::MacroPaste {
+                // `a````b` (two pastes, or a paste around an empty argument) is one paste.
+                while it.peek().is_some_and(|n| n.kind == TokKind::MacroPaste) {
+                    it.next();
+                }
+                // `/``* text *``/` pastes a block comment together (common_cells' registers.svh).
+                if merged.last().is_some_and(|p| p.is_punct("/")) && it.peek().is_some_and(|n| n.is_punct("*")) {
+                    merged.pop();
+                    it.next();
+                    let mut star = false;
+                    for x in it.by_ref() {
+                        if x.is_punct("/") && star {
+                            break;
+                        }
+                        if x.kind != TokKind::MacroPaste {
+                            star = x.is_punct("*");
+                        }
+                    }
+                    continue;
+                }
+                if t.ws_before() {
+                    // `covergroup ``NAME``_cg`: nothing to join on the left of the space.
+                    if let Some(mut n) = it.next() {
+                        n.flags |= flags::WS_BEFORE;
+                        merged.push(n);
+                    }
+                    continue;
+                }
                 let next = it.next();
                 let word = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$');
                 match (merged.last_mut(), next) {
@@ -1028,6 +1079,24 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
         f.flags = (f.flags & !(flags::NL_BEFORE | flags::WS_BEFORE)) | first_flags;
     }
     out
+}
+
+/// Whether `t` continues the based number `last` (`'h` + digits from a macro expansion, which
+/// the lexer split into a number and an identifier: `1` `A11_0000`).
+fn continues_based_number(last: &Token, t: &Token) -> bool {
+    if last.kind != TokKind::Number || !matches!(t.kind, TokKind::Number | TokKind::Ident) || t.text.is_empty() {
+        return false;
+    }
+    let Some(q) = last.text.rfind('\'') else { return false };
+    let base = last.text[q + 1..].trim_start_matches(['s', 'S']);
+    let Some(b) = base.bytes().next() else { return false };
+    if !matches!(b, b'b' | b'B' | b'o' | b'O' | b'd' | b'D' | b'h' | b'H') {
+        return false;
+    }
+    // Right after the base, or (without a space) after digits that came from a macro.
+    let after_base = base.len() == 1;
+    (after_base || (!t.ws_before() && t.flags & flags::FROM_MACRO != 0))
+        && t.text.bytes().all(|c| c.is_ascii_hexdigit() || matches!(c, b'x' | b'X' | b'z' | b'Z' | b'?' | b'_'))
 }
 
 fn classify(text: &str, fallback: TokKind) -> TokKind {

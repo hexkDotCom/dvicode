@@ -289,3 +289,229 @@ fn interface_changes_are_detected() {
     let c = b.update(&[f]);
     assert!(c.interface_changed(&b));
 }
+
+// ---- Found by scripts/corpus (OpenTitan, Ibex, core-v-verif, CVA6, PULP) -----------------
+
+fn clean(name: &str, files: &[(&str, &str)]) {
+    let (a, _) = project(name, files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn packed_dimensions_after_a_type_name_in_lists() {
+    // CVA6 `input scoreboard_entry_t [N-1:0] issue_sbe`, PULP `parameter byte_t [N-1:0] RegRstVal`,
+    // OpenTitan `function ... (input sha_word64_t [7:0] h_i)` and `parameter token_idx_e [N][N] M`.
+    clean(
+        "typeddims",
+        &[(
+            "t.sv",
+            "package p;
+  typedef logic [7:0] byte_t;
+  typedef logic [3:0] addr_t;
+  parameter byte_t [1:0][3:0] M = '0;
+  localparam addr_t [1:0] L = '0;
+  function automatic byte_t [3:0] f(input byte_t [3:0] h_i, byte_t b);
+    return h_i;
+  endfunction
+endpackage
+module t import p::*; #(parameter byte_t [3:0] RST = '0) (
+  input addr_t [1:0] addr_i,
+  output byte_t [1:0] data_o,
+  input logic plain [2]
+);
+  assign data_o = {addr_i[0], addr_i[1]};
+endmodule
+module u(a, b);
+  input p::addr_t [1:0] a;
+  output p::byte_t b;
+endmodule
+",
+        )],
+    );
+}
+
+#[test]
+fn case_item_colon_followed_by_a_comment() {
+    // `3'b000://comment` is not the `:/` of a `dist` (CVA6's vendored C910 FPU).
+    clean(
+        "colonslash",
+        &[("t.sv", "module t(input logic [2:0] rm, output logic y);\n  always_comb begin\n    case (rm)\n      3'b000://round to nearest\n      begin\n        y = 1'b0;\n      end\n      3'b001:/* c */ y = 1'b1;\n      default: y = 1'b1;\n    endcase\n  end\nendmodule\n")],
+    );
+}
+
+#[test]
+fn macro_parameter_list_on_several_lines() {
+    // OpenTitan cip_base_vseq__tl_errors.svh.
+    clean(
+        "mdefnl",
+        &[(
+            "t.sv",
+            r#"`define CASE(task_name_, with_c_,
+             seq_t_ = int,
+             seqr_t)       \
+  initial $display(task_name_, with_c_, seqr_t);
+module t;
+  `CASE(1, 2, , 4)
+endmodule
+"#,
+        )],
+    );
+}
+
+#[test]
+fn macro_pastes_a_comment_together() {
+    // common_cells registers.svh: `/``* synopsys sync_set_reset `"__clear`" *``/`.
+    clean(
+        "pastecomment",
+        &[(
+            "t.sv",
+            r#"`define FFX(__q, __d, __clk) \
+  /``* synopsys sync_set_reset `"__clk`" *``/ \
+  always_ff @(posedge (__clk)) begin \
+    __q <= __d; \
+  end
+module t(input logic clk, d, output logic q);
+  `FFX(q, d, clk)
+endmodule
+"#,
+        )],
+    );
+}
+
+#[test]
+fn paste_after_a_space_and_double_paste() {
+    // riscv-dv `covergroup ``INSTR_NAME``_cg`, core-v-verif `rvfi_csr_``name````idx````suffix``_if`.
+    clean(
+        "pastespace",
+        &[(
+            "t.sv",
+            r#"class instr; int rs1; endclass
+`define CG_BEGIN(NAME, CLS = instr) \
+  covergroup ``NAME``_cg with function sample(CLS i);
+`define R_CG_BEGIN(NAME) \
+  `CG_BEGIN(NAME) \
+    cp_rs1 : coverpoint i.rs1;
+class cov;
+  `R_CG_BEGIN(add)
+  endgroup
+  function new(); add_cg = new(); endfunction
+endclass
+interface cif(input logic clk); logic en; endinterface
+`define IDX_INST(n, s, idx) \
+  cif r_``n````idx````s``_i (.clk(clk));
+module t(input logic clk);
+  `IDX_INST(cnt,,3)
+  initial $display(r_cnt3_i.en);
+endmodule
+"#,
+        )],
+    );
+}
+
+#[test]
+fn covergroup_coverpoint_on_a_concatenation() {
+    // OpenTitan push_pull_agent_cov.sv: `coverpoint {valid, ready};`.
+    clean(
+        "cpconcat",
+        &[(
+            "t.sv",
+            "package p;
+covergroup vr_cg(string name, string path) with function sample(bit valid, bit ready);
+  option.per_instance = 1;
+  option.name = {path, \"::\", name};
+  cp_vr: coverpoint {valid, ready};
+endgroup : vr_cg
+covergroup ra_cg(string name) with function sample(bit req, bit ack);
+  cp_ra: coverpoint {req, ack} {
+    ignore_bins ack_wo_req = {2'b01};
+  }
+endgroup : ra_cg
+endpackage
+",
+        )],
+    );
+}
+
+#[test]
+fn named_assertions_are_scope_members() {
+    // Ibex core_ibex_tb_top: `DV_ASSERT_CTRL("x", core_ibex_tb_top.NoAlertsTriggered)`.
+    clean(
+        "assertlabel",
+        &[("t.sv", "module t(input logic clk, a);\n  NoA: assert property (@(posedge clk) !a);\n  CovA: cover property (@(posedge clk) a);\n  initial $assertoff(0, t.NoA);\n  initial $assertoff(0, NoA, CovA);\nendmodule\n")],
+    );
+}
+
+#[test]
+fn bind_parameters_and_instances() {
+    // CV32E40P `bind cv32e40p_prefetch_controller: path ... #(.DEPTH(DEPTH))`, OpenTitan aes
+    // `bind aes aes_cov_if u_aes_cov_if (...)` used as `dut.u_aes_cov_if`.
+    let files = [(
+        "t.sv",
+        "interface cov_if(input logic clk); logic en; endinterface
+module dut #(parameter int DEPTH = 4) (input logic clk);
+endmodule
+module sva #(parameter int DEPTH = 1) (input logic clk);
+endmodule
+module binds;
+  bind dut sva #(.DEPTH(DEPTH)) u_sva (.clk(clk));
+  bind dut cov_if u_cov_if (.clk);
+  bind dut: tb.d sva #(.DEPTH(DEPTH)) u_sva2 (.*);
+endmodule
+module tb;
+  logic clk;
+  dut #(.DEPTH(8)) d (.clk);
+  // OpenTitan csrng tb: `bind dut csrng_assert_if csrng_assert_if (...)` names an instance.
+  bind d cov_if u_by_inst (.clk);
+  initial $display(d.u_cov_if.en, d.u_by_inst.en, w.d.u_by_path.en);
+  wrap w ();
+  // OpenTitan edn tb: `bind dut.u_edn_core edn_assert_if edn_assert_if ();`.
+  bind w.d cov_if u_by_path (.clk);
+endmodule
+module wrap;
+  logic clk;
+  dut d (.clk);
+endmodule
+",
+    )];
+    let (a, _) = project("bind", &files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // In the design hierarchy, the module holding the `bind`s has no instances of its own.
+    let h = a.design_hierarchy(Some("binds"), 100);
+    assert!(h[0].children.is_empty(), "{:?}", h[0].children.iter().map(|c| &c.name).collect::<Vec<_>>());
+    // The bound instance is not a name in the module that contains the `bind`.
+    let (a, _) = project("bindscope", &[files[0], ("u.sv", "module user;\n  binds b();\n  initial $display(b.u_cov_if.en);\nendmodule\n")]);
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].starts_with("u.sv") && p[0].contains("'u_cov_if' is not declared"), "{p:?}");
+}
+
+#[test]
+fn based_number_digits_from_a_macro() {
+    // Ibex: `parameter int unsigned DmBaseAddr = 32'h`DM_ADDR;` with +define+DM_ADDR=1A11_0000.
+    clean("basedmacro", &[("t.sv", "`define ADDR 1A11_0000\nmodule t;\n  parameter int unsigned A = 32'h`ADDR;\n  parameter int unsigned B = 'h`ADDR;\n  parameter int unsigned C = 8'h`ADDR + 1;\nendmodule\n")]);
+}
+
+#[test]
+fn foreach_over_a_root_path() {
+    // core-v-verif step_compare: `foreach (`CV32E40P_RM_RVVI_STATE.csr[index])` with `$root.`.
+    clean(
+        "foreachroot",
+        &[("t.sv", "`define ST $root.top.u.state\nmodule sub; int state[4]; endmodule\nmodule top;\n  sub u();\n  initial foreach (`ST[i]) $display(i);\nendmodule\n")],
+    );
+}
+
+#[test]
+fn unit_level_import_reaches_later_files() {
+    // core-v-verif: uvmt_cv32e40p_step_compare.sv has `import uvm_pkg::*;` outside any module;
+    // the next file of the same compilation uses UVM_DEBUG.
+    clean(
+        "unitimport",
+        &[
+            ("a.sv", "package lv_pkg; typedef enum {LOW, HIGH} level_e; endpackage\nimport lv_pkg::*;\nmodule a; level_e l = LOW; endmodule\n"),
+            ("b.sv", "module b; level_e l = HIGH; endmodule\n"),
+        ],
+    );
+    // Not in earlier files.
+    let (a, _) = project("unitimport2", &[("a.sv", "module b; int x = HIGH; endmodule\n"), ("b.sv", "package lv_pkg; typedef enum {LOW, HIGH} level_e; endpackage\nimport lv_pkg::*;\n")]);
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].starts_with("a.sv") && p[0].contains("'HIGH' is not declared"), "{p:?}");
+}

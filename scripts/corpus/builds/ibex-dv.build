@@ -1,0 +1,15 @@
+// Ibex core UVM testbench: the VCS/Xcelium compile arguments of
+// dv/uvm/core_ibex/yaml/rtl_simulation.yaml and scripts/compile_tb.py.
++dvicode_setenv+PRJ_DIR=$CORPUS/ibex
++dvicode_setenv+LOWRISC_IP_DIR=$CORPUS/ibex/vendor/lowrisc_ip
+-uvm
++define+UVM
++define+UVM_REGEX_NO_DPI
++define+DM_ADDR=1A11_0000
++define+DM_ADDR_MASK=0000_0FFF
++define+BOOT_ADDR=8000_0000
++define+DEBUG_MODE_HALT_ADDR=8000_0000
++define+DEBUG_MODE_EXCEPTION_ADDR=8000_0008
+-f $PRJ_DIR/dv/uvm/core_ibex/ibex_dv_defines.f
+-f $PRJ_DIR/dv/uvm/core_ibex/ibex_dv.f
+-top core_ibex_tb_top

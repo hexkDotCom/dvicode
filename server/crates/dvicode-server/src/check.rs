@@ -35,6 +35,10 @@ pub fn run(args: &[String]) -> i32 {
     let mut max = 200usize;
     let mut queries: Vec<(String, String)> = Vec::new();
     let mut env: FxHashMap<String, String> = FxHashMap::default();
+    // Seconds one query may take before the process gives up (0: no limit).
+    let mut query_timeout = 0u64;
+    // Queries from a file: catch panics and time each one (used by scripts/corpus).
+    let mut sweep = false;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -54,7 +58,23 @@ pub fn run(args: &[String]) -> i32 {
                     env.insert(k.into(), v.into());
                 }
             }
-            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--hier" | "--uvm" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" => {
+            "--query-timeout" => {
+                i += 1;
+                query_timeout = args.get(i).and_then(|m| m.parse().ok()).unwrap_or(0);
+            }
+            "--queries" => {
+                i += 1;
+                let Some(text) = args.get(i).and_then(|f| std::fs::read_to_string(f).ok()) else {
+                    eprintln!("check: cannot read the query file {}", args.get(i).map_or("", |s| s.as_str()));
+                    return 2;
+                };
+                for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                    let (q, arg) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+                    queries.push((q.to_string(), arg.trim().to_string()));
+                }
+                sweep = true;
+            }
+            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--hier" | "--uvm" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -72,7 +92,11 @@ pub fn run(args: &[String]) -> i32 {
     };
     let root = canonical(&dir);
     let t0 = std::time::Instant::now();
-    let cfg = dvi_project::load(&root, build.as_deref(), &env);
+    // `--build auto` auto-configures even when the project has a build file, like the setting.
+    let cfg = match build.as_deref() {
+        Some(b) if b == Path::new("auto") => dvi_project::load_auto(&root, &env),
+        b => dvi_project::load(&root, b, &env),
+    };
     let cfg_ms = t0.elapsed().as_millis();
     let vfs = Arc::new(Vfs::new());
     let setup = Arc::new(ProjectSetup::new(&root, cfg, env));
@@ -102,15 +126,47 @@ pub fn run(args: &[String]) -> i32 {
             if !quiet && shown < max {
                 shown += 1;
                 let r = a.to_range(d.span).map(|r| (r.start.line + 1, r.start.character + 1)).unwrap_or((0, 0));
-                println!("{}:{}:{}: {:?}: {}", a.vfs.path(f).display(), r.0, r.1, d.severity, d.message);
+                let code = if d.code.is_empty() || d.message.starts_with(d.code) { String::new() } else { format!("{}: ", d.code) };
+                println!("{}:{}:{}: {:?}: {code}{}", a.vfs.path(f).display(), r.0, r.1, d.severity, d.message);
             }
         }
     }
     let mut c: Vec<_> = counts.into_iter().collect();
     c.sort_by(|a, b| b.1.cmp(&a.1));
     eprintln!("dvicode check: {errors} errors, {warnings} warnings ({} ms for diagnostics) {:?}", t1.elapsed().as_millis(), c);
+    // The query being run and since when, for the watchdog.
+    let current = Arc::new(std::sync::Mutex::new((String::new(), std::time::Instant::now())));
+    if query_timeout > 0 && !queries.is_empty() {
+        let current = current.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let Ok(c) = current.lock() else { return };
+            if !c.0.is_empty() && c.1.elapsed().as_secs() >= query_timeout {
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                eprintln!("dvicode check: query timeout after {query_timeout} s: {}", c.0);
+                std::process::exit(124);
+            }
+        });
+    }
     for (q, arg) in &queries {
-        run_query(&a, q, arg);
+        if let Ok(mut c) = current.lock() {
+            *c = (format!("{q} {arg}"), std::time::Instant::now());
+        }
+        if !sweep {
+            run_query(&a, q, arg);
+            continue;
+        }
+        let t = std::time::Instant::now();
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_query(&a, q, arg))) {
+            let m = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
+            println!("!! internal error: {m}");
+            eprintln!("dvicode check: internal error in {q} {arg}: {m}");
+        }
+        println!("-- {} ms", t.elapsed().as_millis());
+    }
+    if let Ok(mut c) = current.lock() {
+        c.0.clear();
     }
     if errors > 0 {
         1
@@ -133,6 +189,13 @@ fn show_loc(l: &lsp_types::Location) -> String {
 fn run_query(a: &Analysis, q: &str, arg: &str) {
     println!("== {q} {arg}");
     match q {
+        "--files" => {
+            let mut files: Vec<_> = a.project_files().into_iter().map(|f| a.vfs.path(f)).collect();
+            files.sort();
+            for f in files {
+                println!("{}", f.display());
+            }
+        }
         "--outline" => {
             let p = canonical(Path::new(arg));
             if let Some(f) = a.vfs.lookup(Path::new(&p)) {
