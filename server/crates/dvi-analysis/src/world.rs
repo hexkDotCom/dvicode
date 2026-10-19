@@ -787,6 +787,8 @@ impl Analysis {
         let n = self.units.len().max(old.units.len());
         (0..n).any(|i| match (self.units.get(i).and_then(|u| u.as_ref()), old.units.get(i).and_then(|u| u.as_ref())) {
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => false,
+            // Only pointed at moved macro definitions: the same declarations.
+            (Some(a), Some(b)) if Arc::ptr_eq(&a.parsed, &b.parsed) => !a.macros_after.same_definitions(&b.macros_after),
             (Some(a), Some(b)) => interface_fingerprint(a) != interface_fingerprint(b) || !a.macros_after.same_definitions(&b.macros_after),
             (None, None) => false,
             _ => true,
