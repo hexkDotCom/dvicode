@@ -229,7 +229,12 @@ fn apply(a: &Analysis, file: u32, edits: &[(dvi_syntax::Span, String)]) -> Strin
     for (s, t) in e {
         text.replace_range(s.start as usize..s.end as usize, t);
     }
-    text
+    // A Windows checkout may have CRLF files; the fixes keep the file's line endings, which
+    // must not mix (checked here), and the expectations below are written with LF.
+    if text.contains("\r\n") {
+        assert!(!text.replace("\r\n", "").contains('\n'), "mixed line endings:\n{text}");
+    }
+    text.replace("\r\n", "\n")
 }
 
 #[test]

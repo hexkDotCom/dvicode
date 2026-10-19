@@ -182,20 +182,20 @@ impl Analysis {
         }
         if top == ParsedUnit::ROOT {
             let ls = self.line_start(at.file, at.start)?;
-            let ind = self.indent_at(at.file, ls);
-            return Some((Span::new(at.file, ls, ls), format!("{ind}import {pkg}::*;\n")));
+            let (ind, nl) = (self.indent_at(at.file, ls), self.newline(at.file));
+            return Some((Span::new(at.file, ls, ls), format!("{ind}import {pkg}::*;{nl}")));
         }
         let d = u.parsed.decl(top);
         match d.kind {
             DeclKind::Module | DeclKind::Interface | DeclKind::Program | DeclKind::Package | DeclKind::Checker => {
                 let semi = self.header_end(DeclRef { unit, decl: top })?;
-                let ind = self.indent_at(semi.file, self.line_start(semi.file, d.span.start)?);
-                Some((Span::new(semi.file, semi.end, semi.end), format!("\n{ind}  import {pkg}::*;")))
+                let (ind, nl) = (self.indent_at(semi.file, self.line_start(semi.file, d.span.start)?), self.newline(semi.file));
+                Some((Span::new(semi.file, semi.end, semi.end), format!("{nl}{ind}  import {pkg}::*;")))
             }
             _ => {
                 let ls = self.line_start(d.span.file, d.span.start)?;
-                let ind = self.indent_at(d.span.file, ls);
-                Some((Span::new(d.span.file, ls, ls), format!("{ind}import {pkg}::*;\n")))
+                let (ind, nl) = (self.indent_at(d.span.file, ls), self.newline(d.span.file));
+                Some((Span::new(d.span.file, ls, ls), format!("{ind}import {pkg}::*;{nl}")))
             }
         }
     }
@@ -219,8 +219,8 @@ impl Analysis {
                 return None;
             }
             let semi = self.header_end(DeclRef { unit, decl: s })?;
-            let ind = self.indent_at(semi.file, self.line_start(semi.file, d.span.start)?);
-            return Some((Span::new(semi.file, semi.end, semi.end), format!("\n{ind}  {ty} {name};")));
+            let (ind, nl) = (self.indent_at(semi.file, self.line_start(semi.file, d.span.start)?), self.newline(semi.file));
+            return Some((Span::new(semi.file, semi.end, semi.end), format!("{nl}{ind}  {ty} {name};")));
         }
         None
     }
@@ -250,6 +250,14 @@ impl Analysis {
         let text = self.file_text(file)?;
         let before = text.get(..off as usize)?;
         Some(before.rfind('\n').map_or(0, |i| i as u32 + 1))
+    }
+
+    /// The line ending the file uses, so that an inserted line does not mix CRLF and LF.
+    fn newline(&self, file: FileId) -> &'static str {
+        match self.file_text(file) {
+            Some(t) if t.contains("\r\n") => "\r\n",
+            _ => "\n",
+        }
     }
 
     /// Leading whitespace of the line starting at `line_start`.

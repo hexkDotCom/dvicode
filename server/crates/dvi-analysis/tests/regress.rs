@@ -134,6 +134,16 @@ fn crlf_string_continuation() {
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
 
+#[test]
+fn quick_fixes_keep_crlf_line_endings() {
+    use dvi_syntax::SourceProvider;
+    let (a, root) = project("crlffix", &[("t.sv", "module t (input logic clk);\r\n  initial undeclared_v = 1;\r\nendmodule\r\n")]);
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let fixes = a.quick_fixes(f, 0, u32::MAX);
+    let declare = fixes.iter().find(|q| q.title.starts_with("Declare")).expect("a declare fix");
+    assert!(declare.edits.iter().all(|(_, t)| !t.contains('\n') || t.contains("\r\n")), "{:?}", declare.edits);
+}
+
 fn codes(a: &Analysis, file: &str) -> Vec<&'static str> {
     use dvi_syntax::SourceProvider;
     let f = a.project_files().into_iter().find(|f| a.vfs.path(*f).ends_with(file)).unwrap();
