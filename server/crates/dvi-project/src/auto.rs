@@ -7,6 +7,7 @@
 use crate::Invocation;
 use dvi_syntax::lexer::lex;
 use dvi_syntax::token::TokKind;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
@@ -129,12 +130,15 @@ fn scan(text: &str) -> FileFacts {
 
 pub fn auto_config(root: &Path, env: &FxHashMap<String, String>) -> Invocation {
     let files = collect_sources(root);
-    let mut facts: Vec<(PathBuf, FileFacts)> = Vec::with_capacity(files.len());
-    for p in files {
-        let text = std::fs::read(&p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        let f = scan(&text);
-        facts.push((p, f));
-    }
+    // In parallel: on network and WSL drives most of the time is waiting for the reads.
+    let facts: Vec<(PathBuf, FileFacts)> = files
+        .into_par_iter()
+        .map(|p| {
+            let text = std::fs::read(&p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            let f = scan(&text);
+            (p, f)
+        })
+        .collect();
     let included: FxHashSet<String> = facts.iter().flat_map(|(_, f)| f.includes.iter().cloned()).collect();
     let mut incdirs: Vec<PathBuf> = Vec::new();
     let mut seen_dirs = FxHashSet::default();

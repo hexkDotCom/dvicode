@@ -235,8 +235,21 @@ impl Analysis {
     /// Compiles the whole project.
     pub fn build(vfs: Arc<Vfs>, setup: Arc<ProjectSetup>) -> Analysis {
         let t0 = Instant::now();
+        vfs.clear_dir_cache();
         let mut units: Vec<Option<Arc<Unit>>> = Vec::new();
         units.push(Some(Arc::new(Self::builtin_unit(&vfs))));
+        // Read and lex the top files in parallel; preprocessing reads them one after another,
+        // which adds up where each read waits for the file system (network or WSL drives).
+        let tops: Vec<FileId> = setup.config.invocations.iter().flat_map(|i| &i.files).map(|f| vfs.file_id(f)).collect();
+        tops.par_iter().for_each(|&id| {
+            vfs.source(id);
+        });
+        // Likewise list the include directories: an `include not found in the first ones
+        // probes all the others.
+        let mut incdirs: Vec<&PathBuf> = setup.pp_configs.iter().flat_map(|c| &c.incdirs).collect();
+        incdirs.sort();
+        incdirs.dedup();
+        incdirs.par_iter().for_each(|d| vfs.list_dir(d));
         // Preprocess in order (macros flow from file to file), parse in parallel.
         let mut jobs = Vec::new();
         for (inv_idx, inv) in setup.config.invocations.iter().enumerate() {
@@ -307,7 +320,7 @@ impl Analysis {
                     'dirs: for d in &inv.lib_dirs {
                         for e in &exts {
                             let p = d.join(format!("{name}{e}"));
-                            if p.is_file() {
+                            if self.vfs.is_file(&p) {
                                 new_files.push((p, inv_idx));
                                 break 'dirs;
                             }

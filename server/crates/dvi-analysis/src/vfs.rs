@@ -2,12 +2,19 @@
 //!
 //! The store is shared and mutable; analysis snapshots copy what they need (see
 //! [`crate::world::Source`]) so that a snapshot never mixes its syntax with newer text.
+//!
+//! File existence checks go through a cache of directory listings: resolving an `include
+//! probes every include directory, and on slow file systems (WSL's `/mnt` drives, network
+//! shares) one `stat` per directory per include made builds take minutes. Each directory is
+//! read once instead; [`Vfs::clear_dir_cache`] starts over (every full build does) and
+//! [`Vfs::invalidate`] forgets the directory of a changed file.
 
 use dvi_syntax::lexer::lex;
 use dvi_syntax::preproc::normalize;
 use dvi_syntax::{FileId, LineIndex, SourceProvider, Token};
-use rustc_hash::FxHashMap;
-use std::path::{Path, PathBuf};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::ffi::{OsStr, OsString};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 #[derive(Default)]
@@ -31,10 +38,77 @@ struct Inner {
     entries: Vec<Entry>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum EntryKind {
+    File,
+    Dir,
+    /// Ask the file system: a symbolic link, a name spelled with different case (the same
+    /// entry on file systems that ignore case), or a directory that cannot be listed.
+    Unknown,
+}
+
+/// The entries of one directory.
+enum DirListing {
+    Missing,
+    /// Exists but cannot be listed: ask the file system for each path.
+    Unlistable,
+    Listed {
+        entries: FxHashMap<OsString, EntryKind>,
+        /// Lowercase names, for file systems that ignore case (Windows, WSL's `/mnt` drives).
+        folded: FxHashSet<String>,
+    },
+}
+
+impl DirListing {
+    fn read(dir: &Path) -> DirListing {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirListing::Missing,
+            Err(_) if !dir.is_dir() => return DirListing::Missing,
+            Err(_) => return DirListing::Unlistable,
+        };
+        let mut entries = FxHashMap::default();
+        let mut folded = FxHashSet::default();
+        for e in rd {
+            let Ok(e) = e else { return DirListing::Unlistable };
+            let kind = match e.file_type() {
+                Ok(t) if t.is_file() => EntryKind::File,
+                Ok(t) if t.is_dir() => EntryKind::Dir,
+                _ => EntryKind::Unknown,
+            };
+            let name = e.file_name();
+            folded.insert(name.to_string_lossy().to_lowercase());
+            entries.insert(name, kind);
+        }
+        DirListing::Listed { entries, folded }
+    }
+
+    /// The kind of the entry `name`, `None` if there is none.
+    fn lookup(&self, name: &OsStr) -> Option<EntryKind> {
+        match self {
+            DirListing::Missing => None,
+            DirListing::Unlistable => Some(EntryKind::Unknown),
+            DirListing::Listed { entries, folded } => match entries.get(name) {
+                Some(k) => Some(*k),
+                None if folded.contains(&name.to_string_lossy().to_lowercase()) => Some(EntryKind::Unknown),
+                None => None,
+            },
+        }
+    }
+}
+
 /// Thread-safe file store shared by all analysis snapshots.
 #[derive(Default)]
 pub struct Vfs {
     inner: RwLock<Inner>,
+    dirs: RwLock<DirCache>,
+}
+
+#[derive(Default)]
+struct DirCache {
+    listings: FxHashMap<PathBuf, Arc<DirListing>>,
+    /// Changes whenever listings are forgotten: a listing read meanwhile may be outdated.
+    generation: u64,
 }
 
 /// Contents of built-in files (the `std` package prelude).
@@ -91,8 +165,26 @@ impl Vfs {
         }
     }
 
-    /// Forgets cached disk contents (after a change on disk).
+    /// Forgets cached disk contents (after a change on disk), and the directory listings that
+    /// may no longer be right: of the directory that holds `path`, of `path` itself and below
+    /// (a created or deleted directory), and of ancestors that did not have the way to it (a
+    /// file created in a new directory).
     pub fn invalidate(&self, path: &Path) -> Option<FileId> {
+        let p = normalize(path);
+        let mut dirs = self.dirs.write().unwrap();
+        dirs.generation += 1;
+        dirs.listings.retain(|d, l| {
+            if d.starts_with(&p) {
+                return false;
+            }
+            let Ok(rest) = p.strip_prefix(d) else { return true };
+            let mut below = rest.components();
+            match (below.next(), below.next()) {
+                (Some(child), Some(_)) => matches!(l.lookup(child.as_os_str()), Some(EntryKind::Dir | EntryKind::Unknown)),
+                _ => false,
+            }
+        });
+        drop(dirs);
         let id = self.lookup(path)?;
         let mut g = self.inner.write().unwrap();
         let e = &mut g.entries[id as usize];
@@ -160,6 +252,52 @@ impl Vfs {
         }
     }
 
+    /// Forgets all directory listings, so that files created or deleted since are seen, also
+    /// where the editor does not watch.
+    pub fn clear_dir_cache(&self) {
+        let mut dirs = self.dirs.write().unwrap();
+        dirs.generation += 1;
+        dirs.listings.clear();
+    }
+
+    /// Reads a directory into the cache ahead of the existence checks that need it.
+    pub fn list_dir(&self, dir: &Path) {
+        self.dir_listing(&normalize(dir));
+    }
+
+    /// What the listing of its directory says about a normalized path.
+    fn entry_kind(&self, p: &Path) -> Option<EntryKind> {
+        match (p.parent(), p.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => self.dir_listing(dir).lookup(name),
+            _ => Some(EntryKind::Unknown),
+        }
+    }
+
+    fn dir_listing(&self, dir: &Path) -> Arc<DirListing> {
+        let generation = {
+            let dirs = self.dirs.read().unwrap();
+            if let Some(l) = dirs.listings.get(dir) {
+                return l.clone();
+            }
+            dirs.generation
+        };
+        // Include paths with directories (`include "sub/x.svh"`) name a missing directory in
+        // most include directories: the parent's listing tells without opening it.
+        let in_parent = self.entry_kind(dir);
+        // Read without the lock; two threads may both read a directory the first time.
+        let l = Arc::new(match in_parent {
+            Some(EntryKind::Dir | EntryKind::Unknown) => DirListing::read(dir),
+            Some(EntryKind::File) | None => DirListing::Missing,
+        });
+        let mut dirs = self.dirs.write().unwrap();
+        if dirs.generation != generation {
+            // A change on disk was reported meanwhile: good for this check (like a `stat` racing
+            // the change), but not to keep.
+            return l;
+        }
+        dirs.listings.entry(dir.to_path_buf()).or_insert(l).clone()
+    }
+
     pub fn file_count(&self) -> usize {
         self.inner.read().unwrap().paths.len()
     }
@@ -221,7 +359,25 @@ impl SourceProvider for Vfs {
                 return true;
             }
         }
-        path.is_file()
+        // `dir/..` resolves only if `dir` exists (on Windows, the system drops both first).
+        let mut prefix = PathBuf::new();
+        for c in path.components() {
+            if c == Component::ParentDir && !cfg!(windows) {
+                match self.entry_kind(&normalize(&prefix)) {
+                    Some(EntryKind::Dir) => {}
+                    Some(EntryKind::File) | None => return false,
+                    Some(EntryKind::Unknown) => return path.is_file(),
+                }
+            }
+            prefix.push(c);
+        }
+        // The normalized path is the one the file is then read from (see `file_id`).
+        let p = normalize(path);
+        match self.entry_kind(&p) {
+            Some(EntryKind::File) => true,
+            Some(EntryKind::Dir) | None => false,
+            Some(EntryKind::Unknown) => p.is_file(),
+        }
     }
 }
 
@@ -249,5 +405,45 @@ mod tests {
         // The old text is no longer the editor's text.
         assert_eq!(vfs.lsp_version_for(id, &st1), None);
         assert_eq!(vfs.line_index(id).unwrap().line_count(), 2);
+    }
+
+    #[test]
+    fn file_checks_see_changes_reported_on_disk() {
+        let root = std::env::temp_dir().join(format!("dvicode-vfs-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("inc")).unwrap();
+        std::fs::write(root.join("inc/a.svh"), "").unwrap();
+        let vfs = Vfs::new();
+        let (a, b, c) = (root.join("inc/a.svh"), root.join("inc/b.svh"), root.join("inc/sub/c.svh"));
+        assert!(vfs.is_file(&a));
+        assert!(vfs.is_file(&root.join("inc/./../inc/a.svh")));
+        assert_eq!(vfs.is_file(&root.join("inc/x/../a.svh")), cfg!(windows));
+        assert!(!vfs.is_file(&root.join("inc")));
+        assert!(!vfs.is_file(&b));
+        assert!(!vfs.is_file(&c));
+        assert!(!vfs.is_file(&root.join("inc/a.svh/d.svh")));
+        // Listings are cached until a change is reported...
+        std::fs::write(&b, "").unwrap();
+        std::fs::create_dir_all(root.join("inc/sub")).unwrap();
+        std::fs::write(&c, "").unwrap();
+        assert!(!vfs.is_file(&b));
+        vfs.invalidate(&b);
+        assert!(vfs.is_file(&b));
+        // ... also for a file in a new directory, which its parent's listing did not have.
+        assert!(!vfs.is_file(&c));
+        vfs.invalidate(&c);
+        assert!(vfs.is_file(&c));
+        std::fs::remove_file(&a).unwrap();
+        vfs.invalidate(&a);
+        assert!(!vfs.is_file(&a));
+        // Or until the next build.
+        std::fs::remove_dir_all(root.join("inc/sub")).unwrap();
+        assert!(vfs.is_file(&c));
+        vfs.clear_dir_cache();
+        assert!(!vfs.is_file(&c));
+        // Editor contents count as a file.
+        vfs.set_overlay(&a, Arc::from(""));
+        assert!(vfs.is_file(&a));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
