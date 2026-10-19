@@ -142,8 +142,10 @@ folder and:
 - compiles UVM first when the sources import `uvm_pkg` or include `uvm_macros.svh` and the
   project does not contain UVM itself (needs `$UVM_HOME` or `dvicode.uvmHome`).
 
-Hidden directories and common build output directories (`work`, `INCA_libs`, `xcelium.d`,
-`csrc`, `simv.daidir`, `obj_dir`, `node_modules`, `target`, ...) are skipped. Auto-configuration
+Hidden directories, common build output directories (`work`, `INCA_libs`, `xcelium.d`,
+`csrc`, `simv.daidir`, `obj_dir`, `node_modules`, `target`, ...) and whatever the project's
+top-level `.gitignore` ignores are skipped (`!` exceptions in it are not supported). UVM from
+`$UVM_HOME` is still used when it lives in an ignored folder. Auto-configuration
 is a good start; a build file is better for projects with several copies of the same files or
 files that must not be compiled together.
 

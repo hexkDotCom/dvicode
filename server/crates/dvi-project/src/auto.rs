@@ -30,7 +30,40 @@ fn is_header(p: &Path) -> bool {
     )
 }
 
+/// The patterns of the project's top-level `.gitignore`: build output, scratch files and
+/// downloaded tools usually live there. Negations (`!pattern`) are not supported and skipped.
+struct GitIgnore(Vec<(String, bool)>);
+
+impl GitIgnore {
+    fn load(root: &Path) -> GitIgnore {
+        let text = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+        let mut pats = Vec::new();
+        for line in text.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') || l.starts_with('!') {
+                continue;
+            }
+            let dir_only = l.ends_with('/');
+            let l = l.trim_end_matches('/');
+            if l.is_empty() {
+                continue;
+            }
+            // A slash other than a trailing one anchors the pattern at the project folder.
+            let pat = if l.contains('/') { format!("/{}", l.trim_start_matches('/')) } else { l.to_string() };
+            pats.push((pat, dir_only));
+        }
+        GitIgnore(pats)
+    }
+
+    /// `rel`: path relative to the project folder.
+    fn ignores(&self, rel: &Path, is_dir: bool) -> bool {
+        self.0.iter().any(|(p, dir_only)| (is_dir || !dir_only) && crate::glob::matches_path(p, rel))
+    }
+}
+
 pub fn collect_sources(root: &Path) -> Vec<PathBuf> {
+    let ignore = GitIgnore::load(root);
+    let rel = |p: &Path| p.strip_prefix(root).map(|r| r.to_path_buf()).unwrap_or_default();
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -42,10 +75,10 @@ pub fn collect_sources(root: &Path) -> Vec<PathBuf> {
             let p = e.path();
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_dir() {
-                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) {
+                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) && !ignore.ignores(&rel(&p), true) {
                     stack.push(p);
                 }
-            } else if (ft.is_file() || ft.is_symlink()) && is_source(&p) {
+            } else if (ft.is_file() || ft.is_symlink()) && is_source(&p) && !ignore.ignores(&rel(&p), false) {
                 out.push(p);
                 if out.len() >= MAX_FILES {
                     return out;

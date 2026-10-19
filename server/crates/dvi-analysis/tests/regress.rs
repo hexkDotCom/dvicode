@@ -76,6 +76,42 @@ fn verilog_xl_protected_regions_are_skipped() {
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
 
+#[test]
+fn escaped_quotes_inside_macro_strings() {
+    // SVUnit's FAIL_UNLESS_STR_EQUAL builds its message with `"\"%s\" != \"%s\"`".
+    let (a, _) = project(
+        "macrostr",
+        &[(
+            "t.sv",
+            r#"`define CHECK_EQ(a,b) \
+  begin \
+    string sa; \
+    sa = a; \
+    if (sa.compare(b) != 0) $display($sformatf(`"\"%s\" != \"%s\" in a\\b`", sa, b)); \
+  end
+module t;
+  initial `CHECK_EQ("x", "y")
+  initial begin int n; n = 1; end
+endmodule
+"#,
+        )],
+    );
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn paste_before_punctuation_keeps_tokens_apart() {
+    // SVUnit's SVTEST ends with `task automatic SVTEST_``_NAME_``();`.
+    let (a, _) = project(
+        "pasteparen",
+        &[(
+            "t.sv",
+            "`define T(n) task automatic run_``n``(); \\\n  $display(`\"n`\");\nmodule t;\n  `T(a)\n  endtask\n  initial run_a();\nendmodule\n",
+        )],
+    );
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
 fn codes(a: &Analysis, file: &str) -> Vec<&'static str> {
     use dvi_syntax::SourceProvider;
     let f = a.project_files().into_iter().find(|f| a.vfs.path(*f).ends_with(file)).unwrap();

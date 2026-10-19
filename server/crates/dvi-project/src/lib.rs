@@ -824,6 +824,22 @@ mod tests {
     }
 
     #[test]
+    fn auto_skips_what_gitignore_ignores() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_gitignore");
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["build/uvm", "sub/scratch", "sub/deep/build"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join(".gitignore"), "# output\n/build/\nscratch/\n*_gen.sv\n!keep_gen.sv\n").unwrap();
+        for f in ["a.sv", "build/uvm/x.sv", "sub/scratch/y.sv", "sub/z_gen.sv", "sub/keep.sv", "sub/deep/build/w.sv"] {
+            std::fs::write(dir.join(f), "module m; endmodule\n").unwrap();
+        }
+        let files = auto::collect_sources(&dir);
+        // `/build/` is anchored: only the top-level one is ignored.
+        assert_eq!(files, vec![dir.join("a.sv"), dir.join("sub/deep/build/w.sv"), dir.join("sub/keep.sv")]);
+    }
+
+    #[test]
     fn non_ascii_paths_and_values() {
         let dir = std::env::temp_dir().join("dvicode_build_test_utf8");
         std::fs::create_dir_all(dir.join("rtl")).unwrap();

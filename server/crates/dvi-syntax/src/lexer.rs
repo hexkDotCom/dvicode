@@ -19,7 +19,7 @@ const PUNCTS: &[&str] = &[
 ];
 
 pub fn lex(text: &str, file: FileId) -> Vec<Token> {
-    let mut lx = Lexer { src: text.as_bytes(), text, pos: 0, file, out: Vec::new() };
+    let mut lx = Lexer { src: text.as_bytes(), text, pos: 0, file, out: Vec::new(), in_macro_str: false };
     lx.run();
     lx.out
 }
@@ -30,6 +30,8 @@ struct Lexer<'a> {
     pos: usize,
     file: FileId,
     out: Vec<Token>,
+    /// Between `` `" `` and the closing `` `" `` of a macro body on one logical line.
+    in_macro_str: bool,
 }
 
 #[inline]
@@ -63,6 +65,7 @@ impl<'a> Lexer<'a> {
             match c {
                 b'\n' => {
                     fl |= flags::NL_BEFORE;
+                    self.in_macro_str = false;
                     self.pos += 1;
                     continue;
                 }
@@ -134,6 +137,13 @@ impl<'a> Lexer<'a> {
             return;
         }
         match c {
+            b'\\' if self.in_macro_str && self.pos + 1 < self.src.len() => {
+                // An escape such as `\"` inside `` `"...`" ``: kept as written, so the macro builds
+                // the string `"\"%s\""` instead of an escaped identifier running to the next space.
+                let ch_len = self.text[start + 1..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+                self.pos += 1 + ch_len;
+                self.push(TokKind::Punct, start, SmolStr::new(self.slice(start)), fl);
+            }
             b'\\' => {
                 // Escaped identifier: up to the next whitespace.
                 self.pos += 1;
@@ -159,6 +169,7 @@ impl<'a> Lexer<'a> {
                     self.push(TokKind::MacroPaste, start, SmolStr::new_inline("``"), fl);
                 } else if n == b'"' {
                     self.pos += 2;
+                    self.in_macro_str = !self.in_macro_str;
                     self.push(TokKind::MacroQuote, start, SmolStr::new_inline("`\""), fl);
                 } else if n == b'\\' && self.peek(2) == b'`' && self.peek(3) == b'"' {
                     self.pos += 4;

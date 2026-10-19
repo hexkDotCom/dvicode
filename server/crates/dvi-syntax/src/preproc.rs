@@ -999,7 +999,13 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
         while let Some(t) = it.next() {
             if t.kind == TokKind::MacroPaste {
                 let next = it.next();
+                let word = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$');
                 match (merged.last_mut(), next) {
+                    // `name``()`: only words join; anything else just follows without a space.
+                    (Some(prev), Some(mut n)) if !(word(&prev.text) && word(&n.text)) => {
+                        n.flags &= !(flags::WS_BEFORE | flags::NL_BEFORE);
+                        merged.push(n);
+                    }
                     (Some(prev), Some(n)) => {
                         let text = format!("{}{}", prev.text, n.text);
                         if prev.kind != TokKind::Directive {
