@@ -128,6 +128,10 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         "writeFile" => {
             let p: WriteParam = serde_json::from_value(params).map_err(bad)?;
             let path = path_of(&p.path);
+            // Checked first: Windows reports "access denied" for a write to a directory.
+            if path.is_dir() {
+                return Err(FsError { code: "FileIsADirectory", message: path.display().to_string() });
+            }
             let exists = path.exists();
             if exists && !p.overwrite {
                 return Err(FsError { code: "FileExists", message: path.display().to_string() });
