@@ -25,14 +25,16 @@ on ARM, for example), use WSL or SSH, or build the engine there and set
 
 ## Making a release
 
-1. Update `version` in `client/package.json` and `server/Cargo.toml`, run `cargo update -w` in
+1. Run the pre-release checks ([development.md](development.md#before-a-release)); best on the
+   universal package of a Release workflow run started by hand from `main`.
+2. Update `version` in `client/package.json` and `server/Cargo.toml`, run `cargo update -w` in
    `server/` so that `server/Cargo.lock` has the new version too (the release builds use
    `--locked` and fail otherwise), and commit all three files.
-2. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
-3. The workflow checks that the tag matches the version, builds everything, runs the engine
+3. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
+4. The workflow checks that the tag matches the version, builds everything, runs the engine
    on the demo project on Windows, Linux and macOS, and creates a GitHub pre-release with the
    packages attached.
-4. Try the packages, then edit the release on GitHub to mark it as the latest release.
+5. Try the packages, then edit the release on GitHub to mark it as the latest release.
 
 To build packages without a release (for testing), run the workflow by hand from the
 **Actions** tab; the packages are attached to the run as the `vsix` artifact.
@@ -45,7 +47,7 @@ followed by the extension name `dvicode`. `publisher` and `name` in `client/pack
 must match them exactly, including case.
 
 Published version numbers cannot be reused, even after a version is removed, so publish only
-packages you have tried (step 4 of [Making a release](#making-a-release)).
+packages you have tried (step 5 of [Making a release](#making-a-release)).
 
 ### Open VSX
 

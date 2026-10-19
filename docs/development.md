@@ -97,6 +97,59 @@ node test/runTest.js 'dvicode://ssh+me%40host/home/me/demo' ssh          # files
 
 For the SSH variant, pass the SSH options through the environment, for example
 `DVICODE_E2E_SETTINGS='{"dvicode.server.sshArgs": ["-p", "2222", "-i", "/path/key"]}'`.
+Without `DVICODE_E2E_EXTENSION` the extension runs from `client/` and uses the engines in
+`client/server/<platform>/`; set it to the `extension` folder of an unpacked `.vsix` to test a
+package instead.
+
+## Before a release
+
+`scripts/prerelease.ps1` runs every check on a Windows machine with WSL and prints a summary;
+it exits with 1 when a step fails:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1
+powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloads\dvicode-0.1.1.vsix -Skip build,test
+```
+
+| Step | What it does |
+|---|---|
+| `build` | Native Windows engine (`cargo`), static Linux engine (`scripts/package.sh --server` in WSL), extension bundle |
+| `test` | Server tests natively on Windows and in WSL |
+| `unit` | The extension's unit tests (`npm run unit`) |
+| `corpus` | The real-world corpus regression (`scripts/corpus`), compared with its baseline |
+| `e2e-native` | End-to-end tests with the engine on Windows |
+| `e2e-wsl` | End-to-end tests in WSL: a Windows-drive folder, a `\\wsl.localhost` folder and a WSL-only `dvicode://` folder |
+| `e2e-ssh` | End-to-end tests over SSH, with deployment of the engine, against a second WSL distribution |
+
+Without `-Vsix` the end-to-end tests run the extension from the sources with the engines just
+built; with `-Vsix` they test a package, typically the universal `.vsix` of a Release workflow
+run (which also contains the release builds of the engines).
+
+One-time setup on the Windows machine:
+
+- Rust with the MSVC toolchain (`rustup-init.exe` from <https://rustup.rs>) and the Visual Studio
+  Build Tools with the C++ workload; Node.js; VS Code; Git.
+- A WSL distribution (default `Ubuntu`, option `-Distro`) with Rust (`rustup target add
+  x86_64-unknown-linux-musl`), Python 3 and `rsync`.
+- For `e2e-ssh`: a second WSL distribution (default `dvicode-remote`, option `-SshDistro`) that
+  plays the remote Linux host. Install OpenSSH server there, create the user (default `dv`), and
+  start a separate `sshd` on its own port with key login only, from `/etc/ssh/sshd_dvicode.conf`:
+
+  ```
+  Port 2222
+  ListenAddress 0.0.0.0
+  HostKey /etc/ssh/ssh_host_ed25519_key
+  PasswordAuthentication no
+  PubkeyAuthentication yes
+  AuthorizedKeysFile .ssh/authorized_keys
+  ```
+
+  Create a key pair for the test (`ssh-keygen -t ed25519 -N "" -f
+  %LOCALAPPDATA%\dvicode-test\e2e_key`), put the public key into `~dv/.ssh/authorized_keys` in that
+  distribution, and allow only your user to read the private key (`icacls ... /inheritance:r
+  /grant:r %USERNAME%:R`). The script starts that `sshd` itself. A distribution of another Linux
+  family than the first one (for example a RHEL clone next to Ubuntu) also tests the engine on a
+  second distribution.
 
 ## Releasing
 
