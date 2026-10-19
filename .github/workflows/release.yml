@@ -146,7 +146,8 @@ jobs:
           path: dist/*.vsix
           if-no-files-found: error
       - name: GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        # Only for the tag push: a run started by hand (to publish) finds the release there.
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/*.vsix --title "DVICode $GITHUB_REF_NAME" --generate-notes --prerelease
