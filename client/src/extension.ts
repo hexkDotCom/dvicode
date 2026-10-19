@@ -30,6 +30,9 @@ interface Status {
 let client: LanguageClient | undefined;
 let launch: Launch | undefined;
 let starting: Promise<LanguageClient> | undefined;
+let restarting: Promise<void> | undefined;
+/** File watcher of the current client; the language client does not dispose it. */
+let watcher: vscode.FileSystemWatcher | undefined;
 let output: LogChannel;
 let reporter: Reporter;
 let statusItem: vscode.StatusBarItem;
@@ -76,6 +79,8 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   }
   const mapper = launch.mapper;
   output.appendLine(`Server: ${launch.target} (mode ${launch.mode}); path mapping: ${mapper.describe()}`);
+  watcher?.dispose();
+  watcher = vscode.workspace.createFileSystemWatcher('**/*.{sv,svh,svi,svp,sva,v,vh,vp,build,f,F}');
   const clientOptions: LanguageClientOptions = {
     documentSelector: SV_SELECTOR,
     outputChannel: output,
@@ -84,7 +89,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     initializationOptions: settingsForServer(),
     synchronize: {
       configurationSection: 'dvicode',
-      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{sv,svh,svi,svp,sva,v,vh,vp,build,f,F}'),
+      fileEvents: watcher,
     },
     uriConverters: {
       code2Protocol: (uri) => mapper.toServer(uri),
@@ -139,17 +144,47 @@ function ensureClient(ctx: vscode.ExtensionContext): Promise<LanguageClient> {
   return starting;
 }
 
-async function restart(ctx: vscode.ExtensionContext): Promise<void> {
-  const c = client;
-  client = undefined;
-  if (c) {
-    try {
-      await c.stop(5000);
-    } catch {
-      // already gone
-    }
+/**
+ * Stops a client. The language client cannot stop while it is starting (after a crash it
+ * restarts itself), so a start in progress is waited for first.
+ */
+async function stopClient(c: LanguageClient): Promise<void> {
+  if (c.state === State.Starting) {
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(t);
+        sub.dispose();
+        resolve();
+      };
+      const sub = c.onDidChangeState((e) => {
+        if (e.newState !== State.Starting) {
+          done();
+        }
+      });
+      const t = setTimeout(done, 15000);
+    });
   }
-  await ensureClient(ctx);
+  try {
+    await c.stop(5000);
+  } catch {
+    // already gone
+  }
+}
+
+function restart(ctx: vscode.ExtensionContext): Promise<void> {
+  // One restart at a time; a second request while one runs joins it.
+  restarting ??= (async () => {
+    await starting?.catch(() => undefined);
+    const c = client;
+    client = undefined;
+    if (c) {
+      await stopClient(c);
+    }
+    await ensureClient(ctx);
+  })().finally(() => {
+    restarting = undefined;
+  });
+  return restarting;
 }
 
 function editorPosition(): { uri: string; position: vscode.Position } | undefined {
@@ -370,7 +405,14 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     }),
     vscode.window.registerTreeDataProvider('dvicode.designHierarchy', hierarchy),
     vscode.window.registerTreeDataProvider('dvicode.compiledFiles', compiled),
-    vscode.workspace.registerFileSystemProvider('dvicode', new RemoteFs(() => ensureClient(ctx)), { isCaseSensitive: true }),
+    vscode.workspace.registerFileSystemProvider(
+      'dvicode',
+      new RemoteFs(
+        () => ensureClient(ctx),
+        () => launch?.authority,
+      ),
+      { isCaseSensitive: true },
+    ),
     vscode.commands.registerCommand('dvicode.restartServer', () => restart(ctx)),
     vscode.commands.registerCommand('dvicode.rebuild', () => client?.sendRequest('dvicode/rebuild')),
     vscode.commands.registerCommand('dvicode.showStatus', showStatus),
@@ -421,6 +463,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
 
 export async function deactivate(): Promise<void> {
   if (client) {
-    await client.stop();
+    await stopClient(client);
   }
+  watcher?.dispose();
 }

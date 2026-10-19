@@ -54,7 +54,7 @@ rtl/top.sv                               anything else is a source file
 | `-f FILE`, `-F FILE`, `-file FILE` | Read more arguments from `FILE` (nested files are allowed, up to 32 levels). See [paths](#paths-wildcards-and-environment-variables) for how relative paths inside it resolve. |
 | `+incdir+DIR[+DIR...]`, `-incdir DIR` | Include directories for `` `include ``, searched in order after the directory of the including file. |
 | `+define+NAME[=VALUE][+NAME2...]`, `-define NAME[=VALUE]`, `-D NAME[=VALUE]` | Macros defined before the first file. A `+` starts a new define only when an identifier follows, so `+define+EXPR=A+1` keeps `A+1`. |
-| `+undefine+NAME` | Remove a macro defined earlier on the command line. |
+| `+undefine+NAME` | Remove a macro defined on the command line. Undefines apply after all the defines of the invocation, wherever they appear. |
 | `-y DIR` | Library directory: a module that is used but not defined is looked up as `DIR/<module><ext>`. |
 | `-v FILE` | Library file: compiled to provide modules that are used but not defined. |
 | `+libext+.v+.sv`, `-libext .v,.sv` | Extensions for `-y` lookups (default `.v`, `.sv`). |
@@ -73,11 +73,11 @@ value. Other `+options+` and `-options` are skipped.
 | Directive | Meaning |
 |---|---|
 | `+dvicode_init[+MODE]` | Start a new [invocation](#invocations): forget the macros, include directories and libraries of the previous one. `MODE` names the compiler being emulated and only changes how relative paths in `-f` files resolve. |
-| `+dvicode_init_auto[+MODE]` | Start an invocation that is [auto-configured](#auto-configuration). Files and directories listed after it are added to what auto-configuration finds. |
+| `+dvicode_init_auto[+MODE]` | Start an invocation that is [auto-configured](#auto-configuration). Files (and wildcards) listed after it are added to what auto-configuration finds. |
 | `+dvicode_setenv+NAME=VALUE` | Set an environment variable for the rest of the build file (and for nested `-f` files). `VALUE` may use other variables. |
 | `+dvicode_setenv_no_override+NAME=VALUE` | Same, unless `NAME` is already set (in the environment, in `dvicode.env`, or earlier in the file). |
 | `+dvicode_undefine+NAME` | Same as `+undefine+NAME`. |
-| `+dvicode_skip_compile+PATTERN[+PATTERN...]` | Do not compile top files whose path matches a [wildcard](#paths-wildcards-and-environment-variables) pattern. A pattern without a leading `/` matches anywhere in the path: `*/obsolete/*`, `**/*_old.sv`. |
+| `+dvicode_skip_compile+PATTERN[+PATTERN...]` | Do not compile top files whose path matches a [wildcard](#paths-wildcards-and-environment-variables) pattern. A pattern without a leading `/` matches anywhere in the path: `*/obsolete/*`, `**/*_old.sv`. A skipped file is still analyzed on its own while it is open in the editor. |
 | `+dvicode_compilation_root+DIR` | Directory that relative paths resolve against for the rest of this file and in `-f` files read from here on in the `questa.*`, `ius.*` and `xcelium.*` modes (default: the project folder). Lasts until the next `+dvicode_init`. |
 | `+dvicode_uvm_home+DIR` | Same as `-uvmhome DIR`. `+dvicode_uvmhome_override+DIR` is the same. |
 | `+dvicode_include_config+FILE` | Read another build file here (its relative paths resolve against its own directory). |
@@ -113,8 +113,9 @@ available. These are always set:
 | `DVICODE_PROJECT_LOC` | the project folder (as the server sees it) |
 | `DVICODE_PROJECT_PARENT_LOC` | its parent folder |
 
-An undefined variable in a path is reported and the entry is skipped; in a define value it is
-kept as written.
+An undefined `$NAME`, `${NAME}` or `$(NAME)` in a path is reported and the entry is skipped; an
+undefined `%NAME%` is kept as written. In a define value an undefined variable is kept as
+written.
 
 ## Invocations
 
@@ -144,8 +145,11 @@ folder and:
 
 Hidden directories, common build output directories (`work`, `INCA_libs`, `xcelium.d`,
 `csrc`, `simv.daidir`, `obj_dir`, `node_modules`, `target`, ...) and whatever the project's
-top-level `.gitignore` ignores are skipped (`!` exceptions in it are not supported). UVM from
-`$UVM_HOME` is still used when it lives in an ignored folder. Auto-configuration
+top-level `.gitignore` ignores are skipped. Its patterns may use `*`, `?` and `**`; `!`
+exceptions and `[...]` character classes are not supported. UVM from `$UVM_HOME` (or
+`dvicode.uvmHome` when `$UVM_HOME` is not set) is still used when it lives in an ignored folder.
+Symbolic links to directories are not followed (list such sources in a build file), and the scan
+stops after 50,000 files. Auto-configuration
 is a good start; a build file is better for projects with several copies of the same files or
 files that must not be compiled together.
 
@@ -159,8 +163,9 @@ Other `+NAME=VALUE` arguments are kept as simulation plusargs. DVICode uses:
 
 ## Problems in build files
 
-Missing files and directories, undefined environment variables in paths, unreadable `-f`
-files and unknown `+dvicode_` directives are shown as warnings on the line of the build file
+Missing files, directories and `-y`/`-v` libraries, undefined environment variables in paths,
+unreadable build and `-f` files, `-f` files that include themselves and unknown `+dvicode_`
+directives are shown as warnings on the line of the build file
 (in the Problems view and in the editor). The build continues with the remaining entries.
 
 ## Examples

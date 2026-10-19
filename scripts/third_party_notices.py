@@ -71,7 +71,7 @@ def rust_packages(targets):
 def rust_packages_for(target):
     meta = json.loads(
         subprocess.check_output(
-            ["cargo", "metadata", "--format-version", "1", "--filter-platform", target],
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target],
             cwd=ROOT / "server",
         )
     )

@@ -55,6 +55,8 @@ async function main() {
     fs.writeFileSync(ws, JSON.stringify({ folders: [{ uri: target }] }));
     folderArgs = [ws];
   }
+  // VS Code failing (a crash on shutdown, say) fails the run even if the tests reported success.
+  let runFailed = false;
   try {
     await runTests({
       vscodeExecutablePath: code,
@@ -73,6 +75,7 @@ async function main() {
       extensionTestsEnv: { DVICODE_E2E_RESULT: result, DVICODE_E2E_LABEL: label },
     });
   } catch (e) {
+    runFailed = true;
     console.error(`[${label}] VS Code test run failed: ${e}`);
   }
   if (fs.existsSync(result)) {
@@ -81,7 +84,7 @@ async function main() {
       console.log(`[${label}] ${t.ok ? 'PASS' : 'FAIL'} ${t.name}${t.detail ? ' - ' + t.detail : ''}`);
     }
     console.log(`[${label}] ${r.tests.filter((t) => t.ok).length}/${r.tests.length} passed; server: ${r.target}`);
-    process.exit(r.tests.every((t) => t.ok) ? 0 : 1);
+    process.exit(r.tests.every((t) => t.ok) && !runFailed ? 0 : 1);
   }
   console.error(`[${label}] no result file`);
   process.exit(1);

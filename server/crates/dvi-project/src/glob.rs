@@ -66,7 +66,7 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize) {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
+                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) {
                     walk(&p, rest, out, depth + 1);
                 }
             }
@@ -88,6 +88,18 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize) {
                 walk(&e.path(), &rest[1..], out, depth + 1);
             }
         }
+    }
+}
+
+/// A symbolic link in `dir` to `dir` itself or a directory above it (`a -> .`): following it
+/// with `**` would walk the same tree over and over.
+fn links_to_ancestor(dir: &Path, e: &std::fs::DirEntry) -> bool {
+    if !e.file_type().is_ok_and(|t| t.is_symlink()) {
+        return false;
+    }
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(e.path())) {
+        (Ok(d), Ok(t)) => d.starts_with(t),
+        _ => true,
     }
 }
 

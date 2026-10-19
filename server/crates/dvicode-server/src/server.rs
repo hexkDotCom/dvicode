@@ -21,7 +21,7 @@ type Res<T> = Result<T, Box<dyn Error + Sync + Send>>;
 
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// Build configuration file, relative to the workspace root or absolute.
@@ -32,6 +32,21 @@ pub struct Settings {
     pub uvm_home: Option<String>,
     /// Maximum number of problems published after a full build (0 = no limit).
     pub max_problems: Option<usize>,
+}
+
+/// For the log, which also goes into issue reports: variable names only, since `dvicode.env`
+/// may hold license keys or passwords.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut env: Vec<&str> = self.env.keys().map(|k| k.as_str()).collect();
+        env.sort_unstable();
+        f.debug_struct("Settings")
+            .field("build_file", &self.build_file)
+            .field("env", &env)
+            .field("uvm_home", &self.uvm_home)
+            .field("max_problems", &self.max_problems)
+            .finish()
+    }
 }
 
 fn capabilities() -> ServerCapabilities {
@@ -604,12 +619,21 @@ impl Server {
                         continue;
                     }
                     let id = self.vfs.invalidate(&path);
-                    if c.typ != FileChangeType::CHANGED && auto {
+                    // A new or deleted source changes what auto-configuration finds, which files
+                    // a build-file wildcard matches, and whether an `include resolves.
+                    if c.typ != FileChangeType::CHANGED && (auto || is_sv_file(&path)) {
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(1500));
                     }
                     if let Some(id) = id {
-                        if !self.vfs.has_overlay(id) && !self.analysis.units_of_file(id).is_empty() {
-                            self.note_change(id);
+                        if !self.vfs.has_overlay(id) {
+                            if self.building {
+                                // The running build may have read the old text, even of a file
+                                // the previous snapshot did not know: replay it afterwards.
+                                self.changed_during_build.insert(id);
+                            }
+                            if !self.analysis.units_of_file(id).is_empty() {
+                                self.note_change(id);
+                            }
                         }
                     }
                 }
@@ -838,6 +862,9 @@ impl Server {
             // Fails on purpose, to test how internal errors reach the user (docs/development.md).
             "dvicode/debug/fail" => self.spawn(req, |_, _: Value| -> Result<Value, String> { panic!("test failure requested by the client") }),
             "dvicode/rebuild" => {
+                // Rebuild Project reads every file again: some may have changed where no
+                // watcher reports it (outside the workspace, or on a remote host).
+                self.vfs.clear_disk_cache();
                 self.start_build();
                 self.send(Message::Response(Response::new_ok(req.id, Value::Null)));
             }
@@ -876,6 +903,13 @@ struct ExpandParams {
     text_document: TextDocumentIdentifier,
     position: Position,
     all: Option<bool>,
+}
+
+/// A SystemVerilog or Verilog source or header, by extension.
+fn is_sv_file(p: &std::path::Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "sv" | "svh" | "svi" | "svp" | "sva" | "v" | "vh" | "vp"))
 }
 
 fn pos(a: &Analysis, uri: &Url, p: Position) -> Option<(FileId, u32)> {

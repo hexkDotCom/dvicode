@@ -19,6 +19,14 @@ export interface MapperOptions {
   wslDistro?: string;
   /** Authority of dvicode:// URIs for files that only exist on the server. */
   remoteAuthority?: string;
+  /** `wsl$` or `wsl.localhost`, as the workspace folder spells it (default `wsl.localhost`). */
+  wslHost?: string;
+  /**
+   * Authority of dvicode:// URIs for server paths outside `localRoots` (SSH mode: UVM under
+   * /opt on the server, say). Paths inside them are shared with this machine and stay files.
+   */
+  fallbackAuthority?: string;
+  localRoots?: string[];
   mappings: PathMapping[];
 }
 
@@ -40,10 +48,19 @@ function norm(p: string): string {
   return s;
 }
 
-function startsWithPath(p: string, prefix: string): boolean {
-  const a = isWin ? p.toLowerCase() : p;
-  const b = isWin ? prefix.toLowerCase() : prefix;
+function startsWithPath(p: string, prefix: string, ignoreCase = isWin): boolean {
+  const a = ignoreCase ? p.toLowerCase() : p;
+  const b = ignoreCase ? prefix.toLowerCase() : prefix;
   return a === b || a.startsWith(b.endsWith('/') ? b : b + '/');
+}
+
+/** `prefix` followed by the rest of a path after it, with exactly one `/` between. */
+function joinPath(prefix: string, rest: string): string {
+  const r = rest.replace(/^\/+/, '');
+  if (!r) {
+    return prefix;
+  }
+  return `${prefix.replace(/\/+$/, '')}/${r}`;
 }
 
 /** WSL distribution and Linux path of a \\wsl$ / \\wsl.localhost URI. */
@@ -77,6 +94,8 @@ export function makeMapper(opts: MapperOptions): Mapper {
     .map((m) => ({ local: norm(m.local), remote: norm(m.remote) }))
     // Longest prefixes first.
     .sort((a, b) => b.local.length - a.local.length);
+  // The other direction picks the longest server prefix.
+  const reverse = [...mappings].sort((a, b) => b.remote.length - a.remote.length);
 
   const serverPath = (uri: vscode.Uri): string | undefined => {
     if (uri.scheme === 'dvicode') {
@@ -92,7 +111,7 @@ export function makeMapper(opts: MapperOptions): Mapper {
     const local = norm(uri.fsPath);
     for (const m of mappings) {
       if (startsWithPath(local, m.local)) {
-        return m.remote + local.slice(m.local.length);
+        return joinPath(m.remote, local.slice(m.local.length));
       }
     }
     if (opts.wslDistro !== undefined) {
@@ -119,22 +138,25 @@ export function makeMapper(opts: MapperOptions): Mapper {
         return uri;
       }
       const p = uri.path;
-      for (const m of mappings) {
-        if (p === m.remote || p.startsWith(m.remote + '/')) {
-          return vscode.Uri.file(m.local + p.slice(m.remote.length));
+      for (const m of reverse) {
+        if (startsWithPath(p, m.remote, false)) {
+          return vscode.Uri.file(joinPath(m.local, p.slice(m.remote.length)));
         }
       }
-      if (opts.wslDistro !== undefined) {
+      // In a dvicode:// workspace every server file stays a dvicode:// file, so replies name
+      // the same documents the editor has open.
+      if (opts.wslDistro !== undefined && !opts.remoteAuthority) {
         const d = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
         if (d && isWin) {
           return vscode.Uri.file(`${d[1]}:${d[2] || '/'}`);
         }
-        if (!opts.remoteAuthority) {
-          return vscode.Uri.from({ scheme: 'file', authority: 'wsl.localhost', path: `/${opts.wslDistro}${p}` });
-        }
+        return vscode.Uri.from({ scheme: 'file', authority: opts.wslHost || 'wsl.localhost', path: `/${opts.wslDistro}${p}` });
       }
       if (opts.remoteAuthority) {
         return vscode.Uri.from({ scheme: 'dvicode', authority: opts.remoteAuthority, path: p });
+      }
+      if (opts.fallbackAuthority && !(opts.localRoots ?? []).some((r) => startsWithPath(p, norm(r)))) {
+        return vscode.Uri.from({ scheme: 'dvicode', authority: opts.fallbackAuthority, path: p });
       }
       return uri;
     },

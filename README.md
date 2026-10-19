@@ -105,7 +105,7 @@ testbench; it needs no UVM installation.
 | `dvicode.server.wslDistro` | | WSL distribution (default: the folder's, else the default one) |
 | `dvicode.server.sshHost`, `.sshArgs`, `.sshCommand` | | SSH destination and options |
 | `dvicode.server.launchCommand` | `${SERVER_CMD}` | Wrapper for `custom`, e.g. `ssh farm bsub -Is ${SERVER_CMD}` |
-| `dvicode.server.tcpAddress`, `.tcpToken` | `127.0.0.1:7777` | Attach to `dvicode-server --listen HOST:PORT --token T` |
+| `dvicode.server.tcpAddress`, `.tcpToken` | `127.0.0.1:7777` | Attach to `DVICODE_TOKEN=T dvicode-server --listen HOST:PORT` |
 | `dvicode.server.path` | | Engine binary on the target (default: bundled, installed to `~/.dvicode/server/`) |
 | `dvicode.server.autoDeploy` | `true` | Install the bundled engine on WSL and SSH targets (Linux x64; for other hosts, build the engine there and set `dvicode.server.path`) |
 | `dvicode.pathMappings` | `[]` | Same folder seen by both sides, e.g. `[{ "local": "Z:\\proj", "remote": "/home/me/proj" }]` |
@@ -137,6 +137,14 @@ Auto-configuration adds UVM by itself when the sources use it.
 **Can it run next to another SystemVerilog extension?** Yes, but both will report problems
 and offer completions. If that is noisy, turn those features off in the other extension's
 settings, or disable it for the workspace.
+
+**Can one window hold several projects?** One window works with one engine and one project:
+the first workspace folder decides where the engine runs and which build file it uses. Open
+other projects, or folders on other hosts, in their own windows.
+
+**I changed files on the server outside VS Code; why don't the problems update?** Files of a
+**DVICode: Open Folder on the Server...** folder are not watched for changes made by other
+programs. Run **DVICode: Rebuild Project**, which reads every file again.
 
 **What doesn't it do yet?** See [Status](#status).
 

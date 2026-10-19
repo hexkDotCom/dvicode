@@ -316,8 +316,8 @@ impl<'a> Lexer<'a> {
             while self.pos < self.src.len() {
                 match self.peek(0) {
                     b'\\' => {
-                        // Escapes, including an escaped newline that continues the string.
-                        self.pos += 2;
+                        // Escapes, including an escaped newline (LF or CRLF) that continues the string.
+                        self.pos += if self.peek(1) == b'\r' && self.peek(2) == b'\n' { 3 } else { 2 };
                     }
                     b'"' => {
                         self.pos += 1;

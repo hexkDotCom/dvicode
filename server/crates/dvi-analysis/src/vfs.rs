@@ -252,6 +252,19 @@ impl Vfs {
         }
     }
 
+    /// Forgets the cached disk contents of every file (open editors' text stays), for a
+    /// rebuild that must also see changes made where the editor does not watch.
+    pub fn clear_disk_cache(&self) {
+        let mut g = self.inner.write().unwrap();
+        for e in g.entries.iter_mut() {
+            if e.disk_loaded {
+                e.disk = None;
+                e.disk_loaded = false;
+                e.version += 1;
+            }
+        }
+    }
+
     /// Forgets all directory listings, so that files created or deleted since are seen, also
     /// where the editor does not watch.
     pub fn clear_dir_cache(&self) {

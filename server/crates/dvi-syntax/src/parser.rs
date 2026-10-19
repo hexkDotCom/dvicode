@@ -23,6 +23,7 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         genblk: Vec::new(),
         kind_override: None,
         stmt_depth: 0,
+        expr_depth: 0,
         too_deep: false,
     };
     p.u.decls.push(Decl {
@@ -82,6 +83,8 @@ struct Parser<'t> {
     kind_override: Option<RefKind>,
     /// Statements being parsed inside each other.
     stmt_depth: u32,
+    /// Expressions being scanned inside each other (calls, selects).
+    expr_depth: u32,
     /// "Nested too deeply" was reported.
     too_deep: bool,
 }
@@ -89,6 +92,8 @@ struct Parser<'t> {
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
 /// broken) code would overflow the stack, which ends the process.
 const MAX_STMT_DEPTH: u32 = 1000;
+/// The same for expressions nested in calls and selects.
+const MAX_EXPR_DEPTH: u32 = 1000;
 
 struct TypeInfo {
     tref: TypeRef,
@@ -2957,6 +2962,27 @@ impl<'t> Parser<'t> {
 
     /// Scans an expression, recording reference chains, up to a stop token at depth 0.
     fn scan_expr(&mut self, stop: Stop, kind: RefKind) {
+        // Calls and selects nest through `chain` and back here.
+        self.expr_depth += 1;
+        self.scan_expr_inner(stop, kind);
+        self.expr_depth -= 1;
+    }
+
+    /// Whether expressions nest too deeply to follow references (once reported, the rest is
+    /// scanned as plain tokens, which needs no recursion).
+    fn expr_too_deep(&mut self) -> bool {
+        if self.expr_depth < MAX_EXPR_DEPTH {
+            return false;
+        }
+        if !self.too_deep {
+            self.too_deep = true;
+            let span = self.tok().span;
+            self.error(span, "Expressions are nested too deeply; names in them are not followed");
+        }
+        true
+    }
+
+    fn scan_expr_inner(&mut self, stop: Stop, kind: RefKind) {
         // Open brackets: b'(' b'[' b'{', or b'\'' for an assignment pattern `'{`.
         let mut stack: Vec<u8> = Vec::new();
         let mut last_chain: Option<RefId> = None;
@@ -3019,7 +3045,7 @@ impl<'t> Parser<'t> {
                 }
                 TokKind::Ident => {
                     // Member name in an assignment pattern: '{ a: 1 }
-                    if stack.last() == Some(&b'\'') && self.nth(1).is_punct(":") {
+                    if (stack.last() == Some(&b'\'') && self.nth(1).is_punct(":")) || self.expr_too_deep() {
                         self.bump();
                         continue;
                     }
@@ -3035,6 +3061,11 @@ impl<'t> Parser<'t> {
                     }
                     if stop.iff && k == "iff" && depth0 {
                         return;
+                    }
+                    if matches!(k, "this" | "super" | "local") && self.expr_depth >= MAX_EXPR_DEPTH {
+                        self.expr_too_deep();
+                        self.bump();
+                        continue;
                     }
                     match k {
                         "this" | "super" => {

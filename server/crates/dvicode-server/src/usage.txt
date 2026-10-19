@@ -2,9 +2,12 @@ dvicode-server - SystemVerilog language server (DVICode)
 
 USAGE:
   dvicode-server [--stdio]                      LSP over stdin/stdout (default)
-  dvicode-server --listen HOST:PORT [--token T] LSP over TCP for one client; the client must
-                                                send "DVICODE-TOKEN <T>\n" first. The token can
-                                                also come from $DVICODE_TOKEN.
+  dvicode-server --listen HOST:PORT             LSP over TCP for one client. With a token in
+                                                $DVICODE_TOKEN (or --token T, which other users
+                                                can see in the process list), the client must
+                                                send "DVICODE-TOKEN <T>\n" first. Without one,
+                                                anyone who can connect can read and write this
+                                                account's files: use a token on shared machines.
   dvicode-server check <dir> [--build FILE] [-q] [--max N]
                                                 Compile a project and print its problems.
                                                 Queries: --goto/--hover/--refs/--impl/--sig/

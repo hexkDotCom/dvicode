@@ -45,13 +45,18 @@ fn main() {
                 std::process::exit(check::run(&args[i + 1..]));
             }
             "--stdio" => {}
-            "--listen" => {
+            "--listen" | "--token" => {
+                // A missing value must not quietly turn authentication off.
+                let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--") && !v.is_empty()) else {
+                    eprintln!("dvicode-server: {} needs a value (see --help)", args[i]);
+                    std::process::exit(2);
+                };
+                if args[i] == "--listen" {
+                    listen = Some(v.clone());
+                } else {
+                    token = Some(v.clone());
+                }
                 i += 1;
-                listen = args.get(i).cloned();
-            }
-            "--token" => {
-                i += 1;
-                token = args.get(i).cloned();
             }
             "--log-level" => {
                 i += 1;

@@ -227,6 +227,11 @@ fn interface_fingerprint(u: &Unit) -> u64 {
         d.extends.as_ref().map(|t| t.text.as_str()).hash(&mut h);
         d.dir.map(|x| x as u8).hash(&mut h);
         d.detail.as_str().hash(&mut h);
+        // A package's imports and exports decide what `pkg::name` finds in other files.
+        for i in d.imports.iter().chain(&d.exports) {
+            (i.pkg.as_str(), i.item.as_deref()).hash(&mut h);
+        }
+        d.exports.len().hash(&mut h);
     }
     h.finish()
 }

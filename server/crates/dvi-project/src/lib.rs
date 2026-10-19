@@ -105,10 +105,14 @@ pub fn load_auto(root: &Path, env: &FxHashMap<String, String>) -> BuildConfig {
 pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>) -> BuildConfig {
     let bf = build_file.map(|p| p.to_path_buf()).or_else(|| find_build_file(root));
     match bf {
-        Some(bf) => {
-            let text = std::fs::read_to_string(&bf).unwrap_or_default();
-            parse_build(root, &bf, &text, env)
-        }
+        Some(bf) => match std::fs::read_to_string(&bf) {
+            Ok(text) => parse_build(root, &bf, &text, env),
+            Err(e) => {
+                let mut cfg = parse_build(root, &bf, "", env);
+                cfg.problems.push((bf.clone(), 0, format!("Cannot read the build file {}: {e}", bf.display())));
+                cfg
+            }
+        },
         None => BuildConfig {
             root: root.to_path_buf(),
             build_file: None,
@@ -128,6 +132,8 @@ pub fn parse_build(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<S
         base_change: None,
         uvm: None,
         depth: 0,
+        reading: vec![std::fs::canonicalize(build_file).unwrap_or_else(|_| build_file.to_path_buf())],
+        files_read: 0,
     };
     b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
     if let Some(p) = root.parent() {
@@ -148,7 +154,14 @@ struct Builder {
     /// UVM requested in the current invocation.
     uvm: Option<UvmRequest>,
     depth: usize,
+    /// The build file and the argument files being read, innermost last.
+    reading: Vec<PathBuf>,
+    /// Argument files read so far.
+    files_read: usize,
 }
+
+/// Argument files one build reads at most.
+const MAX_ARG_FILES: usize = 10_000;
 
 /// `-uvm`, `-uvmhome` or `+dvicode_uvm_home+` in the current invocation. Applied when the
 /// invocation ends, so a location given anywhere in it is used; the library goes where UVM was
@@ -274,6 +287,9 @@ impl Builder {
                     "-y" => {
                         if let Some(p) = next(&mut i) {
                             if let Some(p) = self.resolve(file, line, &p, &base) {
+                                if !p.is_dir() {
+                                    self.problem(file, line, format!("Library directory not found: {}", p.display()));
+                                }
                                 self.inv().lib_dirs.push(p);
                             }
                         }
@@ -281,6 +297,9 @@ impl Builder {
                     "-v" => {
                         if let Some(p) = next(&mut i) {
                             if let Some(p) = self.resolve(file, line, &p, &base) {
+                                if !p.is_file() {
+                                    self.problem(file, line, format!("Library file not found: {}", p.display()));
+                                }
                                 self.inv().lib_files.push(p);
                             }
                         }
@@ -499,14 +518,30 @@ impl Builder {
             self.problem(file, line, "Argument files nested too deeply".into());
             return;
         }
+        // Files that read each other, or one read many times over, would take forever.
+        if self.files_read >= MAX_ARG_FILES {
+            if self.files_read == MAX_ARG_FILES {
+                self.files_read += 1;
+                self.problem(file, line, format!("More than {MAX_ARG_FILES} argument files read; the rest are skipped"));
+            }
+            return;
+        }
         let Some(path) = self.resolve(file, line, p, base) else { return };
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if self.reading.contains(&key) {
+            self.problem(file, line, format!("Argument file {} includes itself", path.display()));
+            return;
+        }
+        self.files_read += 1;
         let Ok(text) = std::fs::read_to_string(&path) else {
             self.problem(file, line, format!("Cannot read argument file {}", path.display()));
             return;
         };
         let nested_base = if relative_to_file { path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.to_path_buf()) } else { self.comp_root.clone() };
         self.depth += 1;
+        self.reading.push(key);
         self.parse_text(&path, &text, nested_base);
+        self.reading.pop();
         self.depth -= 1;
     }
 
@@ -651,9 +686,12 @@ fn split_defines(s: &str) -> Vec<String> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        // `'` quotes only where a quote can start; `8'hFF` and `'hFF` are numbers.
+        let quote_start = c == '"'
+            || (c == '\'' && !(i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_')) && chars[i + 1..].contains(&'\''));
         match quote {
             Some(q) if c == q => quote = None,
-            None if c == '"' || c == '\'' => quote = Some(c),
+            None if quote_start => quote = Some(c),
             None if c == '+' => {
                 let next_ident = chars.get(i + 1).is_some_and(|n| n.is_ascii_alphabetic() || *n == '_');
                 if next_ident || cur.is_empty() {
@@ -673,6 +711,15 @@ fn split_defines(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// Whether the `'` at `b[i]` starts quoted text rather than a SystemVerilog number such as
+/// `8'hFF` or `'hFF`: not right after a letter or digit, and closed later on the same line.
+fn opens_quote(b: &[u8], i: usize) -> bool {
+    if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+        return false;
+    }
+    b[i + 1..].iter().take_while(|c| **c != b'\n').any(|c| *c == b'\'')
 }
 
 /// Splits an argument file into words, dropping `//`, `#`, `--` and `/* */` comments and
@@ -718,7 +765,7 @@ fn split_words(text: &str) -> Vec<Word> {
         let mut wb: Vec<u8> = Vec::new();
         while i < b.len() && !b[i].is_ascii_whitespace() {
             let c = b[i];
-            if c == b'"' || c == b'\'' {
+            if c == b'"' || (c == b'\'' && opens_quote(b, i)) {
                 // Quoted text is kept with its quotes for defines, without them for paths.
                 let q = c;
                 wb.push(c);
@@ -821,6 +868,39 @@ mod tests {
         let auto = load_auto(&dir, &env);
         assert!(auto.build_file.is_none() && auto.problems.is_empty());
         assert_eq!(auto.invocations[0].files, vec![dir.join("x.sv")]);
+    }
+
+    #[test]
+    fn based_literals_are_not_quotes() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_literals");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.sv"), "").unwrap();
+        std::fs::write(dir.join("b.sv"), "").unwrap();
+        let text = "+define+MASK=8'hFF+ALL='1\n-define W='hA\n+define+MSG='a b'\na.sv\nb.sv\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        let inv = &cfg.invocations[0];
+        assert_eq!(inv.files, vec![dir.join("a.sv"), dir.join("b.sv")]);
+        let d: Vec<_> = inv.defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
+        assert_eq!(d, vec!["MASK=8'hFF", "ALL='1", "W='hA", "MSG='a b'"]);
+    }
+
+    #[test]
+    fn argument_file_cycles_stop() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_fcycle");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two references per file: without cycle detection this branches 2^32 times.
+        std::fs::write(dir.join("loop.f"), "-f loop.f\n-f loop.f\n").unwrap();
+        std::fs::write(dir.join("x.build"), "-f loop.f\n-f x.build\n").unwrap();
+        let cfg = load(&dir, Some(&dir.join("x.build")), &FxHashMap::default());
+        assert!(cfg.problems.iter().filter(|p| p.2.contains("includes itself")).count() >= 3, "{:?}", cfg.problems);
+    }
+
+    #[test]
+    fn unreadable_build_file_is_reported() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = load(&dir, Some(&dir.join("nope.build")), &FxHashMap::default());
+        assert!(cfg.problems.iter().any(|p| p.2.contains("Cannot read the build file")), "{:?}", cfg.problems);
     }
 
     #[test]

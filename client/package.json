@@ -22,6 +22,23 @@
   "engines": {
     "vscode": "^1.85.0"
   },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode, DVICode ignores the workspace's settings for which engine to run and where (program path, launch command, SSH and TCP targets, extra arguments); your own user settings still apply.",
+      "restrictedConfigurations": [
+        "dvicode.server.mode",
+        "dvicode.server.path",
+        "dvicode.server.wslDistro",
+        "dvicode.server.sshHost",
+        "dvicode.server.sshArgs",
+        "dvicode.server.sshCommand",
+        "dvicode.server.launchCommand",
+        "dvicode.server.tcpAddress",
+        "dvicode.server.extraArgs"
+      ]
+    }
+  },
   "categories": [
     "Programming Languages",
     "Linters",
@@ -198,7 +215,7 @@
         "dvicode.server.tcpToken": {
           "type": "string",
           "default": "",
-          "description": "Token of the server started with `--token` (tcp mode)."
+          "description": "Token of the server (tcp mode): the value of `DVICODE_TOKEN` (or `--token`) the server was started with."
         },
         "dvicode.server.logLevel": {
           "type": "string",
@@ -447,11 +464,11 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
+    "vscode:prepublish": "npm run build && node check-package.mjs",
     "build": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node out/test/runTest.js",
+    "test": "node test/runTest.js",
     "package": "vsce package --no-dependencies"
   },
   "dependencies": {

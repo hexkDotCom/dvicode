@@ -8,3 +8,4 @@ tsconfig.json
 esbuild.mjs
 .vscode/**
 test/**
+check-package.mjs

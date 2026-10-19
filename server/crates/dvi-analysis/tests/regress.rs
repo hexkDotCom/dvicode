@@ -112,6 +112,28 @@ fn paste_before_punctuation_keeps_tokens_apart() {
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
 
+#[test]
+fn self_referencing_base_class_does_not_crash() {
+    let (a, _) = project("selfbase", &[("t.sv", "class C extends C::T;\nendclass\nmodule m;\n  C c;\n  initial c.x = 1;\nendmodule\n")]);
+    // Problems are expected; reaching here without a stack overflow is the point.
+    let _ = problems(&a);
+}
+
+#[test]
+fn deeply_nested_calls_do_not_crash() {
+    let n = 50_000;
+    let text = format!("module m;\n  function int f(int a); return a; endfunction\n  int x = {}1{};\nendmodule\n", "f(".repeat(n), ")".repeat(n));
+    let (a, _) = project("deepcalls", &[("t.sv", &text)]);
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("nested too deeply")), "{p:?}");
+}
+
+#[test]
+fn crlf_string_continuation() {
+    let (a, _) = project("crlfstr", &[("t.sv", "module m;\r\n  string s = \"abc \\\r\ndef\";\r\nendmodule\r\n")]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
 fn codes(a: &Analysis, file: &str) -> Vec<&'static str> {
     use dvi_syntax::SourceProvider;
     let f = a.project_files().into_iter().find(|f| a.vfs.path(*f).ends_with(file)).unwrap();

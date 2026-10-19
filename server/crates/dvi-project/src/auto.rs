@@ -31,6 +31,11 @@ fn is_header(p: &Path) -> bool {
     )
 }
 
+/// A file, or a link to one: a link to a device (`x.sv -> /dev/zero`) would be read forever.
+fn is_regular_file(ft: &std::fs::FileType, p: &Path) -> bool {
+    ft.is_file() || (ft.is_symlink() && std::fs::metadata(p).is_ok_and(|m| m.is_file()))
+}
+
 /// The patterns of the project's top-level `.gitignore`: build output, scratch files and
 /// downloaded tools usually live there. Negations (`!pattern`) are not supported and skipped.
 struct GitIgnore(Vec<(String, bool)>);
@@ -79,7 +84,7 @@ pub fn collect_sources(root: &Path) -> Vec<PathBuf> {
                 if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) && !ignore.ignores(&rel(&p), true) {
                     stack.push(p);
                 }
-            } else if (ft.is_file() || ft.is_symlink()) && is_source(&p) && !ignore.ignores(&rel(&p), false) {
+            } else if is_regular_file(&ft, &p) && is_source(&p) && !ignore.ignores(&rel(&p), false) {
                 out.push(p);
                 if out.len() >= MAX_FILES {
                     return out;
@@ -246,12 +251,14 @@ pub fn auto_config(root: &Path, env: &FxHashMap<String, String>) -> Invocation {
     // UVM used but not part of the project.
     let uses_uvm = top_uses.values().any(|u| u.contains("uvm_pkg")) || included.contains("uvm_macros.svh");
     if uses_uvm && !pkg_file.contains_key("uvm_pkg") {
+        // The same order as `-uvm`: UVM_HOME wins over the dvicode.uvmHome setting.
         let home = env
             .get("UVM_HOME")
             .cloned()
-            .or_else(|| env.get("DVICODE_UVM_HOME").cloned())
             .or_else(|| std::env::var("UVM_HOME").ok())
-            .or_else(|| std::env::var("DVICODE_UVM_HOME").ok());
+            .or_else(|| env.get("DVICODE_UVM_HOME").cloned())
+            .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
+            .filter(|h| !h.is_empty());
         if let Some(h) = home {
             let h = PathBuf::from(h);
             let src = if h.join("src").is_dir() { h.join("src") } else { h };

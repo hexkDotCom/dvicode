@@ -21,6 +21,8 @@ export interface Launch {
   mapper: Mapper;
   /** Human-readable target, e.g. "WSL Ubuntu" or "ssh build01". */
   target: string;
+  /** The dvicode:// authority whose files this server can read and write (undefined: this machine). */
+  authority?: string;
 }
 
 interface Cfg {
@@ -136,7 +138,7 @@ async function prepareWsl(ctx: vscode.ExtensionContext, cfg: Cfg, distro: string
   }
   const ver = serverVersion(ctx);
   const target = `$HOME/.dvicode/server/${ver}/dvicode-server`;
-  const check = await run('wsl.exe', ['-d', distro, '-e', 'sh', '-c', `test -x "${target}" && echo ok`]);
+  const check = await run('wsl.exe', ['-d', distro, '-e', 'sh', '-c', `test -x "${target}" && test -O "${target}" && echo ok`]);
   if (clean(check.stdout) === 'ok') {
     return target;
   }
@@ -148,7 +150,7 @@ async function prepareWsl(ctx: vscode.ExtensionContext, cfg: Cfg, distro: string
     throw new Error(`the extension has no bundled Linux server (${src}); set dvicode.server.path`);
   }
   out.appendLine(`Installing dvicode-server ${ver} into WSL '${distro}'...`);
-  const script = `set -e; d="$HOME/.dvicode/server/${ver}"; mkdir -p "$d"; cp "$(wslpath -u "$1")" "$d/dvicode-server.tmp"; chmod +x "$d/dvicode-server.tmp"; mv "$d/dvicode-server.tmp" "$d/dvicode-server"; echo ok`;
+  const script = `set -e; umask 077; d="$HOME/.dvicode/server/${ver}"; mkdir -p "$d"; cp "$(wslpath -u "$1")" "$d/dvicode-server.tmp.$$"; chmod +x "$d/dvicode-server.tmp.$$"; mv "$d/dvicode-server.tmp.$$" "$d/dvicode-server"; echo ok`;
   const r = await run('wsl.exe', ['-d', distro, '-e', 'sh', '-c', script, 'sh', src]);
   if (clean(r.stdout) !== 'ok') {
     throw new Error(`could not install the server into WSL '${distro}': ${clean(r.stderr)}`);
@@ -166,7 +168,7 @@ async function prepareSsh(ctx: vscode.ExtensionContext, cfg: Cfg, host: string, 
   }
   const ver = serverVersion(ctx);
   const target = `$HOME/.dvicode/server/${ver}/dvicode-server`;
-  const check = await run(cfg.sshCommand, [...sshBase(cfg), host, `test -x "${target}" && echo ok || uname -sm`]);
+  const check = await run(cfg.sshCommand, [...sshBase(cfg), host, `test -x "${target}" && test -O "${target}" && echo ok || uname -sm`]);
   if (check.code === 255 || check.code === -1) {
     throw new Error(`ssh ${host} failed: ${check.stderr.trim()} (DVICode needs key or agent authentication; BatchMode is on)`);
   }
@@ -182,7 +184,7 @@ async function prepareSsh(ctx: vscode.ExtensionContext, cfg: Cfg, host: string, 
   }
   const src = bundledServer(ctx, 'linux', 'x64');
   out.appendLine(`Installing dvicode-server ${ver} on ${host}...`);
-  const script = `set -e; d="$HOME/.dvicode/server/${ver}"; mkdir -p "$d"; cat > "$d/dvicode-server.tmp"; chmod +x "$d/dvicode-server.tmp"; mv "$d/dvicode-server.tmp" "$d/dvicode-server"; echo ok`;
+  const script = `set -e; umask 077; d="$HOME/.dvicode/server/${ver}"; mkdir -p "$d"; cat > "$d/dvicode-server.tmp.$$"; chmod +x "$d/dvicode-server.tmp.$$"; mv "$d/dvicode-server.tmp.$$" "$d/dvicode-server"; echo ok`;
   const r = await run(cfg.sshCommand, [...sshBase(cfg), host, `sh -c ${shQuote(script)}`], fs.readFileSync(src), 300000);
   if (r.stdout.trim() !== 'ok') {
     throw new Error(`could not install the server on ${host}: ${r.stderr.trim()}`);
@@ -234,7 +236,9 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
   const wslFolder = folder ? parseWslUri(folder) : undefined;
   if (mode === 'auto') {
     const localBin = bundledServer(ctx, process.platform, process.arch);
-    if (process.platform === 'win32' && (wslFolder || !fs.existsSync(localBin))) {
+    // An explicit dvicode.server.path that exists here is a local engine, bundled or not.
+    const localPath = !!cfg.path && fs.existsSync(cfg.path);
+    if (process.platform === 'win32' && (wslFolder || (!fs.existsSync(localBin) && !localPath))) {
       mode = 'wsl';
     } else if (fs.existsSync(localBin) || cfg.path) {
       mode = 'local';
@@ -273,7 +277,13 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
         // A login shell gives the server the user's environment (UVM_HOME, ...).
         args: ['-d', wslDistro, '-e', 'bash', '-lc', `exec "${serverPath}" ${args}`],
       };
-      return { mode, serverOptions: exe, mapper: makeMapperFor(cfg, wslDistro, remoteAuthority), target: `WSL ${wslDistro}` };
+      return {
+        mode,
+        serverOptions: exe,
+        mapper: makeMapperFor(cfg, wslDistro, remoteAuthority, wslFolder ? folder?.authority : undefined),
+        target: `WSL ${wslDistro}`,
+        authority: remoteAuthority ?? `wsl+${wslDistro}`,
+      };
     }
     case 'ssh': {
       if (!sshHost) {
@@ -285,7 +295,17 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
         command: cfg.sshCommand,
         args: [...sshBase(cfg), sshHost, `bash -lc ${shQuote(`exec "${serverPath}" ${args}`)}`],
       };
-      return { mode, serverOptions: exe, mapper: makeMapperFor(cfg, undefined, remoteAuthority), target: `ssh ${sshHost}` };
+      const authority = remoteAuthority ?? `ssh+${sshHost}`;
+      // Server files outside dvicode.pathMappings and outside the (shared) workspace folders,
+      // such as UVM under /opt, open as dvicode:// files.
+      const mapper = remoteAuthority
+        ? makeMapperFor(cfg, undefined, remoteAuthority)
+        : makeMapper({
+            mappings: cfg.pathMappings,
+            fallbackAuthority: authority,
+            localRoots: (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file').map((f) => f.uri.fsPath),
+          });
+      return { mode, serverOptions: exe, mapper, target: `ssh ${sshHost}`, authority };
     }
     case 'tcp':
       return {
@@ -293,6 +313,7 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
         serverOptions: tcpStream(tcpAddress, cfg.tcpToken),
         mapper: makeMapperFor(cfg, undefined, remoteAuthority),
         target: `tcp ${tcpAddress}`,
+        authority: remoteAuthority ?? `tcp+${tcpAddress}`,
       };
     case 'custom': {
       const serverCmd = [cfg.path || 'dvicode-server', ...serverArgs(cfg)].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
@@ -304,9 +325,9 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
   throw new Error(`unknown dvicode.server.mode '${mode}'`);
 }
 
-function makeMapperFor(cfg: Cfg, wslDistro: string | undefined, remoteAuthority: string | undefined): Mapper {
+function makeMapperFor(cfg: Cfg, wslDistro: string | undefined, remoteAuthority: string | undefined, wslHost?: string): Mapper {
   if (wslDistro === undefined && !remoteAuthority && cfg.pathMappings.length === 0) {
     return identityMapper();
   }
-  return makeMapper({ wslDistro, remoteAuthority, mappings: cfg.pathMappings });
+  return makeMapper({ wslDistro, remoteAuthority, wslHost, mappings: cfg.pathMappings });
 }

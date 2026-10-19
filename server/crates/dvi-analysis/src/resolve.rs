@@ -6,6 +6,32 @@ use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefI
 
 const MAX_DEPTH: usize = 32;
 
+thread_local! {
+    /// How many `class_base` calls are on this thread's stack.
+    static BASE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Limits nested `class_base` calls (a base resolved through the class itself).
+struct BaseGuard;
+
+impl BaseGuard {
+    fn enter() -> Option<BaseGuard> {
+        BASE_DEPTH.with(|d| {
+            if d.get() >= MAX_DEPTH {
+                return None;
+            }
+            d.set(d.get() + 1);
+            Some(BaseGuard)
+        })
+    }
+}
+
+impl Drop for BaseGuard {
+    fn drop(&mut self) {
+        BASE_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
 /// Built-in methods of every class.
 pub const CLASS_BUILTINS: &[&str] = &[
     "randomize", "srandom", "get_randstate", "set_randstate", "pre_randomize", "post_randomize",
@@ -220,6 +246,9 @@ impl Analysis {
 
     /// The base class (`extends`) of a class, through typedefs.
     pub fn class_base(&self, class: DeclRef) -> Option<DeclRef> {
+        // `class C extends C::T` needs C's base to resolve its own base: give up instead of
+        // recursing until the stack overflows.
+        let _guard = BaseGuard::enter()?;
         let d = self.decl(class);
         let ext = d.extends.as_ref()?;
         let b = self.resolve_typeref(class.unit, ext)?;

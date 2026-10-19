@@ -29,7 +29,12 @@ stdio as the channel:
 | `wsl`   | `wsl.exe -d <distro> -e bash -lc 'exec "<server>" --stdio ...'` |
 | `ssh`   | `ssh [opts] -T -o BatchMode=yes <host> "bash -lc 'exec \"<server>\" --stdio ...'"` |
 | `custom`| `dvicode.server.launchCommand` with `${SERVER_CMD}` inside  |
-| `tcp`   | no spawn; connect to `host:port` of `dvicode-server --listen` (token auth) |
+| `tcp`   | no spawn; connect to `host:port` of `dvicode-server --listen` (token optional) |
+
+In `tcp` mode the engine authenticates the client only when it was started with a token
+(`DVICODE_TOKEN=T`, or `--token T`, which other users can see in the process list). Without
+one, any program that can reach the port can connect, and with it read and write every file
+the engine's account can: use a token, and listen on `127.0.0.1` unless you need more.
 
 The login shell (`bash -lc`) gives the engine the user's environment (`UVM_HOME`, tool
 paths). `ssh` and `wsl.exe` already carry stdio, so the language server needs no port of its
@@ -46,7 +51,14 @@ the bundled Linux x64 engine to `~/.dvicode/server/<version>-<hash>/` on the tar
 2. **Remote files** (`dvicode://` scheme). The workspace folder exists only on the server.
    The extension registers a `FileSystemProvider` backed by `dvicode/fs/*` requests to the
    server (stat, readDirectory, readFile, writeFile, delete, rename, createDirectory), so
-   VS Code edits remote files directly; the server sees plain `file://` paths.
+   VS Code edits remote files directly; the server sees plain `file://` paths. Changes made
+   on the server by other programs (a generator, another editor) are not watched: run
+   **DVICode: Rebuild Project** after them, which reads every file again.
+
+One window works with one engine and one project: the first workspace folder decides where the
+engine runs and which build file it uses. Further folders are not configured on their own; their
+files are analyzed with the first folder's configuration when opened, and a `dvicode://`
+folder of another host cannot be opened in the same window.
 
 ## Server crates
 

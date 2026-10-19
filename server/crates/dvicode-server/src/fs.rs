@@ -22,6 +22,8 @@ fn err(e: std::io::Error, path: &Path) -> FsError {
         NotFound => "FileNotFound",
         AlreadyExists => "FileExists",
         PermissionDenied => "NoPermissions",
+        IsADirectory => "FileIsADirectory",
+        NotADirectory => "FileNotADirectory",
         _ => "Unavailable",
     };
     FsError { code, message: format!("{}: {e}", path.display()) }
@@ -137,7 +139,7 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
                 .decode(p.content.as_bytes())
                 .map_err(|e| FsError { code: "Unavailable", message: format!("bad content: {e}") })?;
             std::fs::write(&path, data).map_err(|e| err(e, &path))?;
-            Ok(Value::Null)
+            Ok(json!({ "created": !exists }))
         }
         "createDirectory" => {
             let p: PathParam = serde_json::from_value(params).map_err(bad)?;
@@ -179,4 +181,64 @@ pub fn hostname() -> String {
         .or_else(|_| std::env::var("HOSTNAME"))
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "localhost".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dvicode-fs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn call(op: &str, params: Value) -> Result<Value, &'static str> {
+        handle(op, params).map_err(|e| e.code)
+    }
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(s)
+    }
+
+    #[test]
+    fn write_honours_create_and_overwrite() {
+        let d = dir("write");
+        let f = d.join("a.sv").display().to_string();
+        let w = |create: bool, overwrite: bool| call("writeFile", json!({ "path": f, "content": b64("x"), "create": create, "overwrite": overwrite }));
+        assert_eq!(w(false, true), Err("FileNotFound"));
+        assert_eq!(w(true, false), Ok(json!({ "created": true })));
+        assert_eq!(w(true, false), Err("FileExists"));
+        assert_eq!(w(false, true), Ok(json!({ "created": false })));
+        let r = call("readFile", json!({ "path": f })).unwrap();
+        assert_eq!(r["content"], b64("x"));
+    }
+
+    #[test]
+    fn rename_and_delete() {
+        let d = dir("rename");
+        let (a, b) = (d.join("a.sv"), d.join("b.sv"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let r = |overwrite: bool| call("rename", json!({ "from": a.display().to_string(), "to": b.display().to_string(), "overwrite": overwrite }));
+        assert_eq!(r(false), Err("FileExists"));
+        assert_eq!(r(true), Ok(Value::Null));
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "a");
+
+        let sub = d.join("sub");
+        call("createDirectory", json!({ "path": sub.display().to_string() })).unwrap();
+        std::fs::write(sub.join("c.sv"), "c").unwrap();
+        assert!(call("delete", json!({ "path": sub.display().to_string(), "recursive": false })).is_err());
+        assert_eq!(call("delete", json!({ "path": sub.display().to_string(), "recursive": true })), Ok(Value::Null));
+        assert!(!sub.exists());
+    }
+
+    #[test]
+    fn type_errors_have_their_codes() {
+        let d = dir("types");
+        std::fs::write(d.join("f.sv"), "").unwrap();
+        assert_eq!(call("readFile", json!({ "path": d.display().to_string() })), Err("FileIsADirectory"));
+        assert_eq!(call("readDirectory", json!({ "path": d.join("f.sv").display().to_string() })), Err("FileNotADirectory"));
+    }
 }

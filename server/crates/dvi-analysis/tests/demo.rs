@@ -29,8 +29,12 @@ fn at(a: &Analysis, rel: &str, line: u32, needle: &str) -> (u32, u32) {
 }
 
 fn loc_str(a: &Analysis, l: &lsp_types::Location) -> String {
-    let p = PathBuf::from(l.uri.path());
-    let rel = p.strip_prefix(demo_root()).map(|r| r.display().to_string()).unwrap_or_else(|_| p.display().to_string());
+    // A file URL, not a path: spaces are escaped and Windows drives look different.
+    let p = l.uri.to_file_path().unwrap_or_else(|_| PathBuf::from(l.uri.path()));
+    let rel = p
+        .strip_prefix(demo_root())
+        .map(|r| r.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|_| p.display().to_string());
     let _ = a;
     format!("{}:{}", rel, l.range.start.line + 1)
 }

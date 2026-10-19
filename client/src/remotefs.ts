@@ -8,10 +8,26 @@ export class RemoteFs implements vscode.FileSystemProvider {
   private readonly emitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
   readonly onDidChangeFile = this.emitter.event;
 
-  constructor(private readonly client: () => Promise<LanguageClient>) {}
+  /**
+   * `client` starts the language server if needed; `authority` is the dvicode:// authority that
+   * server serves (`wsl+…`, `ssh+…`, `tcp+…`), or undefined when it runs on this machine.
+   */
+  constructor(
+    private readonly client: () => Promise<LanguageClient>,
+    private readonly authority: () => string | undefined,
+  ) {}
 
-  private async call<T>(op: string, params: object, uri: vscode.Uri): Promise<T> {
+  private async call<T>(op: string, params: object, uri: vscode.Uri, other?: vscode.Uri): Promise<T> {
     const c = await this.client();
+    // One server per window: a folder of another host must not be read or written through it.
+    const served = this.authority();
+    for (const u of other ? [uri, other] : [uri]) {
+      if (!served || served.toLowerCase() !== u.authority.toLowerCase()) {
+        throw vscode.FileSystemError.Unavailable(
+          `DVICode is connected to ${served ? `dvicode://${served}` : 'this machine'}, not dvicode://${u.authority}; open folders of one server per window`,
+        );
+      }
+    }
     try {
       return await c.sendRequest<T>(`dvicode/fs/${op}`, params);
     } catch (e: unknown) {
@@ -59,8 +75,13 @@ export class RemoteFs implements vscode.FileSystemProvider {
   }
 
   async writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean; overwrite: boolean }): Promise<void> {
-    await this.call('writeFile', { path: uri.path, content: Buffer.from(content).toString('base64'), create: options.create, overwrite: options.overwrite }, uri);
-    this.emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+    const r = await this.call<{ created?: boolean } | null>(
+      'writeFile',
+      { path: uri.path, content: Buffer.from(content).toString('base64'), create: options.create, overwrite: options.overwrite },
+      uri,
+    );
+    // A new file must be reported as created: the server looks for new sources on that event.
+    this.emitter.fire([{ type: r?.created ? vscode.FileChangeType.Created : vscode.FileChangeType.Changed, uri }]);
   }
 
   async createDirectory(uri: vscode.Uri): Promise<void> {
@@ -74,7 +95,7 @@ export class RemoteFs implements vscode.FileSystemProvider {
   }
 
   async rename(oldUri: vscode.Uri, newUri: vscode.Uri, options: { overwrite: boolean }): Promise<void> {
-    await this.call('rename', { from: oldUri.path, to: newUri.path, overwrite: options.overwrite }, oldUri);
+    await this.call('rename', { from: oldUri.path, to: newUri.path, overwrite: options.overwrite }, oldUri, newUri);
     this.emitter.fire([
       { type: vscode.FileChangeType.Deleted, uri: oldUri },
       { type: vscode.FileChangeType.Created, uri: newUri },

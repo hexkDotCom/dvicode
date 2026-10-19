@@ -59,6 +59,11 @@ jobs:
           cat smoke.txt
           # Build-file warnings (unresolved paths) count as failures too.
           ! grep -q "build config:" smoke.txt
+      - name: Tests
+        # Packaging needs every engine job, so a failing test stops the release.
+        if: matrix.platform == 'linux-x64'
+        working-directory: server
+        run: cargo test --locked
       - uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.platform }}
@@ -83,11 +88,15 @@ jobs:
         with:
           pattern: engine-*
           path: engines
-      - name: Check the tag matches the extension version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Check the versions match
         run: |
           version=$(node -p "require('./client/package.json').version")
-          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+          engine=$(cargo metadata --locked --no-deps --format-version 1 --manifest-path server/Cargo.toml \
+            | node -p "JSON.parse(require('fs').readFileSync(0)).packages.find(p => p.name === 'dvicode-server').version")
+          test "$engine" = "$version" || { echo "engine $engine != extension $version"; exit 1; }
+          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+          fi
       - name: Build the extension
         working-directory: client
         run: |
