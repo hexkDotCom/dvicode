@@ -33,7 +33,17 @@ function findCode() {
     '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
     '/usr/share/code/code',
   ];
-  return candidates.find((c) => c && fs.existsSync(c));
+  const found = candidates.find((c) => c && fs.existsSync(macBinary(c)));
+  return found && macBinary(found);
+}
+
+/**
+ * Newer VS Code names its macOS program Contents/MacOS/Code; @vscode/test-electron still points
+ * at Contents/MacOS/Electron.
+ */
+function macBinary(p) {
+  const code = p.replace(/\/Contents\/MacOS\/Electron$/, '/Contents/MacOS/Code');
+  return code !== p && !fs.existsSync(p) && fs.existsSync(code) ? code : p;
 }
 
 /** Runs a shell script on the remote machine of a remote window; resolves with its stdout. */
@@ -164,6 +174,8 @@ async function main() {
     fs.writeFileSync(ws, JSON.stringify({ folders: [{ uri: folderUri }], ...(remote ? { remoteAuthority: remote } : {}) }));
     folderArgs = [ws];
   }
+  // Downloaded here rather than by runTests, whose own path to the macOS program is outdated.
+  code = macBinary(code || (await downloadAndUnzipVSCode()));
   // VS Code failing (a crash on shutdown, say) fails the run even if the tests reported success.
   let runFailed = false;
   try {
