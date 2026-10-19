@@ -9,6 +9,7 @@
 mod check;
 mod crash;
 mod fs;
+mod fuzz;
 mod logger;
 mod server;
 mod transport;

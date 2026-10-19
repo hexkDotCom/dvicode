@@ -101,6 +101,21 @@ impl MacroTable {
         self.0.is_empty()
     }
 
+    /// Identity of the shared map: tables with the same identity are equal.
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as *const () as usize
+    }
+
+    /// A copy in which the definitions found in `moved` (keyed by the address of the old
+    /// definition, see [`def_identity`]) are replaced; `None` when the table has none of them.
+    pub fn replaced(&self, moved: &FxHashMap<usize, Arc<MacroDef>>) -> Option<MacroTable> {
+        if !self.0.values().any(|d| moved.contains_key(&def_identity(d))) {
+            return None;
+        }
+        let map = self.0.iter().map(|(k, d)| (k.clone(), moved.get(&def_identity(d)).unwrap_or(d).clone())).collect();
+        Some(MacroTable(Arc::new(map)))
+    }
+
     /// Same macro names with the same parameters and bodies (locations may differ): files
     /// compiled after a table expand identically with either.
     pub fn same_definitions(&self, other: &MacroTable) -> bool {
@@ -112,6 +127,11 @@ impl MacroTable {
                 other.0.get(k).is_some_and(|b| Arc::ptr_eq(a, b) || (a.body_text == b.body_text && a.signature() == b.signature()))
             })
     }
+}
+
+/// Identity of a definition (its address), for maps from old to new definitions.
+pub fn def_identity(d: &Arc<MacroDef>) -> usize {
+    Arc::as_ptr(d) as usize
 }
 
 /// A `` `define `` given as `NAME` or `NAME=value`.

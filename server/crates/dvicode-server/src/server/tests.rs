@@ -278,6 +278,79 @@ fn closing_a_file_outside_the_build_clears_its_problems() {
 }
 
 #[test]
+fn closing_a_file_outside_the_build_updates_the_files_that_used_it() {
+    let top_text = "module top;\n  scratch_t v;\nendmodule\n";
+    let root = project("adhocuse", &[("top.sv", top_text)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let top = uri(&root, "top.sv");
+    let p = c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    assert_eq!(codes(&p), vec!["NON_EXISTING_TYPE"]);
+    // An open file outside the build declares the type...
+    let scratch = uri(&root, "scratch.sv");
+    c.open(&scratch, 1, "typedef int scratch_t;\n");
+    c.wait_problems(&top, |p| p.diagnostics.is_empty());
+    // ... until it is closed.
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": scratch } }));
+    let p = c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    assert_eq!(codes(&p), vec!["NON_EXISTING_TYPE"]);
+    c.shutdown();
+}
+
+#[test]
+fn editing_a_header_updates_the_problems_of_the_file_that_includes_it() {
+    // The header opens a function that the including file finishes: renaming a local
+    // variable in the header changes no declaration other files see, but breaks the
+    // including file, which is not open.
+    let h = "  function automatic int f();\n    int k;\n";
+    let p_text = "package p;\n`include \"h.svh\"\n    k = 1;\n    return k;\n  endfunction\nendpackage\n";
+    let root = project("headerspill", &[("h.svh", h), ("p.sv", p_text)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let (hu, pu) = (uri(&root, "h.svh"), uri(&root, "p.sv"));
+    c.open(&hu, 1, h);
+    c.change(&hu, 2, &h.replace("int k;", "int k2;"));
+    let p = c.wait_problems(&pu, |p| !p.diagnostics.is_empty());
+    assert_eq!(codes(&p), vec!["UNDECLARED_IDENTIFIER", "UNDECLARED_IDENTIFIER"]);
+    assert_eq!(p.diagnostics[0].range.start.line, 2);
+    c.change(&hu, 3, h);
+    c.wait_problems(&pu, |p| p.diagnostics.is_empty());
+    c.shutdown();
+}
+
+#[test]
+fn problems_of_a_header_go_when_nothing_includes_it_any_more() {
+    // Inside a function body, so that what other files see does not change.
+    let h = "    int from_h = undeclared_h;\n";
+    let a = "module a;\n  function void f();\n`include \"h.svh\"\n  endfunction\nendmodule\n";
+    let root = project("dropped", &[("h.svh", h), ("a.sv", a)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let (hu, au) = (uri(&root, "h.svh"), uri(&root, "a.sv"));
+    c.wait_problems(&hu, |p| codes(p) == vec!["UNDECLARED_IDENTIFIER"]);
+    c.open(&au, 1, a);
+    c.change(&au, 2, &a.replace("`include \"h.svh\"\n", ""));
+    c.wait_problems(&hu, |p| p.diagnostics.is_empty());
+    c.shutdown();
+}
+
+#[test]
+fn an_open_header_stays_analysed_when_its_last_includer_drops_it() {
+    let h = "  int from_h = undeclared_h;\n";
+    let a = "module a;\n`include \"h.svh\"\nendmodule\n";
+    let root = project("orphan", &[("h.svh", h), ("a.sv", a)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let (hu, au) = (uri(&root, "h.svh"), uri(&root, "a.sv"));
+    c.open(&hu, 1, h);
+    c.wait_problems(&hu, |p| codes(p) == vec!["UNDECLARED_IDENTIFIER"]);
+    c.open(&au, 1, a);
+    c.change(&au, 2, "module a;\nendmodule\n");
+    // Analysed on its own now (outside a module, so other problems), not dropped.
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": au } }));
+    let r = c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": hu } }));
+    assert_eq!(r.as_array().map(|v| v.len()), Some(1), "{r}");
+    assert_eq!(r[0]["name"], "from_h");
+    c.shutdown();
+}
+
+#[test]
 fn files_changed_on_disk_update_the_open_files_problems() {
     let root = project("watch", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);
