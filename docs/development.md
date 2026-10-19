@@ -117,6 +117,7 @@ powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloa
 | `test` | Server tests natively on Windows and in WSL |
 | `unit` | The extension's unit tests (`npm run unit`) |
 | `corpus` | The real-world corpus regression (`scripts/corpus`), compared with its baseline |
+| `corpus-private` | The same with a private set of projects outside the repository, when `-PrivateCorpus PATH` or `DVICODE_CORPUS_MANIFEST` names its manifest (see [scripts/corpus/README.md](../scripts/corpus/README.md#private-projects)); the summary shows only counts |
 | `e2e-native` | End-to-end tests with the engine on Windows |
 | `e2e-wsl` | End-to-end tests in WSL: a Windows-drive folder, a `\\wsl.localhost` folder and a WSL-only `dvicode://` folder |
 | `e2e-ssh` | End-to-end tests over SSH, with deployment of the engine, against a second WSL distribution |

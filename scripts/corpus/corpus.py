@@ -7,6 +7,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,7 @@ STATUS = re.compile(
     r"dvicode check: (\d+) top files, (\d+) files, (\d+) declarations, (\d+) macros, (\d+) packages, "
     r"(\d+) classes, (\d+) design elements; config (\d+) ms, build (\d+) ms")
 TOTALS = re.compile(r"dvicode check: (\d+) errors, (\d+) warnings \((\d+) ms for diagnostics\) \[(.*)\]")
+WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 SIGNALS = {4: "SIGILL", 6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE", 9: "SIGKILL", 11: "SIGSEGV", 15: "SIGTERM"}
 
 
@@ -25,9 +27,35 @@ def expand(s):
     return os.path.expandvars(s)
 
 
+def wsl_path(s):
+    """A Windows path (D:\\work\\x, D:/work/x, \\\\server\\share) as a Linux path, with wslpath."""
+    try:
+        return subprocess.run(["wslpath", "-u", s], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        if s[1:2] == ":":
+            return "/mnt/" + s[0].lower() + s[2:].replace("\\", "/")
+        sys.exit(f"corpus.py: cannot convert the Windows path {s}")
+
+
+def local_path(s, base):
+    """A path from a manifest: variables expanded, Windows paths converted, relative to base."""
+    s = os.path.expanduser(expand(s))
+    if WINDOWS_PATH.match(s):
+        s = wsl_path(s)
+    return os.path.normpath(os.path.join(base, s))
+
+
 def manifest(path):
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        m = json.load(f)
+    # Build files and relative project paths resolve against the manifest's folder.
+    m["_dir"] = os.path.dirname(os.path.abspath(path))
+    return m
+
+
+def project_dir(m, name):
+    p = m["projects"][name]
+    return local_path(p["path"], m["_dir"]) if "path" in p else os.path.join(os.environ["CORPUS"], name)
 
 
 def configs(m, only):
@@ -36,12 +64,12 @@ def configs(m, only):
         if rx and not rx.search(c["name"]):
             continue
         p = m["projects"][c["project"]]
-        d = expand(p["path"]) if "path" in p else os.path.join(os.environ["CORPUS"], c["project"])
+        d = project_dir(m, c["project"])
         if "dir" in c:
             d = os.path.join(d, c["dir"])
         b = c.get("build", "auto")
         if b not in ("auto", "project"):
-            b = expand(b) if b.startswith("$") else os.path.join(HERE, b)
+            b = local_path(b, m["_dir"])
         yield c, p, d, b
 
 
@@ -60,6 +88,14 @@ def cmd_projects(a):
     for n, p in m["projects"].items():
         if "url" in p:
             print("\t".join([n, p["url"], p["commit"], ",".join(p.get("submodules", []))]))
+
+
+def cmd_locals(a):
+    """name, directory, optional, for projects that are used where they are (`path`)."""
+    m = manifest(a.manifest)
+    for n, p in m["projects"].items():
+        if "path" in p:
+            print("\t".join([n, project_dir(m, n), "1" if p.get("optional") else "0"]))
 
 
 def cmd_setup(a):
@@ -332,6 +368,8 @@ def cmd_baseline(a):
 
 
 def cmd_compare(a):
+    if not os.path.exists(a.baseline):
+        sys.exit(f"compare: no baseline at {a.baseline}; record one with `run.sh baseline`")
     base = json.load(open(a.baseline))["configurations"]
     res = load_results(a.results, a.only)
     if a.only:
@@ -392,6 +430,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("configs"); s.add_argument("manifest"); s.add_argument("--only", default=""); s.set_defaults(f=cmd_configs)
     s = sub.add_parser("projects"); s.add_argument("manifest"); s.set_defaults(f=cmd_projects)
+    s = sub.add_parser("locals"); s.add_argument("manifest"); s.set_defaults(f=cmd_locals)
     s = sub.add_parser("setup"); s.add_argument("manifest"); s.add_argument("--only", default=""); s.set_defaults(f=cmd_setup)
     s = sub.add_parser("result")
     for k in ("config", "project", "commit", "stdout", "stderr", "output"):

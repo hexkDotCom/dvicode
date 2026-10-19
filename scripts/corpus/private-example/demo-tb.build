@@ -1,0 +1,12 @@
+// Example build file of a private corpus. Relative paths resolve against the project folder
+// (the checkout named by the configuration), so it needs no machine-specific paths.
++incdir+tb
++incdir+tb/uvm
++define+DEMO_WIDTH=16
+rtl/demo_pkg.sv
+rtl/fifo.sv
+rtl/top.sv
+tb/tb_pkg.sv
+tb/tb_top.sv
+tb/uvm/uvm_pkg.sv
+tb/demo_env_pkg.sv
