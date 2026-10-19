@@ -454,6 +454,103 @@ fn remote_file_requests_carry_error_codes() {
     c.shutdown();
 }
 
+/// `dvicode/fs/*` as the client's file system provider uses it: VS Code's semantics for
+/// create, overwrite, rename onto an existing entry and recursive delete.
+#[test]
+fn remote_file_writes_follow_the_editor_file_system_semantics() {
+    use base64::Engine;
+    let root = project("fswrite", &[("top.sv", TOP)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let d = root.join("fs");
+    std::fs::create_dir_all(&d).unwrap();
+    let s = |p: &Path| p.to_str().unwrap().to_string();
+    let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
+    let code = |r: Response| r.error.and_then(|e| e.data).and_then(|d| d["code"].as_str().map(str::to_string)).unwrap_or_else(|| "ok".into());
+    let write = |c: &mut Client, p: &Path, text: &str, create: bool, overwrite: bool| {
+        code(c.request("dvicode/fs/writeFile", json!({ "path": s(p), "content": b64(text), "create": create, "overwrite": overwrite })))
+    };
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+
+    // writeFile: create, overwrite, and the refusals.
+    let a = d.join("a.sv");
+    assert_eq!(write(&mut c, &a, "one\r\n", false, true), "FileNotFound");
+    assert!(!a.exists());
+    assert_eq!(write(&mut c, &a, "one\r\n", true, false), "ok");
+    assert_eq!(read(&a), "one\r\n", "bytes as sent, line endings included");
+    assert_eq!(write(&mut c, &a, "two\n", true, false), "FileExists");
+    assert_eq!(read(&a), "one\r\n");
+    assert_eq!(write(&mut c, &a, "two\n", false, true), "ok");
+    assert_eq!(read(&a), "two\n");
+    assert_eq!(write(&mut c, &a, "", true, true), "ok");
+    assert_eq!(read(&a), "", "an empty file");
+    assert_eq!(write(&mut c, &d.join("missing/b.sv"), "x", true, true), "FileNotFound");
+    assert_eq!(write(&mut c, &d, "x", true, true), "FileIsADirectory");
+    assert!(d.is_dir());
+
+    // createDirectory.
+    let sub = d.join("sub");
+    assert_eq!(code(c.request("dvicode/fs/createDirectory", json!({ "path": s(&sub) }))), "ok");
+    assert_eq!(code(c.request("dvicode/fs/createDirectory", json!({ "path": s(&sub) }))), "FileExists");
+    assert_eq!(code(c.request("dvicode/fs/createDirectory", json!({ "path": s(&d.join("no/such")) }))), "FileNotFound");
+
+    // rename: onto an existing file only with overwrite; a directory onto a directory.
+    let b = d.join("b.sv");
+    std::fs::write(&a, "from a").unwrap();
+    std::fs::write(&b, "from b").unwrap();
+    let rename = |c: &mut Client, from: &Path, to: &Path, overwrite: bool| code(c.request("dvicode/fs/rename", json!({ "from": s(from), "to": s(to), "overwrite": overwrite })));
+    assert_eq!(rename(&mut c, &a, &b, false), "FileExists");
+    assert_eq!((read(&a).as_str(), read(&b).as_str()), ("from a", "from b"));
+    assert_eq!(rename(&mut c, &a, &b, true), "ok");
+    assert!(!a.exists());
+    assert_eq!(read(&b), "from a");
+    assert_eq!(rename(&mut c, &a, &b, true), "FileNotFound");
+    let other = d.join("other");
+    std::fs::create_dir_all(other.join("deep")).unwrap();
+    std::fs::write(other.join("deep/old.sv"), "old").unwrap();
+    std::fs::write(sub.join("new.sv"), "new").unwrap();
+    assert_eq!(rename(&mut c, &sub, &other, false), "FileExists");
+    assert_eq!(rename(&mut c, &sub, &other, true), "ok");
+    assert!(!sub.exists());
+    assert_eq!(read(&other.join("new.sv")), "new");
+    assert!(!other.join("deep").exists(), "the replaced directory is gone");
+    // A file onto a directory and back.
+    assert_eq!(rename(&mut c, &b, &other, true), "ok");
+    assert_eq!(read(&other), "from a");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert_eq!(rename(&mut c, &sub, &other, true), "ok");
+    assert!(other.is_dir());
+
+    // delete: recursive only when asked; missing entries.
+    let tree = d.join("tree");
+    std::fs::create_dir_all(tree.join("x/y")).unwrap();
+    std::fs::write(tree.join("x/y/z.sv"), "z").unwrap();
+    let delete = |c: &mut Client, p: &Path, recursive: bool| code(c.request("dvicode/fs/delete", json!({ "path": s(p), "recursive": recursive })));
+    assert_ne!(delete(&mut c, &tree, false), "ok");
+    assert!(tree.join("x/y/z.sv").exists());
+    assert_eq!(delete(&mut c, &tree, true), "ok");
+    assert!(!tree.exists());
+    assert_eq!(delete(&mut c, &tree, true), "FileNotFound");
+    assert_eq!(delete(&mut c, &other, false), "ok", "an empty directory");
+    #[cfg(unix)]
+    {
+        // A link to a directory is deleted, not what it points to.
+        let target = d.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.sv"), "keep").unwrap();
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(delete(&mut c, &link, false), "ok");
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(read(&target.join("keep.sv")), "keep");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(delete(&mut c, &link, true), "ok");
+        assert_eq!(read(&target.join("keep.sv")), "keep");
+    }
+    // The server keeps answering.
+    assert_eq!(c.request_ok("dvicode/status", Value::Null)["top_files"], 1);
+    c.shutdown();
+}
+
 #[test]
 fn a_new_build_file_setting_rebuilds() {
     let root = project("settings", &[("pkg.sv", PKG), ("top.sv", TOP)]);
