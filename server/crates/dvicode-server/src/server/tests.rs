@@ -351,6 +351,22 @@ fn an_open_header_stays_analysed_when_its_last_includer_drops_it() {
 }
 
 #[test]
+fn closing_a_header_takes_its_disk_text_back_in_other_open_files() {
+    let root = project("closeheader", &[("top.sv", "module top; endmodule\n"), ("h.svh", "  int from_disk;\n")]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    // Neither file is part of the build: x.sv's own unit includes the header.
+    let (xu, hu) = (uri(&root, "x.sv"), uri(&root, "h.svh"));
+    c.open(&xu, 1, "module x;\n`include \"h.svh\"\n  initial from_editor = 1;\nendmodule\n");
+    c.wait_problems(&xu, |p| codes(p) == vec!["UNDECLARED_IDENTIFIER"]);
+    c.open(&hu, 1, "  int from_editor;\n");
+    c.wait_problems(&xu, |p| p.diagnostics.is_empty());
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": hu } }));
+    let p = c.wait_problems(&xu, |p| !p.diagnostics.is_empty());
+    assert_eq!(codes(&p), vec!["UNDECLARED_IDENTIFIER"]);
+    c.shutdown();
+}
+
+#[test]
 fn files_changed_on_disk_update_the_open_files_problems() {
     let root = project("watch", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

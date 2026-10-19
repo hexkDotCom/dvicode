@@ -3,8 +3,8 @@
 use dvi_syntax::SourceProvider;
 use super::{Hit, Target};
 use crate::world::{Analysis, DeclRef, UnitKind};
-use dvi_syntax::ast::{dflags, DeclId, DeclKind};
-use dvi_syntax::{FileId, Span};
+use dvi_syntax::ast::{dflags, DeclId, DeclKind, RefKind};
+use dvi_syntax::{FileId, Span, TokKind};
 use lsp_types::{Location, SymbolKind, TypeHierarchyItem, WorkspaceEdit};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -131,9 +131,94 @@ impl Analysis {
                         }
                     }
                 }
+                out.extend(self.macro_uses_in_bodies(&m.name).into_iter().filter(|s| seen.insert(*s)).map(macro_name));
+                // `ifdef NAME and friends; where it is not defined yet (`ifndef GUARD), when it
+                // has no other definition.
+                let unique = self.unique_macro(&m.name).is_some_and(|d| d.name_span == m.name_span);
+                for u in self.units.iter().flatten() {
+                    for mn in &u.macro_names {
+                        if mn.name == m.name && mn.def.as_ref().map_or(unique, |d| d.name_span == m.name_span) && seen.insert(mn.span) {
+                            out.push(mn.span);
+                        }
+                    }
+                }
                 out
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// `` `NAME `` in the bodies and default arguments of macro definitions: they refer to
+    /// the macro by name wherever they are expanded.
+    pub fn macro_uses_in_bodies(&self, name: &str) -> Vec<Span> {
+        let mut out = Vec::new();
+        let mut defs = FxHashSet::default();
+        for d in self.global.macros.values().flatten() {
+            if !defs.insert(d.name_span) {
+                continue;
+            }
+            let defaults = d.params.iter().flatten().filter_map(|p| p.default.as_ref()).flatten();
+            for t in d.body.iter().chain(defaults) {
+                if t.kind == TokKind::Directive && t.text == name && t.span.file == d.name_span.file && t.is_real() {
+                    out.push(t.span);
+                }
+            }
+        }
+        out.sort_by_key(|s| (s.file, s.start));
+        out.dedup();
+        out
+    }
+
+    /// A use of `r` inside a macro body: the name of the macro and where it is expanded.
+    /// Rename cannot change it there, and changing the macro could break its other uses.
+    fn use_in_macro_body(&self, r: DeclRef) -> Option<(String, Span)> {
+        let key = self.decl_key(self.canonical(r));
+        let name = &self.decl(r).name;
+        for u in self.units.iter().flatten() {
+            let Some(occ) = u.names.get(name) else { continue };
+            for (rid, seg) in occ {
+                let s = &u.parsed.reference(*rid).segs[*seg as usize];
+                if !s.from_macro || !self.resolve_ref(u.id, *rid, *seg as usize).is_some_and(|t| self.decl_key(self.canonical(t)) == key) {
+                    continue;
+                }
+                let m = u.macro_uses.iter().find(|m| m.call_span.file == s.span.file && m.call_span.start <= s.span.start && s.span.start < m.call_span.end.max(m.call_span.start + 1));
+                return Some((m.map_or_else(|| "?".to_string(), |m| m.name.to_string()), s.span));
+            }
+        }
+        None
+    }
+
+    /// The text that replaces the name at `span` in a rename. An implicit `.name` port
+    /// connection stands for both the port and the local signal of that name, so it becomes
+    /// an explicit connection: `.new(name)` when the port is renamed, `.name(new)` when the
+    /// signal is.
+    fn rename_text(&self, span: Span, target: Option<(u32, u32)>, new_name: &str) -> String {
+        let Some(key) = target else { return new_name.to_string() };
+        // The port references written at this place, and whether one of them is the target.
+        let mut port = None;
+        for uid in self.units_for(span.file) {
+            let u = self.unit(uid);
+            let Some(pos) = u.positions.get(&span.file) else { continue };
+            let lo = pos.refs.partition_point(|(s, _, _)| (s.start, s.end) < (span.start, span.end));
+            for (_, rid, seg) in pos.refs[lo..].iter().take_while(|(s, _, _)| *s == span) {
+                if matches!(u.parsed.reference(*rid).kind, RefKind::Port { .. }) {
+                    let is_target = self.resolve_ref(uid, *rid, *seg as usize).is_some_and(|t| self.decl_key(self.canonical(t)) == key);
+                    port = Some(port.unwrap_or(false) || is_target);
+                }
+            }
+        }
+        let Some(port_side) = port else { return new_name.to_string() };
+        // `.name(...)` is explicit already.
+        let Some(toks) = self.file_tokens(span.file) else { return new_name.to_string() };
+        let i = toks.partition_point(|t| t.span.start < span.start);
+        if toks.get(i).is_some_and(|t| t.span != span) || toks.get(i + 1).is_some_and(|t| t.is_punct("(")) {
+            return new_name.to_string();
+        }
+        let old = self.file_text(span.file).map(|t| t[span.start as usize..span.end as usize].to_string()).unwrap_or_default();
+        if port_side {
+            format!("{new_name}({old})")
+        } else {
+            format!("{old}({new_name})")
         }
     }
 
@@ -241,12 +326,12 @@ impl Analysis {
             (Hit::Include { .. }, _) => None,
             (_, Target::Decl(r)) => {
                 let d = self.decl(r);
-                if self.vfs.is_builtin(d.name_span.file) || d.has(dflags::FROM_MACRO) {
+                if !self.is_editable(d.name_span.file) || d.has(dflags::FROM_MACRO) {
                     return None;
                 }
                 Some(hit.span())
             }
-            (_, Target::Macro(m)) => (m.name_span.file != dvi_syntax::preproc::COMMAND_LINE_FILE).then(|| match hit {
+            (_, Target::Macro(m)) => self.is_editable(m.name_span.file).then(|| match hit {
                 Hit::MacroUse { span, .. } => macro_name(span),
                 _ => hit.span(),
             }),
@@ -261,13 +346,35 @@ impl Analysis {
         if self.prepare_rename(file, off).is_none() {
             return Err("This element cannot be renamed".into());
         }
+        let line = |s: Span| format!("{}:{}", self.vfs.path(s.file).display(), self.to_range(s).map_or(0, |r| r.start.line + 1));
+        let target = match self.target_at(file, off) {
+            Some(Target::Decl(r)) => {
+                if let Some((m, at)) = self.use_in_macro_body(r) {
+                    return Err(format!("'{}' is also used inside the macro `{m} (expanded at {}), which rename cannot change", self.decl(r).name, line(at)));
+                }
+                Some(self.decl_key(self.canonical(r)))
+            }
+            Some(Target::Macro(m)) => {
+                if self.units.iter().flatten().any(|u| u.pasted_macros.contains(&m.name)) {
+                    return Err(format!("`{} is also called through a name that a macro builds with `` (token pasting), which rename cannot change", m.name));
+                }
+                // Uses inside other macros name it without saying which definition they mean.
+                let other = self.global.macros.get(&m.name).into_iter().flatten().find(|d| d.name_span != m.name_span);
+                if let (Some(o), false) = (other, self.macro_uses_in_bodies(&m.name).is_empty()) {
+                    return Err(format!("`{} is defined in more than one place ({} and {}) and used inside other macros, which could mean either", m.name, line(m.name_span), line(o.name_span)));
+                }
+                None
+            }
+            _ => None,
+        };
         let spans = self.reference_spans(file, off, true);
+        // A use in a library outside the workspace would be left behind, or the library
+        // changed: neither is what the user asked for.
+        if let Some(s) = spans.iter().find(|s| !self.is_editable(s.file)) {
+            return Err(format!("Renaming would change {}, which is outside the workspace", self.vfs.path(s.file).display()));
+        }
         let mut seen = FxHashSet::default();
-        let edits: Vec<(Span, String)> = spans
-            .into_iter()
-            .filter(|s| seen.insert(*s) && !self.vfs.is_builtin(s.file))
-            .map(|s| (s, new_name.to_string()))
-            .collect();
+        let edits: Vec<(Span, String)> = spans.into_iter().filter(|s| seen.insert(*s)).map(|s| (s, self.rename_text(s, target, new_name))).collect();
         self.versioned_edit(edits).ok_or_else(|| "The files to edit are not available".to_string())
     }
 

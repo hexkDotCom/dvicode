@@ -27,6 +27,7 @@ scripts/corpus/run.sh sweep          # IDE queries on every file
 scripts/corpus/run.sh compare        # exit 1 on a regression against baseline.json
 scripts/corpus/run.sh table          # summary of the results
 scripts/corpus/run.sh fuzz           # random edits: incremental updates against full builds
+scripts/corpus/run.sh writes         # renames and quick fixes applied, results checked
 ```
 
 From Windows: `wsl.exe -e bash -c 'cd /mnt/d/.../hexk-dvicode && scripts/corpus/run.sh all'`
@@ -35,7 +36,7 @@ From Windows: `wsl.exe -e bash -c 'cd /mnt/d/.../hexk-dvicode && scripts/corpus/
 Options: `--only REGEX` (configurations whose name matches), `--bin PATH` (an engine binary
 instead of building one with `scripts/wsl-cargo.sh`), `--out DIR` (results directory),
 `--every N`, `--cap N`, `--query-timeout S`, `--sweep-uvm` (see [Sweep](#sweep)), `--edits N`,
-`--seed S` (see [Fuzz](#fuzz)).
+`--seed S` (see [Fuzz](#fuzz)), `--renames N` (see [Writes](#writes)).
 
 Environment:
 
@@ -136,12 +137,32 @@ for each: the editor contents to start from (as changes to the files on disk) an
 last edits that still show the difference, then the differences. A run stops at three
 findings. Options: `--edits N` (default 60; each edit costs a full build, so keep it small
 for the `*-auto` configurations), `--seed S` (default 1; the same seed makes the same edits).
-`fuzz` is not part of `all`.
+`fuzz` and `writes` are not part of `all`.
 
 For a single project: `dvicode-server check DIR [--build FILE] --fuzz-edits 200 --seed 7`
 (`--fuzz-verbose` prints every edit; `--fuzz-disk` also writes some edits to the files and
-reports them like watched-file changes, so use it only on a copy). The server's unit tests run
-a short seeded session on the demo project.
+reports them like watched-file changes, so use it only on a copy). When a difference needs a
+long history, the reducer removes edits from the whole sequence (delta debugging) before
+looking for the shortest tail. `--fuzz-save DIR` writes each reproducer as JSON, and
+`check DIR --fuzz-replay FILE` replays one and prints the differences it still shows, which is
+the quickest way to debug a finding. The server's unit tests run a short seeded session on the
+demo project.
+
+## Writes
+
+`run.sh writes` checks the edits the server asks the editor to make:
+`check --write-check N --seed S` renames N elements at sampled positions (macro uses,
+`` `define `` names and `` `ifdef `` operands, names in macro arguments, names in headers, any
+name) and applies the quick fixes for problems it makes on purpose (a misspelled name, a
+removed `import`). Each workspace edit is applied as the editor applies it (every document
+must carry the version of the open document, or none; ranges must not overlap), and the
+result is compiled again from scratch. A finding is a rename that adds problems, edits places
+that are not the element's references or misses some, changes anything but the name or the
+line endings, or touches a file outside the workspace or a built-in file; a "Did you mean"
+that does not restore the text; an "Import package" after which the file's problems differ
+from what they were with the import. Refused renames (outside the workspace, a name used
+inside a macro body or built by token pasting) and missing quick fixes are notes.
+`<configuration>.writes.txt` lists both. `--renames N` (default 40), `--seed S`.
 
 ## Baseline and compare
 

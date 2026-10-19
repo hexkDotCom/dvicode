@@ -35,6 +35,8 @@ pub mod flags {
     pub const FROM_MACRO: u8 = 4;
     /// Came from a macro argument; the span is the real location in the argument text.
     pub const MACRO_ARG: u8 = 8;
+    /// A `` `name `` built by token pasting (`` `dv_``SEV_ ``).
+    pub const PASTED: u8 = 16;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -59,23 +59,30 @@ impl Analysis {
         let seg = &chain.segs[0];
         let name = seg.name.as_str();
         let scoped = chain.segs.get(1).is_some_and(|s| s.sep == Sep::Scope);
-        let want = if d.code == "NON_EXISTING_TYPE" || chain.kind == RefKind::Type {
-            Want::Type
-        } else if scoped {
+        // In `p::t` the unknown name is the package or class, also in a type.
+        let want = if scoped {
             Want::Scope
+        } else if d.code == "NON_EXISTING_TYPE" || chain.kind == RefKind::Type {
+            Want::Type
         } else {
             Want::Value
         };
         let first = out.len();
-        // Did you mean: visible names that are close to the unknown one.
-        for c in self.similar_names(unit, chain.scope, name, want) {
+        // Did you mean: visible names that are close to the unknown one. A type can stand
+        // where the parser sees a value: parameter values (`#(my_item)`) and macro arguments.
+        let mut similar = self.similar_names(unit, chain.scope, name, want);
+        if similar.is_empty() && want == Want::Value {
+            similar = self.similar_names(unit, chain.scope, name, Want::Type);
+        }
+        for c in similar {
             out.push(QuickFix { title: format!("Did you mean '{c}'?"), diag: d.clone(), edits: vec![(d.span, c)], preferred: false });
         }
         if out.len() == first + 1 {
             out[first].preferred = true;
         }
-        // Import package: packages that declare the name.
-        for pkg in self.packages_declaring(name, want) {
+        // Import package: packages that declare the name, whatever it is (a type in a macro
+        // argument, a parameter in a cast).
+        for pkg in self.packages_declaring(name) {
             if let Some(edit) = self.import_edit(unit, chain.scope, d.span, &pkg) {
                 out.push(QuickFix { title: format!("Import package '{pkg}' ({pkg}::*)"), diag: d.clone(), edits: vec![edit], preferred: false });
             }
@@ -151,7 +158,7 @@ impl Analysis {
     }
 
     /// Packages (other than `std`) that declare `name` directly.
-    fn packages_declaring(&self, name: &str, want: Want) -> Vec<String> {
+    fn packages_declaring(&self, name: &str) -> Vec<String> {
         let mut out: Vec<String> = self
             .global
             .packages
@@ -162,7 +169,7 @@ impl Analysis {
                     return None;
                 }
                 let m = self.member_of(p, name)?;
-                (want.accepts(self.decl(m).kind) && !self.decl(m).has(dflags::OUT_OF_BLOCK)).then(|| pname.to_string())
+                (!self.decl(m).has(dflags::OUT_OF_BLOCK)).then(|| pname.to_string())
             })
             .collect();
         out.sort();

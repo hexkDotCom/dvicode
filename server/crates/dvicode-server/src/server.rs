@@ -596,10 +596,10 @@ impl Server {
                         drop(st);
                         // Other files may have used its declarations or macros.
                         self.publish_all();
-                    } else {
-                        // Back to the disk contents.
-                        self.note_change(id);
                     }
+                    // Back to the disk contents, also in the units of other open files that
+                    // include it.
+                    self.note_change(id);
                 }
             }
             "workspace/didChangeWatchedFiles" => {

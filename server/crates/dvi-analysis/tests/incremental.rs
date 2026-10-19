@@ -112,3 +112,78 @@ fn files_compiled_again_with_an_edited_header_are_reported() {
     files.sort();
     assert_eq!(files, vec!["a.sv", "defs.svh"]);
 }
+
+/// Definition lines and files a reference leads to, as text.
+fn targets(a: &Analysis, root: &Path, file: &str, needle: &str) -> Vec<String> {
+    definition_lines(a, root, file, needle).into_iter().map(|(f, l)| format!("{f}:{l}")).collect()
+}
+
+#[test]
+fn open_files_outside_the_build_rank_by_path_not_by_opening_order() {
+    // Two open files declare the same function at compilation-unit level.
+    let top = "module top;\n  initial helper();\nendmodule\n";
+    let mut seen = Vec::new();
+    for (i, order) in [["a_scratch.sv", "b_scratch.sv"], ["b_scratch.sv", "a_scratch.sv"]].iter().enumerate() {
+        let (a, root) = project(&format!("adhocorder{i}"), &[("top.sv", top)]);
+        let mut cur = a;
+        for f in order {
+            let id = edit(&cur, &root, f, "function automatic void helper(); endfunction\n");
+            cur = cur.sync_open_files(&[id]);
+        }
+        seen.push(targets(&cur, &root, "top.sv", "helper"));
+    }
+    assert_eq!(seen[0], vec!["a_scratch.sv:1".to_string()]);
+    assert_eq!(seen[0], seen[1]);
+}
+
+#[test]
+fn an_open_header_included_by_another_open_file_keeps_its_own_unit() {
+    for (i, first_header) in [true, false].iter().enumerate() {
+        let (a, root) = project(&format!("nested{i}"), &[("top.sv", "module top; endmodule\n")]);
+        let h = edit(&a, &root, "h.svh", "  int from_h;\n");
+        let x = edit(&a, &root, "x.sv", "module x;\n`include \"h.svh\"\nendmodule\n");
+        let open = if *first_header { [h, x] } else { [x, h] };
+        let b = a.sync_open_files(&open);
+        assert!(b.is_adhoc_root(h) && b.is_adhoc_root(x), "order {i}");
+        // Its own unit comes first for its problems and navigation.
+        assert_eq!(b.unit(b.units_for(h)[0]).root, h);
+    }
+}
+
+#[test]
+fn library_units_follow_the_instances_that_need_them() {
+    let root = std::env::temp_dir().join(format!("dvicode-incr-lib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    std::fs::write(root.join("lib/sub.v"), "module sub(input a);\n  leaf l(.x(a));\nendmodule\n").unwrap();
+    std::fs::write(root.join("lib/leaf.v"), "module leaf(input x);\nendmodule\n").unwrap();
+    let with = "module top;\n  logic s;\n  sub u(.a(s));\nendmodule\n";
+    std::fs::write(root.join("top.sv"), with).unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-y lib\n+libext+.v\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let names = |a: &Analysis| {
+        let mut v: Vec<String> = a.project_files().iter().map(|f| a.path(*f).file_name().unwrap().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&a), vec!["leaf.v", "sub.v", "top.sv"]);
+    // The instance goes: so do sub.v and, through it, leaf.v.
+    let top = edit(&a, &root, "top.sv", "module top;\n  logic s;\nendmodule\n");
+    let b = a.update(&[top]);
+    assert_eq!(names(&b), vec!["top.sv"]);
+    // And comes back.
+    edit(&b, &root, "top.sv", with);
+    let c = b.update(&[top]);
+    assert_eq!(names(&c), vec!["leaf.v", "sub.v", "top.sv"]);
+    assert_eq!(targets(&c, &root, "top.sv", "sub u"), vec!["sub.v:1".to_string()]);
+    // An open library file that is needed has no unit of its own; once it is not, it does.
+    let leaf = edit(&c, &root, "lib/leaf.v", "module leaf(input x);\nendmodule\n");
+    let d = c.update(&[leaf]).sync_open_files(&[leaf]);
+    assert!(!d.is_adhoc_root(leaf));
+    edit(&d, &root, "top.sv", "module top;\nendmodule\n");
+    let e = d.update(&[top]).sync_open_files(&[leaf]);
+    assert!(e.is_adhoc_root(leaf));
+    assert_eq!(names(&e), vec!["leaf.v", "top.sv"]);
+}

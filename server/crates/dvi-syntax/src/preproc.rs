@@ -156,6 +156,15 @@ pub struct MacroUse {
     pub def: Option<Arc<MacroDef>>,
 }
 
+/// A macro name written after `` `ifdef ``, `` `ifndef ``, `` `elsif `` or `` `undef `` (no
+/// backtick): what it names when it is defined there.
+#[derive(Clone, Debug)]
+pub struct MacroName {
+    pub name: SmolStr,
+    pub span: Span,
+    pub def: Option<Arc<MacroDef>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct IncludeInfo {
     /// The file name token (string literal) of the directive.
@@ -178,6 +187,9 @@ pub struct PpResult {
     pub includes: Vec<IncludeInfo>,
     pub macro_uses: Vec<MacroUse>,
     pub macro_defs: Vec<Arc<MacroDef>>,
+    pub macro_names: Vec<MacroName>,
+    /// Macros called through a name built by token pasting.
+    pub pasted_macros: Vec<SmolStr>,
     /// The root and every file it includes, in first-include order.
     pub files: Vec<FileId>,
     /// Regions removed by `` `ifdef `` and friends.
@@ -489,6 +501,7 @@ impl<'a> Pp<'a> {
             "define" => self.define(tok),
             "undef" => {
                 if let Some(n) = self.take_same_line() {
+                    self.note_macro_name(&n);
                     self.macros.remove(&n.text);
                 }
             }
@@ -582,10 +595,21 @@ impl<'a> Pp<'a> {
                 }
                 toks.push(t);
             }
+            for t in &toks {
+                self.note_macro_name(t);
+            }
             let mut pos = 0;
             return self.cond_expr(&toks, &mut pos);
         }
+        self.note_macro_name(&t);
         self.defined(&t.text)
+    }
+
+    /// Records a macro name written in a conditional or `` `undef `` directive.
+    fn note_macro_name(&mut self, t: &Token) {
+        if t.kind == TokKind::Ident && t.is_real() {
+            self.res.macro_names.push(MacroName { name: t.text.clone(), span: t.span, def: self.macros.get(&t.text).cloned() });
+        }
     }
 
     fn cond_expr(&self, toks: &[Token], pos: &mut usize) -> bool {
@@ -817,8 +841,14 @@ impl<'a> Pp<'a> {
     fn macro_call(&mut self, tok: Token) {
         let def = self.macros.get(&tok.text).cloned();
         let outer_site = self.in_macro();
+        // Written by the user: outside any expansion, or in the arguments of a macro call
+        // (`` `uvm_info(`gfn, ...) ``). Such uses are recorded and their problems shown there.
+        let written = outer_site.is_none() || tok.is_real();
+        if tok.flags & flags::PASTED != 0 && !self.res.pasted_macros.contains(&tok.text) {
+            self.res.pasted_macros.push(tok.text.clone());
+        }
         let Some(def) = def else {
-            if outer_site.is_none() {
+            if written {
                 self.res.diags.push(Diag::error(tok.span, "UNDEFINED_MACRO", format!("Macro `{} is not defined", tok.text)));
                 self.res.macro_uses.push(MacroUse { name: tok.text.clone(), name_span: tok.span, call_span: tok.span, def: None });
             } else {
@@ -844,7 +874,7 @@ impl<'a> Pp<'a> {
                     None => return,
                 }
                 if args.len() > params.len() && !(params.is_empty() && args.len() == 1 && args[0].is_empty()) {
-                    let sp = outer_site.unwrap_or(tok.span);
+                    let sp = if written { tok.span } else { outer_site.unwrap_or(tok.span) };
                     self.res.diags.push(Diag::error(
                         sp,
                         "MACRO_ARGUMENTS",
@@ -852,13 +882,13 @@ impl<'a> Pp<'a> {
                     ));
                 }
             } else {
-                let sp = outer_site.unwrap_or(tok.span);
+                let sp = if written { tok.span } else { outer_site.unwrap_or(tok.span) };
                 self.res.diags.push(Diag::error(sp, "MACRO_ARGUMENTS", format!("Macro `{} needs arguments", def.name)));
             }
             // Missing actuals without defaults.
             for p in params.iter().skip(args.len().max(1)) {
                 if p.default.is_none() {
-                    let sp = outer_site.unwrap_or(tok.span);
+                    let sp = if written { tok.span } else { outer_site.unwrap_or(tok.span) };
                     self.res.diags.push(Diag::error(
                         sp,
                         "MACRO_ARGUMENTS",
@@ -869,8 +899,9 @@ impl<'a> Pp<'a> {
             }
         }
         let site = outer_site.unwrap_or_else(|| tok.span.cover(call_end));
-        if outer_site.is_none() {
-            self.res.macro_uses.push(MacroUse { name: tok.text.clone(), name_span: tok.span, call_span: site, def: Some(def.clone()) });
+        if written {
+            let call_span = if call_end.file == tok.span.file && call_end.start >= tok.span.start { tok.span.cover(call_end) } else { tok.span };
+            self.res.macro_uses.push(MacroUse { name: tok.text.clone(), name_span: tok.span, call_span, def: Some(def.clone()) });
         }
         let limit = self.depth_limit;
         if self.macro_depth() >= limit {
@@ -1084,7 +1115,8 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
                         }
                         prev.text = SmolStr::new(text);
                         prev.span = site;
-                        prev.flags = (prev.flags & flags::WS_BEFORE) | flags::FROM_MACRO;
+                        let pasted = if prev.kind == TokKind::Directive { flags::PASTED } else { 0 };
+                        prev.flags = (prev.flags & flags::WS_BEFORE) | flags::FROM_MACRO | pasted;
                     }
                     (None, Some(n)) => merged.push(n),
                     _ => {}

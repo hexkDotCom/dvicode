@@ -36,11 +36,13 @@ pub struct Options {
     pub disk: bool,
     /// Print every edit.
     pub verbose: bool,
+    /// Directory to save each reproducer in (JSON, see `replay_file`).
+    pub save: Option<PathBuf>,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { edits: 100, seed: 1, samples: 6, max_findings: 5, disk: false, verbose: false }
+        Options { edits: 100, seed: 1, samples: 6, max_findings: 5, disk: false, verbose: false, save: None }
     }
 }
 
@@ -62,10 +64,10 @@ pub struct Report {
 // ------------------------------------------------------------------------------ random
 
 /// SplitMix64: small, fast, and the same everywhere for a seed.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -73,7 +75,7 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(crate) fn below(&mut self, n: usize) -> usize {
         if n == 0 {
             0
         } else {
@@ -81,11 +83,11 @@ impl Rng {
         }
     }
 
-    fn chance(&mut self, percent: u64) -> bool {
+    pub(crate) fn chance(&mut self, percent: u64) -> bool {
         self.next() % 100 < percent
     }
 
-    fn pick<'a, T>(&mut self, v: &'a [T]) -> Option<&'a T> {
+    pub(crate) fn pick<'a, T>(&mut self, v: &'a [T]) -> Option<&'a T> {
         if v.is_empty() {
             None
         } else {
@@ -225,7 +227,8 @@ impl Incr {
                     if self.a.is_adhoc_root(id) {
                         self.a = self.a.remove_adhoc(id);
                         self.shown = all_problems(&self.a, &self.open);
-                    } else if !files.contains(&id) {
+                    }
+                    if !files.contains(&id) {
                         files.push(id);
                     }
                 }
@@ -279,7 +282,7 @@ struct Probe<'a> {
     samples: usize,
 }
 
-fn rel(root: &Path, p: &Path) -> String {
+pub(crate) fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string().replace('\\', "/")
 }
 
@@ -296,12 +299,12 @@ fn locations(root: &Path, v: Vec<lsp_types::Location>) -> Vec<String> {
         .collect()
 }
 
-fn is_ident_byte(b: u8) -> bool {
+pub(crate) fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 /// Offsets of whole-word occurrences of `name` in `text`.
-fn word_offsets(text: &str, name: &str, limit: usize) -> Vec<u32> {
+pub(crate) fn word_offsets(text: &str, name: &str, limit: usize) -> Vec<u32> {
     let b = text.as_bytes();
     let mut out = Vec::new();
     let mut from = 0;
@@ -438,7 +441,7 @@ fn differences(inc: &Incr, full: &Analysis, probe: &Probe) -> Vec<String> {
 }
 
 /// Panics become differences, so that a crash in an update is a finding like any other.
-fn guarded<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
+pub(crate) fn guarded<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
     catch_unwind(AssertUnwindSafe(f)).map_err(|p| {
         let m = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
         format!("internal error in {what}: {m}")
@@ -803,7 +806,7 @@ fn hunk(before: &str, after: &str, out: &mut String) {
     }
 }
 
-fn disk_text(p: &Path) -> Arc<str> {
+pub(crate) fn disk_text(p: &Path) -> Arc<str> {
     Arc::from(std::fs::read_to_string(p).unwrap_or_default())
 }
 
@@ -857,9 +860,73 @@ fn state_after(base: &BTreeMap<PathBuf, Arc<str>>, steps: &[Vec<Change>]) -> BTr
     s
 }
 
+type Reproducer = (BTreeMap<PathBuf, Arc<str>>, Vec<Vec<Change>>, Vec<String>);
+
 /// Reduces a divergence to a starting state and the fewest last edits that still show it,
-/// then drops open files from the starting state that do not matter.
-fn minimize(setup: &Arc<ProjectSetup>, base: &BTreeMap<PathBuf, Arc<str>>, steps: &[Vec<Change>], probe: &Probe) -> Option<(BTreeMap<PathBuf, Arc<str>>, Vec<Vec<Change>>, Vec<String>)> {
+/// then drops open files from the starting state that do not matter. When it needs more of
+/// the history than that, removes edits from the whole sequence first (delta debugging).
+fn minimize(setup: &Arc<ProjectSetup>, base: &BTreeMap<PathBuf, Arc<str>>, steps: &[Vec<Change>], probe: &Probe) -> Option<Reproducer> {
+    if let Some(r) = shortest_tail(setup, base, steps, probe) {
+        return Some(r);
+    }
+    // Any subset of the edits is a valid sequence: each change carries the whole new text.
+    let mut steps = steps.to_vec();
+    let mut budget = 400;
+    let mut parts = 2;
+    while steps.len() >= 2 && budget > 0 {
+        let chunk = steps.len().div_ceil(parts);
+        let mut reduced = false;
+        let mut i = 0;
+        while i < steps.len() && budget > 0 {
+            let mut fewer = steps.clone();
+            fewer.drain(i..(i + chunk).min(steps.len()));
+            budget -= 1;
+            if !replay(setup, base, &fewer, probe).is_empty() {
+                steps = fewer;
+                parts = (parts - 1).max(2);
+                reduced = true;
+                break;
+            }
+            i += chunk;
+        }
+        if !reduced {
+            if parts >= steps.len() {
+                break;
+            }
+            parts = (parts * 2).min(steps.len());
+        }
+    }
+    let steps = rebased(base, &steps);
+    if let Some(r) = shortest_tail(setup, base, &steps, probe) {
+        return Some(r);
+    }
+    let diffs = replay(setup, base, &steps, probe);
+    (!diffs.is_empty()).then(|| (base.clone(), steps, diffs))
+}
+
+/// The changes with their `before` texts as they are when applied in this sequence.
+fn rebased(base: &BTreeMap<PathBuf, Arc<str>>, steps: &[Vec<Change>]) -> Vec<Vec<Change>> {
+    let mut state = base.clone();
+    let mut out = Vec::new();
+    for st in steps {
+        let mut v = Vec::new();
+        for c in st {
+            let mut c = c.clone();
+            c.before = state.get(&c.path).cloned().unwrap_or_else(|| disk_text(&c.path));
+            match c.channel {
+                Channel::Close => state.remove(&c.path),
+                _ => state.insert(c.path.clone(), c.after.clone()),
+            };
+            v.push(c);
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// The fewest last edits that show the divergence from a full build of the state before them,
+/// with the open files that do not matter dropped from that state.
+fn shortest_tail(setup: &Arc<ProjectSetup>, base: &BTreeMap<PathBuf, Arc<str>>, steps: &[Vec<Change>], probe: &Probe) -> Option<Reproducer> {
     let n = steps.len();
     for j in 1..=n.min(12) {
         let start = state_after(base, &steps[..n - j]);
@@ -895,6 +962,65 @@ fn minimize(setup: &Arc<ProjectSetup>, base: &BTreeMap<PathBuf, Arc<str>>, steps
         return Some((start, tail, diffs));
     }
     None
+}
+
+// ------------------------------------------------------------------------------ saved reproducers
+
+/// Writes a reproducer as JSON: the editor contents to start from, the edits, and the
+/// positions the comparison looks at.
+fn save(path: &Path, probe: &Probe, base: &BTreeMap<PathBuf, Arc<str>>, steps: &[Vec<Change>]) -> std::io::Result<()> {
+    let steps: Vec<Vec<serde_json::Value>> = steps
+        .iter()
+        .map(|st| {
+            st.iter()
+                .map(|c| serde_json::json!({ "path": c.path, "kind": c.kind, "channel": format!("{:?}", c.channel), "after": &*c.after }))
+                .collect()
+        })
+        .collect();
+    let v = serde_json::json!({
+        "focus": probe.focus,
+        "names": probe.names,
+        "seed": probe.seed,
+        "samples": probe.samples,
+        "base": base.iter().map(|(p, t)| (p.display().to_string(), serde_json::Value::String(t.to_string()))).collect::<serde_json::Map<_, _>>(),
+        "steps": steps,
+    });
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&v).unwrap_or_default())
+}
+
+/// Replays a reproducer saved by `--fuzz-save`: the differences it still shows.
+pub fn replay_file(setup: Arc<ProjectSetup>, file: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    let paths = |x: &serde_json::Value| -> Vec<PathBuf> { x.as_array().into_iter().flatten().filter_map(|p| p.as_str()).map(PathBuf::from).collect() };
+    let strings = |x: &serde_json::Value| -> Vec<String> { x.as_array().into_iter().flatten().filter_map(|p| p.as_str()).map(String::from).collect() };
+    let base: BTreeMap<PathBuf, Arc<str>> = v["base"].as_object().into_iter().flatten().map(|(p, t)| (PathBuf::from(p), Arc::from(t.as_str().unwrap_or("")))).collect();
+    let mut steps = Vec::new();
+    for st in v["steps"].as_array().into_iter().flatten() {
+        let mut batch = Vec::new();
+        for c in st.as_array().into_iter().flatten() {
+            let channel = match c["channel"].as_str() {
+                Some("Close") => Channel::Close,
+                Some("Disk") => Channel::Disk,
+                _ => Channel::Editor,
+            };
+            let path = PathBuf::from(c["path"].as_str().unwrap_or(""));
+            batch.push(Change { path, kind: "replayed", before: Arc::from(""), after: Arc::from(c["after"].as_str().unwrap_or("")), channel });
+        }
+        steps.push(batch);
+    }
+    let root = setup.root.clone();
+    let probe = Probe {
+        root: &root,
+        focus: paths(&v["focus"]),
+        names: strings(&v["names"]),
+        seed: v["seed"].as_u64().unwrap_or(0),
+        samples: v["samples"].as_u64().unwrap_or(6) as usize,
+    };
+    Ok(replay(&setup, &base, &steps, &probe))
 }
 
 // ------------------------------------------------------------------------------ the session
@@ -1169,15 +1295,22 @@ pub fn run(setup: Arc<ProjectSetup>, opts: &Options, log: &mut dyn FnMut(&str)) 
             continue;
         }
         log(&format!("fuzz: step {step}: {} difference(s), reducing...", diffs.len()));
-        let text = match minimize(&setup, &base, &chain, &probe) {
-            Some((start, tail, d)) => describe(&root, opts.seed, step, &start, &tail, &d),
+        let (text, start, tail) = match minimize(&setup, &base, &chain, &probe) {
+            Some((start, tail, d)) => (describe(&root, opts.seed, step, &start, &tail, &d), start, tail),
             None => {
                 let mut s = describe(&root, opts.seed, step, &base, &chain, &diffs);
                 s.push_str("  (seen only with the exact sequence above, applied in this order)\n");
-                s
+                (s, base.clone(), chain.clone())
             }
         };
         log(&text);
+        if let Some(dir) = &opts.save {
+            let p = dir.join(format!("fuzz-{}-{step}.json", opts.seed));
+            match save(&p, &probe, &start, &tail) {
+                Ok(()) => log(&format!("fuzz: reproducer saved to {} (replay with --fuzz-replay)", p.display())),
+                Err(e) => log(&format!("fuzz: cannot save {}: {e}", p.display())),
+            }
+        }
         report.findings.push(Finding { step, differences: diffs, reproducer: text });
         if report.findings.len() >= opts.max_findings {
             break;
