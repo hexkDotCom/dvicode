@@ -1,0 +1,4 @@
+# What run.sh writes when the example is tried inside this repository. A private copy may keep
+# its baseline in its own (private) version control.
+baseline.json
+results/

@@ -33,7 +33,8 @@ From Windows: `wsl.exe -e bash -c 'cd /mnt/d/.../hexk-dvicode && scripts/corpus/
 
 Options: `--only REGEX` (configurations whose name matches), `--bin PATH` (an engine binary
 instead of building one with `scripts/wsl-cargo.sh`), `--out DIR` (results directory),
-`--every N`, `--cap N`, `--query-timeout S`, `--sweep-uvm` (see [Sweep](#sweep)).
+`--every N`, `--cap N`, `--query-timeout S`, `--sweep-uvm` (see [Sweep](#sweep)),
+`--manifest PATH` and `--baseline PATH` (see [Private projects](#private-projects)).
 
 Environment:
 
@@ -42,6 +43,8 @@ Environment:
 | `CORPUS` | `~/.cache/dvicode-corpus` | Clones (`$CORPUS/<project>`), generated files (`$CORPUS/.gen`), Python venv (`$CORPUS/.venv`), results (`$CORPUS/results`) |
 | `UVM_HOME` | `~/corpus/uvm-1.2` | UVM 1.2 for the `-uvm` build files and auto-configuration (the Accellera 1.2 release) |
 | `CARGO_TARGET_DIR` | `~/.cache/dvicode-target` | Where `run.sh build` builds the engine |
+| `DVICODE_CORPUS_MANIFEST` | (unset) | A manifest to use instead of `manifest.json` (see [Private projects](#private-projects)) |
+| `OUT` | `$CORPUS/results` | Results directory for `manifest.json` (another manifest keeps its results next to it) |
 
 Keep `CORPUS` on the Linux file system: `/mnt/<drive>` is much slower. The clones are never
 part of this repository; only the manifest, the build files and the baseline are.
@@ -58,8 +61,11 @@ submodules to fetch) and the configurations. A configuration names a project and
   auto-configuration.
 
 Optional `env` values are passed with `--env`; `CORPUS` and `UVM_HOME` always are. `path`
-projects are used where they are (the demo project and the earlier local corpus in
-`~/corpus`); missing optional ones are skipped.
+projects are local checkouts used where they are (the demo project and the earlier local
+corpus in `~/corpus`): `fetch` leaves them alone and fails when a non-optional one is missing,
+missing optional ones are skipped, and the results record their `git rev-parse HEAD` (if any)
+for reference. Paths may use `$VARIABLES` and `~`; a Windows path (`D:\work\x`) is converted
+with `wslpath`; a relative path, build files included, resolves against the manifest's folder.
 
 | Configuration | Source of the build file |
 |---|---|
@@ -131,6 +137,69 @@ Fewer problems are reported as a note: after checking that the change is a fix, 
 configurations). The times in the baseline come from one machine (a 24-thread WSL
 installation); on a much slower machine, record a local baseline first.
 
+## Private projects
+
+The same checks can run on projects that must not leave your machine (proprietary code). A
+private set is a folder of its own, outside this repository, with a manifest, its build files,
+its baseline and its results:
+
+```
+~/dvicode-private/            (or %USERPROFILE%\dvicode-private on Windows)
+  manifest.json               projects and configurations
+  *.build                     build files (paths relative to the project folder)
+  baseline.json               written by `run.sh baseline`
+  results/                    written by check and sweep
+```
+
+[private-example/](private-example) shows the format with this repository's demo project;
+copy it to start:
+
+```bash
+cp -r scripts/corpus/private-example ~/dvicode-private
+```
+
+In `manifest.json`, list the projects as local checkouts with `path` (a Linux path such as
+`/home/me/work/projX`, `~/work/projX`, or a Windows path such as `D:/work/projX` or
+`D:\\work\\projX` in JSON, which is converted with `wslpath`); `url` + `commit` projects (a private Git server) work too and are
+cloned into `$CORPUS`. Give each configuration a build file next to the manifest, `auto`, or
+`project` (the checkout's own `.dvicode/default.build`). Checkouts on the Linux file system
+are much faster than `/mnt/<drive>`.
+
+Point `run.sh` at the manifest with `--manifest PATH` (the file, or the folder that holds
+`manifest.json`) or the `DVICODE_CORPUS_MANIFEST` environment variable. The baseline defaults
+to `baseline.json` next to the manifest (`--baseline PATH` to change it) and the results to
+`results/` next to it, so nothing is written to the repository or mixed with the public
+results:
+
+```bash
+export DVICODE_CORPUS_MANIFEST=~/dvicode-private/manifest.json
+scripts/corpus/run.sh check          # problems per configuration
+scripts/corpus/run.sh sweep          # IDE queries on every file
+scripts/corpus/run.sh baseline       # first time: record baseline.json (review it first)
+scripts/corpus/run.sh compare        # later runs: exit 1 on a regression
+scripts/corpus/run.sh all            # fetch (checks the checkouts), build, check, sweep, compare
+```
+
+Before a release, `scripts/prerelease.ps1` runs it as the `corpus-private` step after the
+public `corpus` step when `DVICODE_CORPUS_MANIFEST` is set on Windows or `-PrivateCorpus PATH`
+is given (a Windows path or a path in WSL):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -PrivateCorpus $env:USERPROFILE\dvicode-private\manifest.json
+```
+
+The step's output on the console names your projects and files; its line in the summary only
+gives the number of configurations, regressions and notes.
+
+Keeping it private:
+
+- Never put the private folder inside this repository or any other public one, and do not
+  copy its build files, baseline or results into issues or pull requests: problem messages,
+  `top_problem_files` and sweep crashes contain file, module and class names.
+- When an engine problem shows up only in a private project, reduce it to a small example with
+  invented names before reporting it, and review everything you attach (logs included) for
+  paths and names from your projects.
+
 ## Files
 
 | File | Purpose |
@@ -140,4 +209,5 @@ installation); on a much slower machine, record a local baseline first.
 | `manifest.json` | Projects, pinned commits, configurations |
 | `builds/` | Build files |
 | `baseline.json` | Expected results |
+| `private-example/` | The format of a private set of projects, with the demo project |
 | `gen-builds.sh`, `fusesoc_build.py`, `bender_flist.py` | Regenerate the build files derived from FuseSoC cores and Bender manifests |

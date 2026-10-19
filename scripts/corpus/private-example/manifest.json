@@ -1,0 +1,11 @@
+{
+ "comment": "Example of a private corpus (see scripts/corpus/README.md, 'Private projects'). Copy this folder out of the repository and list your own checkouts. Relative paths, build files included, resolve against this folder; baseline.json and results/ go next to this file.",
+ "timeout": 600,
+ "projects": {
+  "demo": {"path": "$REPO/examples/demo-project"}
+ },
+ "configurations": [
+  {"name": "demo-tb", "project": "demo", "build": "demo-tb.build"},
+  {"name": "demo-auto", "project": "demo", "build": "auto"}
+ ]
+}

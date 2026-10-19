@@ -9,6 +9,9 @@
     test        server tests natively on Windows and in WSL
     unit        the extension's unit tests (npm run unit), when the script exists
     corpus      the real-world corpus regression (scripts/corpus), when it exists
+    corpus-private
+                the same with a private manifest outside the repository (-PrivateCorpus or
+                DVICODE_CORPUS_MANIFEST), when one is given; its summary shows only counts
     e2e-native  end-to-end tests with the engine running on Windows
     e2e-wsl     end-to-end tests in WSL: Windows drive, \\wsl.localhost folder, WSL-only folder
     e2e-ssh     end-to-end tests over SSH against a second WSL distribution
@@ -28,9 +31,12 @@
   powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloads\dvicode-0.1.1.vsix -Skip build,test
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -PrivateCorpus $env:USERPROFILE\dvicode-private\manifest.json
 #>
 param(
   [string]$Vsix,
+  [string]$PrivateCorpus = $env:DVICODE_CORPUS_MANIFEST,
   [string[]]$Skip = @(),
   [string]$Distro = 'Ubuntu',
   [string]$SshDistro = 'dvicode-remote',
@@ -175,8 +181,28 @@ Step 'corpus' {
   $runner = Join-Path $Root 'scripts\corpus\run.sh'
   if (-not (Test-Path $runner)) { return 'SKIP: no corpus harness yet' }
   # Fetches the pinned projects, builds the engine, checks, sweeps the IDE queries, compares.
-  Run 'corpus regression' { wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh all" }
+  # The manifest is explicit so that a DVICODE_CORPUS_MANIFEST set in WSL does not replace it.
+  Run 'corpus regression' { wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh all --manifest scripts/corpus/manifest.json" }
   'no regression against scripts/corpus/baseline.json'
+}
+
+Step 'corpus-private' {
+  if (-not $PrivateCorpus) { return 'SKIP: no private manifest (-PrivateCorpus or DVICODE_CORPUS_MANIFEST)' }
+  if (-not (Test-Path (Join-Path $Root 'scripts\corpus\run.sh'))) { return 'SKIP: no corpus harness yet' }
+  # A Windows path is converted; anything else is taken as a path in WSL.
+  $manifest = if (Test-Path -LiteralPath $PrivateCorpus) { WslPath (Resolve-Path -LiteralPath $PrivateCorpus).Path } else { $PrivateCorpus }
+  # The output names private projects and files: it goes to the console only, and the summary
+  # keeps the counts.
+  $out = wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh all --manifest '$manifest'" 2>&1 |
+    ForEach-Object { $s = "$_"; Write-Host $s; $s }
+  $code = $LASTEXITCODE
+  $cmp = $out | Where-Object { $_ -match '^compare: (\d+) results, (\d+) regressions' } | Select-Object -Last 1
+  if (-not $cmp) { throw "private corpus failed before compare (exit $code)" }
+  $null = $cmp -match '^compare: (\d+) results, (\d+) regressions'
+  $notes = @($out | Where-Object { $_ -like 'note: *' }).Count
+  $counts = "$($Matches[1]) configurations, $($Matches[2]) regressions, $notes notes"
+  if ($code -ne 0) { throw "private corpus: $counts" }
+  $counts
 }
 
 # The extension under test: the sources (default) or an unpacked VSIX.

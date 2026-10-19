@@ -8,9 +8,9 @@ REPO="$(cd "$HERE/../.." && pwd)"
 export REPO
 export CORPUS="${CORPUS:-$HOME/.cache/dvicode-corpus}"
 export UVM_HOME="${UVM_HOME:-$HOME/corpus/uvm-1.2}"
-MANIFEST="$HERE/manifest.json"
-BASELINE="$HERE/baseline.json"
-OUT="${OUT:-$CORPUS/results}"
+MANIFEST="${DVICODE_CORPUS_MANIFEST:-}"
+BASELINE=""
+OUT_ARG=""
 BIN="${DVICODE_BIN:-}"
 ONLY=""
 EVERY=20
@@ -24,7 +24,8 @@ usage() {
 Usage: scripts/corpus/run.sh COMMAND [OPTIONS]
 
 Commands:
-  fetch      clone the projects (or move them) to the pinned commits, generate sources
+  fetch      clone the projects (or move them) to the pinned commits, generate sources;
+             local checkouts (`path` projects) are left alone
   build      build the release engine with scripts/wsl-cargo.sh
   check      run `dvicode-server check` for every configuration: OUT/<config>.json
   sweep      run IDE queries on every file of every configuration: OUT/<config>.sweep.json
@@ -34,9 +35,14 @@ Commands:
   all        fetch, build (unless --bin), check, sweep, compare
 
 Options:
+  --manifest PATH    projects and configurations, or a folder with a manifest.json (default
+                     $DVICODE_CORPUS_MANIFEST, else scripts/corpus/manifest.json); a Windows
+                     path is converted with wslpath
+  --baseline PATH    baseline (default baseline.json next to the manifest)
   --bin PATH         engine binary (default: build it; or $DVICODE_BIN)
   --only REGEX       only configurations whose name matches
-  --out DIR          results directory (default $CORPUS/results)
+  --out DIR          results directory (default $CORPUS/results for scripts/corpus/manifest.json,
+                     results/ next to any other manifest)
   --every N          sweep: query identifiers on every Nth line (default 20)
   --cap N            sweep: at most N positions per file (default 30)
   --query-timeout S  sweep: one query may take S seconds (default 60)
@@ -44,7 +50,8 @@ Options:
   --merge            baseline: keep configurations that have no result in OUT
 
 Environment: CORPUS (clones, default ~/.cache/dvicode-corpus), UVM_HOME (default
-~/corpus/uvm-1.2), CARGO_TARGET_DIR (for build).
+~/corpus/uvm-1.2), CARGO_TARGET_DIR (for build), DVICODE_CORPUS_MANIFEST (see --manifest),
+OUT (results directory for scripts/corpus/manifest.json only).
 EOF
 }
 
@@ -53,9 +60,11 @@ CMD="${1:-}"
 MERGE=""
 while [ $# -gt 0 ]; do
     case "$1" in
+        --manifest) MANIFEST="$2"; shift ;;
+        --baseline) BASELINE="$2"; shift ;;
         --bin) BIN="$2"; shift ;;
         --only) ONLY="$2"; shift ;;
-        --out) OUT="$2"; shift ;;
+        --out) OUT_ARG="$2"; shift ;;
         --every) EVERY="$2"; shift ;;
         --cap) CAP="$2"; shift ;;
         --query-timeout) QUERY_TIMEOUT="$2"; shift ;;
@@ -68,6 +77,34 @@ while [ $# -gt 0 ]; do
 done
 
 log() { echo "[corpus] $*" >&2; }
+
+# A path given on Windows (D:\work\x, D:/work/x, \\server\share) as a Linux path.
+linux_path() {
+    case "$1" in
+        [A-Za-z]:[\\/]*|\\\\*) wslpath -u "$1" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# The manifest decides where the baseline and the results live: a private manifest keeps
+# everything in its own folder, the public one keeps results in $CORPUS (out of the repository).
+PUBLIC="$(realpath -m "$HERE/manifest.json")"
+MANIFEST="$(realpath -m "$(linux_path "${MANIFEST:-$PUBLIC}")")"
+[ -d "$MANIFEST" ] && MANIFEST="$MANIFEST/manifest.json"
+case "$CMD" in
+    ""|-h|--help|build|table) ;;
+    *) [ -f "$MANIFEST" ] || { echo "run.sh: no manifest at $MANIFEST" >&2; exit 2; } ;;
+esac
+MDIR="$(dirname "$MANIFEST")"
+BASELINE="$(realpath -m "$(linux_path "${BASELINE:-$MDIR/baseline.json}")")"
+if [ -n "$OUT_ARG" ]; then
+    OUT="$(linux_path "$OUT_ARG")"
+elif [ "$MANIFEST" = "$PUBLIC" ]; then
+    OUT="${OUT:-$CORPUS/results}"
+else
+    OUT="$MDIR/results"
+fi
+[ "$MANIFEST" = "$PUBLIC" ] || log "manifest $MANIFEST, results $OUT"
 
 # --- fetch ---------------------------------------------------------------------------------
 
@@ -123,6 +160,18 @@ cmd_fetch() {
     while IFS=$'\t' read -r name url commit subs; do
         fetch_project "$name" "$url" "$commit" "$subs" || { log "$name: fetch failed"; rc=1; }
     done < <($PY "$HERE/corpus.py" projects "$MANIFEST")
+    # Local checkouts are used as they are; check records their commit for reference.
+    local dir optional c
+    while IFS=$'\t' read -r name dir optional; do
+        if [ -d "$dir" ]; then
+            c="$(commit_of "$dir")"
+            log "$name: local checkout $dir${c:+ at ${c:0:12}}"
+        elif [ "$optional" = 1 ]; then
+            log "$name: $dir missing (optional, skipped)"
+        else
+            log "$name: $dir missing"; rc=1
+        fi
+    done < <($PY "$HERE/corpus.py" locals "$MANIFEST")
     run_setup || rc=1
     return $rc
 }
