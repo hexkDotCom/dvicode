@@ -4,6 +4,21 @@
 import * as vscode from 'vscode';
 import type { LanguageClient } from 'vscode-languageclient/node';
 
+/**
+ * Whether two dvicode:// authorities name the same server: host names ignore case, and
+ * "Open Folder on the Server" writes `ssh+user%40host` where the settings give `ssh+user@host`.
+ */
+export function sameAuthority(a: string, b: string): boolean {
+  const canon = (s: string) => {
+    try {
+      return decodeURIComponent(s).toLowerCase();
+    } catch {
+      return s.toLowerCase();
+    }
+  };
+  return canon(a) === canon(b);
+}
+
 export class RemoteFs implements vscode.FileSystemProvider {
   private readonly emitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
   readonly onDidChangeFile = this.emitter.event;
@@ -22,7 +37,7 @@ export class RemoteFs implements vscode.FileSystemProvider {
     // One server per window: a folder of another host must not be read or written through it.
     const served = this.authority();
     for (const u of other ? [uri, other] : [uri]) {
-      if (!served || served.toLowerCase() !== u.authority.toLowerCase()) {
+      if (!served || !sameAuthority(served, u.authority)) {
         throw vscode.FileSystemError.Unavailable(
           `DVICode is connected to ${served ? `dvicode://${served}` : 'this machine'}, not dvicode://${u.authority}; open folders of one server per window`,
         );

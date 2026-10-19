@@ -40,8 +40,9 @@ export interface Mapper {
 
 const isWin = process.platform === 'win32';
 
+/** Forward slashes (backslashes separate only on Windows), no trailing slash. */
 function norm(p: string): string {
-  let s = p.replace(/\\/g, '/');
+  let s = isWin ? p.replace(/\\/g, '/') : p;
   if (s.length > 1 && s.endsWith('/')) {
     s = s.slice(0, -1);
   }
@@ -57,10 +58,12 @@ function startsWithPath(p: string, prefix: string, ignoreCase = isWin): boolean 
 /** `prefix` followed by the rest of a path after it, with exactly one `/` between. */
 function joinPath(prefix: string, rest: string): string {
   const r = rest.replace(/^\/+/, '');
-  if (!r) {
-    return prefix;
+  const p = prefix.replace(/\/+$/, '');
+  if (r) {
+    return `${p}/${r}`;
   }
-  return `${prefix.replace(/\/+$/, '')}/${r}`;
+  // `Z:` alone is the current directory of drive Z.
+  return /^[a-zA-Z]:$/.test(p) ? `${p}/` : prefix;
 }
 
 /** WSL distribution and Linux path of a \\wsl$ / \\wsl.localhost URI. */
@@ -104,9 +107,10 @@ export function makeMapper(opts: MapperOptions): Mapper {
     if (uri.scheme !== 'file') {
       return undefined;
     }
-    const wsl = parseWslUri(uri);
+    // Only an engine in that same distribution sees a \\wsl$ file under its Linux path.
+    const wsl = opts.wslDistro !== undefined ? parseWslUri(uri) : undefined;
     if (wsl) {
-      return wsl.path;
+      return wsl.distro.toLowerCase() === opts.wslDistro!.toLowerCase() ? wsl.path : undefined;
     }
     const local = norm(uri.fsPath);
     for (const m of mappings) {
@@ -167,6 +171,9 @@ export function makeMapper(opts: MapperOptions): Mapper {
       }
       if (opts.remoteAuthority) {
         parts.push(`dvicode://${opts.remoteAuthority}`);
+      }
+      if (opts.fallbackAuthority) {
+        parts.push(`server-only files: dvicode://${opts.fallbackAuthority}`);
       }
       for (const m of mappings) {
         parts.push(`${m.local} -> ${m.remote}`);

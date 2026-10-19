@@ -4,7 +4,7 @@ node_modules/**
 test-workspace/**
 **/*.map
 **/*.ts
-tsconfig.json
+tsconfig*.json
 esbuild.mjs
 .vscode/**
 test/**
