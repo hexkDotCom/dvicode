@@ -1,0 +1,33 @@
+// CV32E40P UVM testbench of core-v-verif, as mk/uvmt/uvmt.mk and xrun.mk compile it (default
+// configuration, USE_ISS=YES). The RTL comes from the cv32e40p clone, pinned to the commit
+// that cv32e40p/sim/ExternalRepos.mk asks for.
++dvicode_setenv+CORE_V_VERIF=$CORPUS/core-v-verif
++dvicode_setenv+DV_UVMT_PATH=$CORE_V_VERIF/cv32e40p/tb/uvmt
++dvicode_setenv+DV_UVME_PATH=$CORE_V_VERIF/cv32e40p/env/uvme
++dvicode_setenv+DV_UVML_HRTBT_PATH=$CORE_V_VERIF/lib/uvm_libs/uvml_hrtbt
++dvicode_setenv+DV_UVML_TRN_PATH=$CORE_V_VERIF/lib/uvm_libs/uvml_trn
++dvicode_setenv+DV_UVML_LOGS_PATH=$CORE_V_VERIF/lib/uvm_libs/uvml_logs
++dvicode_setenv+DV_UVML_SB_PATH=$CORE_V_VERIF/lib/uvm_libs/uvml_sb
++dvicode_setenv+DV_UVML_MEM_PATH=$CORE_V_VERIF/lib/uvm_libs/uvml_mem
++dvicode_setenv+DV_UVMA_CLKNRST_PATH=$CORE_V_VERIF/lib/uvm_agents/uvma_clknrst
++dvicode_setenv+DV_UVMA_INTERRUPT_PATH=$CORE_V_VERIF/lib/uvm_agents/uvma_interrupt
++dvicode_setenv+DV_UVMA_DEBUG_PATH=$CORE_V_VERIF/lib/uvm_agents/uvma_debug
++dvicode_setenv+DV_UVMA_OBI_MEMORY_PATH=$CORE_V_VERIF/lib/uvm_agents/uvma_obi_memory
++dvicode_setenv+DV_SVLIB_PATH=$CORE_V_VERIF/cv32e40p/vendor_lib/verilab
++dvicode_setenv+DV_OVPM_HOME=$CORE_V_VERIF/vendor_lib/imperas
++dvicode_setenv+DV_OVPM_MODEL=$DV_OVPM_HOME/imperas_DV_COREV
++dvicode_setenv+DV_OVPM_DESIGN=$DV_OVPM_HOME/design
++dvicode_setenv+TBSRC_HOME=$CORE_V_VERIF/cv32e40p/tb
++dvicode_setenv+DESIGN_RTL_DIR=$CORPUS/cv32e40p/rtl
+-uvm
++define+CV32E40P_ASSERT_ON
++define+CV32E40P_TRACE_EXECUTION
++define+UVM
+// compile_flags of cv32e40p/tests/cfg/default.yaml
++define+NO_PULP
++incdir+$DV_UVME_PATH
++incdir+$DV_UVMT_PATH
+-f $CORPUS/cv32e40p/cv32e40p_manifest.flist
+-f $DV_UVMT_PATH/uvmt_cv32e40p.flist
+-f $DV_UVMT_PATH/imperas_iss.flist
+-top uvmt_cv32e40p_tb

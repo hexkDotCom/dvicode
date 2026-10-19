@@ -1,0 +1,43 @@
+{
+ "comment": "Projects for scripts/corpus/run.sh. Cloned projects live in $CORPUS/<name> at the pinned commit; 'path' projects are used where they are and skipped when 'optional' and missing. A configuration's build is a file in this directory, 'auto' (auto-configuration) or 'project' (the project's own .dvicode/default.build, else auto-configuration, like the editor).",
+ "timeout": 600,
+ "projects": {
+  "opentitan": {"url": "https://github.com/lowRISC/opentitan", "commit": "f602dde0c71f0ee48dd621264a970aad92988983"},
+  "ibex": {"url": "https://github.com/lowRISC/ibex", "commit": "65368a4c41d8e6c2e56ce816e418e21fc4e7b328"},
+  "core-v-verif": {"url": "https://github.com/openhwgroup/core-v-verif", "commit": "083728bd8d548fd188e0ef43e0c1b038bce24002"},
+  "cv32e40p": {"url": "https://github.com/openhwgroup/cv32e40p", "commit": "fcd59685681bc2b58e5805497b0c59df14eda810"},
+  "cva6": {"url": "https://github.com/openhwgroup/cva6", "commit": "81245a47fad8fe1a5d562d953ef2662e099def76",
+           "submodules": ["core/cvfpu", "core/cache_subsystem/hpdcache"]},
+  "axi": {"url": "https://github.com/pulp-platform/axi", "commit": "70b8e54fd460e3308e58be596ceb3566a6e3576e"},
+  "common_cells": {"url": "https://github.com/pulp-platform/common_cells", "commit": "db42769334b4589b4b3fc671b34513bdb98be565"},
+  "tech_cells_generic": {"url": "https://github.com/pulp-platform/tech_cells_generic", "commit": "55cb54513e2d426be5992d311cb9d5dbcad10c78"},
+  "demo": {"path": "$REPO/examples/demo-project"},
+  "ubus": {"path": "$HOME/corpus/ubus", "optional": true},
+  "uvm-only": {"path": "$HOME/corpus/uvm-only", "optional": true},
+  "hexk-sv-lib": {"path": "$HOME/corpus/hexk-sv-lib", "optional": true},
+  "uvm11d-proj": {"path": "$HOME/corpus/questa/uvm11d-proj", "optional": true}
+ },
+ "configurations": [
+  {"name": "opentitan-uart", "project": "opentitan", "build": "builds/opentitan-uart.build"},
+  {"name": "opentitan-i2c", "project": "opentitan", "build": "builds/opentitan-i2c.build"},
+  {"name": "opentitan-aes", "project": "opentitan", "build": "builds/opentitan-aes.build"},
+  {"name": "opentitan-earlgrey-rtl", "project": "opentitan", "build": "builds/opentitan-earlgrey-rtl.build"},
+  {"name": "opentitan-auto", "project": "opentitan", "build": "auto", "timeout": 1800},
+  {"name": "ibex-dv", "project": "ibex", "build": "builds/ibex-dv.build"},
+  {"name": "ibex-auto", "project": "ibex", "build": "auto"},
+  {"name": "cv32e40p-uvm", "project": "core-v-verif", "build": "builds/cv32e40p-uvm.build"},
+  {"name": "core-v-verif-auto", "project": "core-v-verif", "build": "auto"},
+  {"name": "cv32e40p-auto", "project": "cv32e40p", "build": "auto"},
+  {"name": "cva6-rtl", "project": "cva6", "build": "builds/cva6-rtl.build"},
+  {"name": "cva6-auto", "project": "cva6", "build": "auto"},
+  {"name": "pulp-axi-rtl", "project": "axi", "build": "builds/pulp-axi-rtl.build"},
+  {"name": "axi-auto", "project": "axi", "build": "auto"},
+  {"name": "common_cells-auto", "project": "common_cells", "build": "auto"},
+  {"name": "demo", "project": "demo", "build": "project"},
+  {"name": "demo-errors", "project": "demo", "build": "$REPO/examples/demo-project/.dvicode/errors.build"},
+  {"name": "ubus", "project": "ubus", "build": "project"},
+  {"name": "uvm-only", "project": "uvm-only", "build": "project"},
+  {"name": "hexk-sv-lib", "project": "hexk-sv-lib", "build": "project"},
+  {"name": "uvm11d-proj", "project": "uvm11d-proj", "build": "project"}
+ ]
+}
