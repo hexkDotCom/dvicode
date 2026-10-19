@@ -429,6 +429,38 @@ fn rename_edits_every_file_with_the_open_documents_versions() {
 }
 
 #[test]
+fn a_quick_fix_applied_like_the_editor_does_clears_the_problem() {
+    let root = project("quickfix", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let top = uri(&root, "top.sv");
+    let broken = TOP.replace("initial s = IDLE;", "initial s = IDEL;").replace('\n', "\r\n");
+    c.open(&top, 3, &broken);
+    let p = c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    assert_eq!(codes(&p), vec!["UNDECLARED_IDENTIFIER"]);
+    let range = p.diagnostics[0].range;
+    let actions = c.request_ok(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": top }, "range": range, "context": { "diagnostics": [], "only": ["quickfix"] } }),
+    );
+    let fix = actions.as_array().unwrap().iter().find(|a| a["title"] == "Did you mean 'IDLE'?").unwrap_or_else(|| panic!("{actions}")).clone();
+    // The editor applies it only to version 3 of the document.
+    let docs = fix["edit"]["documentChanges"].as_array().unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["textDocument"]["version"], 3);
+    let edits = docs[0]["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 1);
+    let (r, new) = (&edits[0]["range"], edits[0]["newText"].as_str().unwrap());
+    let li = dvi_syntax::LineIndex::new(&broken);
+    let pos = |p: &Value| li.offset(&broken, p["line"].as_u64().unwrap() as u32, p["character"].as_u64().unwrap() as u32) as usize;
+    let mut fixed = broken.clone();
+    fixed.replace_range(pos(&r["start"])..pos(&r["end"]), new);
+    assert_eq!(fixed, TOP.replace('\n', "\r\n"), "only the name changes, line endings kept");
+    c.change(&top, 4, &fixed);
+    c.wait_problems(&top, |p| p.version == Some(4) && p.diagnostics.is_empty());
+    c.shutdown();
+}
+
+#[test]
 fn bad_requests_get_errors_and_the_server_keeps_answering() {
     let root = project("errors", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);
