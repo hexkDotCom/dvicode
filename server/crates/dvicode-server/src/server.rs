@@ -916,3 +916,6 @@ fn pos(a: &Analysis, uri: &Url, p: Position) -> Option<(FileId, u32)> {
     let f = a.file_of_url(uri)?;
     Some((f, a.offset_at(f, p)?))
 }
+
+#[cfg(test)]
+mod tests;

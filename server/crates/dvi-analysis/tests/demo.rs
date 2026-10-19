@@ -8,7 +8,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn demo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples/demo-project").canonicalize().unwrap()
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples/demo-project").canonicalize().unwrap();
+    // Without the `\\?\` that canonicalize adds on Windows: paths from file URLs have none.
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => p,
+    }
 }
 
 fn build(build_file: &str) -> Analysis {
