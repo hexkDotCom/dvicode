@@ -17,6 +17,9 @@ EVERY=20
 CAP=30
 QUERY_TIMEOUT=60
 SWEEP_UVM=0
+FUZZ_EDITS=60
+FUZZ_SEED=1
+RENAMES=40
 PY=python3
 
 usage() {
@@ -29,6 +32,10 @@ Commands:
   build      build the release engine with scripts/wsl-cargo.sh
   check      run `dvicode-server check` for every configuration: OUT/<config>.json
   sweep      run IDE queries on every file of every configuration: OUT/<config>.sweep.json
+  fuzz       random edits, each incremental update compared with a full build:
+             OUT/<config>.fuzz.txt has a reproducer per difference; exit 1 on any
+  writes     renames and quick fixes applied like the editor does, each result checked:
+             OUT/<config>.writes.txt lists findings and notes; exit 1 on findings
   compare    compare OUT with baseline.json; exit 1 on regressions
   baseline   write baseline.json from OUT (--merge keeps configurations not in OUT)
   table      print a summary of OUT
@@ -47,6 +54,9 @@ Options:
   --cap N            sweep: at most N positions per file (default 30)
   --query-timeout S  sweep: one query may take S seconds (default 60)
   --sweep-uvm        sweep: also query the UVM library's files
+  --edits N          fuzz: edits per configuration (default 60)
+  --seed S           fuzz, writes: random seed (default 1)
+  --renames N        writes: renames per configuration (default 40)
   --merge            baseline: keep configurations that have no result in OUT
 
 Environment: CORPUS (clones, default ~/.cache/dvicode-corpus), UVM_HOME (default
@@ -69,6 +79,9 @@ while [ $# -gt 0 ]; do
         --cap) CAP="$2"; shift ;;
         --query-timeout) QUERY_TIMEOUT="$2"; shift ;;
         --sweep-uvm) SWEEP_UVM=1 ;;
+        --edits) FUZZ_EDITS="$2"; shift ;;
+        --seed) FUZZ_SEED="$2"; shift ;;
+        --renames) RENAMES="$2"; shift ;;
         --merge) MERGE=--merge ;;
         -h|--help) usage; exit 0 ;;
         *) echo "run.sh: unknown option $1" >&2; usage >&2; exit 2 ;;
@@ -275,11 +288,63 @@ cmd_sweep() {
     done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
 }
 
+# --- fuzz ----------------------------------------------------------------------------------
+
+# `check --fuzz-edits`: random edits as editor contents (the clones are never written), each
+# incremental update compared with a full build of the same texts.
+cmd_fuzz() {
+    need_bin
+    mkdir -p "$OUT"
+    local name project dir build timeout optional envs found=0 n line
+    while IFS=$'\t' read -r name project dir build timeout optional envs; do
+        [ -d "$dir" ] || { log "$name: $dir missing, skipped"; continue; }
+        engine_args "$dir" "$build" "$envs"
+        # Each edit costs a full build, so the time limit grows with the number of edits.
+        run_engine $((timeout * (FUZZ_EDITS / 20 + 1))) "$OUT/$name.fuzz.txt" "$OUT/$name.fuzz.err" "${ARGS[@]}" \
+            --fuzz-edits "$FUZZ_EDITS" --seed "$FUZZ_SEED" --fuzz-findings 3
+        line=$(grep "dvicode check: fuzz seed" "$OUT/$name.fuzz.err" | sed 's/^dvicode check: //; s/ (.*//')
+        n=$(grep -c "^reproducer" "$OUT/$name.fuzz.txt")
+        if [ $RC -gt 1 ] || [ -n "$TIMED_OUT" ]; then
+            log "$name: engine failed (exit $RC${TIMED_OUT:+, timed out}), see $OUT/$name.fuzz.err"
+            found=1
+        else
+            log "$name: $line"
+        fi
+        [ "$n" -gt 0 ] && found=1
+    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
+    return $found
+}
+
+# `check --write-check`: renames and quick fixes applied like the editor does (in memory: the
+# clones are never written), each result compiled again and checked.
+cmd_writes() {
+    need_bin
+    mkdir -p "$OUT"
+    local name project dir build timeout optional envs found=0 line
+    while IFS=$'\t' read -r name project dir build timeout optional envs; do
+        [ -d "$dir" ] || { log "$name: $dir missing, skipped"; continue; }
+        engine_args "$dir" "$build" "$envs"
+        run_engine $((timeout * (RENAMES / 10 + 1))) "$OUT/$name.writes.txt" "$OUT/$name.writes.err" "${ARGS[@]}" \
+            --write-check "$RENAMES" --seed "$FUZZ_SEED"
+        line=$(grep "dvicode check: write check" "$OUT/$name.writes.err" | sed 's/^dvicode check: //')
+        if [ $RC -gt 1 ] || [ -n "$TIMED_OUT" ]; then
+            log "$name: engine failed (exit $RC${TIMED_OUT:+, timed out}), see $OUT/$name.writes.err"
+            found=1
+        else
+            log "$name: $line"
+        fi
+        grep -q "^finding:" "$OUT/$name.writes.txt" && found=1
+    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
+    return $found
+}
+
 case "$CMD" in
     fetch) cmd_fetch ;;
     build) cmd_build ;;
     check) cmd_check ;;
     sweep) cmd_sweep ;;
+    fuzz) cmd_fuzz ;;
+    writes) cmd_writes ;;
     compare) $PY "$HERE/corpus.py" compare "$OUT" --baseline "$BASELINE" --only "$ONLY" ;;
     baseline) $PY "$HERE/corpus.py" baseline "$OUT" --output "$BASELINE" --only "$ONLY" $MERGE ;;
     table) $PY "$HERE/corpus.py" table "$OUT" ;;

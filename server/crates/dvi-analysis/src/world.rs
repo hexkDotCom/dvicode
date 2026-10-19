@@ -3,7 +3,7 @@
 use crate::vfs::{Vfs, BUILTIN_DIR};
 use dvi_project::BuildConfig;
 use dvi_syntax::ast::{DeclId, DeclKind, ParsedUnit, RefId, RefKind};
-use dvi_syntax::preproc::{command_line_define, preprocess, IncludeInfo, MacroDef, MacroTable, MacroUse, PpConfig};
+use dvi_syntax::preproc::{command_line_define, def_identity, preprocess, IncludeInfo, MacroDef, MacroName, MacroTable, MacroUse, PpConfig};
 use dvi_syntax::{parser, Diag, FileId, SourceProvider, Span};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -38,27 +38,36 @@ pub struct FilePositions {
     pub decls: Vec<DeclId>,
 }
 
+/// The heavy parts are shared, so that a copy that only differs in its macros is cheap (see
+/// `Analysis::propagate_macros`).
+#[derive(Clone)]
 pub struct Unit {
     pub id: UnitId,
     pub root: FileId,
     pub kind: UnitKind,
     /// Index of the build invocation.
     pub invocation: usize,
-    pub parsed: ParsedUnit,
+    pub parsed: Arc<ParsedUnit>,
     pub includes: Vec<IncludeInfo>,
     pub macro_uses: Vec<MacroUse>,
     pub macro_defs: Vec<Arc<MacroDef>>,
+    /// Macro names in `` `ifdef ``, `` `ifndef ``, `` `elsif `` and `` `undef ``.
+    pub macro_names: Vec<MacroName>,
+    /// Macros called through a name built by token pasting (`` `dv_``SEV_ ``).
+    pub pasted_macros: Vec<SmolStr>,
     pub files: Vec<FileId>,
     pub inactive: Vec<Span>,
     pub pp_diags: Vec<Diag>,
     pub macros_before: MacroTable,
     pub macros_after: MacroTable,
-    pub positions: FxHashMap<FileId, FilePositions>,
+    pub positions: Arc<FxHashMap<FileId, FilePositions>>,
     /// Name -> reference segments with that name.
-    pub names: FxHashMap<SmolStr, Vec<(RefId, u16)>>,
+    pub names: Arc<FxHashMap<SmolStr, Vec<(RefId, u16)>>>,
     /// The text of each file exactly as this unit was compiled from it.
-    pub sources: FxHashMap<FileId, Arc<Source>>,
+    pub sources: Arc<FxHashMap<FileId, Arc<Source>>>,
     pub parse_ms: u128,
+    /// A `-y`/`-v` library file, compiled because it provides a missing design element.
+    pub library: bool,
 }
 
 /// A file's text as an analysis snapshot saw it. Positions in the snapshot are converted with
@@ -190,19 +199,22 @@ fn make_unit(
         root,
         kind,
         invocation,
-        parsed,
+        parsed: Arc::new(parsed),
         includes: pp.includes,
         macro_uses: pp.macro_uses,
         macro_defs: pp.macro_defs,
+        macro_names: pp.macro_names,
+        pasted_macros: pp.pasted_macros,
         files: pp.files,
         inactive: pp.inactive,
         pp_diags: pp.diags,
         macros_before,
         macros_after: pp.macros_after,
-        positions,
-        names,
-        sources,
+        positions: Arc::new(positions),
+        names: Arc::new(names),
+        sources: Arc::new(sources),
         parse_ms: t0.elapsed().as_millis(),
+        library: false,
     }
 }
 
@@ -289,7 +301,7 @@ impl Analysis {
             build_ms: 0,
         };
         a.reindex();
-        a.add_library_units();
+        a.update_library_units();
         a.build_ms = t0.elapsed().as_millis();
         a
     }
@@ -301,29 +313,46 @@ impl Analysis {
         make_unit(vfs, 0, id, UnitKind::Builtin, usize::MAX, pp, MacroTable::new())
     }
 
-    /// Compiles `-y`/`-v` library files that provide otherwise missing design elements.
-    fn add_library_units(&mut self) {
+    /// Compiles the `-y`/`-v` library files that provide otherwise missing design elements,
+    /// in as many rounds as their own instances need. After an edit, the library units that
+    /// are still needed (with the same macros) are kept, and those that nothing needs any more
+    /// (the last instance was removed) are dropped: a full build would not compile them.
+    fn update_library_units(&mut self) {
+        let old: Vec<UnitId> = self.units.iter().flatten().filter(|u| u.library).map(|u| u.id).collect();
         let has_libs = self.setup.config.invocations.iter().any(|i| !i.lib_dirs.is_empty() || !i.lib_files.is_empty());
-        if !has_libs {
+        if !has_libs && old.is_empty() {
             return;
         }
+        let definitions = |u: &Unit| -> Vec<SmolStr> {
+            u.parsed
+                .decl(ParsedUnit::ROOT)
+                .children
+                .iter()
+                .map(|c| u.parsed.decl(*c))
+                .filter(|d| d.kind.is_definition() && !d.name.is_empty() && !d.has(dvi_syntax::ast::dflags::OUT_OF_BLOCK))
+                .map(|d| d.name.clone())
+                .collect()
+        };
+        // Only the build's own files count, as when a full build adds library files (before any
+        // ad-hoc unit exists): which library files are compiled does not depend on what is open.
+        let own = |u: &Unit| u.kind != UnitKind::AdHoc && !u.library;
+        let mut defined: FxHashSet<SmolStr> = self.units.iter().flatten().filter(|u| own(u)).flat_map(|u| definitions(u)).collect();
+        // Library units in the order a full build adds them.
+        let mut kept: Vec<UnitId> = Vec::new();
+        let mut changed = false;
         for _round in 0..8 {
             let mut missing: FxHashSet<SmolStr> = FxHashSet::default();
-            for u in self.units.iter().flatten() {
+            for u in self.units.iter().flatten().filter(|u| own(u) || kept.contains(&u.id)) {
                 for r in &u.parsed.refs {
-                    if r.kind == RefKind::Definition {
-                        let n = &r.segs[0].name;
-                        if !self.global.definitions.contains_key(n) {
-                            missing.insert(n.clone());
-                        }
+                    if r.kind == RefKind::Definition && !defined.contains(&r.segs[0].name) {
+                        missing.insert(r.segs[0].name.clone());
                     }
                 }
             }
             if missing.is_empty() {
-                return;
+                break;
             }
             let mut new_files: Vec<(PathBuf, usize)> = Vec::new();
-            let compiled: FxHashSet<FileId> = self.units.iter().flatten().map(|u| u.root).collect();
             for (inv_idx, inv) in self.setup.config.invocations.iter().enumerate() {
                 let exts: Vec<String> = if inv.libext.is_empty() { vec![".v".into(), ".sv".into()] } else { inv.libext.clone() };
                 for name in &missing {
@@ -344,20 +373,62 @@ impl Analysis {
             let mut added = false;
             for (p, inv_idx) in new_files {
                 let id = self.vfs.file_id(&p);
-                if compiled.contains(&id) || self.units.iter().flatten().any(|u| u.root == id) {
+                if self.units.iter().flatten().any(|u| u.root == id && (own(u) || kept.contains(&u.id))) {
                     continue;
                 }
-                let macros = self.last_macros(inv_idx);
-                let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv_idx], id, macros.clone());
-                let uid = self.units.len() as UnitId;
-                self.units.push(Some(Arc::new(make_unit(&self.vfs, uid, id, UnitKind::Project, inv_idx, pp, macros))));
+                // The macro state after the library unit added before it, else after the
+                // invocation's files.
+                let macros = kept
+                    .iter()
+                    .rev()
+                    .map(|k| self.unit(*k))
+                    .find(|u| u.invocation == inv_idx)
+                    .map(|u| u.macros_after.clone())
+                    .unwrap_or_else(|| self.invocation_macros(inv_idx));
+                let reuse = old.iter().copied().find(|o| {
+                    let u = self.unit(*o);
+                    !kept.contains(o) && u.root == id && u.invocation == inv_idx && u.macros_before.same_definitions(&macros)
+                });
+                let uid = match reuse {
+                    Some(o) => o,
+                    None => {
+                        let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv_idx], id, macros.clone());
+                        let uid = self.units.len() as UnitId;
+                        let mut u = make_unit(&self.vfs, uid, id, UnitKind::Project, inv_idx, pp, macros);
+                        u.library = true;
+                        self.units.push(Some(Arc::new(u)));
+                        changed = true;
+                        uid
+                    }
+                };
+                kept.push(uid);
+                defined.extend(definitions(self.unit(uid)));
                 added = true;
             }
             if !added {
-                return;
+                break;
             }
+        }
+        for o in old {
+            if !kept.contains(&o) {
+                self.units[o as usize] = None;
+                changed = true;
+            }
+        }
+        if changed {
             self.reindex();
         }
+    }
+
+    /// Macro state at the end of an invocation's own files (not its library files).
+    fn invocation_macros(&self, inv: usize) -> MacroTable {
+        self.units
+            .iter()
+            .flatten()
+            .filter(|u| u.kind == UnitKind::Project && !u.library && u.invocation == inv)
+            .last()
+            .map(|u| u.macros_after.clone())
+            .unwrap_or_else(|| self.setup.initial_macros.get(inv).cloned().unwrap_or_default())
     }
 
     /// Macro table at the end of an invocation.
@@ -427,15 +498,25 @@ impl Analysis {
                 g.macros.entry(n.clone()).or_default().push(m.clone());
             }
         }
-        // Prefer project units over ad-hoc ones for the same name.
+        // Prefer project units, in compilation order, then library units, over ad-hoc ones
+        // for the same name. Library and ad-hoc units come in the order they were needed or
+        // opened, which depends on the editing session: order them by path.
         let units = &self.units;
-        let rank = |r: &DeclRef| units[r.unit as usize].as_ref().map_or(3, |u| match u.kind {
-            UnitKind::Project => 0,
-            UnitKind::Builtin => 1,
-            UnitKind::AdHoc => 2,
-        });
+        let order: FxHashMap<UnitId, (u8, u32, PathBuf)> = units
+            .iter()
+            .flatten()
+            .map(|u| {
+                let key = match u.kind {
+                    UnitKind::Project if u.library => (1, 0, self.vfs.path(u.root)),
+                    UnitKind::Project => (0, u.id, PathBuf::new()),
+                    UnitKind::Builtin => (2, u.id, PathBuf::new()),
+                    UnitKind::AdHoc => (3, 0, self.vfs.path(u.root)),
+                };
+                (u.id, key)
+            })
+            .collect();
         for v in g.packages.values_mut().chain(g.definitions.values_mut()).chain(g.unit_items.values_mut()) {
-            v.sort_by_key(|r| (rank(r), r.unit));
+            v.sort_by(|a, b| order.get(&a.unit).cmp(&order.get(&b.unit)).then(a.decl.cmp(&b.decl)));
         }
         self.global = Arc::new(g);
         self.file_units = Arc::new(fu);
@@ -484,55 +565,156 @@ impl Analysis {
         }
         next.propagate_macros(self, &affected);
         next.reindex();
-        next.add_library_units();
+        next.update_library_units();
         next
     }
 
     fn recompile(&self, old: &Unit, macros_before: MacroTable) -> Unit {
         let cfg = self.pp_config_for(old);
         let pp = preprocess(&*self.vfs, cfg, old.root, macros_before.clone());
-        make_unit(&self.vfs, old.id, old.root, old.kind, old.invocation, pp, macros_before)
+        let mut u = make_unit(&self.vfs, old.id, old.root, old.kind, old.invocation, pp, macros_before);
+        u.library = old.library;
+        u
     }
 
     /// After `changed` units were recompiled: when one of them now leaves different macros
     /// behind, the files compiled after it in the same invocation are recompiled with the new
     /// macros, until the macro state is back to what it was.
+    ///
+    /// Definitions that only moved (a line added above a `` `define ``) expand the same way,
+    /// so the files after them are not compiled again; but their macro uses and macro tables
+    /// are pointed at the new definitions, or they would lead to the old location.
     fn propagate_macros(&mut self, before: &Analysis, changed: &[UnitId]) {
         // Pending macro state per invocation, valid for the next unit of that invocation.
         let mut carry: FxHashMap<usize, MacroTable> = FxHashMap::default();
+        // Moved definitions: identity of the old one -> the new one.
+        let mut moved: FxHashMap<usize, Arc<MacroDef>> = FxHashMap::default();
+        // Tables already pointed at the moved definitions, by identity.
+        let mut replaced: FxHashMap<usize, Option<MacroTable>> = FxHashMap::default();
         let ids: Vec<UnitId> = self.units.iter().flatten().map(|u| u.id).collect();
         for uid in ids {
             let u = self.unit(uid).clone();
-            match u.kind {
+            let old = before.try_unit(uid);
+            let edited = changed.contains(&uid);
+            let recompiled = match u.kind {
                 UnitKind::Builtin => continue,
-                UnitKind::AdHoc => {
-                    // Ad-hoc files see the final state of their invocation.
-                    if let Some(m) = carry.get(&u.invocation) {
+                // Ad-hoc files see the final state of their invocation.
+                UnitKind::AdHoc => match carry.get(&u.invocation) {
+                    Some(m) => {
                         let nu = self.recompile(&u, m.clone());
                         self.units[uid as usize] = Some(Arc::new(nu));
+                        true
                     }
-                    continue;
+                    None => false,
+                },
+                UnitKind::Project => {
+                    let old_after = old.map(|o| o.macros_after.clone());
+                    if let Some(m) = carry.get(&u.invocation).cloned() {
+                        // A file before this one changed the macros: compile again with them.
+                        let nu = self.recompile(&u, m);
+                        let same = old_after.as_ref().is_some_and(|o| nu.macros_after.same_definitions(o));
+                        if same {
+                            carry.remove(&u.invocation);
+                        } else {
+                            carry.insert(u.invocation, nu.macros_after.clone());
+                        }
+                        self.units[uid as usize] = Some(Arc::new(nu));
+                        true
+                    } else {
+                        if edited {
+                            let same = old_after.as_ref().is_some_and(|o| u.macros_after.same_definitions(o));
+                            if !same {
+                                carry.insert(u.invocation, u.macros_after.clone());
+                            }
+                        }
+                        false
+                    }
                 }
-                UnitKind::Project => {}
+            };
+            // Compiled with its previous macro state (edited, or not compiled again): point it
+            // at definitions that moved before it.
+            if !recompiled && !moved.is_empty() {
+                if let Some(nu) = Self::relocated(self.unit(uid), &moved, &mut replaced) {
+                    self.units[uid as usize] = Some(Arc::new(nu));
+                }
             }
-            let old_after = before.try_unit(uid).map(|o| o.macros_after.clone());
-            if let Some(m) = carry.get(&u.invocation).cloned() {
-                // A file before this one changed the macros: compile again with them.
-                let nu = self.recompile(&u, m);
-                let same = old_after.as_ref().is_some_and(|o| nu.macros_after.same_definitions(o));
-                if same {
-                    carry.remove(&u.invocation);
-                } else {
-                    carry.insert(u.invocation, nu.macros_after.clone());
-                }
-                self.units[uid as usize] = Some(Arc::new(nu));
-            } else if changed.contains(&uid) {
-                let same = old_after.as_ref().is_some_and(|o| u.macros_after.same_definitions(o));
-                if !same {
-                    carry.insert(u.invocation, u.macros_after.clone());
+            if recompiled || edited {
+                // What this unit leaves behind that only moved.
+                let (Some(o), Some(n)) = (old, self.try_unit(uid)) else { continue };
+                for (name, od) in o.macros_after.iter() {
+                    if let Some(nd) = n.macros_after.get(name) {
+                        if !Arc::ptr_eq(od, nd) && od.body_text == nd.body_text && od.signature() == nd.signature() {
+                            moved.insert(def_identity(od), nd.clone());
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// A copy of `u` whose macro uses and tables refer to the new places of `moved`
+    /// definitions; `None` when it refers to none of them.
+    fn relocated(u: &Unit, moved: &FxHashMap<usize, Arc<MacroDef>>, tables: &mut FxHashMap<usize, Option<MacroTable>>) -> Option<Unit> {
+        let mut table = |t: &MacroTable| tables.entry(t.identity()).or_insert_with(|| t.replaced(moved)).clone();
+        let before = table(&u.macros_before);
+        let after = table(&u.macros_after);
+        let is_moved = |d: &Option<Arc<MacroDef>>| d.as_ref().is_some_and(|d| moved.contains_key(&def_identity(d)));
+        let uses = u.macro_uses.iter().any(|m| is_moved(&m.def)) || u.macro_names.iter().any(|m| is_moved(&m.def));
+        if before.is_none() && after.is_none() && !uses {
+            return None;
+        }
+        let mut nu = u.clone();
+        if let Some(t) = before {
+            nu.macros_before = t;
+        }
+        if let Some(t) = after {
+            nu.macros_after = t;
+        }
+        for m in &mut nu.macro_uses {
+            if let Some(d) = m.def.as_ref().and_then(|d| moved.get(&def_identity(d))) {
+                m.def = Some(d.clone());
+            }
+        }
+        for m in &mut nu.macro_names {
+            if let Some(d) = m.def.as_ref().and_then(|d| moved.get(&def_identity(d))) {
+                m.def = Some(d.clone());
+            }
+        }
+        Some(nu)
+    }
+
+    /// Keeps ad-hoc units in step with the files open in the editor: an open file that no
+    /// project unit compiles (new, or its last includer dropped the `` `include ``) gets one,
+    /// also when another open file includes it (so that the result does not depend on which
+    /// was opened first), and an open file that a project unit now compiles loses its own.
+    pub fn sync_open_files(&self, open: &[FileId]) -> Analysis {
+        let mut next: Option<Analysis> = None;
+        // Until nothing changes: a new ad-hoc unit can make a library unit unnecessary, whose
+        // file, when open, then needs one of its own.
+        for _ in 0..=open.len() {
+            let mut changed = false;
+            for &f in open {
+                let cur = next.as_ref().unwrap_or(self);
+                let in_project = cur.in_project_unit(f);
+                let own = cur.is_adhoc_root(f);
+                if !in_project && !own {
+                    next = Some(cur.add_adhoc(f));
+                    changed = true;
+                } else if in_project && own {
+                    next = Some(cur.remove_adhoc(f));
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        next.unwrap_or_else(|| self.clone())
+    }
+
+    /// Whether a unit of the build compiles `file`.
+    fn in_project_unit(&self, file: FileId) -> bool {
+        self.units_of_file(file).iter().any(|u| self.try_unit(*u).is_some_and(|u| u.kind == UnitKind::Project))
     }
 
     fn pp_config_for(&self, u: &Unit) -> &PpConfig {
@@ -541,7 +723,7 @@ impl Analysis {
 
     /// Compiles an editor file that is not part of the build, with the final macro state.
     pub fn add_adhoc(&self, file: FileId) -> Analysis {
-        if !self.units_of_file(file).is_empty() {
+        if self.in_project_unit(file) || self.is_adhoc_root(file) {
             return self.clone();
         }
         let mut next = self.clone();
@@ -605,10 +787,33 @@ impl Analysis {
         let n = self.units.len().max(old.units.len());
         (0..n).any(|i| match (self.units.get(i).and_then(|u| u.as_ref()), old.units.get(i).and_then(|u| u.as_ref())) {
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => false,
+            // Only pointed at moved macro definitions: the same declarations.
+            (Some(a), Some(b)) if Arc::ptr_eq(&a.parsed, &b.parsed) => !a.macros_after.same_definitions(&b.macros_after),
             (Some(a), Some(b)) => interface_fingerprint(a) != interface_fingerprint(b) || !a.macros_after.same_definitions(&b.macros_after),
             (None, None) => false,
             _ => true,
         })
+    }
+
+    /// Files of the units compiled again since `old` (not those only pointed at moved macro
+    /// definitions), before and after: their problems may have changed even where their
+    /// text did not, for example when a syntax error in a header continues into the file that
+    /// includes it, or when a header is no longer included at all.
+    pub fn recompiled_files(&self, old: &Analysis) -> Vec<FileId> {
+        let mut seen = FxHashSet::default();
+        let mut out = Vec::new();
+        for u in self.units.iter().flatten() {
+            let before = old.try_unit(u.id);
+            if u.kind == UnitKind::Builtin || before.is_some_and(|o| Arc::ptr_eq(&o.parsed, &u.parsed)) {
+                continue;
+            }
+            for f in u.files.iter().chain(before.map(|o| &o.files).into_iter().flatten()) {
+                if seen.insert(*f) {
+                    out.push(*f);
+                }
+            }
+        }
+        out
     }
 
     /// The text of a file as this snapshot compiled it; for files no unit read (build files,

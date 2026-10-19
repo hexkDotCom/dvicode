@@ -19,6 +19,17 @@ USAGE:
                                                 are reported and each query is timed
                                                 --query-timeout SECS: exit 124 when one
                                                 query runs longer
+                                                --fuzz-edits N [--seed S]: make N random
+                                                edits and compare each incremental update
+                                                with a full build; print reproducers of
+                                                differences (exit 1). --fuzz-samples K,
+                                                --fuzz-findings M, --fuzz-verbose;
+                                                --fuzz-disk also writes files (use a copy);
+                                                --fuzz-save DIR saves reproducers as JSON,
+                                                --fuzz-replay FILE replays one
+                                                --write-check N [--seed S]: N renames and
+                                                quick fixes applied like the editor does,
+                                                each result checked (exit 1 on findings)
   dvicode-server --version
 
 OPTIONS:

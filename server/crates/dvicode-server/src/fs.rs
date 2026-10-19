@@ -150,28 +150,54 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         "delete" => {
             let p: DeleteParam = serde_json::from_value(params).map_err(bad)?;
             let path = path_of(&p.path);
-            let r = if path.is_dir() {
-                if p.recursive {
-                    std::fs::remove_dir_all(&path)
-                } else {
-                    std::fs::remove_dir(&path)
-                }
-            } else {
-                std::fs::remove_file(&path)
-            };
-            r.map_err(|e| err(e, &path))?;
+            remove(&path, p.recursive).map_err(|e| err(e, &path))?;
             Ok(Value::Null)
         }
         "rename" => {
             let p: RenameParam = serde_json::from_value(params).map_err(bad)?;
             let (from, to) = (path_of(&p.from), path_of(&p.to));
-            if to.exists() && !p.overwrite {
-                return Err(FsError { code: "FileExists", message: to.display().to_string() });
+            std::fs::symlink_metadata(&from).map_err(|e| err(e, &from))?;
+            // A change of case only (`a.sv` -> `A.sv`) names the same entry where case does not
+            // matter: nothing to replace.
+            let same = std::fs::canonicalize(&from).ok().is_some_and(|f| std::fs::canonicalize(&to).ok() == Some(f));
+            if std::fs::symlink_metadata(&to).is_ok() && !same {
+                if !p.overwrite {
+                    return Err(FsError { code: "FileExists", message: to.display().to_string() });
+                }
+                // Replace the target, file or directory. It is moved aside first and put back
+                // if the rename fails, so that a failure loses nothing.
+                let aside = to.with_file_name(format!(".{}.dvicode-replaced-{}", to.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), std::process::id()));
+                std::fs::rename(&to, &aside).map_err(|e| err(e, &to))?;
+                if let Err(e) = std::fs::rename(&from, &to) {
+                    let _ = std::fs::rename(&aside, &to);
+                    return Err(err(e, &from));
+                }
+                remove(&aside, true).map_err(|e| err(e, &aside))?;
+                return Ok(Value::Null);
             }
             std::fs::rename(&from, &to).map_err(|e| err(e, &from))?;
             Ok(Value::Null)
         }
         _ => Err(FsError { code: "Unavailable", message: format!("unknown file system operation {op}") }),
+    }
+}
+
+/// Deletes a file, a directory (with its contents when `recursive`), or a symbolic link
+/// itself (never what it points to).
+fn remove(path: &Path, recursive: bool) -> std::io::Result<()> {
+    let m = std::fs::symlink_metadata(path)?;
+    if !m.is_dir() {
+        // On Windows a link to a directory is removed as a directory.
+        #[cfg(windows)]
+        if m.file_type().is_symlink() && std::fs::metadata(path).is_ok_and(|t| t.is_dir()) {
+            return std::fs::remove_dir(path);
+        }
+        return std::fs::remove_file(path);
+    }
+    if recursive {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_dir(path)
     }
 }
 

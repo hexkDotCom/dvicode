@@ -9,10 +9,12 @@
 mod check;
 mod crash;
 mod fs;
+mod fuzz;
 mod logger;
 mod server;
 mod transport;
 mod util;
+mod writes;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

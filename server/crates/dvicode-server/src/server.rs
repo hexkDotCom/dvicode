@@ -328,13 +328,9 @@ impl Server {
 
     fn on_built(&mut self, a: Analysis, _generation: u64, error: Option<String>) {
         self.building = false;
-        let mut a = a;
         // Open files that are not part of the build are compiled ad hoc.
-        for f in self.open.keys() {
-            if a.units_of_file(*f).is_empty() {
-                a = a.add_adhoc(*f);
-            }
-        }
+        let open = self.open_files();
+        let mut a = a.sync_open_files(&open);
         // Edits made while the build ran, including those already applied to the previous
         // snapshot by the debounce: the build may have read older text.
         let mut files: Vec<FileId> = self.changed_during_build.drain().collect();
@@ -343,17 +339,8 @@ impl Server {
         files.dedup();
         self.pending_since = None;
         if !files.is_empty() {
-            let open = &self.open;
             let built = &a;
-            let replayed = crash::catch("update after an edit", Some(&self.sender), || {
-                let mut next = built.update(&files);
-                for f in &files {
-                    if open.contains_key(f) && next.units_of_file(*f).is_empty() {
-                        next = next.add_adhoc(*f);
-                    }
-                }
-                next
-            });
+            let replayed = crash::catch("update after an edit", Some(&self.sender), || built.update(&files).sync_open_files(&open));
             if let Some(next) = replayed {
                 a = next;
             }
@@ -387,6 +374,13 @@ impl Server {
         }
     }
 
+    /// The open documents, in a stable order.
+    fn open_files(&self) -> Vec<FileId> {
+        let mut v: Vec<FileId> = self.open.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Records that a file's text changed: analysed after the debounce, and replayed onto
     /// the result of a running full build.
     fn note_change(&mut self, id: FileId) {
@@ -405,20 +399,16 @@ impl Server {
         let files: Vec<FileId> = self.pending.drain().collect();
         let t0 = Instant::now();
         let a = self.analysis.clone();
-        let open = &self.open;
-        let r = crash::catch("update after an edit", Some(&self.sender), || {
-            let mut next = a.update(&files);
-            for f in &files {
-                if open.contains_key(f) && next.units_of_file(*f).is_empty() {
-                    next = next.add_adhoc(*f);
-                }
-            }
-            next
-        });
+        let open = self.open_files();
+        // An open header may have lost its last includer, or an open file outside the build
+        // gained one.
+        let r = crash::catch("update after an edit", Some(&self.sender), || a.update(&files).sync_open_files(&open));
         let mut interface_changed = false;
+        let mut recompiled = Vec::new();
         match r {
             Some(next) => {
                 interface_changed = next.interface_changed(&a);
+                recompiled = next.recompiled_files(&a);
                 self.analysis = Arc::new(next);
             }
             None => log::error!("kept the previous analysis of {:?}", files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
@@ -429,8 +419,10 @@ impl Server {
             return;
         }
         log::debug!("incremental update of {} file(s) in {} ms", files.len(), t0.elapsed().as_millis());
-        // Problems of the changed files and of the other open files of the same units.
+        // Problems of the changed files, of the other files compiled again with them, and of
+        // the open files.
         let mut targets: FxHashSet<FileId> = files.iter().copied().collect();
+        targets.extend(recompiled);
         for f in self.open.keys() {
             targets.insert(*f);
         }
@@ -602,10 +594,12 @@ impl Server {
                         let msg = PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None };
                         let _ = self.sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), msg)));
                         drop(st);
-                    } else {
-                        // Back to the disk contents.
-                        self.note_change(id);
+                        // Other files may have used its declarations or macros.
+                        self.publish_all();
                     }
+                    // Back to the disk contents, also in the units of other open files that
+                    // include it.
+                    self.note_change(id);
                 }
             }
             "workspace/didChangeWatchedFiles" => {

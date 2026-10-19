@@ -32,13 +32,17 @@ pub enum Hit {
     Ref { unit: UnitId, rid: RefId, seg: usize, span: Span },
     Decl { unit: UnitId, decl: DeclId, span: Span },
     MacroUse { unit: UnitId, idx: usize, span: Span },
+    /// A macro name in `` `ifdef `` and friends.
+    MacroName { unit: UnitId, idx: usize, span: Span },
+    /// The name in a `` `define ``.
+    MacroDef { unit: UnitId, idx: usize, span: Span },
     Include { unit: UnitId, idx: usize, span: Span },
 }
 
 impl Hit {
     pub fn span(&self) -> Span {
         match self {
-            Hit::Ref { span, .. } | Hit::Decl { span, .. } | Hit::MacroUse { span, .. } | Hit::Include { span, .. } => *span,
+            Hit::Ref { span, .. } | Hit::Decl { span, .. } | Hit::MacroUse { span, .. } | Hit::MacroName { span, .. } | Hit::MacroDef { span, .. } | Hit::Include { span, .. } => *span,
         }
     }
 }
@@ -76,15 +80,25 @@ impl Analysis {
         self.vfs.lookup(&path_of(url)?)
     }
 
-    /// Units containing `file`, project units first.
+    /// Units containing `file`: project units first (in compilation order), then the file's
+    /// own ad-hoc unit, then other open files' units by path (not by when they were opened).
     pub fn units_for(&self, file: FileId) -> Vec<UnitId> {
-        let mut v: Vec<UnitId> = self.units_of_file(file).to_vec();
-        v.sort_by_key(|u| (self.try_unit(*u).map_or(9, |u| match u.kind {
-            UnitKind::Project => 0,
-            UnitKind::AdHoc => 1,
-            UnitKind::Builtin => 2,
-        }), *u));
-        v
+        let mut v: Vec<((u8, UnitId, PathBuf), UnitId)> = self
+            .units_of_file(file)
+            .iter()
+            .filter_map(|id| self.try_unit(*id))
+            .map(|u| {
+                let key = match u.kind {
+                    UnitKind::Project => (0, u.id, PathBuf::new()),
+                    UnitKind::AdHoc if u.root == file => (1, 0, PathBuf::new()),
+                    UnitKind::AdHoc => (2, 0, self.vfs.path(u.root)),
+                    UnitKind::Builtin => (3, u.id, PathBuf::new()),
+                };
+                (key, u.id)
+            })
+            .collect();
+        v.sort();
+        v.into_iter().map(|(_, id)| id).collect()
     }
 
     /// The navigable element at `off` in `file`.
@@ -119,6 +133,16 @@ impl Analysis {
                     return Some(Hit::MacroUse { unit: uid, idx: i, span: m.name_span });
                 }
             }
+            for (i, m) in u.macro_names.iter().enumerate() {
+                if m.span.file == file && m.span.contains(off) {
+                    return Some(Hit::MacroName { unit: uid, idx: i, span: m.span });
+                }
+            }
+            for (i, d) in u.macro_defs.iter().enumerate() {
+                if d.name_span.file == file && d.name_span.contains(off) {
+                    return Some(Hit::MacroDef { unit: uid, idx: i, span: d.name_span });
+                }
+            }
             for (i, inc) in u.includes.iter().enumerate() {
                 if inc.span.file == file && inc.span.contains(off) {
                     return Some(Hit::Include { unit: uid, idx: i, span: inc.span });
@@ -133,8 +157,21 @@ impl Analysis {
             Hit::Ref { unit, rid, seg, .. } => self.resolve_ref(*unit, *rid, *seg).map(Target::Decl),
             Hit::Decl { unit, decl, .. } => Some(Target::Decl(DeclRef { unit: *unit, decl: *decl })),
             Hit::MacroUse { unit, idx, .. } => self.unit(*unit).macro_uses[*idx].def.clone().map(Target::Macro),
+            Hit::MacroDef { unit, idx, .. } => Some(Target::Macro(self.unit(*unit).macro_defs[*idx].clone())),
+            // `ifndef GUARD before `define GUARD: the only definition of that name, if there is one.
+            Hit::MacroName { unit, idx, .. } => {
+                let m = &self.unit(*unit).macro_names[*idx];
+                m.def.clone().or_else(|| self.unique_macro(&m.name)).map(Target::Macro)
+            }
             Hit::Include { unit, idx, .. } => self.unit(*unit).includes[*idx].resolved.map(Target::File),
         }
+    }
+
+    /// The definition of a macro when all its definitions are the same one.
+    pub fn unique_macro(&self, name: &str) -> Option<Arc<MacroDef>> {
+        let defs = self.global.macros.get(name)?;
+        let first = defs.first()?;
+        defs.iter().all(|d| d.name_span == first.name_span).then(|| first.clone())
     }
 
     pub fn target_at(&self, file: FileId, off: u32) -> Option<Target> {
@@ -170,6 +207,22 @@ impl Analysis {
             })
             .collect();
         Some(lsp_types::WorkspaceEdit { changes: None, document_changes: Some(DocumentChanges::Edits(docs)), change_annotations: None })
+    }
+
+    /// Whether edits (rename) may change a file: the project's own files, under the
+    /// workspace root, and documents open in the editor; never built-in files or libraries
+    /// outside the workspace, such as the UVM sources.
+    pub fn is_editable(&self, file: FileId) -> bool {
+        if self.vfs.is_builtin(file) || file == dvi_syntax::preproc::COMMAND_LINE_FILE {
+            return false;
+        }
+        if self.vfs.has_overlay(file) {
+            return true;
+        }
+        let (p, root) = (self.vfs.path(file), &self.setup.root);
+        // Drive letters and folder names may differ in case on Windows.
+        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        p.starts_with(root) || cfg!(windows) && lower(&p).starts_with(lower(root))
     }
 
     /// The snapshot text of a file (see [`Analysis::source`]).

@@ -39,10 +39,42 @@ pub fn run(args: &[String]) -> i32 {
     let mut query_timeout = 0u64;
     // Queries from a file: catch panics and time each one (used by scripts/corpus).
     let mut sweep = false;
+    let mut fuzz = crate::fuzz::Options { edits: 0, ..Default::default() };
+    let mut write_check = 0usize;
+    let mut replay: Option<PathBuf> = None;
+    let num = |s: Option<&String>| s.and_then(|m| m.parse::<u64>().ok());
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
+            "--fuzz-edits" | "--seed" | "--fuzz-samples" | "--fuzz-findings" | "--write-check" => {
+                i += 1;
+                let Some(n) = num(args.get(i)) else {
+                    eprintln!("check: {a} needs a number");
+                    return 2;
+                };
+                match a {
+                    "--fuzz-edits" => fuzz.edits = n as usize,
+                    "--seed" => fuzz.seed = n,
+                    "--fuzz-samples" => fuzz.samples = n as usize,
+                    "--write-check" => write_check = n as usize,
+                    _ => fuzz.max_findings = (n as usize).max(1),
+                }
+            }
+            "--fuzz-save" | "--fuzz-replay" => {
+                i += 1;
+                let Some(p) = args.get(i).map(PathBuf::from) else {
+                    eprintln!("check: {a} needs a path");
+                    return 2;
+                };
+                if a == "--fuzz-save" {
+                    fuzz.save = Some(p);
+                } else {
+                    replay = Some(p);
+                }
+            }
+            "--fuzz-disk" => fuzz.disk = true,
+            "--fuzz-verbose" => fuzz.verbose = true,
             "--build" => {
                 i += 1;
                 build = args.get(i).map(PathBuf::from);
@@ -98,8 +130,67 @@ pub fn run(args: &[String]) -> i32 {
         b => dvi_project::load(&root, b, &env),
     };
     let cfg_ms = t0.elapsed().as_millis();
-    let vfs = Arc::new(Vfs::new());
     let setup = Arc::new(ProjectSetup::new(&root, cfg, env));
+    if let Some(file) = replay {
+        return match crate::fuzz::replay_file(setup, &file) {
+            Ok(d) if d.is_empty() => {
+                eprintln!("dvicode check: the reproducer shows no difference");
+                0
+            }
+            Ok(d) => {
+                for x in d {
+                    println!("{x}");
+                }
+                1
+            }
+            Err(e) => {
+                eprintln!("check: {e}");
+                2
+            }
+        };
+    }
+    if write_check > 0 {
+        let t = std::time::Instant::now();
+        let opts = crate::writes::Options { count: write_check, seed: fuzz.seed, verbose: fuzz.verbose };
+        let r = crate::writes::run(setup, &opts, &mut |s| eprintln!("{s}"));
+        eprintln!(
+            "dvicode check: write check seed {}: {} renames, {} refused, {} quick fixes, {} finding(s), {} note(s), {} s",
+            fuzz.seed,
+            r.renames,
+            r.refused,
+            r.fixes,
+            r.findings.len(),
+            r.notes.len(),
+            t.elapsed().as_secs()
+        );
+        for f in &r.findings {
+            println!("finding: {f}");
+        }
+        for n in &r.notes {
+            println!("note: {n}");
+        }
+        return if r.findings.is_empty() { 0 } else { 1 };
+    }
+    if fuzz.edits > 0 {
+        let t = std::time::Instant::now();
+        let r = crate::fuzz::run(setup, &fuzz, &mut |s| eprintln!("{s}"));
+        let kinds: Vec<String> = r.kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
+        eprintln!(
+            "dvicode check: fuzz seed {}: {} edits in {} steps, {} finding(s), {} s ({})",
+            fuzz.seed,
+            r.edits,
+            r.steps,
+            r.findings.len(),
+            t.elapsed().as_secs(),
+            kinds.join(", ")
+        );
+        for f in &r.findings {
+            eprintln!("dvicode check: fuzz finding at step {}: {}", f.step, f.differences.first().map_or("", |d| d.as_str()));
+            println!("{}", f.reproducer);
+        }
+        return if r.findings.is_empty() { 0 } else { 1 };
+    }
+    let vfs = Arc::new(Vfs::new());
     let a = Analysis::build(vfs, setup);
     let st = a.status();
     eprintln!(
