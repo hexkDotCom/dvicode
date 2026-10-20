@@ -198,14 +198,15 @@ pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, Str
             b.comp_root = a.comp_root.clone();
             b.inv().mode = a.mode.clone();
             b.switches = a.switches.clone();
-            // The build may give the UVM location after this file.
-            b.partial = true;
             a.base.clone()
         }
         None => root.to_path_buf(),
     };
     b.parse_text(file, text, base);
-    // The last invocation's UVM library, with its note.
+    // The last invocation's UVM library, with its note. In an argument file that invocation
+    // goes on after the file, where the build may still give the UVM location (invocations the
+    // file ends itself are complete).
+    b.partial = argument_file.is_some();
     b.apply_uvm();
     let (notes, links) = (std::mem::take(&mut b.notes), std::mem::take(&mut b.links));
     let cfg = b.finish(&Progress::new());
@@ -886,13 +887,13 @@ impl Builder {
                 switches: self.switches.clone(),
             });
         }
-        let (span, word) = (self.span, std::mem::take(&mut self.word));
+        let (span, word, focus_at) = (self.span, std::mem::take(&mut self.word), self.focus_at);
         self.depth += 1;
         self.reading.push(key);
         self.parse_text(&path, &text, nested_base);
         self.reading.pop();
         self.depth -= 1;
-        (self.span, self.word) = (span, word);
+        (self.span, self.word, self.focus_at) = (span, word, focus_at);
     }
 
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
@@ -1543,6 +1544,14 @@ mod tests {
         // `+incdir+a+a`: each argument in turn.
         assert_eq!(p[1].range, Some((23, 24)));
         assert_eq!(p[2].range, Some((25, 26)));
+        // After an included file, the next argument of the including word.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.build"), format!("+incdir+{}\n", "d".repeat(100))).unwrap();
+        let text = "+dvicode_include_config+a.build+b.build\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        let p: Vec<_> = cfg.problems.iter().filter(|p| p.file == dir.join("x.build")).collect();
+        assert_eq!(p.len(), 1, "{:?}", cfg.problems);
+        assert_eq!(at(text, p[0]), "b.build");
     }
 
     #[test]
@@ -1557,6 +1566,11 @@ mod tests {
         let arg = cfg.arg_files.iter().find(|a| a.path == dir.join("opts.f")).expect("recorded");
         let ins = inspect(&dir, &arg.path, "-uvm\n", &FxHashMap::default(), Some(arg));
         assert!(!messages(&ins.problems).join("\n").contains("UVM_HOME"), "{:?}", ins.problems);
+        // An invocation the file ends itself is complete: nothing later can give its location.
+        if std::env::var_os("UVM_HOME").is_none() && std::env::var_os("DVICODE_UVM_HOME").is_none() {
+            let ins = inspect(&dir, &arg.path, "-uvm\n+dvicode_init\n", &FxHashMap::default(), Some(arg));
+            assert!(messages(&ins.problems).join("\n").contains("UVM_HOME"), "{:?}", ins.problems);
+        }
         // The UVM library of the last invocation has its note too.
         let ins = inspect(&dir, &file, "-uvmhome uvm\n", &FxHashMap::default(), None);
         assert!(ins.notes.iter().any(|n| n.2.contains("UVM library")), "{:?}", ins.notes);
