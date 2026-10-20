@@ -756,7 +756,15 @@ impl<'t> Parser<'t> {
             let end = self.skip_group_from(self.pos);
             self.pos = end;
         }
-        self.delay_opt();
+        if self.at_p("#") && self.nth(1).kind == TokKind::Ident {
+            // `#D`: a parameter (not a call: the terminals follow).
+            self.bump();
+            let d = self.tok().clone();
+            self.add_ref(vec![Self::seg(&d, Sep::None)], RefKind::Expr);
+            self.bump();
+        } else {
+            self.delay_opt();
+        }
         // Undeclared names on the terminals are implicit nets (IEEE 1800 6.10).
         self.scan_until_semi(RefKind::Loose);
     }
@@ -1964,7 +1972,12 @@ impl<'t> Parser<'t> {
                 }
                 self.finish(id);
             } else if ty.is_some() && (self.at_p(",") || self.at_p(")")) && self.u.decls[self.scope() as usize].has(dflags::DPI) {
-                // Argument names are optional in DPI import prototypes: `f(input real)`.
+                // Argument names are optional in DPI import prototypes: `f(input real)`. The
+                // argument still counts for signatures.
+                let id = self.new_decl(kind, None, start);
+                self.u.decls[id as usize].dir = Some(dir.unwrap_or(PortDir::Input));
+                self.u.decls[id as usize].ty = ty;
+                self.finish(id);
             } else {
                 let sp = self.tok().span;
                 self.error(sp, "Expected argument name");
@@ -2063,15 +2076,24 @@ impl<'t> Parser<'t> {
             self.bump();
         }
         if self.at_kw("solve") {
-            // `solve a, b before c [hard];` (`hard` is a VCS extension).
+            // `solve a, b before c [hard];` (`hard` is a VCS extension, after a variable).
             self.bump();
+            let mut after_before = false;
+            let mut rhs = 0;
             loop {
                 let t = self.tok();
                 if t.kind == TokKind::Eof || t.is_punct(";") || t.is_punct("}") || t.kind == TokKind::Keyword && is_end_kw(&t.text) {
                     break;
                 }
-                if t.kind == TokKind::Ident && !(t.text == "hard" && self.nth(1).is_punct(";")) {
+                if t.is_kw("before") {
+                    after_before = true;
+                }
+                let modifier = t.text == "hard" && after_before && rhs > 0 && self.nth(1).is_punct(";");
+                if t.kind == TokKind::Ident && !modifier {
                     self.chain(RefKind::Expr);
+                    if after_before {
+                        rhs += 1;
+                    }
                 } else {
                     self.bump();
                 }

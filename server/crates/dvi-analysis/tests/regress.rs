@@ -665,3 +665,84 @@ fn auto_config_does_not_know_the_defines_of_conditional_package_members() {
     let p = problems(&a);
     assert!(p.len() == 2 && p.iter().all(|m| m.contains("'NUM_AGENTS'")), "{p:?}");
 }
+
+// ---- Review of the fixes above ------------------------------------------------------------
+
+#[test]
+fn macro_default_after_a_continuation_inside_an_expansion() {
+    // The default value of a macro defined by a macro ends at the continued line; no panic.
+    let (a, _) = project("contdefault", &[("t.sv", "`define OUTER \\\n  `define INNER(x = \\\n    1) x\n`OUTER\nmodule t; endmodule\n")]);
+    let _ = problems(&a);
+}
+
+#[test]
+fn directives_are_not_macro_formals() {
+    // A formal named like a directive does not turn `define into a call.
+    clean("formaldirective", &[("t.sv", "`define MAKE(define) `define FLAG 1\n`MAKE(other)\nmodule m;\n  initial $display(`FLAG);\nendmodule\n")]);
+}
+
+#[test]
+fn macro_named_by_an_expanded_actual() {
+    // `M(N) with M = `SELECT: the actual is expanded first, then the macro it names is called.
+    clean(
+        "formalexpanded",
+        &[("t.sv", "`define SELECT DECL\n`define DECL(N) int N;\n`define APPLY(M, N) `M(N)\nmodule m;\n  `APPLY(`SELECT, n)\n  initial n = 0;\nendmodule\n")],
+    );
+}
+
+#[test]
+fn hidden_package_members_open_only_wildcard_imports_and_direct_scopes() {
+    let auto = |name: &str, files: &[(&str, &str)]| {
+        let (_, root) = project(name, files);
+        let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+        let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+        problems(&a)
+    };
+    // An explicit import of a known member brings in nothing else.
+    let p = auto(
+        "hiddenexplicit",
+        &[("p.sv", "package p;\n  int known;\n`ifdef OPTIONAL\n  int extra;\n`endif\nendpackage\n"), ("m.sv", "module m;\n  import p::known;\n  initial typo = known;\nendmodule\n")],
+    );
+    assert!(p.len() == 1 && p[0].contains("'typo'"), "{p:?}");
+    // Code removed inside a method declares locals, not class members.
+    let p = auto(
+        "hiddenmethod",
+        &[("c.sv", "class C;\n  function void f();\n`ifdef OPTIONAL\n    int temporary;\n`endif\n  endfunction\nendclass\nmodule m;\n  C c;\n  initial c.typo = 1;\nendmodule\n")],
+    );
+    assert!(p.len() == 1 && p[0].contains("'typo' is not a member"), "{p:?}");
+}
+
+#[test]
+fn unnamed_dpi_arguments_count_in_signatures() {
+    use dvi_syntax::SourceProvider;
+    let text = "module t;\n  import \"DPI-C\" function int add(input int, input int b);\n  int r;\n  initial r = add(1, 2);\nendmodule\n";
+    let (a, root) = project("dpisig", &[("t.sv", text)]);
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let off = text.find("add(1, 2").unwrap() as u32 + 7;
+    let sh = a.signature_help(f, off).expect("signature help");
+    let sig = &sh.signatures[0];
+    assert_eq!(sig.parameters.as_ref().map(|p| p.len()), Some(2), "{}", sig.label);
+    assert_eq!(sh.active_parameter, Some(1));
+    let _ = a.vfs.text(f);
+}
+
+#[test]
+fn a_variable_named_hard_in_solve_before() {
+    use dvi_syntax::SourceProvider;
+    let text = "class C;\n  rand int a, hard;\n  constraint c { solve a before hard; }\nendclass\n";
+    let (a, root) = project("solvevar", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let off = text.find("before hard").unwrap() as u32 + 8;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![1]);
+    let _ = a.vfs.text(f);
+}
+
+#[test]
+fn unnamed_instance_delay_names_a_parameter() {
+    let udp = "primitive p (o, i);\n  output o; input i;\n  table 0 : 0; 1 : 1; endtable\nendprimitive\n";
+    clean("udpdelay", &[("t.sv", &format!("{udp}module m;\n  localparam D = 1;\n  wire a, y;\n  p #D (y, a);\nendmodule\n"))]);
+    let (a, _) = project("udpdelay2", &[("t.sv", &format!("{udp}module m;\n  wire a, y;\n  p #NO_SUCH (y, a);\nendmodule\n"))]);
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].contains("'NO_SUCH'"), "{p:?}");
+}

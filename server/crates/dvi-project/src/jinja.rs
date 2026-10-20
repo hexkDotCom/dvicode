@@ -5,8 +5,12 @@
 //! ```
 //!
 //! Conditions are evaluated against the switches given with `+dvicode_switches+` (a plain
-//! variable name such as `fl_switches` stands for that list). The rendered text keeps the byte
-//! offsets of the original: tags and the text of false branches become spaces, newlines stay.
+//! variable name such as `fl_switches` stands for that list). The rendered text has the length
+//! and the newlines of the original: tags and the text of false branches become spaces, and text
+//! kept inside a word moves over them so the word stays whole.
+
+/// Parentheses and `not`s a condition may nest.
+const MAX_DEPTH: usize = 64;
 
 /// Whether `text` may hold Jinja tags.
 pub fn has_tags(text: &str) -> bool {
@@ -32,17 +36,12 @@ struct Branch {
 
 pub fn render(text: &str, switches: &[String]) -> Rendered {
     let b = text.as_bytes();
-    let mut out = b.to_vec();
+    // Bytes left out of the rendered text: tags and the text of false branches.
+    let mut removed = vec![false; b.len()];
     let mut problems = Vec::new();
     let mut notes = Vec::new();
     let mut stack: Vec<Branch> = Vec::new();
-    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
-        for c in &mut out[from..to] {
-            if *c != b'\n' {
-                *c = b' ';
-            }
-        }
-    };
+    let blank = |removed: &mut Vec<bool>, from: usize, to: usize| removed[from..to].fill(true);
     let shown = if switches.is_empty() { "none".to_string() } else { switches.join(", ") };
     let mut i = 0;
     let mut copied_from = 0;
@@ -58,18 +57,18 @@ pub fn render(text: &str, switches: &[String]) -> Rendered {
         };
         let active = stack.last().map_or(true, |f| f.active);
         if !active {
-            blank(&mut out, copied_from, i);
+            blank(&mut removed, copied_from, i);
         }
         let start = i;
-        let Some(len) = b[i + 2..].windows(2).position(|w| w == close) else {
+        let Some(close_at) = find_close(b, i + 2, close) else {
             problems.push((start as u32, (start + 2) as u32, "Unterminated Jinja tag".to_string()));
-            blank(&mut out, start, b.len());
+            blank(&mut removed, start, b.len());
             copied_from = b.len();
             break;
         };
-        let end = i + 2 + len + 2;
+        let end = close_at + 2;
         let span = (start as u32, end as u32);
-        blank(&mut out, start, end);
+        blank(&mut removed, start, end);
         i = end;
         copied_from = end;
         let inner = text[start + 2..end - 2].trim_matches(|c: char| c == '-' || c == '+' || c == '~').trim();
@@ -121,18 +120,74 @@ pub fn render(text: &str, switches: &[String]) -> Rendered {
         }
     }
     if stack.last().is_some_and(|f| !f.active) {
-        blank(&mut out, copied_from, b.len());
+        blank(&mut removed, copied_from, b.len());
     }
     for f in stack {
         problems.push((f.start.0, f.start.1, "{% if %} without {% endif %}".to_string()));
     }
+    let out = compact(b, &removed);
     Rendered { text: String::from_utf8(out).unwrap_or_else(|_| text.to_string()), problems, notes }
+}
+
+/// Where `close` ends the tag whose text starts at `from`: outside the quoted strings of `{% %}`
+/// and `{{ }}` tags (`{% if "a%}b" in s %}`).
+fn find_close(b: &[u8], from: usize, close: &[u8]) -> Option<usize> {
+    let quotes = close != b"#}";
+    let mut quote: Option<u8> = None;
+    let mut i = from;
+    while i + 1 < b.len() {
+        let c = b[i];
+        match quote {
+            Some(_) if c == b'\\' => i += 1,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if quotes && (c == b'"' || c == b'\'') => quote = Some(c),
+            None if &b[i..i + 2] == close => return Some(i),
+            None => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The rendered bytes: spaces for removed ones, newlines kept. In a word (bytes up to kept
+/// whitespace), the kept bytes join up where its first kept byte was, and the spaces follow:
+/// `rtl/{% if x %}a{% else %}b{% endif %}.sv` becomes `rtl/a.sv` and spaces.
+fn compact(b: &[u8], removed: &[bool]) -> Vec<u8> {
+    let sep = |j: usize| b[j] == b'\n' || (!removed[j] && b[j].is_ascii_whitespace());
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if sep(i) {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && !sep(i) {
+            i += 1;
+        }
+        let mut j = start;
+        while j < i && removed[j] {
+            out.push(b' ');
+            j += 1;
+        }
+        let before = out.len();
+        out.extend((j..i).filter(|k| !removed[*k]).map(|k| b[k]));
+        let kept = out.len() - before;
+        out.resize(out.len() + (i - j - kept), b' ');
+    }
+    out
 }
 
 fn eval_reported(expr: &str, switches: &[String], span: (u32, u32), problems: &mut Vec<(u32, u32, String)>) -> bool {
     let toks = tokenize(expr);
-    let mut p = Eval { toks: &toks, pos: 0, switches };
+    let mut p = Eval { toks: &toks, pos: 0, switches, depth: 0, too_deep: false };
     let v = p.or();
+    if p.too_deep {
+        problems.push((span.0, span.1, format!("The Jinja condition is nested more than {MAX_DEPTH} levels deep; taken as false")));
+        return false;
+    }
     if p.pos < toks.len() || v.is_none() {
         problems.push((span.0, span.1, format!("Cannot evaluate the Jinja condition `{expr}`; taken as false")));
         return false;
@@ -166,7 +221,8 @@ fn tokenize(s: &str) -> Vec<Tok> {
                 v.push(c[j]);
                 j += 1;
             }
-            out.push(Tok::Str(v));
+            // An unterminated string cannot be evaluated.
+            out.push(if j < c.len() { Tok::Str(v) } else { Tok::Other });
             i = j + 1;
         } else if ch.is_alphanumeric() || ch == '_' {
             let mut j = i;
@@ -198,6 +254,9 @@ struct Eval<'a> {
     toks: &'a [Tok],
     pos: usize,
     switches: &'a [String],
+    /// Parentheses and `not`s entered.
+    depth: usize,
+    too_deep: bool,
 }
 
 impl Eval<'_> {
@@ -242,11 +301,12 @@ impl Eval<'_> {
     }
 
     fn not(&mut self) -> Option<bool> {
-        if self.peek_name("not") {
+        let mut negate = false;
+        while self.peek_name("not") {
             self.pos += 1;
-            return self.not().map(|b| !b);
+            negate = !negate;
         }
-        self.comparison()
+        self.comparison().map(|b| b != negate)
     }
 
     fn comparison(&mut self) -> Option<bool> {
@@ -275,7 +335,14 @@ impl Eval<'_> {
         self.pos += 1;
         let v = match t {
             Tok::Punct('(') => {
+                if self.depth >= MAX_DEPTH {
+                    self.too_deep = true;
+                    self.pos = self.toks.len();
+                    return None;
+                }
+                self.depth += 1;
                 let v = self.or();
+                self.depth -= 1;
                 if self.toks.get(self.pos) == Some(&Tok::Punct(')')) {
                     self.pos += 1;
                 }
@@ -348,7 +415,40 @@ mod tests {
     fn unsupported_parts_are_reported() {
         // An expression, a subscript that cannot be evaluated, a missing endif.
         let (words, problems) = kept("x/{{ dirname }}/a.sv\n{% if \"x\" in sw[0]['config'] %}b.sv{% endif %}\n{% if \"y\" in sw %}c.sv\n", &["y"]);
-        assert_eq!(words, vec!["x/", "/a.sv", "c.sv"]);
+        assert_eq!(words, vec!["x//a.sv", "c.sv"]);
         assert_eq!(problems, 3);
+    }
+
+    #[test]
+    fn tags_inside_a_word_keep_it_whole() {
+        let t = "pre.sv rtl/{% if \"a\" in s %}a{% else %}b{% endif %}.sv post.sv
+";
+        let r = render(t, &["a".to_string()]);
+        assert_eq!(r.text.split_whitespace().collect::<Vec<_>>(), vec!["pre.sv", "rtl/a.sv", "post.sv"]);
+        // The word starts where it did, and the next word has not moved.
+        assert_eq!(r.text.find("rtl/a.sv"), t.find("rtl/"));
+        assert_eq!(r.text.find("post.sv"), t.find("post.sv"));
+        assert_eq!(kept(t, &[]).0, vec!["pre.sv", "rtl/b.sv", "post.sv"]);
+    }
+
+    #[test]
+    fn tag_ends_outside_quoted_strings() {
+        let t = "{% if \"x%}y\" in s %}a.sv{% else %}b.sv{% endif %}";
+        assert_eq!(kept(t, &[]), (vec!["b.sv".to_string()], 0));
+        assert_eq!(kept(t, &["x%}y"]), (vec!["a.sv".to_string()], 0));
+        // An unterminated string cannot be evaluated.
+        let (words, problems) = kept("{% if \"x in s %}a.sv{% endif %}b.sv", &["x"]);
+        assert!(problems >= 1 && !words.contains(&"a.sv".to_string()), "{words:?}");
+    }
+
+    #[test]
+    fn deep_nesting_is_reported_not_followed() {
+        let n = 1_000_000;
+        let t = format!("{{% if {}true{} %}}top.sv{{% endif %}}", "(".repeat(n), ")".repeat(n));
+        let r = render(&t, &[]);
+        assert!(r.text.split_whitespace().next().is_none());
+        assert!(r.problems.iter().any(|p| p.2.contains("nested")), "{:?}", r.problems.iter().map(|p| &p.2).collect::<Vec<_>>());
+        let t = format!("{{% if {}\"a\" in s %}}top.sv{{% endif %}}", "not ".repeat(n + 1));
+        assert!(render(&t, &[]).text.contains("top.sv"));
     }
 }

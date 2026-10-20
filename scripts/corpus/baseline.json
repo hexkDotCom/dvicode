@@ -13,8 +13,8 @@
     "NON_EXISTING_TYPE": 8
    },
    "files": 94,
-   "build_ms": 18,
-   "config_ms": 4
+   "build_ms": 17,
+   "config_ms": 2
   },
   "common_cells-auto": {
    "commit": "db42769334b4589b4b3fc671b34513bdb98be565",
@@ -28,7 +28,7 @@
    },
    "files": 356,
    "build_ms": 51,
-   "config_ms": 4
+   "config_ms": 2
   },
   "core-v-verif-auto": {
    "commit": "083728bd8d548fd188e0ef43e0c1b038bce24002",
@@ -47,8 +47,8 @@
     "INCLUDE_NOT_FOUND": 11
    },
    "files": 806,
-   "build_ms": 156,
-   "config_ms": 155
+   "build_ms": 143,
+   "config_ms": 40
   },
   "cv32e40p-auto": {
    "commit": "fcd59685681bc2b58e5805497b0c59df14eda810",
@@ -60,8 +60,8 @@
     "NON_EXISTING_PACKAGE": 1
    },
    "files": 184,
-   "build_ms": 49,
-   "config_ms": 7
+   "build_ms": 48,
+   "config_ms": 2
   },
   "cv32e40p-uvm": {
    "commit": "083728bd8d548fd188e0ef43e0c1b038bce24002",
@@ -72,8 +72,8 @@
     "NON_EXISTING_DESIGN_ELEMENT": 1
    },
    "files": 350,
-   "build_ms": 102,
-   "config_ms": 10
+   "build_ms": 70,
+   "config_ms": 2
   },
   "cva6-auto": {
    "commit": "81245a47fad8fe1a5d562d953ef2662e099def76",
@@ -92,8 +92,8 @@
     "SYNTAX_ERROR": 3
    },
    "files": 828,
-   "build_ms": 137,
-   "config_ms": 122
+   "build_ms": 112,
+   "config_ms": 29
   },
   "cva6-rtl": {
    "commit": "81245a47fad8fe1a5d562d953ef2662e099def76",
@@ -104,8 +104,8 @@
     "NON_EXISTING_DESIGN_ELEMENT": 3
    },
    "files": 232,
-   "build_ms": 29,
-   "config_ms": 10
+   "build_ms": 26,
+   "config_ms": 2
   },
   "demo": {
    "commit": "",
@@ -114,8 +114,8 @@
    "warnings": 0,
    "codes": {},
    "files": 9,
-   "build_ms": 11,
-   "config_ms": 17
+   "build_ms": 13,
+   "config_ms": 22
   },
   "demo-errors": {
    "commit": "",
@@ -134,7 +134,7 @@
    },
    "files": 10,
    "build_ms": 13,
-   "config_ms": 19
+   "config_ms": 21
   },
   "hexk-sv-lib": {
    "commit": "",
@@ -143,8 +143,8 @@
    "warnings": 0,
    "codes": {},
    "files": 142,
-   "build_ms": 45,
-   "config_ms": 1
+   "build_ms": 44,
+   "config_ms": 0
   },
   "ibex-auto": {
    "commit": "65368a4c41d8e6c2e56ce816e418e21fc4e7b328",
@@ -162,7 +162,7 @@
    },
    "files": 756,
    "build_ms": 127,
-   "config_ms": 68
+   "config_ms": 13
   },
   "ibex-dv": {
    "commit": "65368a4c41d8e6c2e56ce816e418e21fc4e7b328",
@@ -173,8 +173,8 @@
     "NON_EXISTING_DESIGN_ELEMENT": 6
    },
    "files": 339,
-   "build_ms": 95,
-   "config_ms": 18
+   "build_ms": 76,
+   "config_ms": 1
   },
   "opentitan-aes": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
@@ -185,17 +185,17 @@
     "NON_EXISTING_DESIGN_ELEMENT": 1
    },
    "files": 594,
-   "build_ms": 106,
-   "config_ms": 7
+   "build_ms": 90,
+   "config_ms": 2
   },
   "opentitan-auto": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
-   "total": 2860,
-   "errors": 2738,
+   "total": 2873,
+   "errors": 2751,
    "warnings": 122,
    "codes": {
-    "UNDECLARED_IDENTIFIER": 1254,
-    "NOT_A_MEMBER": 554,
+    "UNDECLARED_IDENTIFIER": 1264,
+    "NOT_A_MEMBER": 557,
     "NON_EXISTING_PORT": 505,
     "UNDEFINED_MACRO": 260,
     "NON_EXISTING_DESIGN_ELEMENT": 122,
@@ -206,8 +206,8 @@
     "INCLUDE_SYNTAX": 1
    },
    "files": 3730,
-   "build_ms": 885,
-   "config_ms": 568
+   "build_ms": 790,
+   "config_ms": 201
   },
   "opentitan-earlgrey-rtl": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
@@ -216,8 +216,8 @@
    "warnings": 0,
    "codes": {},
    "files": 733,
-   "build_ms": 145,
-   "config_ms": 16
+   "build_ms": 137,
+   "config_ms": 6
   },
   "opentitan-i2c": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
@@ -228,8 +228,8 @@
     "NON_EXISTING_DESIGN_ELEMENT": 4
    },
    "files": 550,
-   "build_ms": 104,
-   "config_ms": 4
+   "build_ms": 89,
+   "config_ms": 2
   },
   "opentitan-uart": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
@@ -240,8 +240,8 @@
     "NON_EXISTING_DESIGN_ELEMENT": 4
    },
    "files": 513,
-   "build_ms": 106,
-   "config_ms": 13
+   "build_ms": 82,
+   "config_ms": 2
   },
   "pulp-axi-rtl": {
    "commit": "70b8e54fd460e3308e58be596ceb3566a6e3576e",
@@ -250,8 +250,8 @@
    "warnings": 0,
    "codes": {},
    "files": 247,
-   "build_ms": 23,
-   "config_ms": 3
+   "build_ms": 18,
+   "config_ms": 2
   },
   "ubus": {
    "commit": "",
@@ -260,7 +260,7 @@
    "warnings": 0,
    "codes": {},
    "files": 163,
-   "build_ms": 53,
+   "build_ms": 47,
    "config_ms": 0
   },
   "uvm-only": {
@@ -280,8 +280,8 @@
    "warnings": 0,
    "codes": {},
    "files": 130,
-   "build_ms": 71,
-   "config_ms": 1
+   "build_ms": 40,
+   "config_ms": 0
   }
  }
 }

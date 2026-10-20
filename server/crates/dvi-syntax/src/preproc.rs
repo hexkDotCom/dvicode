@@ -386,13 +386,18 @@ impl<'a> Pp<'a> {
     /// a line continuation of the body ends the line too, so that a `` `define `` or
     /// `` `undef `` in a macro body ends where its line does.
     fn take_same_line(&mut self) -> Option<Token> {
-        let f = self.frames.last_mut()?;
+        let t = self.peek_same_line()?.clone();
+        self.frames.last_mut()?.pos += 1;
+        Some(t)
+    }
+
+    /// The token [`take_same_line`](Self::take_same_line) would take.
+    fn peek_same_line(&self) -> Option<&Token> {
+        let f = self.frames.last()?;
         let t = f.toks.get(f.pos)?;
         if t.nl_before() || (t.flags & flags::CONT_BEFORE != 0 && matches!(f.kind, FrameKind::Macro { .. })) {
             return None;
         }
-        let t = t.clone();
-        f.pos += 1;
         Some(t)
     }
 
@@ -718,19 +723,16 @@ impl<'a> Pp<'a> {
                 }
                 let mut p = MacroParam { name: t.text.clone(), default: None };
                 // Optional default: `= tokens` up to `,` or `)` at depth 0.
-                let has_default = self.frames.last().and_then(|f| f.toks.get(f.pos)).is_some_and(|t| t.is_punct("=") && !t.nl_before());
+                let has_default = self.peek_same_line().is_some_and(|t| t.is_punct("="));
                 if has_default {
                     self.take_same_line();
                     let mut d = Vec::new();
                     let mut depth = 0i32;
                     loop {
-                        let stop = self.frames.last().and_then(|f| f.toks.get(f.pos)).map(|t| {
-                            t.nl_before() || (depth == 0 && (t.is_punct(",") || t.is_punct(")")))
-                        });
-                        if stop != Some(false) {
+                        if self.peek_same_line().map_or(true, |t| depth == 0 && (t.is_punct(",") || t.is_punct(")"))) {
                             break;
                         }
-                        let t = self.take_same_line().unwrap();
+                        let Some(t) = self.take_same_line() else { break };
                         if matches!(t.text.as_str(), "(" | "[" | "{") {
                             depth += 1;
                         } else if matches!(t.text.as_str(), ")" | "]" | "}") {
@@ -949,13 +951,31 @@ impl<'a> Pp<'a> {
             return;
         }
         let first_flags = tok.flags & (flags::NL_BEFORE | flags::WS_BEFORE);
-        let toks = substitute(&def, &args, site, first_flags);
+        let toks = substitute(&def, &args, site, first_flags, &|t| self.called_name(t));
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
             kind: FrameKind::Macro { site, name: def.name.clone() },
             cond_depth: self.conds.len(),
         });
+    }
+
+    /// The macro an actual argument names in `` `FORMAL(...) ``: an identifier names itself; a
+    /// `` `NAME `` is expanded first (when it is a plain name, as in `` `define SELECT DECL ``).
+    fn called_name(&self, t: &Token) -> SmolStr {
+        let mut cur = t;
+        for _ in 0..MAX_MACRO_DEPTH {
+            if cur.kind != TokKind::Directive {
+                break;
+            }
+            match self.macros.get(&cur.text) {
+                Some(d) if d.params.is_none() && d.body.len() == 1 && matches!(d.body[0].kind, TokKind::Ident | TokKind::Keyword | TokKind::Directive) => {
+                    cur = &d.body[0];
+                }
+                _ => break,
+            }
+        }
+        cur.text.clone()
     }
 
     /// Collects macro actual arguments after the opening parenthesis. Returns the arguments
@@ -1015,7 +1035,17 @@ pub fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) -> Vec<Token> {
+/// Compiler directives: never macro formals, even when a formal has the same name.
+const COMPILER_DIRECTIVES: &[&str] = &[
+    "define", "undef", "undefineall", "ifdef", "ifndef", "elsif", "else", "endif", "include", "timescale",
+    "resetall", "celldefine", "endcelldefine", "default_nettype", "pragma", "line", "__FILE__", "__LINE__",
+    "begin_keywords", "end_keywords", "unconnected_drive", "nounconnected_drive", "protect", "endprotect",
+    "protected", "endprotected", "default_decay_time", "default_trireg_strength", "delay_mode_distributed",
+    "delay_mode_path", "delay_mode_unit", "delay_mode_zero",
+];
+
+/// `called` gives the macro an actual names after a backtick (see [`Pp::called_name`]).
+fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8, called: &dyn Fn(&Token) -> SmolStr) -> Vec<Token> {
     let params = def.params.as_deref().unwrap_or(&[]);
     let param_index = |name: &str| params.iter().position(|p| p.name == name);
     let body_tok = |t: &Token| -> Token {
@@ -1084,7 +1114,7 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
                 }
                 out.extend(a);
             }
-            TokKind::Directive if param_index(&t.text).is_some() => {
+            TokKind::Directive if param_index(&t.text).is_some() && !COMPILER_DIRECTIVES.contains(&t.text.as_str()) => {
                 // `` `MACRO(x) `` with a formal MACRO: the macro its actual names, as
                 // simulators do.
                 let a = actual(param_index(&t.text).unwrap());
@@ -1092,7 +1122,7 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
                 d.flags |= flags::PASTED;
                 match a.first() {
                     Some(f) if a.len() == 1 && matches!(f.kind, TokKind::Ident | TokKind::Keyword | TokKind::Directive) => {
-                        d.text = f.text.clone();
+                        d.text = called(f);
                         out.push(d);
                     }
                     // Anything else (empty, several tokens): the formal's own name.

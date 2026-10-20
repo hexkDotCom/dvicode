@@ -4,7 +4,7 @@ use dvi_syntax::SourceProvider;
 use crate::resolve::{CLASS_BUILTINS, COVERGROUP_BUILTINS};
 use crate::world::{Analysis, DeclRef, UnitId};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, ParsedUnit, RefKind, Sep};
-use dvi_syntax::{Diag, FileId};
+use dvi_syntax::{Diag, FileId, Span};
 use rustc_hash::FxHashSet;
 use smol_str::SmolStr;
 
@@ -208,21 +208,23 @@ impl Analysis {
                 }
             }
             for imp in &d.imports {
-                if !self.import_is_complete(&imp.pkg) {
+                if !self.import_is_complete(imp) {
                     return true;
                 }
             }
             cur = d.parent;
         }
         let root = u.parsed.decl(ParsedUnit::ROOT);
-        root.imports.iter().any(|i| !self.import_is_complete(&i.pkg))
+        root.imports.iter().any(|i| !self.import_is_complete(i))
     }
 
-    /// The package exists and all its members are known.
-    fn import_is_complete(&self, pkg: &str) -> bool {
-        match self.global.packages.get(pkg).and_then(|v| v.first()) {
-            Some(p) => !self.may_hide_members(*p),
-            None => false,
+    /// The import brings in only names we know: its package exists and, for `pkg::*`, has no
+    /// members we cannot see; `pkg::item` is complete when the item is found.
+    fn import_is_complete(&self, imp: &dvi_syntax::ast::Import) -> bool {
+        let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()).copied() else { return false };
+        match &imp.item {
+            Some(item) => self.member_of(p, item).is_some() || !self.may_hide_members(p),
+            None => !self.may_hide_members(p),
         }
     }
 
@@ -233,8 +235,16 @@ impl Analysis {
         if self.setup.config.build_file.is_some() {
             return false;
         }
-        let span = self.decl(d).span;
-        self.unit(d.unit).inactive.iter().any(|s| s.file == span.file && span.start <= s.start && s.end <= span.end)
+        let decl = self.decl(d);
+        let span = decl.span;
+        let u = self.unit(d.unit);
+        let within = |outer: Span, s: &Span| s.file == outer.file && outer.start <= s.start && s.end <= outer.end;
+        // Only code removed directly in its scope: in a method or a struct it would declare
+        // locals or fields, not members.
+        u.inactive
+            .iter()
+            .filter(|s| within(span, s))
+            .any(|s| !decl.children.iter().any(|c| within(u.parsed.decl(*c).span, s)))
     }
 
     /// Enclosing module/interface/program/checker.

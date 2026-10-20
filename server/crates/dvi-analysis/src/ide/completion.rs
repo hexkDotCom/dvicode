@@ -297,7 +297,7 @@ impl Analysis {
                     .iter()
                     .enumerate()
                     .filter(|(_, a)| a.detail.is_empty())
-                    .map(|(i, a)| format!("${{{}:{}}}", i + 1, a.name))
+                    .map(|(i, a)| if a.name.is_empty() { format!("${{{}:arg{}}}", i + 1, i + 1) } else { format!("${{{}:{}}}", i + 1, a.name) })
                     .collect();
                 format!("{}({})", d.name, a.join(", "))
             };
@@ -525,7 +525,9 @@ impl Analysis {
                     s.push_str(&t.text);
                     s.push(' ');
                 }
+                // Unnamed (DPI import): the type alone.
                 s.push_str(&a.name);
+                s.truncate(s.trim_end().len());
                 if !a.detail.is_empty() {
                     s.push_str(" = ");
                     s.push_str(&a.detail);
