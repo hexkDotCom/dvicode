@@ -158,9 +158,9 @@ pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String,
     let bf = build_file.map(|p| p.to_path_buf()).or_else(|| find_build_file(root));
     match bf {
         Some(bf) => match std::fs::read_to_string(&bf) {
-            Ok(text) => parse_build(root, &bf, &text, env),
+            Ok(text) => parse_build_with(root, &bf, &text, env, progress),
             Err(e) => {
-                let mut cfg = parse_build(root, &bf, "", env);
+                let mut cfg = parse_build_with(root, &bf, "", env, progress);
                 cfg.problems.push(BuildProblem { file: bf.clone(), line: 0, range: None, message: format!("Cannot read the build file {}: {e}", bf.display()) });
                 cfg
             }
@@ -176,9 +176,14 @@ pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String,
 
 /// Parses build file text.
 pub fn parse_build(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<String, String>) -> BuildConfig {
+    parse_build_with(root, build_file, text, env, &Progress::new())
+}
+
+/// [`parse_build`], scanning `+dvicode_init_auto` sections on (and cancelled through) `progress`.
+pub fn parse_build_with(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
     let mut b = Builder::new(root, build_file, env, false);
     b.parse_text(build_file, text, root.to_path_buf());
-    b.finish()
+    b.finish(progress)
 }
 
 /// Checks the text of a build file (`.dvicode/*.build`, relative paths from the project
@@ -193,13 +198,17 @@ pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, Str
             b.comp_root = a.comp_root.clone();
             b.inv().mode = a.mode.clone();
             b.switches = a.switches.clone();
+            // The build may give the UVM location after this file.
+            b.partial = true;
             a.base.clone()
         }
         None => root.to_path_buf(),
     };
     b.parse_text(file, text, base);
+    // The last invocation's UVM library, with its note.
+    b.apply_uvm();
     let (notes, links) = (std::mem::take(&mut b.notes), std::mem::take(&mut b.links));
-    let cfg = b.finish();
+    let cfg = b.finish(&Progress::new());
     let own = |f: &Path| f == file;
     Inspection {
         problems: cfg.problems.into_iter().filter(|p| own(&p.file)).collect(),
@@ -227,6 +236,12 @@ struct Builder {
     /// `span` (the word, its argument, or the part of a `+opt+a+b` word that is wrong).
     span: (u32, u32),
     word: (u32, String),
+    /// Where [`Builder::focus`] looks for the next argument in `word`: after the option name
+    /// and the arguments already pointed at.
+    focus_at: usize,
+    /// Reading an argument file on its own ([`inspect`]): what the rest of the build sets later
+    /// (such as the UVM location) is unknown.
+    partial: bool,
     /// For [`inspect`]: collect `notes` and `links` (file, byte range, ...); skip scanning for
     /// `+dvicode_init_auto`.
     inspecting: bool,
@@ -325,6 +340,8 @@ impl Builder {
             files_read: 0,
             span: (0, 0),
             word: (0, String::new()),
+            focus_at: 0,
+            partial: false,
             inspecting,
             notes: Vec::new(),
             links: Vec::new(),
@@ -339,9 +356,13 @@ impl Builder {
 
     /// Points problems and notes at `part` of the current word (an argument of `+opt+a+b`).
     fn focus(&mut self, part: &str) {
-        if let Some(off) = self.word.1.find(part).filter(|_| !part.is_empty()) {
+        let from = self.focus_at.min(self.word.1.len());
+        let found = self.word.1.get(from..).and_then(|rest| rest.find(part)).filter(|_| !part.is_empty());
+        if let Some(off) = found {
+            let off = from + off;
             let start = self.word.0 + off as u32;
             self.span = (start, start + part.len() as u32);
+            self.focus_at = off + part.len();
         }
     }
 
@@ -382,7 +403,7 @@ impl Builder {
         self.cur = Some(Invocation { mode: if mode.is_empty() { "default".into() } else { mode.to_string() }, auto, ..Default::default() });
     }
 
-    fn finish(mut self) -> BuildConfig {
+    fn finish(mut self, progress: &Progress) -> BuildConfig {
         self.apply_uvm();
         if let Some(c) = self.cur.take() {
             self.cfg.invocations.push(c);
@@ -392,8 +413,8 @@ impl Builder {
         let env = self.env.clone();
         let inspecting = self.inspecting;
         for inv in &mut self.cfg.invocations {
-            if inv.auto && !inspecting {
-                let a = auto_config(&root, &env);
+            if inv.auto && !inspecting && !progress.is_cancelled() {
+                let a = auto_config_with(&root, &env, progress);
                 let mut files = a.files;
                 files.extend(std::mem::take(&mut inv.files));
                 inv.files = files;
@@ -450,6 +471,8 @@ impl Builder {
             i += 1;
             self.span = (w.start, w.end);
             self.word = (w.start, text.get(w.start as usize..w.end as usize).unwrap_or("").to_string());
+            // `+name+arg`: arguments start after the name.
+            self.focus_at = if self.word.1.starts_with('+') { self.word.1[1..].find('+').map_or(0, |i| i + 2) } else { 0 };
             // The value of an option: the next word, unless that is another option.
             let is_option = |w: &Word| (w.text.starts_with('-') && w.text.len() > 1) || w.text.starts_with('+');
             // An option and its value are one thing to point at.
@@ -541,9 +564,9 @@ impl Builder {
                         Some(kv) => self.setenv(&kv, true),
                         None => self.missing_value(file, line, &raw, "NAME=VALUE"),
                     },
-                    "-uvm" | "-ovm" => self.request_uvm(file, line, None),
+                    "-uvm" | "-ovm" => self.request_uvm(file, line, None, &base),
                     "-uvmhome" => match next(&mut i) {
-                        Some(p) => self.request_uvm(file, line, Some(p)),
+                        Some(p) => self.request_uvm(file, line, Some(p), &base),
                         None => self.missing_value(file, line, &raw, "the UVM directory"),
                     },
                     "-endlib" => {}
@@ -727,7 +750,7 @@ impl Builder {
             "uvmhome_override" | "uvm_home" => {
                 if let Some(a) = args.first() {
                     self.focus(a);
-                    self.request_uvm(file, line, Some(a.clone()));
+                    self.request_uvm(file, line, Some(a.clone()), base);
                 }
             }
             "include_config" => {
@@ -772,9 +795,10 @@ impl Builder {
         }
     }
 
-    fn request_uvm(&mut self, file: &Path, line: u32, home: Option<String>) {
-        // Expanded now, with the variables set so far.
-        let home = home.and_then(|h| self.expand(&h, true));
+    fn request_uvm(&mut self, file: &Path, line: u32, home: Option<String>, base: &Path) {
+        // Expanded now, with the variables set so far; a relative location is from `base`, like
+        // other paths.
+        let home = home.and_then(|h| self.expand(&h, true)).map(|h| absolutize(&h, base).display().to_string());
         let (files_at, incdirs_at) = {
             let inv = self.inv();
             (inv.files.len(), inv.incdirs.len())
@@ -803,7 +827,9 @@ impl Builder {
             .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
             .filter(|h| !h.is_empty());
         let Some(home) = home else {
-            self.problem(&req.file, req.line, "-uvm: set UVM_HOME or DVICODE_UVM_HOME to the UVM library location".into());
+            if !self.partial {
+                self.problem(&req.file, req.line, "-uvm: set UVM_HOME or DVICODE_UVM_HOME to the UVM library location".into());
+            }
             return;
         };
         let home = PathBuf::from(home);
@@ -1503,5 +1529,50 @@ mod tests {
         let ins = inspect(&dir, &arg.path, text, &FxHashMap::default(), Some(arg));
         assert_eq!(messages(&ins.problems), vec![format!("File not found: {}", dir.join("sub").join("d.sv").display())]);
         assert_eq!(at(text, &ins.problems[0]), "d.sv");
+    }
+
+    #[test]
+    fn arguments_named_like_their_option_are_pointed_at() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_focus");
+        let text = "+incdir+incdir\n+incdir+a+a\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        let p = &cfg.problems;
+        assert_eq!(p.len(), 3, "{p:?}");
+        // `+incdir+incdir`: the directory, not the option name.
+        assert_eq!(p[0].range, Some((8, 14)));
+        // `+incdir+a+a`: each argument in turn.
+        assert_eq!(p[1].range, Some((23, 24)));
+        assert_eq!(p[2].range, Some((25, 26)));
+    }
+
+    #[test]
+    fn an_argument_file_alone_does_not_ask_for_a_uvm_location_the_build_gives_later() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_partial_uvm");
+        std::fs::create_dir_all(dir.join("uvm/src")).unwrap();
+        std::fs::write(dir.join("uvm/src/uvm_pkg.sv"), "").unwrap();
+        std::fs::write(dir.join("opts.f"), "-uvm\n").unwrap();
+        let file = dir.join(".dvicode/default.build");
+        let cfg = parse_build(&dir, &file, "-f opts.f\n-uvmhome uvm\n", &FxHashMap::default());
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        let arg = cfg.arg_files.iter().find(|a| a.path == dir.join("opts.f")).expect("recorded");
+        let ins = inspect(&dir, &arg.path, "-uvm\n", &FxHashMap::default(), Some(arg));
+        assert!(!messages(&ins.problems).join("\n").contains("UVM_HOME"), "{:?}", ins.problems);
+        // The UVM library of the last invocation has its note too.
+        let ins = inspect(&dir, &file, "-uvmhome uvm\n", &FxHashMap::default(), None);
+        assert!(ins.notes.iter().any(|n| n.2.contains("UVM library")), "{:?}", ins.notes);
+    }
+
+    #[test]
+    fn a_cancelled_build_does_not_scan_init_auto_sections() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_cancel_auto");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.sv"), "module a; endmodule\n").unwrap();
+        let file = dir.join(".dvicode/default.build");
+        let progress = Progress::new();
+        progress.cancel();
+        let cfg = parse_build_with(&dir, &file, "+dvicode_init_auto\n", &FxHashMap::default(), &progress);
+        assert!(cfg.invocations[0].files.is_empty(), "{:?}", cfg.invocations[0].files);
+        let cfg = parse_build(&dir, &file, "+dvicode_init_auto\n", &FxHashMap::default());
+        assert_eq!(cfg.invocations[0].files, vec![dir.join("a.sv")]);
     }
 }

@@ -239,9 +239,14 @@ fn an_open_build_file_is_checked_as_it_is_typed() {
     assert!(md.contains("source file") && md.contains("pkg.sv") && md.contains("found"), "{h}");
     let links = c.request_ok("textDocument/documentLink", json!({ "textDocument": { "uri": bf } }));
     assert_eq!(links.as_array().map(|l| l.len()), Some(2), "{links}");
+    // Links asked for right after an edit are those of the new text.
+    c.change(&bf, 2, "top.sv\n");
+    let links = c.request_ok("textDocument/documentLink", json!({ "textDocument": { "uri": bf } }));
+    let targets: Vec<&str> = links.as_array().into_iter().flatten().filter_map(|l| l["target"].as_str()).collect();
+    assert!(targets.len() == 1 && targets[0].ends_with("top.sv"), "{links}");
     // Fixed as typed: the problems go, before the file is saved.
-    c.change(&bf, 2, "pkg.sv\ntop.sv\n");
-    c.wait_problems(&bf, |p| p.version == Some(2) && p.diagnostics.is_empty());
+    c.change(&bf, 3, "pkg.sv\ntop.sv\n");
+    c.wait_problems(&bf, |p| p.version == Some(3) && p.diagnostics.is_empty());
     // Nothing else applies to it.
     assert_eq!(c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": bf } })), Value::Null);
     c.shutdown();

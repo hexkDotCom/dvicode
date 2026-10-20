@@ -114,7 +114,7 @@ enum Event {
     /// failed and fell back to an empty project.
     Built(Option<Box<Analysis>>, u64, Option<String>),
     /// An open build or argument file checked: its URI and version, and what was found.
-    Inspected(Url, i32, Inspected),
+    Inspected(Url, u64, Inspected),
 }
 
 struct Server {
@@ -148,6 +148,8 @@ struct Server {
     /// Build and argument files open in the editor, and when to check them again.
     build_docs: FxHashMap<Url, BuildDoc>,
     inspect_at: Option<Instant>,
+    /// Numbers the checks of build documents (`BuildDoc::seq`).
+    inspect_seq: u64,
 }
 
 /// How long typing in a build file pauses before it is checked.
@@ -211,6 +213,7 @@ pub fn run(conn: Connection) -> Res<()> {
         logged_at: Instant::now(),
         build_docs: FxHashMap::default(),
         inspect_at: None,
+        inspect_seq: 0,
     };
     s.start_build();
     s.main_loop(&conn)
@@ -260,7 +263,7 @@ impl Server {
                 recv(self.events_rx) -> ev => {
                     match ev {
                         Ok(Event::Built(a, generation, error)) => self.on_built(a.map(|a| *a), generation, error),
-                        Ok(Event::Inspected(uri, version, ins)) => self.on_inspected(uri, version, ins),
+                        Ok(Event::Inspected(uri, seq, ins)) => self.on_inspected(uri, seq, ins),
                         Err(_) => {}
                     }
                 }
@@ -285,24 +288,50 @@ impl Server {
 
     /// Checks the open build and argument files in the background, the way the current build
     /// reads them.
-    fn inspect_build_docs(&self) {
+    fn inspect_build_docs(&mut self) {
         let env = project_env(&self.settings);
-        for (uri, doc) in &self.build_docs {
-            let cx = build_docs::context(&doc.path, self.root.as_deref(), &self.analysis.setup.config, &env);
-            let (uri, version, path, text, env, tx, sender) = (uri.clone(), doc.version, doc.path.clone(), doc.text.clone(), env.clone(), self.events_tx.clone(), self.sender.clone());
+        let uris: Vec<Url> = self.build_docs.keys().cloned().collect();
+        for uri in uris {
+            // Each check has a number: only the newest one of a document is kept (another may
+            // still run with an older build's context, or for the text before a reopen).
+            self.inspect_seq += 1;
+            let seq = self.inspect_seq;
+            let job = self.inspect_job(&uri, &env, seq);
+            let Some(job) = job else { continue };
+            let tx = self.events_tx.clone();
             rayon::spawn(move || {
-                let Some(inspection) = crash::catch("build file check", Some(&sender), || build_docs::inspect(&path, &text, &cx, &env)) else { return };
-                let lines = dvi_syntax::LineIndex::new(&text);
-                let _ = tx.send(Event::Inspected(uri, version, Inspected { text, lines, inspection }));
+                if let Some(ins) = job() {
+                    let _ = tx.send(Event::Inspected(uri, seq, ins));
+                }
             });
         }
     }
 
-    fn on_inspected(&mut self, uri: Url, version: i32, ins: Inspected) {
-        let Some(doc) = self.build_docs.get_mut(&uri) else { return };
-        if doc.version != version {
-            return; // edited since: a newer check is coming
+    /// A check of the open build document `uri` as it is now, to run in the background; marks
+    /// it as the document's newest check `seq`.
+    fn inspect_job(&mut self, uri: &Url, env: &FxHashMap<String, String>, seq: u64) -> Option<impl FnOnce() -> Option<Inspected> + Send + 'static> {
+        let cx = {
+            let doc = self.build_docs.get(uri)?;
+            build_docs::context(&doc.path, self.root.as_deref(), &self.analysis.setup.config, env)
+        };
+        let doc = self.build_docs.get_mut(uri)?;
+        if seq != 0 {
+            doc.seq = seq;
         }
+        let (version, path, text, env, sender) = (doc.version, doc.path.clone(), doc.text.clone(), env.clone(), self.sender.clone());
+        Some(move || {
+            let inspection = crash::catch("build file check", Some(&sender), || build_docs::inspect(&path, &text, &cx, &env))?;
+            let lines = dvi_syntax::LineIndex::new(&text);
+            Some(Inspected { text, lines, version, inspection })
+        })
+    }
+
+    fn on_inspected(&mut self, uri: Url, seq: u64, ins: Inspected) {
+        let Some(doc) = self.build_docs.get_mut(&uri) else { return };
+        if doc.seq != seq || doc.version != ins.version {
+            return; // a newer check is coming
+        }
+        let version = ins.version;
         let diagnostics = build_docs::diagnostics(&ins);
         doc.inspected = Some(ins);
         let mut st = self.published.lock().unwrap();
@@ -698,7 +727,7 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
                 if build_docs::is_build_doc(&path, Some(&p.text_document.language_id)) {
-                    let doc = BuildDoc { path: path.clone(), text: Arc::from(p.text_document.text), version: p.text_document.version, inspected: None };
+                    let doc = BuildDoc { path: path.clone(), text: Arc::from(p.text_document.text), version: p.text_document.version, seq: 0, inspected: None };
                     self.build_docs.insert(url_of(&path), doc);
                     self.inspect_at = Some(Instant::now());
                     return;
@@ -870,15 +899,21 @@ impl Server {
         let uri = req.params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| serde_json::from_value::<Url>(u.clone()).ok());
         let Some(key) = uri.as_ref().and_then(path_of).map(|p| url_of(&p)) else { return false };
         let Some(doc) = self.build_docs.get(&key) else { return false };
-        let result = match (req.method.as_str(), &doc.inspected) {
-            ("textDocument/hover", Some(ins)) => serde_json::from_value::<HoverParams>(req.params.clone())
-                .ok()
-                .and_then(|p| build_docs::hover(ins, p.text_document_position_params.position))
-                .map_or(Value::Null, |h| serde_json::to_value(h).unwrap_or_default()),
-            ("textDocument/documentLink", Some(ins)) => serde_json::to_value(build_docs::links(ins)).unwrap_or_default(),
-            _ => Value::Null,
-        };
-        self.send(Message::Response(Response::new_ok(req.id.clone(), result)));
+        let answers = matches!(req.method.as_str(), "textDocument/hover" | "textDocument/documentLink");
+        let current = doc.inspected.as_ref().filter(|ins| ins.version == doc.version);
+        if !answers || current.is_some() {
+            let result = current.filter(|_| answers).map_or(Value::Null, |ins| build_docs::answer(&req.method, &req.params, ins));
+            self.send(Message::Response(Response::new_ok(req.id.clone(), result)));
+            return true;
+        }
+        // Edited since the last check: check this text now, so that ranges match it.
+        let env = project_env(&self.settings);
+        let job = self.inspect_job(&key, &env, 0);
+        let (id, method, params, sender) = (req.id.clone(), req.method.clone(), req.params.clone(), self.sender.clone());
+        rayon::spawn(move || {
+            let result = job.and_then(|j| j()).map_or(Value::Null, |ins| build_docs::answer(&method, &params, &ins));
+            let _ = sender.send(Message::Response(Response::new_ok(id, result)));
+        });
         true
     }
 

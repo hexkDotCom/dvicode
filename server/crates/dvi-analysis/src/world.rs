@@ -358,7 +358,11 @@ impl Analysis {
             build_ms: 0,
         };
         a.reindex();
-        a.update_library_units();
+        a.update_library_units(Some(progress));
+        // Cancelled while indexing or compiling `-y`/`-v` libraries: a newer build replaces it.
+        if progress.is_cancelled() {
+            return None;
+        }
         a.build_ms = t0.elapsed().as_millis();
         Some(a)
     }
@@ -374,7 +378,7 @@ impl Analysis {
     /// in as many rounds as their own instances need. After an edit, the library units that
     /// are still needed (with the same macros) are kept, and those that nothing needs any more
     /// (the last instance was removed) are dropped: a full build would not compile them.
-    fn update_library_units(&mut self) {
+    fn update_library_units(&mut self, progress: Option<&Progress>) {
         let old: Vec<UnitId> = self.units.iter().flatten().filter(|u| u.library).map(|u| u.id).collect();
         let has_libs = self.setup.config.invocations.iter().any(|i| !i.lib_dirs.is_empty() || !i.lib_files.is_empty());
         if !has_libs && old.is_empty() {
@@ -398,6 +402,9 @@ impl Analysis {
         let mut kept: Vec<UnitId> = Vec::new();
         let mut changed = false;
         for _round in 0..8 {
+            if progress.is_some_and(|p| p.is_cancelled()) {
+                return;
+            }
             let mut missing: FxHashSet<SmolStr> = FxHashSet::default();
             for u in self.units.iter().flatten().filter(|u| own(u) || kept.contains(&u.id)) {
                 for r in &u.parsed.refs {
@@ -622,7 +629,7 @@ impl Analysis {
         }
         next.propagate_macros(self, &affected);
         next.reindex();
-        next.update_library_units();
+        next.update_library_units(None);
         next
     }
 
