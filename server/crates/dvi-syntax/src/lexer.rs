@@ -76,7 +76,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'\\' if self.peek(1) == b'\n' || (self.peek(1) == b'\r' && self.peek(2) == b'\n') => {
                     // Line continuation.
-                    fl |= flags::WS_BEFORE;
+                    fl |= flags::WS_BEFORE | flags::CONT_BEFORE;
                     self.pos += if self.peek(1) == b'\r' { 3 } else { 2 };
                     continue;
                 }
@@ -91,6 +91,7 @@ impl<'a> Lexer<'a> {
                     }
                     if e > 0 && self.src[e - 1] == b'\\' && self.pos < self.src.len() {
                         self.pos += 1;
+                        fl |= flags::CONT_BEFORE;
                     }
                     fl |= flags::WS_BEFORE;
                     continue;

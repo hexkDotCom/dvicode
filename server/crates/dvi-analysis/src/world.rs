@@ -158,6 +158,33 @@ pub struct Analysis {
 
 const PRELUDE: &str = include_str!("prelude.sv");
 
+/// Flags the innermost scope around each encrypted region: names it uses may be declared in
+/// the ciphertext.
+fn mark_encrypted(parsed: &mut dvi_syntax::ast::ParsedUnit, regions: &[Span]) {
+    use dvi_syntax::ast::{dflags, DeclKind};
+    for r in regions {
+        let inner = parsed
+            .decls
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, d)| {
+                matches!(
+                    d.kind,
+                    DeclKind::Module | DeclKind::Interface | DeclKind::Program | DeclKind::Checker | DeclKind::Package
+                        | DeclKind::Class | DeclKind::InterfaceClass | DeclKind::Function | DeclKind::Task
+                ) && d.span.file == r.file
+                    && d.span.start <= r.start
+                    && r.end <= d.span.end
+            })
+            .min_by_key(|(_, d)| d.span.end - d.span.start)
+            .map(|(i, _)| i);
+        if let Some(i) = inner {
+            parsed.decls[i].flags |= dflags::ENCRYPTED;
+        }
+    }
+}
+
 fn make_unit(
     vfs: &Vfs,
     id: UnitId,
@@ -168,7 +195,8 @@ fn make_unit(
     macros_before: MacroTable,
 ) -> Unit {
     let t0 = Instant::now();
-    let parsed = parser::parse(&pp.tokens, root);
+    let mut parsed = parser::parse(&pp.tokens, root);
+    mark_encrypted(&mut parsed, &pp.protected);
     let mut positions: FxHashMap<FileId, FilePositions> = FxHashMap::default();
     let mut names: FxHashMap<SmolStr, Vec<(RefId, u16)>> = FxHashMap::default();
     for (rid, r) in parsed.refs.iter().enumerate() {

@@ -82,6 +82,7 @@ value. Other `+options+` and `-options` are skipped.
 | `+dvicode_uvm_home+DIR` | Same as `-uvmhome DIR`. `+dvicode_uvmhome_override+DIR` is the same. |
 | `+dvicode_include_config+FILE` | Read another build file here (its relative paths resolve against its own directory). |
 | `+dvicode_test+FILE` | Compile `FILE` like a top file (kept for compatibility with test lists). |
+| `+dvicode_switches+NAME[+NAME...]` | The switches that [Jinja conditions](#jinja-templated-argument-files) in argument files read after it test (`{% if "NAME" in fl_switches %}`). Each use replaces the list. |
 
 ## Paths, wildcards and environment variables
 
@@ -116,6 +117,40 @@ available. These are always set:
 An undefined `$NAME`, `${NAME}` or `$(NAME)` in a path is reported and the entry is skipped; an
 undefined `%NAME%` is kept as written. In a define value an undefined variable is kept as
 written.
+
+## Jinja-templated argument files
+
+Some run flows render their `-f` files with Jinja before calling the simulator, choosing
+files with switches of the model being run:
+
+```
+common/top.sv
+{% if "gate_sim" in fl_switches %}
+  netlist/top_gate.v
+{% elif ("fpga" in fl_switches) or ("emu" in fl_switches) %}
+  rtl/top_fpga.sv
+{% else %}
+  rtl/top.sv
+{% endif %}
+```
+
+DVICode evaluates these conditions itself, with the switches given in the build file before
+the `-f` file is read:
+
+```
++dvicode_switches+sim+gate_sim
+-f verif/run/default.f
+```
+
+- Supported: `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}` (nested too), with
+  `"NAME" in LIST`, `"NAME" not in LIST`, `not`, `and`, `or`, parentheses, `true` and `false`.
+  A plain variable name (`fl_switches`, or any other) stands for the switch list. `{# comments #}`
+  are skipped. Without `+dvicode_switches+`, the list is empty.
+- Not supported, and reported: `{{ expressions }}` (left out of the text, so a path built
+  with one is usually not found), other tags such as `{% for %}` or `{% set %}` (ignored), and
+  conditions that test something other than the switch list, such as
+  `"x" in fl_switches[0]['config']` (taken as false).
+- Hovering a condition in the editor shows whether it is true.
 
 ## Invocations
 

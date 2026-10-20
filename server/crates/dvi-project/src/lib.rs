@@ -6,6 +6,7 @@
 
 mod auto;
 mod glob;
+mod jinja;
 mod progress;
 
 pub use auto::{auto_config, auto_config_with};
@@ -83,6 +84,8 @@ pub struct ArgFile {
     /// The `+dvicode_init` mode and compilation root at that point.
     pub mode: String,
     pub comp_root: PathBuf,
+    /// The `+dvicode_switches+` its Jinja conditions are evaluated with.
+    pub switches: Vec<String>,
 }
 
 impl BuildConfig {
@@ -189,6 +192,7 @@ pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, Str
             b.env = a.env.clone();
             b.comp_root = a.comp_root.clone();
             b.inv().mode = a.mode.clone();
+            b.switches = a.switches.clone();
             a.base.clone()
         }
         None => root.to_path_buf(),
@@ -228,6 +232,8 @@ struct Builder {
     inspecting: bool,
     notes: Vec<(PathBuf, u32, u32, String)>,
     links: Vec<(PathBuf, u32, u32, PathBuf)>,
+    /// `+dvicode_switches+`: what Jinja conditions in argument files test.
+    switches: Vec<String>,
 }
 
 /// Argument files one build reads at most.
@@ -272,7 +278,7 @@ const DASH_OPTIONS: &[&str] = &["-f", "-F", "-file", "-incdir", "-define", "-y",
 const PLUS_OPTIONS: &[&str] = &["incdir", "define", "undefine", "libext", "xmtop", "nctop"];
 const DIRECTIVES: &[&str] = &[
     "init", "init_auto", "init_from_simlog", "setenv", "env", "setenv_no_override", "undefine", "skip_compile",
-    "compilation_root", "uvmhome_override", "uvm_home", "include_config", "test",
+    "compilation_root", "uvmhome_override", "uvm_home", "include_config", "test", "switches",
 ];
 
 /// The known name `name` is probably a misspelling of, ignoring case: same first letter, and
@@ -322,6 +328,7 @@ impl Builder {
             inspecting,
             notes: Vec::new(),
             links: Vec::new(),
+            switches: Vec::new(),
         };
         b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
         if let Some(p) = root.parent() {
@@ -416,6 +423,23 @@ impl Builder {
     }
 
     fn parse_text(&mut self, file: &Path, text: &str, file_base: PathBuf) {
+        // Jinja conditions (`{% if "x" in fl_switches %}`): keep the text of the true branches.
+        let rendered;
+        let text = if jinja::has_tags(text) {
+            rendered = jinja::render(text, &self.switches);
+            let line_of = |off: u32| text.as_bytes()[..(off as usize).min(text.len())].iter().filter(|c| **c == b'\n').count() as u32;
+            for (s, e, msg) in &rendered.problems {
+                self.span = (*s, *e);
+                self.problem(file, line_of(*s), msg.clone());
+            }
+            for (s, e, note) in &rendered.notes {
+                self.span = (*s, *e);
+                self.note(file, note.clone());
+            }
+            rendered.text.as_str()
+        } else {
+            text
+        };
         let words = split_words(text);
         let mut base = file_base.clone();
         let mut i = 0;
@@ -639,6 +663,7 @@ impl Builder {
             "skip_compile" => Some("a file pattern"),
             "compilation_root" | "uvmhome_override" | "uvm_home" => Some("a directory"),
             "include_config" => Some("a file name"),
+            "switches" => Some("switch names"),
             "test" => Some("a file"),
             _ => None,
         };
@@ -716,6 +741,10 @@ impl Builder {
                     self.focus(&a);
                     self.add_file(file, line, &a, base);
                 }
+            }
+            "switches" => {
+                self.note(file, format!("**Jinja switches** `{}` for the conditions of argument files read after this", args.join(", ")));
+                self.switches = args;
             }
             _ => {
                 let hint = near_miss(d, DIRECTIVES).map(|k| format!("; did you mean +{prefix}_{k}?")).unwrap_or_else(|| " (see docs/build-files.md)".into());
@@ -822,7 +851,14 @@ impl Builder {
         let nested_base = if relative_to_file { path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.to_path_buf()) } else { self.comp_root.clone() };
         if !self.inspecting {
             let mode = self.inv().mode.clone();
-            self.cfg.arg_files.push(ArgFile { path: path.clone(), base: nested_base.clone(), env: self.env.clone(), mode, comp_root: self.comp_root.clone() });
+            self.cfg.arg_files.push(ArgFile {
+                path: path.clone(),
+                base: nested_base.clone(),
+                env: self.env.clone(),
+                mode,
+                comp_root: self.comp_root.clone(),
+                switches: self.switches.clone(),
+            });
         }
         let (span, word) = (self.span, std::mem::take(&mut self.word));
         self.depth += 1;
@@ -1223,6 +1259,28 @@ mod tests {
         assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
         let cfg = parse_build(&dir, &dir.join("x.build"), "+dvicode_bogus\n", &FxHashMap::default());
         assert_eq!(cfg.problems.len(), 1, "{:?}", cfg.problems);
+    }
+
+    #[test]
+    fn jinja_filelists_use_the_switches() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_jinja");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["top.sv", "gate.sv", "rtl.sv", "stub.sv"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let list = "top.sv\n{% if \"gate\" in fl_switches %}\n  gate.sv\n{% elif \"stub\" not in fl_switches %}\n  rtl.sv\n{% else %}\n  stub.sv\n{% endif %}\n{{ extra }}\n";
+        std::fs::write(dir.join("list.f"), list).unwrap();
+        let env = FxHashMap::default();
+        let files = |cfg: &BuildConfig| cfg.invocations[0].files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let cfg = parse_build(&dir, &dir.join("x.build"), "+dvicode_switches+sim+stub\n-f list.f\n", &env);
+        assert_eq!(files(&cfg), vec!["top.sv", "stub.sv"]);
+        // `{{ }}` is reported, on its own line of the argument file.
+        assert_eq!(cfg.problems.len(), 1, "{:?}", cfg.problems);
+        assert!(cfg.problems[0].file.ends_with("list.f") && cfg.problems[0].line == 8 && cfg.problems[0].message.contains("{{ extra }}"));
+        // The argument file remembers its switches, for checking it in the editor.
+        assert_eq!(cfg.arg_files[0].switches, vec!["sim", "stub"]);
+        let cfg = parse_build(&dir, &dir.join("x.build"), "-f list.f\n", &env);
+        assert_eq!(files(&cfg), vec!["top.sv", "rtl.sv"]);
     }
 
     #[test]

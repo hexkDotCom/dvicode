@@ -173,6 +173,8 @@ pub mod dflags {
     /// Instance created by `bind`: a member of the target module, not of the scope where the
     /// `bind` is written (see [`ParsedUnit::binds`](super::ParsedUnit::binds)).
     pub const BOUND: u32 = 1 << 21;
+    /// Contains encrypted text (`` `pragma protect ``), which may declare names we cannot see.
+    pub const ENCRYPTED: u32 = 1 << 22;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

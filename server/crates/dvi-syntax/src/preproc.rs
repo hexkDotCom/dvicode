@@ -194,6 +194,8 @@ pub struct PpResult {
     pub files: Vec<FileId>,
     /// Regions removed by `` `ifdef `` and friends.
     pub inactive: Vec<Span>,
+    /// Encrypted regions (`` `pragma protect begin_protected ``, `` `protected ``).
+    pub protected: Vec<Span>,
     pub macros_after: MacroTable,
     /// The text of every file read, exactly as it was lexed.
     pub sources: Vec<(FileId, Arc<str>)>,
@@ -380,11 +382,13 @@ impl<'a> Pp<'a> {
         self.frames.iter().rev().find_map(|f| f.toks.get(f.pos))
     }
 
-    /// Next token of the current frame only, if it is on the same line.
+    /// Next token of the current frame only, if it is on the same line. In a macro expansion
+    /// a line continuation of the body ends the line too, so that a `` `define `` or
+    /// `` `undef `` in a macro body ends where its line does.
     fn take_same_line(&mut self) -> Option<Token> {
         let f = self.frames.last_mut()?;
         let t = f.toks.get(f.pos)?;
-        if t.nl_before() {
+        if t.nl_before() || (t.flags & flags::CONT_BEFORE != 0 && matches!(f.kind, FrameKind::Macro { .. })) {
             return None;
         }
         let t = t.clone();
@@ -509,11 +513,14 @@ impl<'a> Pp<'a> {
             "include" => self.include(tok),
             "protected" => {
                 // Verilog-XL style encrypted region: the text up to `endprotected is ciphertext.
+                let mut end = tok.span;
                 while let Some(t) = self.next() {
+                    end = t.span;
                     if t.kind == TokKind::Directive && t.text == "endprotected" {
                         break;
                     }
                 }
+                self.note_protected(&tok, end);
             }
             "resetall" | "celldefine" | "endcelldefine" | "nounconnected_drive" | "end_keywords"
             | "endprotect" | "protect" | "endprotected" | "delay_mode_distributed"
@@ -527,7 +534,8 @@ impl<'a> Pp<'a> {
                 let is_begin_protected = rest.iter().any(|t| t.text == "protect")
                     && rest.iter().any(|t| t.text == "begin_protected");
                 if is_begin_protected {
-                    self.skip_protected();
+                    let end = self.skip_protected();
+                    self.note_protected(&tok, end.unwrap_or(tok.span));
                 }
             }
             "__FILE__" => {
@@ -559,15 +567,27 @@ impl<'a> Pp<'a> {
         self.res.tokens.push(t);
     }
 
-    fn skip_protected(&mut self) {
+    /// Skips to the `` `pragma protect end_protected `` line; returns the span of its last token.
+    fn skip_protected(&mut self) -> Option<Span> {
         while let Some(t) = self.next() {
             if t.kind == TokKind::Directive && t.text == "pragma" {
                 let rest = self.rest_of_line();
                 if rest.iter().any(|t| t.text == "end_protected") {
-                    return;
+                    return Some(rest.last().map_or(t.span, |l| l.span));
                 }
             }
         }
+        None
+    }
+
+    /// Records an encrypted region from its first directive to `end`.
+    fn note_protected(&mut self, begin: &Token, end: Span) {
+        let span = match self.in_macro() {
+            Some(site) => site,
+            None if end.file == begin.span.file && end.end >= begin.span.start => begin.span.cover(end),
+            None => begin.span,
+        };
+        self.res.protected.push(span);
     }
 
     fn defined(&self, name: &str) -> bool {
@@ -1001,7 +1021,7 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
     let body_tok = |t: &Token| -> Token {
         let mut t = t.clone();
         t.span = site;
-        t.flags = flags::FROM_MACRO | (t.flags & flags::WS_BEFORE);
+        t.flags = flags::FROM_MACRO | (t.flags & (flags::WS_BEFORE | flags::CONT_BEFORE));
         t
     };
     let actual = |i: usize| -> Vec<Token> {
@@ -1013,7 +1033,7 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
                     if t.flags & flags::FROM_MACRO == 0 {
                         t.flags |= flags::FROM_MACRO | flags::MACRO_ARG;
                     }
-                    t.flags &= !flags::NL_BEFORE;
+                    t.flags &= !(flags::NL_BEFORE | flags::CONT_BEFORE);
                     t
                 })
                 .collect(),
@@ -1059,9 +1079,25 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
             TokKind::Ident | TokKind::Keyword if param_index(&t.text).is_some() => {
                 let mut a = actual(param_index(&t.text).unwrap());
                 if let Some(f) = a.first_mut() {
-                    f.flags = (f.flags & !flags::WS_BEFORE) | (t.flags & flags::WS_BEFORE);
+                    let keep = flags::WS_BEFORE | flags::CONT_BEFORE;
+                    f.flags = (f.flags & !keep) | (t.flags & keep);
                 }
                 out.extend(a);
+            }
+            TokKind::Directive if param_index(&t.text).is_some() => {
+                // `` `MACRO(x) `` with a formal MACRO: the macro its actual names, as
+                // simulators do.
+                let a = actual(param_index(&t.text).unwrap());
+                let mut d = body_tok(t);
+                d.flags |= flags::PASTED;
+                match a.first() {
+                    Some(f) if a.len() == 1 && matches!(f.kind, TokKind::Ident | TokKind::Keyword | TokKind::Directive) => {
+                        d.text = f.text.clone();
+                        out.push(d);
+                    }
+                    // Anything else (empty, several tokens): the formal's own name.
+                    _ => out.push(d),
+                }
             }
             _ => out.push(body_tok(t)),
         }
@@ -1116,7 +1152,7 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8) 
                         prev.text = SmolStr::new(text);
                         prev.span = site;
                         let pasted = if prev.kind == TokKind::Directive { flags::PASTED } else { 0 };
-                        prev.flags = (prev.flags & flags::WS_BEFORE) | flags::FROM_MACRO | pasted;
+                        prev.flags = (prev.flags & (flags::WS_BEFORE | flags::CONT_BEFORE)) | flags::FROM_MACRO | pasted;
                     }
                     (None, Some(n)) => merged.push(n),
                     _ => {}

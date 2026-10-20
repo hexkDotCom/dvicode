@@ -544,3 +544,124 @@ fn unit_level_import_reaches_later_files() {
     let p = problems(&a);
     assert!(p.len() == 1 && p[0].starts_with("a.sv") && p[0].contains("'HIGH' is not declared"), "{p:?}");
 }
+
+// ---- Found on closed-source projects; reduced to invented examples -----------------------
+
+#[test]
+fn names_on_unnamed_instance_terminals_are_implicit_nets() {
+    // Standard-cell libraries: `chk_buf (a_chk, a, 1'b1);` instantiates a UDP without a name,
+    // and `a_chk` is used again only in the specify block.
+    clean(
+        "unnamedudp",
+        &[(
+            "cells.sv",
+            "primitive chk_buf (o, i, en);\n  output o; input i, en;\n  table 0 1 : 0; 1 1 : 1; endtable\nendprimitive\n\
+             module leaf (input a, output y); assign y = a; endmodule\n\
+             module cel1 (q, a);\n  input a; output q;\n  reg notifier;\n  buf (q, a);\n  chk_buf (a_chk, a, 1'b1);\n  chk_buf #1 (b_chk, a, 1'b0), (c_chk, a, 1'b1);\n  leaf (a, leaf_y);\n\
+             \x20 specify\n    $setuphold (posedge a &&& a_chk, a, 0, 0, notifier);\n  endspecify\nendmodule\n",
+        )],
+    );
+    // The primitive is a design element: navigation reaches it, and a missing one is reported.
+    use dvi_syntax::SourceProvider;
+    let (a, root) = project("unnamedudp2", &[("m.sv", "primitive p1 (o, i);\n  output o; input i;\n  table 0 : 0; 1 : 1; endtable\nendprimitive\nmodule m;\n  p1 (x, y);\n  p2 (x, y);\nendmodule\n")]);
+    let f = a.vfs.file_id(&root.join("m.sv"));
+    let off = a.vfs.text(f).unwrap().find("p1 (x").unwrap() as u32;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![0]);
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].contains("'p2' is not defined"), "{p:?}");
+}
+
+#[test]
+fn macro_formal_after_a_backtick_names_the_macro_to_call() {
+    // `` `define APPLY(MACRO, ARG) `MACRO(ARG) ``: simulators substitute MACRO, then expand it.
+    clean(
+        "macroformal",
+        &[(
+            "t.sv",
+            "`define DECL(N) int N;\n`define APPLY0(MACRO, ARG) `MACRO(ARG)\n`define APPLY_N(MACRO, ARG, N) `APPLY``N(MACRO, ARG)\n\
+             module t;\n  `APPLY0(DECL, first)\n  `APPLY_N(DECL, second, 0)\n  initial first = second;\nendmodule\n",
+        )],
+    );
+}
+
+#[test]
+fn names_near_encrypted_code_are_not_reported() {
+    // Vendor IP: the declarations of a module are encrypted, the code using them is not.
+    clean(
+        "encrypted",
+        &[(
+            "ip.sv",
+            "module ip (input clk);\n`pragma protect begin_protected\n`pragma protect data_block\nAbCdEfGh0123+/==\n`pragma protect end_protected\n\
+             \x20 always @(posedge clk) for (i = 0; i < 4; i = i + 1) hidden_r[i] <= 1'b0;\nendmodule\n",
+        )],
+    );
+    // Other modules are still checked.
+    let (a, _) = project("encrypted2", &[("ip.sv", "module ip;\n`pragma protect begin_protected\nxyz\n`pragma protect end_protected\nendmodule\nmodule other;\n  initial undeclared_x = 1;\nendmodule\n")]);
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].contains("'undeclared_x'"), "{p:?}");
+}
+
+#[test]
+fn inline_constraint_foreach_sees_the_randomized_object() {
+    use dvi_syntax::SourceProvider;
+    let text = "`define check(EXPR) if (!(EXPR)) $error(\"failed\");\nclass cfg_c;\n  rand int mults[4];\nendclass\nmodule t;\n  cfg_c c = new;\n  initial begin\n\
+                \x20   `check(c.randomize() with { foreach (mults[i]) mults[i] inside {[1:3]}; })\n    if (!c.randomize() with { foreach (mults[i]) mults[i] < 5; }) $error(\"x\");\n  end\nendmodule\n";
+    let (a, root) = project("withforeach", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let off = text.find("foreach (mults").unwrap() as u32 + 9;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![2]);
+}
+
+#[test]
+fn macro_body_with_define_lines_and_a_multiline_argument() {
+    // A macro that wraps its argument in a module twice, with `define/`undef lines and pasted
+    // comments in its body, called with an argument that has `ifdef in it.
+    clean(
+        "definebody",
+        &[(
+            "t.sv",
+            "`define alt_name(M) `ifdef ALT_``M``_ON ``M``_alt `else M `endif\n\
+             `define wrap_defn(M, BODY) \\\n  module ``M``_wrap #(bit ALT = 0) (); \\\n    /``* pragma coverage off ``*/ \\\n    if (ALT) begin : body \\\n      `define ALT_``M``_ON \\\n      BODY \\\n      `undef ALT_``M``_ON \\\n    end \\\n\
+             \x20   else begin : body \\\n      BODY \\\n    end \\\n    /``* pragma coverage on ``*/ \\\n  endmodule : ``M``_wrap\n\
+             module dut; logic clk; endmodule\n\
+             `wrap_defn(dut,\n  logic seen;\n`ifdef NOT_DEFINED\n  logic never;\n`endif\n  initial seen = 1;\n)\n",
+        )],
+    );
+}
+
+#[test]
+fn solve_before_hard() {
+    // VCS extension.
+    clean("solvehard", &[("t.sv", "class pkt;\n  rand bit a; rand bit [3:0] b;\n  constraint c { solve a before b hard; solve a, b before c2; if (a) b == 0; }\n  rand bit c2;\nendclass\n")]);
+}
+
+#[test]
+fn dpi_import_arguments_without_names() {
+    clean(
+        "dpinames",
+        &[("t.sv", "module t;\n  import \"DPI-C\" pure function real fabs_r(input real);\n  import \"DPI-C\" function int add2(input int, input int b);\n  import \"DPI-C\" function void put(input bit [3:0], output bit);\n  real r = fabs_r(-1.0);\nendmodule\n")],
+    );
+    // Elsewhere a name is still required.
+    let (a, _) = project("dpinames2", &[("t.sv", "module t;\n  function int f(input int);\n    return 0;\n  endfunction\nendmodule\n")]);
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("Expected argument name")), "{p:?}");
+}
+
+#[test]
+fn auto_config_does_not_know_the_defines_of_conditional_package_members() {
+    // A package whose members are inside `ifdef FULL_ENV, defined only on the simulator
+    // command line: without a build file, using them is not an error.
+    let files = [
+        ("env_pkg.sv", "package env_pkg;\n`ifdef FULL_ENV\n  parameter int NUM_AGENTS = 4;\n`endif\n  parameter int VISIBLE = 1;\nendpackage\n"),
+        ("user.sv", "class user_seq;\n  int slots[env_pkg::NUM_AGENTS];\n  int other[env_pkg::VISIBLE];\nendclass\nmodule user_top;\n  import env_pkg::*;\n  int n = NUM_AGENTS;\nendmodule\n"),
+    ];
+    let (_, root) = project("autocond", &files);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // With a build file the defines are known, and the members are missing.
+    let (a, _) = project("autocond2", &files);
+    let p = problems(&a);
+    assert!(p.len() == 2 && p.iter().all(|m| m.contains("'NUM_AGENTS'")), "{p:?}");
+}

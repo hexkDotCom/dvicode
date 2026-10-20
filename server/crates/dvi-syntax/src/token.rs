@@ -37,6 +37,9 @@ pub mod flags {
     pub const MACRO_ARG: u8 = 8;
     /// A `` `name `` built by token pasting (`` `dv_``SEV_ ``).
     pub const PASTED: u8 = 16;
+    /// A line continuation (backslash, newline) comes before this token: a line break of the
+    /// macro body it belongs to.
+    pub const CONT_BEFORE: u8 = 32;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -50,7 +50,7 @@ pub fn context(path: &Path, root: Option<&Path>, config: &BuildConfig, env: &FxH
         return Context { root: config.root.clone(), arg: Some(a.clone()), show_problems: true };
     }
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| project.clone());
-    let arg = ArgFile { path: path.to_path_buf(), base: dir, env: env.clone(), mode: "default".into(), comp_root: project.clone() };
+    let arg = ArgFile { path: path.to_path_buf(), base: dir, env: env.clone(), mode: "default".into(), comp_root: project.clone(), switches: Vec::new() };
     Context { root: project, arg: Some(arg), show_problems: false }
 }
 

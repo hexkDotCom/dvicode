@@ -123,6 +123,10 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     };
     let root = canonical(&dir);
+    if !root.is_dir() {
+        eprintln!("check: {} is not a folder", dir.display());
+        return 2;
+    }
     let t0 = std::time::Instant::now();
     // `--build auto` auto-configures even when the project has a build file, like the setting.
     let cfg = match build.as_deref() {
@@ -391,5 +395,14 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_missing_folder_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("dvicode-check-missing-{}", std::process::id()));
+        assert_eq!(super::run(&[dir.display().to_string(), "-q".into()]), 2);
     }
 }

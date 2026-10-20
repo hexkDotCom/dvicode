@@ -169,6 +169,9 @@ impl Analysis {
             _ => self.type_of(prev),
         }?;
         let cd = self.decl(container);
+        if cd.has(dflags::ENCRYPTED) || self.may_hide_members(container) {
+            return None;
+        }
         match cd.kind {
             DeclKind::Class | DeclKind::InterfaceClass => {
                 if CLASS_BUILTINS.contains(&name) || !self.class_chain_complete(container) {
@@ -192,6 +195,9 @@ impl Analysis {
         let mut cur = Some(scope);
         while let Some(s) = cur {
             let d = u.parsed.decl(s);
+            if d.has(dflags::ENCRYPTED) {
+                return true;
+            }
             if matches!(d.kind, DeclKind::Class | DeclKind::InterfaceClass) && !self.class_chain_complete(DeclRef { unit: uid, decl: s }) {
                 return true;
             }
@@ -202,14 +208,33 @@ impl Analysis {
                 }
             }
             for imp in &d.imports {
-                if !self.global.packages.contains_key(&imp.pkg) {
+                if !self.import_is_complete(&imp.pkg) {
                     return true;
                 }
             }
             cur = d.parent;
         }
         let root = u.parsed.decl(ParsedUnit::ROOT);
-        root.imports.iter().any(|i| !self.global.packages.contains_key(&i.pkg))
+        root.imports.iter().any(|i| !self.import_is_complete(&i.pkg))
+    }
+
+    /// The package exists and all its members are known.
+    fn import_is_complete(&self, pkg: &str) -> bool {
+        match self.global.packages.get(pkg).and_then(|v| v.first()) {
+            Some(p) => !self.may_hide_members(*p),
+            None => false,
+        }
+    }
+
+    /// Without a build file the defines are unknown: a declaration with code removed by
+    /// `` `ifdef `` may have members under the defines of the real build (a package whose body
+    /// is inside `` `ifdef UVM ``, defined on the simulator command line).
+    pub fn may_hide_members(&self, d: DeclRef) -> bool {
+        if self.setup.config.build_file.is_some() {
+            return false;
+        }
+        let span = self.decl(d).span;
+        self.unit(d.unit).inactive.iter().any(|s| s.file == span.file && span.start <= s.start && s.end <= span.end)
     }
 
     /// Enclosing module/interface/program/checker.

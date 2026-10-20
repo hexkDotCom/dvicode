@@ -707,8 +707,58 @@ impl<'t> Parser<'t> {
             Lookahead::Instance if self.in_design_context() || self.scope_kind() == DeclKind::Generate || self.context() == DeclKind::Unit => {
                 self.data_decl(DeclKind::Variable, 0, start);
             }
+            _ if self.in_design_context() && self.unnamed_instance_end().is_some() => self.unnamed_instances(),
             _ => self.expr_stmt(RefKind::Expr),
         }
+    }
+
+    /// `udp [strength] [#delay] (terminals) [, (terminals)] ;`: an instance without a name, as
+    /// UDPs (and gates) allow. A call is not a module item, so this is the only meaning there.
+    /// Returns the index of the `;`.
+    fn unnamed_instance_end(&self) -> Option<usize> {
+        let toks = self.toks;
+        let mut i = self.pos + 1;
+        let is_strength = |t: &Token| {
+            matches!(
+                t.text.as_str(),
+                "strong0" | "strong1" | "weak0" | "weak1" | "pull0" | "pull1" | "supply0" | "supply1" | "highz0" | "highz1"
+            )
+        };
+        if toks.get(i).is_some_and(|t| t.is_punct("(")) && toks.get(i + 1).is_some_and(is_strength) {
+            i = self.skip_group_from(i);
+        }
+        if toks.get(i).is_some_and(|t| t.is_punct("#")) {
+            i += 1;
+            if toks.get(i).is_some_and(|t| t.is_punct("(")) {
+                i = self.skip_group_from(i);
+            } else {
+                i += 1;
+            }
+        }
+        if !toks.get(i).is_some_and(|t| t.is_punct("(")) {
+            return None;
+        }
+        loop {
+            i = self.skip_group_from(i);
+            match toks.get(i) {
+                Some(t) if t.is_punct(";") => return Some(i),
+                Some(t) if t.is_punct(",") && toks.get(i + 1).is_some_and(|t| t.is_punct("(")) => i += 1,
+                _ => return None,
+            }
+        }
+    }
+
+    fn unnamed_instances(&mut self) {
+        let n = self.tok().clone();
+        self.bump();
+        self.add_ref(vec![Self::seg(&n, Sep::None)], RefKind::Definition);
+        if self.at_p("(") && !self.nth(1).is_punct("(") && self.nth(1).kind == TokKind::Keyword {
+            let end = self.skip_group_from(self.pos);
+            self.pos = end;
+        }
+        self.delay_opt();
+        // Undeclared names on the terminals are implicit nets (IEEE 1800 6.10).
+        self.scan_until_semi(RefKind::Loose);
     }
 
     fn skip_named(&mut self, kind: DeclKind, end: &'static str) {
@@ -1913,6 +1963,8 @@ impl<'t> Parser<'t> {
                     self.u.decls[id as usize].detail = self.text_of(from, self.pos);
                 }
                 self.finish(id);
+            } else if ty.is_some() && (self.at_p(",") || self.at_p(")")) && self.u.decls[self.scope() as usize].has(dflags::DPI) {
+                // Argument names are optional in DPI import prototypes: `f(input real)`.
             } else {
                 let sp = self.tok().span;
                 self.error(sp, "Expected argument name");
@@ -2010,7 +2062,24 @@ impl<'t> Parser<'t> {
         if self.at_kw("soft") {
             self.bump();
         }
-        if self.at_kw("solve") || (self.at_kw("disable") && self.nth(1).is_kw("soft")) {
+        if self.at_kw("solve") {
+            // `solve a, b before c [hard];` (`hard` is a VCS extension).
+            self.bump();
+            loop {
+                let t = self.tok();
+                if t.kind == TokKind::Eof || t.is_punct(";") || t.is_punct("}") || t.kind == TokKind::Keyword && is_end_kw(&t.text) {
+                    break;
+                }
+                if t.kind == TokKind::Ident && !(t.text == "hard" && self.nth(1).is_punct(";")) {
+                    self.chain(RefKind::Expr);
+                } else {
+                    self.bump();
+                }
+            }
+            self.eat_p(";");
+            return;
+        }
+        if self.at_kw("disable") && self.nth(1).is_kw("soft") {
             self.bump();
             self.scan_until_semi(RefKind::Expr);
             return;
@@ -2059,7 +2128,10 @@ impl<'t> Parser<'t> {
             break;
         }
         if !segs.is_empty() {
-            self.add_ref(segs, RefKind::Expr);
+            // In an inline constraint (`obj.randomize() with { foreach (arr[i]) ... }`) the
+            // array may be a member of the randomized object.
+            let kind = self.kind_override.unwrap_or(RefKind::Expr);
+            self.add_ref(segs, kind);
         }
         while self.at_p("[") {
             self.bump();
