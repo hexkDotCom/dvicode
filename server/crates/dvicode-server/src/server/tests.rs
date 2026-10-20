@@ -202,6 +202,26 @@ fn codes(p: &PublishDiagnosticsParams) -> Vec<String> {
 }
 
 #[test]
+fn a_change_of_the_build_file_in_use_is_announced() {
+    let root = project("bfswitch", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let message = |v: &Value| v["message"].as_str().unwrap_or("").to_string();
+    // Removed: the next build configures the project automatically.
+    let bf = root.join(".dvicode/default.build");
+    let saved = std::fs::read_to_string(&bf).unwrap();
+    std::fs::remove_file(&bf).unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, ".dvicode/default.build"), "type": 3 }] }));
+    let m = c.wait_note("window/showMessage", |_| true);
+    assert!(message(&m).contains("configures the project automatically"), "{m}");
+    // Created again: it is used, and the user is told so.
+    std::fs::write(&bf, saved).unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, ".dvicode/default.build"), "type": 1 }] }));
+    let m = c.wait_note("window/showMessage", |_| true);
+    assert!(message(&m).contains("now uses the build file") && message(&m).contains("default.build"), "{m}");
+    c.shutdown();
+}
+
+#[test]
 fn initialize_announces_capabilities_and_builds() {
     let root = project("init", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (c, init) = Client::start(&root, Value::Null);

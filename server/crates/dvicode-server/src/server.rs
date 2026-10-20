@@ -5,6 +5,7 @@ use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
 use dvi_analysis::{Analysis, ProjectSetup, Vfs};
+use dvi_project::Progress;
 use dvi_syntax::{FileId, SourceProvider};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::*;
@@ -105,9 +106,9 @@ struct PubState {
 }
 
 enum Event {
-    /// A finished full build; the error message when it failed and fell back to an empty
-    /// project.
-    Built(Box<Analysis>, u64, Option<String>),
+    /// A finished full build (`None`: cancelled for a newer one); the error message when it
+    /// failed and fell back to an empty project.
+    Built(Option<Box<Analysis>>, u64, Option<String>),
 }
 
 struct Server {
@@ -130,8 +131,19 @@ struct Server {
     built_once: bool,
     published: Arc<Mutex<PubState>>,
     next_id: i32,
+    /// The client shows `$/progress` notifications.
     progress: bool,
+    /// Progress of the running build, and the switch that cancels it.
+    build_progress: Option<Arc<Progress>>,
+    build_started: Instant,
+    /// What the client was last told (message, percentage), and when progress was last logged.
+    reported: (String, u32),
+    logged_at: Instant,
 }
+
+/// How often the running build's progress is sent to the client, and written to the log.
+const REPORT_EVERY: Duration = Duration::from_millis(500);
+const LOG_EVERY: Duration = Duration::from_secs(5);
 
 pub fn run(conn: Connection) -> Res<()> {
     let (id, params) = conn.initialize_start()?;
@@ -181,6 +193,10 @@ pub fn run(conn: Connection) -> Res<()> {
         published: Arc::new(Mutex::new(PubState::default())),
         next_id: 1,
         progress,
+        build_progress: None,
+        build_started: Instant::now(),
+        reported: (String::new(), 0),
+        logged_at: Instant::now(),
     };
     s.start_build();
     s.main_loop(&conn)
@@ -195,6 +211,9 @@ impl Server {
             }
             if let Some(t) = self.rebuild_at {
                 timeout = timeout.min(t.saturating_duration_since(Instant::now()));
+            }
+            if self.building {
+                timeout = timeout.min(REPORT_EVERY);
             }
             select! {
                 recv(conn.receiver) -> msg => {
@@ -223,7 +242,7 @@ impl Server {
                 }
                 recv(self.events_rx) -> ev => {
                     if let Ok(Event::Built(a, generation, error)) = ev {
-                        self.on_built(*a, generation, error);
+                        self.on_built(a.map(|a| *a), generation, error);
                     }
                 }
                 default(timeout) => {}
@@ -235,6 +254,34 @@ impl Server {
                 self.rebuild_at = None;
                 self.start_build();
             }
+            if self.building {
+                self.report_build_progress();
+            }
+        }
+    }
+
+    /// Sends the running build's progress to the client when it changed, and logs it now and
+    /// then, so that a long build shows what it is doing.
+    fn report_build_progress(&mut self) {
+        let Some(p) = self.build_progress.clone() else { return };
+        let (message, percentage) = (p.message(), p.percentage());
+        if self.progress && (self.reported.0 != message || self.reported.1 != percentage) {
+            self.notify(
+                "$/progress",
+                ProgressParams {
+                    token: NumberOrString::String("dvicode-build".into()),
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(WorkDoneProgressReport {
+                        cancellable: Some(false),
+                        message: Some(message.clone()),
+                        percentage: Some(percentage),
+                    })),
+                },
+            );
+            self.reported = (message.clone(), percentage);
+        }
+        if self.logged_at.elapsed() >= LOG_EVERY {
+            self.logged_at = Instant::now();
+            log::info!("building ({} s): {message}", self.build_started.elapsed().as_secs());
         }
     }
 
@@ -254,31 +301,16 @@ impl Server {
 
     // ------------------------------------------------------------------ builds
 
-    fn setup(&self) -> ProjectSetup {
-        let root = self.root.clone().unwrap_or_else(|| PathBuf::from("/"));
-        let mut env = self.settings.env.clone();
-        if let Some(u) = &self.settings.uvm_home {
-            env.insert("DVICODE_UVM_HOME".into(), u.clone());
-        }
-        let wanted = self.settings.build_file.as_deref().map(str::trim).unwrap_or("");
-        if wanted == dvi_project::AUTO {
-            let cfg = if self.root.is_some() { dvi_project::load_auto(&root, &env) } else { Default::default() };
-            return ProjectSetup::new(&root, cfg, env);
-        }
-        let bf = self.settings.build_file.as_ref().filter(|b| !b.trim().is_empty()).map(|b| {
-            let p = PathBuf::from(b);
-            if p.is_absolute() {
-                p
-            } else {
-                root.join(p)
-            }
-        });
-        let cfg = if self.root.is_some() { dvi_project::load(&root, bf.as_deref(), &env) } else { Default::default() };
-        ProjectSetup::new(&root, cfg, env)
-    }
-
     fn start_build(&mut self) {
         if self.building {
+            // The running build is out of date (new build file, settings, Rebuild Project):
+            // stop it, and start again when it has stopped.
+            if !self.build_again {
+                log::info!("cancelling the running build for a new one");
+            }
+            if let Some(p) = &self.build_progress {
+                p.cancel();
+            }
             self.build_again = true;
             return;
         }
@@ -286,6 +318,11 @@ impl Server {
         self.changed_during_build.clear();
         self.build_generation += 1;
         let generation = self.build_generation;
+        let progress = Arc::new(Progress::new());
+        self.build_progress = Some(progress.clone());
+        self.build_started = Instant::now();
+        self.logged_at = Instant::now();
+        self.reported = (String::new(), 0);
         if self.progress {
             self.request_client("window/workDoneProgress/create", WorkDoneProgressCreateParams { token: NumberOrString::String("dvicode-build".into()) });
             self.notify(
@@ -301,7 +338,7 @@ impl Server {
                 },
             );
         }
-        let setup = self.setup();
+        let (root, settings) = (self.root.clone(), self.settings.clone());
         let vfs = self.vfs.clone();
         let tx = self.events_tx.clone();
         let client = self.sender.clone();
@@ -309,25 +346,63 @@ impl Server {
             .name("dvicode-build".into())
             .stack_size(64 << 20)
             .spawn(move || {
+                // Configuring can take long too (auto-configuration reads the whole folder), so
+                // it runs here, not in the loop that answers the editor.
                 let t0 = Instant::now();
-                let setup = Arc::new(setup);
-                let r = crash::catch("project build", Some(&client), || Analysis::build(vfs.clone(), setup.clone()));
+                let setup = Arc::new(project_setup(root.as_deref(), &settings, &progress));
+                let t1 = Instant::now();
+                if !progress.is_cancelled() {
+                    log::info!("configuration: {} in {} ms", describe_config(&setup), (t1 - t0).as_millis());
+                }
+                let r = crash::catch("project build", Some(&client), || Analysis::build_with(vfs.clone(), setup.clone(), &progress));
                 let (a, error) = match r {
-                    Some(a) => (a, None),
+                    Some(Some(a)) => (Some(a), None),
+                    Some(None) => (None, None),
                     None => {
                         log::error!("falling back to an empty project");
                         let empty = Analysis::build(vfs, Arc::new(ProjectSetup::new(&setup.root, Default::default(), Default::default())));
-                        (empty, Some("The project build failed with an internal error".to_string()))
+                        (Some(empty), Some("The project build failed with an internal error".to_string()))
                     }
                 };
-                log::info!("full build: {} units in {} ms", a.units.len(), t0.elapsed().as_millis());
-                let _ = tx.send(Event::Built(Box::new(a), generation, error));
+                match &a {
+                    Some(a) => log::info!(
+                        "full build: {} units; configuration {} ms, build {} ms",
+                        a.units.len(),
+                        (t1 - t0).as_millis(),
+                        t1.elapsed().as_millis()
+                    ),
+                    None => log::info!("build cancelled after {} ms", t0.elapsed().as_millis()),
+                }
+                let _ = tx.send(Event::Built(a.map(Box::new), generation, error));
             })
             .expect("spawn build thread");
     }
 
-    fn on_built(&mut self, a: Analysis, _generation: u64, error: Option<String>) {
+    fn on_built(&mut self, a: Option<Analysis>, _generation: u64, error: Option<String>) {
         self.building = false;
+        self.build_progress = None;
+        let Some(a) = a else {
+            // Cancelled for a newer build, which starts now with a progress of its own.
+            self.end_progress();
+            if self.build_again {
+                self.build_again = false;
+                self.start_build();
+            }
+            return;
+        };
+        // Tell when the build file in use changed (one added, removed or chosen).
+        let new_bf = a.setup.config.build_file.clone();
+        if self.built_once && self.analysis.setup.config.build_file != new_bf {
+            let text = match &new_bf {
+                Some(bf) => {
+                    let shown = self.root.as_deref().and_then(|r| bf.strip_prefix(r).ok()).unwrap_or(bf);
+                    format!("DVICode now uses the build file {}", shown.display())
+                }
+                None => "DVICode now configures the project automatically (no build file)".to_string(),
+            };
+            log::info!("{text}");
+            self.notify("window/showMessage", ShowMessageParams { typ: MessageType::INFO, message: text });
+        }
         // Open files that are not part of the build are compiled ad hoc.
         let open = self.open_files();
         let mut a = a.sync_open_files(&open);
@@ -347,19 +422,14 @@ impl Server {
         }
         self.analysis = Arc::new(a);
         self.built_once = true;
-        if self.progress {
-            self.notify(
-                "$/progress",
-                ProgressParams {
-                    token: NumberOrString::String("dvicode-build".into()),
-                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd { message: None })),
-                },
-            );
-        }
+        self.end_progress();
         let st = self.analysis.status();
         log::info!(
-            "project ready: {} top files, {} files, {} declarations in {} ms",
-            st.top_files, st.files, st.declarations, st.build_ms
+            "project ready: {} top files, {} files, {} declarations; {} s since the build started",
+            st.top_files,
+            st.files,
+            st.declarations,
+            self.build_started.elapsed().as_secs_f32().round()
         );
         // The client shows a failed build in its status bar.
         let mut status = serde_json::to_value(&st).unwrap_or_default();
@@ -371,6 +441,18 @@ impl Server {
         if self.build_again {
             self.build_again = false;
             self.start_build();
+        }
+    }
+
+    fn end_progress(&self) {
+        if self.progress {
+            self.notify(
+                "$/progress",
+                ProgressParams {
+                    token: NumberOrString::String("dvicode-build".into()),
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd { message: None })),
+                },
+            );
         }
     }
 
@@ -897,6 +979,41 @@ struct ExpandParams {
     text_document: TextDocumentIdentifier,
     position: Position,
     all: Option<bool>,
+}
+
+/// The project configuration the settings ask for: a build file, the default one, or
+/// auto-configuration (reported on and cancelled through `progress`).
+fn project_setup(root: Option<&std::path::Path>, settings: &Settings, progress: &Progress) -> ProjectSetup {
+    let base = root.map(|r| r.to_path_buf()).unwrap_or_else(|| PathBuf::from("/"));
+    let mut env = settings.env.clone();
+    if let Some(u) = &settings.uvm_home {
+        env.insert("DVICODE_UVM_HOME".into(), u.clone());
+    }
+    let wanted = settings.build_file.as_deref().map(str::trim).unwrap_or("");
+    if wanted == dvi_project::AUTO {
+        let cfg = if root.is_some() { dvi_project::load_auto_with(&base, &env, progress) } else { Default::default() };
+        return ProjectSetup::new(&base, cfg, env);
+    }
+    let bf = Some(wanted).filter(|b| !b.is_empty()).map(|b| {
+        let p = PathBuf::from(b);
+        if p.is_absolute() {
+            p
+        } else {
+            base.join(p)
+        }
+    });
+    let cfg = if root.is_some() { dvi_project::load_with(&base, bf.as_deref(), &env, progress) } else { Default::default() };
+    ProjectSetup::new(&base, cfg, env)
+}
+
+/// "build file .dvicode/default.build: 12 top files" or "auto-configuration of D:\proj: ...".
+fn describe_config(setup: &ProjectSetup) -> String {
+    let tops: usize = setup.config.invocations.iter().map(|i| i.files.len()).sum();
+    let what = match &setup.config.build_file {
+        Some(bf) => format!("build file {}", bf.strip_prefix(&setup.root).unwrap_or(bf).display()),
+        None => format!("auto-configuration of {}", setup.root.display()),
+    };
+    format!("{what}: {} invocation(s), {tops} top files", setup.config.invocations.len())
 }
 
 /// A SystemVerilog or Verilog source or header, by extension.

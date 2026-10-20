@@ -1,7 +1,7 @@
 //! Project compilation and analysis snapshots.
 
 use crate::vfs::{Vfs, BUILTIN_DIR};
-use dvi_project::BuildConfig;
+use dvi_project::{BuildConfig, Phase, Progress};
 use dvi_syntax::ast::{DeclId, DeclKind, ParsedUnit, RefId, RefKind};
 use dvi_syntax::preproc::{command_line_define, def_identity, preprocess, IncludeInfo, MacroDef, MacroName, MacroTable, MacroUse, PpConfig};
 use dvi_syntax::{parser, Diag, FileId, SourceProvider, Span};
@@ -256,6 +256,11 @@ fn interface_fingerprint(u: &Unit) -> u64 {
 impl Analysis {
     /// Compiles the whole project.
     pub fn build(vfs: Arc<Vfs>, setup: Arc<ProjectSetup>) -> Analysis {
+        Self::build_with(vfs, setup, &Progress::new()).expect("a build that nothing cancels finishes")
+    }
+
+    /// [`Analysis::build`], reporting each phase on `progress`; `None` when it is cancelled.
+    pub fn build_with(vfs: Arc<Vfs>, setup: Arc<ProjectSetup>, progress: &Progress) -> Option<Analysis> {
         let t0 = Instant::now();
         vfs.clear_dir_cache();
         let mut units: Vec<Option<Arc<Unit>>> = Vec::new();
@@ -263,9 +268,16 @@ impl Analysis {
         // Read and lex the top files in parallel; preprocessing reads them one after another,
         // which adds up where each read waits for the file system (network or WSL drives).
         let tops: Vec<FileId> = setup.config.invocations.iter().flat_map(|i| &i.files).map(|f| vfs.file_id(f)).collect();
+        progress.begin(Phase::Reading, tops.len());
         tops.par_iter().for_each(|&id| {
-            vfs.source(id);
+            if !progress.is_cancelled() {
+                vfs.source(id);
+            }
+            progress.step();
         });
+        if progress.is_cancelled() {
+            return None;
+        }
         // Likewise list the include directories: an `include not found in the first ones
         // probes all the others.
         let mut incdirs: Vec<&PathBuf> = setup.pp_configs.iter().flat_map(|c| &c.incdirs).collect();
@@ -273,25 +285,42 @@ impl Analysis {
         incdirs.dedup();
         incdirs.par_iter().for_each(|d| vfs.list_dir(d));
         // Preprocess in order (macros flow from file to file), parse in parallel.
+        progress.begin(Phase::Preprocessing, tops.len());
         let mut jobs = Vec::new();
         for (inv_idx, inv) in setup.config.invocations.iter().enumerate() {
             let mut macros = setup.initial_macros[inv_idx].clone();
             let cfg = &setup.pp_configs[inv_idx];
             for f in &inv.files {
+                if progress.is_cancelled() {
+                    return None;
+                }
                 let id = vfs.file_id(f);
                 let before = macros.clone();
                 let pp = preprocess(&*vfs, cfg, id, macros);
                 macros = pp.macros_after.clone();
                 jobs.push((id, inv_idx, pp, before));
+                progress.step();
             }
         }
         let base = units.len() as UnitId;
-        let built: Vec<Unit> = jobs
+        progress.begin(Phase::Parsing, jobs.len());
+        let built: Vec<Option<Unit>> = jobs
             .into_par_iter()
             .enumerate()
-            .map(|(i, (id, inv, pp, before))| make_unit(&vfs, base + i as UnitId, id, UnitKind::Project, inv, pp, before))
+            .map(|(i, (id, inv, pp, before))| {
+                if progress.is_cancelled() {
+                    return None;
+                }
+                let u = make_unit(&vfs, base + i as UnitId, id, UnitKind::Project, inv, pp, before);
+                progress.step();
+                Some(u)
+            })
             .collect();
-        units.extend(built.into_iter().map(|u| Some(Arc::new(u))));
+        if progress.is_cancelled() {
+            return None;
+        }
+        units.extend(built.into_iter().flatten().map(|u| Some(Arc::new(u))));
+        progress.begin(Phase::Indexing, 0);
         let mut a = Analysis {
             vfs,
             setup,
@@ -303,7 +332,7 @@ impl Analysis {
         a.reindex();
         a.update_library_units();
         a.build_ms = t0.elapsed().as_millis();
-        a
+        Some(a)
     }
 
     fn builtin_unit(vfs: &Vfs) -> Unit {

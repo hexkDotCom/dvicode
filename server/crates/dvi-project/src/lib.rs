@@ -6,8 +6,10 @@
 
 mod auto;
 mod glob;
+mod progress;
 
-pub use auto::auto_config;
+pub use auto::{auto_config, auto_config_with};
+pub use progress::{Phase, Progress};
 
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
@@ -99,10 +101,20 @@ pub const AUTO: &str = "auto";
 
 /// Auto-configuration, ignoring any build file.
 pub fn load_auto(root: &Path, env: &FxHashMap<String, String>) -> BuildConfig {
-    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config(root, env)], problems: Vec::new() }
+    load_auto_with(root, env, &Progress::new())
+}
+
+/// [`load_auto`], reporting on (and cancelled through) `progress`.
+pub fn load_auto_with(root: &Path, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
+    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config_with(root, env, progress)], problems: Vec::new() }
 }
 
 pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>) -> BuildConfig {
+    load_with(root, build_file, env, &Progress::new())
+}
+
+/// [`load`], reporting the auto-configuration on (and cancelled through) `progress`.
+pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
     let bf = build_file.map(|p| p.to_path_buf()).or_else(|| find_build_file(root));
     match bf {
         Some(bf) => match std::fs::read_to_string(&bf) {
@@ -116,7 +128,7 @@ pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, Stri
         None => BuildConfig {
             root: root.to_path_buf(),
             build_file: None,
-            invocations: vec![auto_config(root, env)],
+            invocations: vec![auto_config_with(root, env, progress)],
             problems: Vec::new(),
         },
     }
@@ -951,7 +963,7 @@ mod tests {
         for f in ["a.sv", "build/uvm/x.sv", "sub/scratch/y.sv", "sub/z_gen.sv", "sub/keep.sv", "sub/deep/build/w.sv"] {
             std::fs::write(dir.join(f), "module m; endmodule\n").unwrap();
         }
-        let files = auto::collect_sources(&dir);
+        let files = auto::collect_sources_with(&dir, &Progress::new());
         // `/build/` is anchored: only the top-level one is ignored.
         assert_eq!(files, vec![dir.join("a.sv"), dir.join("sub/deep/build/w.sv"), dir.join("sub/keep.sv")]);
     }

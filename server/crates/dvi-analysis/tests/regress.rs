@@ -144,6 +144,25 @@ fn quick_fixes_keep_crlf_line_endings() {
     assert!(declare.edits.iter().all(|(_, t)| !t.contains('\n') || t.contains("\r\n")), "{:?}", declare.edits);
 }
 
+#[test]
+fn builds_report_progress_and_stop_when_cancelled() {
+    use dvi_project::{Phase, Progress};
+    let (_, root) = project("progress", &[("a.sv", "module a; endmodule\n"), ("b.sv", "module b; endmodule\n")]);
+    let setup = || {
+        let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+        Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default()))
+    };
+    // A build that runs to the end has counted every top file.
+    let p = Progress::new();
+    let a = Analysis::build_with(Arc::new(Vfs::new()), setup(), &p).expect("not cancelled");
+    assert_eq!(p.snapshot().0, Phase::Indexing);
+    assert_eq!(a.status().top_files, 2);
+    // A cancelled one gives nothing back.
+    let p = Progress::new();
+    p.cancel();
+    assert!(Analysis::build_with(Arc::new(Vfs::new()), setup(), &p).is_none());
+}
+
 fn codes(a: &Analysis, file: &str) -> Vec<&'static str> {
     use dvi_syntax::SourceProvider;
     let f = a.project_files().into_iter().find(|f| a.vfs.path(*f).ends_with(file)).unwrap();

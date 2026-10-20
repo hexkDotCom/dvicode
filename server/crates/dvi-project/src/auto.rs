@@ -4,6 +4,7 @@
 //! are include directories; files defining packages are compiled before the files that use
 //! them, and files that mostly define macros come first.
 
+use crate::progress::{Phase, Progress};
 use crate::Invocation;
 use dvi_syntax::lexer::lex;
 use dvi_syntax::token::TokKind;
@@ -67,12 +68,16 @@ impl GitIgnore {
     }
 }
 
-pub fn collect_sources(root: &Path) -> Vec<PathBuf> {
+/// The project's sources; counts them on `progress`, and stops early when it is cancelled.
+pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
     let ignore = GitIgnore::load(root);
     let rel = |p: &Path| p.strip_prefix(root).map(|r| r.to_path_buf()).unwrap_or_default();
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if progress.is_cancelled() {
+            return out;
+        }
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         let mut entries: Vec<_> = rd.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
@@ -86,6 +91,7 @@ pub fn collect_sources(root: &Path) -> Vec<PathBuf> {
                 }
             } else if is_regular_file(&ft, &p) && is_source(&p) && !ignore.ignores(&rel(&p), false) {
                 out.push(p);
+                progress.step();
                 if out.len() >= MAX_FILES {
                     return out;
                 }
@@ -139,13 +145,26 @@ fn scan(text: &str) -> FileFacts {
 }
 
 pub fn auto_config(root: &Path, env: &FxHashMap<String, String>) -> Invocation {
-    let files = collect_sources(root);
+    auto_config_with(root, env, &Progress::new())
+}
+
+/// [`auto_config`], reporting on `progress`; returns early (an incomplete result the caller
+/// throws away) when it is cancelled.
+pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: &Progress) -> Invocation {
+    progress.begin(Phase::Scanning, 0);
+    let files = collect_sources_with(root, progress);
+    progress.begin(Phase::Examining, files.len());
     // In parallel: on network and WSL drives most of the time is waiting for the reads.
     let facts: Vec<(PathBuf, FileFacts)> = files
         .into_par_iter()
         .map(|p| {
-            let text = std::fs::read(&p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            let text = if progress.is_cancelled() {
+                String::new()
+            } else {
+                std::fs::read(&p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+            };
             let f = scan(&text);
+            progress.step();
             (p, f)
         })
         .collect();
