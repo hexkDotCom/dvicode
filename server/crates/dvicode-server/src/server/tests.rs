@@ -222,6 +222,51 @@ fn a_change_of_the_build_file_in_use_is_announced() {
 }
 
 #[test]
+fn an_open_build_file_is_checked_as_it_is_typed() {
+    let root = project("bfcheck", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let bf = uri(&root, ".dvicode/default.build");
+    let text = "pkg.sv\ntop.sv\n-incdr inc\nmisng.sv\n";
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": bf, "languageId": "dvicode-build", "version": 1, "text": text } }));
+    let p = c.wait_problems(&bf, |p| p.version == Some(1));
+    let found: Vec<(String, Value)> = p.diagnostics.iter().map(|d| (d.message.clone(), serde_json::to_value(d.range.start).unwrap())).collect();
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(found[0].0.contains("did you mean -incdir?") && found[0].1 == at(text, "-incdr"), "{found:?}");
+    assert!(found[2].0.starts_with("File not found") && found[2].1 == at(text, "misng"), "{found:?}");
+    // What a path resolves to, and a link to it.
+    let h = c.request_ok("textDocument/hover", json!({ "textDocument": { "uri": bf }, "position": at(text, "kg.sv") }));
+    let md = h["contents"]["value"].as_str().unwrap_or("");
+    assert!(md.contains("source file") && md.contains("pkg.sv") && md.contains("found"), "{h}");
+    let links = c.request_ok("textDocument/documentLink", json!({ "textDocument": { "uri": bf } }));
+    assert_eq!(links.as_array().map(|l| l.len()), Some(2), "{links}");
+    // Fixed as typed: the problems go, before the file is saved.
+    c.change(&bf, 2, "pkg.sv\ntop.sv\n");
+    c.wait_problems(&bf, |p| p.version == Some(2) && p.diagnostics.is_empty());
+    // Nothing else applies to it.
+    assert_eq!(c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": bf } })), Value::Null);
+    c.shutdown();
+}
+
+#[test]
+fn an_open_argument_file_is_checked_the_way_the_build_reads_it() {
+    let root = project("argcheck", &[("pkg.sv", PKG)]);
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/top.sv"), TOP).unwrap();
+    std::fs::write(root.join("sub/list.f"), "top.sv\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "+dvicode_setenv+SUB=$DVICODE_PROJECT_LOC/sub\npkg.sv\n-f sub/list.f\n").unwrap();
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let f = uri(&root, "sub/list.f");
+    // Relative to its own folder, with the build file's variables.
+    let text = "top.sv\n$SUB/top.sv\ngone.sv\n";
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": f, "languageId": "dvicode-build", "version": 1, "text": text } }));
+    let p = c.wait_problems(&f, |p| p.version == Some(1));
+    let messages: Vec<&str> = p.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].starts_with("File not found") && messages[0].contains("gone.sv"), "{messages:?}");
+    c.shutdown();
+}
+
+#[test]
 fn initialize_announces_capabilities_and_builds() {
     let root = project("init", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (c, init) = Client::start(&root, Value::Null);

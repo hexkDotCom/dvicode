@@ -197,8 +197,8 @@ pub fn run(args: &[String]) -> i32 {
         "dvicode check: {} top files, {} files, {} declarations, {} macros, {} packages, {} classes, {} design elements; config {} ms, build {} ms",
         st.top_files, st.files, st.declarations, st.macros, st.packages, st.classes, st.modules, cfg_ms, st.build_ms
     );
-    for (f, l, m) in &a.setup.config.problems {
-        eprintln!("{}:{}: build config: {m}", f.display(), l + 1);
+    for p in &a.setup.config.problems {
+        eprintln!("{}:{}: build config: {}", p.file.display(), p.line + 1, p.message);
     }
     let t1 = std::time::Instant::now();
     let mut counts: FxHashMap<&'static str, usize> = FxHashMap::default();

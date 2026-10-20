@@ -163,10 +163,28 @@ Other `+NAME=VALUE` arguments are kept as simulation plusargs. DVICode uses:
 
 ## Problems in build files
 
-Missing files, directories and `-y`/`-v` libraries, undefined environment variables in paths,
-unreadable build and `-f` files, `-f` files that include themselves and unknown `+dvicode_`
-directives are shown as warnings on the line of the build file
-(in the Problems view and in the editor). The build continues with the remaining entries.
+A build file is checked as you type, before it is saved. Warnings are underlined at the word
+that is wrong and listed in the Problems view. The build skips the wrong entry and continues
+with the rest. The checks:
+
+- Files, directories, `-y`/`-v` libraries and `-f` files that do not exist, and wildcards
+  that match nothing.
+- Environment variables that are not set; the warning names the variable.
+- Options with no value (`-incdir` at the end of a line, `+incdir+` with nothing after it,
+  `+dvicode_setenv+NAME` with no `=`).
+- Misspelt options and directives, with what was probably meant: `-incdr` (did you mean
+  `-incdir`?), `+incdri+`, `+dvicode_skip_compil`, `+dvicod_init`.
+- `-f` files that include themselves, unreadable files, and `-uvm` with no UVM library.
+
+Other simulator options (`-sv`, `-timescale`, `+acc`, ...) are accepted and ignored.
+
+Hover over a word to see what DVICode makes of it: the full path and whether it exists, what
+a variable expands to, how many files a wildcard matches (and the first few), and which
+options DVICode does not use. Ctrl+click (Cmd+click on macOS) a file name to open the file.
+
+An open `-f` file is checked the way the current build reads it: relative paths start from
+its folder, and it sees the variables set before it. An `-f` file that the build does not read
+gets hover and links, but no warnings, because its paths may be meant for another folder.
 
 ## Examples
 

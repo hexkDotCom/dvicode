@@ -46,12 +46,14 @@ impl Analysis {
         }
         // Build file problems.
         let path = self.vfs.path(file);
-        for (f, line, msg) in &self.setup.config.problems {
-            if *f == path {
+        for p in &self.setup.config.problems {
+            if p.file == path {
                 if let (Some(text), Some(li)) = (self.file_text(file), self.file_lines(file)) {
-                    let start = li.offset(&text, *line, 0);
-                    let end = li.offset(&text, *line, u32::MAX);
-                    push(Diag::warning(dvi_syntax::Span::new(file, start, end), "BUILD_CONFIG", msg.clone()), &mut out);
+                    let (start, end) = match p.range {
+                        Some((s, e)) if (e as usize) <= text.len() => (s, e),
+                        _ => (li.offset(&text, p.line, 0), li.offset(&text, p.line, u32::MAX)),
+                    };
+                    push(Diag::warning(dvi_syntax::Span::new(file, start, end), "BUILD_CONFIG", p.message.clone()), &mut out);
                 }
             }
         }

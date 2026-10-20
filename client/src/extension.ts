@@ -49,6 +49,9 @@ const SV_SELECTOR = [
   { scheme: 'file', language: 'verilog' },
   { scheme: 'dvicode', language: 'systemverilog' },
   { scheme: 'dvicode', language: 'verilog' },
+  // Build and argument files: checked as they are typed, with hover and links (not compiled).
+  { scheme: 'file', language: 'dvicode-build' },
+  { scheme: 'dvicode', language: 'dvicode-build' },
 ];
 
 function settingsForServer(): object {

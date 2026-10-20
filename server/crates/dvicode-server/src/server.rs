@@ -1,6 +1,9 @@
 //! The LSP main loop.
 
+mod build_docs;
+
 use crate::{crash, fs, util};
+use build_docs::{BuildDoc, Inspected};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
@@ -85,6 +88,7 @@ fn capabilities() -> ServerCapabilities {
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
         })),
+        document_link_provider: Some(DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
             legend: SemanticTokensLegend { token_types: TOKEN_TYPES.to_vec(), token_modifiers: TOKEN_MODIFIERS.to_vec() },
             full: Some(SemanticTokensFullOptions::Bool(true)),
@@ -109,6 +113,8 @@ enum Event {
     /// A finished full build (`None`: cancelled for a newer one); the error message when it
     /// failed and fell back to an empty project.
     Built(Option<Box<Analysis>>, u64, Option<String>),
+    /// An open build or argument file checked: its URI and version, and what was found.
+    Inspected(Url, i32, Inspected),
 }
 
 struct Server {
@@ -139,7 +145,13 @@ struct Server {
     /// What the client was last told (message, percentage), and when progress was last logged.
     reported: (String, u32),
     logged_at: Instant,
+    /// Build and argument files open in the editor, and when to check them again.
+    build_docs: FxHashMap<Url, BuildDoc>,
+    inspect_at: Option<Instant>,
 }
+
+/// How long typing in a build file pauses before it is checked.
+const INSPECT_DELAY: Duration = Duration::from_millis(300);
 
 /// How often the running build's progress is sent to the client, and written to the log.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
@@ -197,6 +209,8 @@ pub fn run(conn: Connection) -> Res<()> {
         build_started: Instant::now(),
         reported: (String::new(), 0),
         logged_at: Instant::now(),
+        build_docs: FxHashMap::default(),
+        inspect_at: None,
     };
     s.start_build();
     s.main_loop(&conn)
@@ -214,6 +228,9 @@ impl Server {
             }
             if self.building {
                 timeout = timeout.min(REPORT_EVERY);
+            }
+            if let Some(t) = self.inspect_at {
+                timeout = timeout.min(t.saturating_duration_since(Instant::now()));
             }
             select! {
                 recv(conn.receiver) -> msg => {
@@ -241,8 +258,10 @@ impl Server {
                     }
                 }
                 recv(self.events_rx) -> ev => {
-                    if let Ok(Event::Built(a, generation, error)) = ev {
-                        self.on_built(a.map(|a| *a), generation, error);
+                    match ev {
+                        Ok(Event::Built(a, generation, error)) => self.on_built(a.map(|a| *a), generation, error),
+                        Ok(Event::Inspected(uri, version, ins)) => self.on_inspected(uri, version, ins),
+                        Err(_) => {}
                     }
                 }
                 default(timeout) => {}
@@ -257,7 +276,46 @@ impl Server {
             if self.building {
                 self.report_build_progress();
             }
+            if self.inspect_at.is_some_and(|t| Instant::now() >= t) {
+                self.inspect_at = None;
+                self.inspect_build_docs();
+            }
         }
+    }
+
+    /// Checks the open build and argument files in the background, the way the current build
+    /// reads them.
+    fn inspect_build_docs(&self) {
+        let env = project_env(&self.settings);
+        for (uri, doc) in &self.build_docs {
+            let cx = build_docs::context(&doc.path, self.root.as_deref(), &self.analysis.setup.config, &env);
+            let (uri, version, path, text, env, tx, sender) = (uri.clone(), doc.version, doc.path.clone(), doc.text.clone(), env.clone(), self.events_tx.clone(), self.sender.clone());
+            rayon::spawn(move || {
+                let Some(inspection) = crash::catch("build file check", Some(&sender), || build_docs::inspect(&path, &text, &cx, &env)) else { return };
+                let lines = dvi_syntax::LineIndex::new(&text);
+                let _ = tx.send(Event::Inspected(uri, version, Inspected { text, lines, inspection }));
+            });
+        }
+    }
+
+    fn on_inspected(&mut self, uri: Url, version: i32, ins: Inspected) {
+        let Some(doc) = self.build_docs.get_mut(&uri) else { return };
+        if doc.version != version {
+            return; // edited since: a newer check is coming
+        }
+        let diagnostics = build_docs::diagnostics(&ins);
+        doc.inspected = Some(ins);
+        let mut st = self.published.lock().unwrap();
+        st.next += 1;
+        let g = st.next;
+        st.latest.insert(uri.clone(), g);
+        if diagnostics.is_empty() {
+            st.published.remove(&uri);
+        } else {
+            st.published.insert(uri.clone());
+        }
+        let p = PublishDiagnosticsParams { uri, diagnostics, version: Some(version) };
+        let _ = self.sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
     }
 
     /// Sends the running build's progress to the client when it changed, and logs it now and
@@ -438,6 +496,10 @@ impl Server {
         }
         self.notify("dvicode/status", &status);
         self.publish_all();
+        // The build may read open argument files differently now.
+        if !self.build_docs.is_empty() {
+            self.inspect_at = Some(Instant::now());
+        }
         if self.build_again {
             self.build_again = false;
             self.start_build();
@@ -535,8 +597,8 @@ impl Server {
             }
         }
         // Build files with problems (the client does not open them as documents).
-        for (p, _, _) in &self.analysis.setup.config.problems {
-            let f = self.vfs.file_id(p);
+        for p in &self.analysis.setup.config.problems {
+            let f = self.vfs.file_id(&p.file);
             if !files.contains(&f) {
                 files.push(f);
             }
@@ -551,6 +613,9 @@ impl Server {
     /// and only publishes a file while it is the newest job covering that file.
     fn publish(&self, files: Vec<FileId>, full: bool) {
         let a = self.analysis.clone();
+        // Open build files have problems of their own, as typed (`on_inspected`).
+        let skip: FxHashSet<Url> = self.build_docs.keys().cloned().collect();
+        let files: Vec<FileId> = files.into_iter().filter(|f| skip.is_empty() || !skip.contains(&url_of(&a.vfs.path(*f)))).collect();
         let sender = self.sender.clone();
         let published = self.published.clone();
         let generation = {
@@ -612,7 +677,7 @@ impl Server {
                 let stale: Vec<Url> = st
                     .published
                     .iter()
-                    .filter(|u| !now.contains(*u) && st.latest.get(*u).map_or(true, |g| *g <= generation))
+                    .filter(|u| !now.contains(*u) && !skip.contains(*u) && st.latest.get(*u).map_or(true, |g| *g <= generation))
                     .cloned()
                     .collect();
                 for u in stale {
@@ -632,7 +697,13 @@ impl Server {
             "textDocument/didOpen" => {
                 let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
-                let id = self.vfs.set_overlay_versioned(&path, Arc::from(p.text_document.text), Some(p.text_document.version));
+                if build_docs::is_build_doc(&path, Some(&p.text_document.language_id)) {
+                    let doc = BuildDoc { path: path.clone(), text: Arc::from(p.text_document.text), version: p.text_document.version, inspected: None };
+                    self.build_docs.insert(url_of(&path), doc);
+                    self.inspect_at = Some(Instant::now());
+                    return;
+                }
+                let id =self.vfs.set_overlay_versioned(&path, Arc::from(p.text_document.text), Some(p.text_document.version));
                 self.open.insert(id, p.text_document.uri);
                 self.note_change(id);
                 // Make the file available right away.
@@ -641,7 +712,13 @@ impl Server {
             "textDocument/didChange" => {
                 let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
-                let id = self.vfs.file_id(&path);
+                if let Some(doc) = self.build_docs.get_mut(&url_of(&path)) {
+                    doc.text = Arc::from(util::apply_changes(&doc.text, p.content_changes));
+                    doc.version = p.text_document.version;
+                    self.inspect_at = Some(Instant::now() + INSPECT_DELAY);
+                    return;
+                }
+                let id =self.vfs.file_id(&path);
                 let old = self.vfs.text(id).unwrap_or_else(|| Arc::from(""));
                 let new = util::apply_changes(&old, p.content_changes);
                 self.vfs.set_overlay_versioned(&path, Arc::from(new), Some(p.text_document.version));
@@ -661,6 +738,23 @@ impl Server {
             "textDocument/didClose" => {
                 let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
+                if self.build_docs.remove(&url_of(&path)).is_some() {
+                    // Back to the problems the last build found in it, if any.
+                    let uri = url_of(&path);
+                    {
+                        let mut st = self.published.lock().unwrap();
+                        st.next += 1;
+                        let g = st.next;
+                        st.latest.insert(uri.clone(), g);
+                        st.published.remove(&uri);
+                    }
+                    let msg = PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None };
+                    self.notify("textDocument/publishDiagnostics", msg);
+                    if self.analysis.setup.config.problems.iter().any(|p| p.file == path) {
+                        self.publish(vec![self.vfs.file_id(&path)], false);
+                    }
+                    return;
+                }
                 self.vfs.clear_overlay(&path);
                 if let Some(id) = self.vfs.lookup(&path) {
                     self.open.remove(&id);
@@ -687,6 +781,10 @@ impl Server {
             "workspace/didChangeWatchedFiles" => {
                 let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else { return };
                 let auto = self.analysis.setup.config.build_file.is_none();
+                // Files created or deleted change what open build files find.
+                if !self.build_docs.is_empty() && p.changes.iter().any(|c| c.typ != FileChangeType::CHANGED) {
+                    self.inspect_at = Some(Instant::now() + INSPECT_DELAY);
+                }
                 for c in p.changes {
                     let Some(path) = path_of(&c.uri) else { continue };
                     let is_build = path.extension().is_some_and(|e| e == "build" || e == "f" || e == "F");
@@ -764,7 +862,30 @@ impl Server {
         });
     }
 
+    /// Requests on an open build or argument file: hover and links; nothing else applies.
+    fn on_build_doc_request(&mut self, req: &Request) -> bool {
+        if !req.method.starts_with("textDocument/") {
+            return false;
+        }
+        let uri = req.params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| serde_json::from_value::<Url>(u.clone()).ok());
+        let Some(key) = uri.as_ref().and_then(path_of).map(|p| url_of(&p)) else { return false };
+        let Some(doc) = self.build_docs.get(&key) else { return false };
+        let result = match (req.method.as_str(), &doc.inspected) {
+            ("textDocument/hover", Some(ins)) => serde_json::from_value::<HoverParams>(req.params.clone())
+                .ok()
+                .and_then(|p| build_docs::hover(ins, p.text_document_position_params.position))
+                .map_or(Value::Null, |h| serde_json::to_value(h).unwrap_or_default()),
+            ("textDocument/documentLink", Some(ins)) => serde_json::to_value(build_docs::links(ins)).unwrap_or_default(),
+            _ => Value::Null,
+        };
+        self.send(Message::Response(Response::new_ok(req.id.clone(), result)));
+        true
+    }
+
     fn on_request(&mut self, req: Request) {
+        if self.on_build_doc_request(&req) {
+            return;
+        }
         match req.method.as_str() {
             "textDocument/hover" => self.spawn(req, |a, p: HoverParams| {
                 let tp = p.text_document_position_params;
@@ -868,6 +989,8 @@ impl Server {
                 let Some((f, off)) = pos(a, &it.uri, it.selection_range.start) else { return Ok(None) };
                 Ok(a.call_item_decl(f, off).map(|r| a.outgoing_calls(r)))
             }),
+            // Links are for build files only (`on_build_doc_request`).
+            "textDocument/documentLink" => self.send(Message::Response(Response::new_ok(req.id, Value::Null))),
             "textDocument/codeAction" => self.spawn(req, |a, p: CodeActionParams| {
                 if p.context.only.as_ref().is_some_and(|o| !o.iter().any(|k| k.as_str().starts_with("quickfix"))) {
                     return Ok(None);
@@ -985,10 +1108,7 @@ struct ExpandParams {
 /// auto-configuration (reported on and cancelled through `progress`).
 fn project_setup(root: Option<&std::path::Path>, settings: &Settings, progress: &Progress) -> ProjectSetup {
     let base = root.map(|r| r.to_path_buf()).unwrap_or_else(|| PathBuf::from("/"));
-    let mut env = settings.env.clone();
-    if let Some(u) = &settings.uvm_home {
-        env.insert("DVICODE_UVM_HOME".into(), u.clone());
-    }
+    let env = project_env(settings);
     let wanted = settings.build_file.as_deref().map(str::trim).unwrap_or("");
     if wanted == dvi_project::AUTO {
         let cfg = if root.is_some() { dvi_project::load_auto_with(&base, &env, progress) } else { Default::default() };
@@ -1004,6 +1124,15 @@ fn project_setup(root: Option<&std::path::Path>, settings: &Settings, progress: 
     });
     let cfg = if root.is_some() { dvi_project::load_with(&base, bf.as_deref(), &env, progress) } else { Default::default() };
     ProjectSetup::new(&base, cfg, env)
+}
+
+/// The variables build files are read with: `dvicode.env`, and `dvicode.uvmHome`.
+fn project_env(settings: &Settings) -> FxHashMap<String, String> {
+    let mut env = settings.env.clone();
+    if let Some(u) = &settings.uvm_home {
+        env.insert("DVICODE_UVM_HOME".into(), u.clone());
+    }
+    env
 }
 
 /// "build file .dvicode/default.build: 12 top files" or "auto-configuration of D:\proj: ...".

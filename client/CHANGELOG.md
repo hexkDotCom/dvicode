@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+**Build files**
+
+- Build files (`.dvicode/*.build`) and `-f` files are checked as you type, before saving.
+  Warnings are underlined at the wrong word. They cover missing files and folders, wildcards
+  that match nothing, variables that are not set (by name), options with no value, and misspelt
+  options and directives (with a "did you mean" hint). See "Problems in build files" in
+  docs/build-files.md.
+- Hover over a word in a build file to see its full path and whether it exists, what a
+  variable expands to, or what a wildcard matches. Ctrl+click a file name to open it.
+- The build notification shows how far the build is (files scanned or compiled, percentage), and
+  the DVICode log shows progress and timings. A new build request cancels the running one, and
+  DVICode says when it starts using another build file.
+
 ## 0.1.2 (preview)
 
 Tested in VS Code's Remote - WSL and Remote - SSH windows and on macOS, and with a new edit fuzzer

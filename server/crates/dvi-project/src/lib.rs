@@ -39,13 +39,50 @@ pub struct Invocation {
     pub plusargs: Vec<(String, Option<String>)>,
 }
 
+/// A problem in a build or argument file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildProblem {
+    pub file: PathBuf,
+    /// Zero-based line.
+    pub line: u32,
+    /// Byte range in the file of what is wrong; `None`: the whole line.
+    pub range: Option<(u32, u32)>,
+    pub message: String,
+}
+
+/// What [`inspect`] finds out about one build or argument file, for the editor.
+#[derive(Clone, Debug, Default)]
+pub struct Inspection {
+    /// Problems in the file itself (those of the argument files it reads are left out).
+    pub problems: Vec<BuildProblem>,
+    /// What words mean: resolved paths, what wildcards match, values (Markdown), by byte range.
+    pub notes: Vec<(u32, u32, String)>,
+    /// Paths of existing files, by byte range.
+    pub links: Vec<(u32, u32, PathBuf)>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BuildConfig {
     pub root: PathBuf,
     pub build_file: Option<PathBuf>,
     pub invocations: Vec<Invocation>,
-    /// Problems in the build file: (file, zero-based line, message).
-    pub problems: Vec<(PathBuf, u32, String)>,
+    /// Problems in the build file and the argument files it reads.
+    pub problems: Vec<BuildProblem>,
+    /// The argument files read, and how (to check one the way the build reads it).
+    pub arg_files: Vec<ArgFile>,
+}
+
+/// An argument file a build reads, and what it is read with.
+#[derive(Clone, Debug, Default)]
+pub struct ArgFile {
+    pub path: PathBuf,
+    /// Where its relative paths start.
+    pub base: PathBuf,
+    /// The variables set when it is read (the settings' and the build file's).
+    pub env: FxHashMap<String, String>,
+    /// The `+dvicode_init` mode and compilation root at that point.
+    pub mode: String,
+    pub comp_root: PathBuf,
 }
 
 impl BuildConfig {
@@ -106,7 +143,7 @@ pub fn load_auto(root: &Path, env: &FxHashMap<String, String>) -> BuildConfig {
 
 /// [`load_auto`], reporting on (and cancelled through) `progress`.
 pub fn load_auto_with(root: &Path, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
-    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config_with(root, env, progress)], problems: Vec::new() }
+    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config_with(root, env, progress)], ..Default::default() }
 }
 
 pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>) -> BuildConfig {
@@ -121,7 +158,7 @@ pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String,
             Ok(text) => parse_build(root, &bf, &text, env),
             Err(e) => {
                 let mut cfg = parse_build(root, &bf, "", env);
-                cfg.problems.push((bf.clone(), 0, format!("Cannot read the build file {}: {e}", bf.display())));
+                cfg.problems.push(BuildProblem { file: bf.clone(), line: 0, range: None, message: format!("Cannot read the build file {}: {e}", bf.display()) });
                 cfg
             }
         },
@@ -129,30 +166,42 @@ pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String,
             root: root.to_path_buf(),
             build_file: None,
             invocations: vec![auto_config_with(root, env, progress)],
-            problems: Vec::new(),
+            ..Default::default()
         },
     }
 }
 
 /// Parses build file text.
 pub fn parse_build(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<String, String>) -> BuildConfig {
-    let mut b = Builder {
-        cfg: BuildConfig { root: root.to_path_buf(), build_file: Some(build_file.to_path_buf()), ..Default::default() },
-        cur: None,
-        env: env.clone(),
-        comp_root: root.to_path_buf(),
-        base_change: None,
-        uvm: None,
-        depth: 0,
-        reading: vec![std::fs::canonicalize(build_file).unwrap_or_else(|_| build_file.to_path_buf())],
-        files_read: 0,
-    };
-    b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
-    if let Some(p) = root.parent() {
-        b.env.insert("DVICODE_PROJECT_PARENT_LOC".into(), p.display().to_string());
-    }
+    let mut b = Builder::new(root, build_file, env, false);
     b.parse_text(build_file, text, root.to_path_buf());
     b.finish()
+}
+
+/// Checks the text of a build file (`.dvicode/*.build`, relative paths from the project
+/// folder `root`) or, given how a build reads it, of an argument file, for an editor: its
+/// problems, what its words resolve to, and links to the files it names. Argument files it
+/// reads are read from disk; `+dvicode_init_auto` sections are not scanned.
+pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, String>, argument_file: Option<&ArgFile>) -> Inspection {
+    let mut b = Builder::new(root, file, env, true);
+    let base = match argument_file {
+        Some(a) => {
+            b.env = a.env.clone();
+            b.comp_root = a.comp_root.clone();
+            b.inv().mode = a.mode.clone();
+            a.base.clone()
+        }
+        None => root.to_path_buf(),
+    };
+    b.parse_text(file, text, base);
+    let (notes, links) = (std::mem::take(&mut b.notes), std::mem::take(&mut b.links));
+    let cfg = b.finish();
+    let own = |f: &Path| f == file;
+    Inspection {
+        problems: cfg.problems.into_iter().filter(|p| own(&p.file)).collect(),
+        notes: notes.into_iter().filter(|(f, ..)| own(f)).map(|(_, s, e, t)| (s, e, t)).collect(),
+        links: links.into_iter().filter(|(f, ..)| own(f)).map(|(_, s, e, t)| (s, e, t)).collect(),
+    }
 }
 
 struct Builder {
@@ -170,6 +219,15 @@ struct Builder {
     reading: Vec<PathBuf>,
     /// Argument files read so far.
     files_read: usize,
+    /// The word being read: byte range in its file, and its text there. Problems point at
+    /// `span` (the word, its argument, or the part of a `+opt+a+b` word that is wrong).
+    span: (u32, u32),
+    word: (u32, String),
+    /// For [`inspect`]: collect `notes` and `links` (file, byte range, ...); skip scanning for
+    /// `+dvicode_init_auto`.
+    inspecting: bool,
+    notes: Vec<(PathBuf, u32, u32, String)>,
+    links: Vec<(PathBuf, u32, u32, PathBuf)>,
 }
 
 /// Argument files one build reads at most.
@@ -181,6 +239,7 @@ const MAX_ARG_FILES: usize = 10_000;
 struct UvmRequest {
     file: PathBuf,
     line: u32,
+    span: (u32, u32),
     home: Option<String>,
     files_at: usize,
     incdirs_at: usize,
@@ -190,6 +249,9 @@ struct UvmRequest {
 struct Word {
     text: String,
     line: u32,
+    /// Byte range in the file, quotes included.
+    start: u32,
+    end: u32,
 }
 
 /// Simulator options that take a separate argument we do not use.
@@ -202,7 +264,103 @@ const OPTS_WITH_ARG: &[&str] = &[
     "-sverilog_ext", "-vlog_ext", "-uvmhome",
 ];
 
+/// Options DVICode reads that take the next word as their value.
+const VALUE_OPTIONS: &[&str] = &["-f", "-F", "-file", "-incdir", "-define", "-D", "-y", "-v", "-libext", "-top", "-setenv", "-uvmhome"];
+
+/// Options DVICode reads (`-name`, and `+name+`); a near miss of one is likely a typo.
+const DASH_OPTIONS: &[&str] = &["-f", "-F", "-file", "-incdir", "-define", "-y", "-v", "-libext", "-top", "-setenv", "-uvm", "-ovm", "-uvmhome", "-makelib", "-endlib"];
+const PLUS_OPTIONS: &[&str] = &["incdir", "define", "undefine", "libext", "xmtop", "nctop"];
+const DIRECTIVES: &[&str] = &[
+    "init", "init_auto", "init_from_simlog", "setenv", "env", "setenv_no_override", "undefine", "skip_compile",
+    "compilation_root", "uvmhome_override", "uvm_home", "include_config", "test",
+];
+
+/// The known name `name` is probably a misspelling of, ignoring case: same first letter, and
+/// one edit away (two for names of six letters or more). Names of three letters or fewer are
+/// left alone: simulators have many short options (`-sv`, `+acc`) that are near ours.
+fn near_miss<'a>(name: &str, known: &[&'a str]) -> Option<&'a str> {
+    let n = name.to_ascii_lowercase();
+    let core = n.trim_start_matches(['-', '+']);
+    if core.len() <= 3 {
+        return None;
+    }
+    let allowed = if core.len() <= 5 { 1 } else { 2 };
+    known.iter().copied().find(|k| {
+        let k = k.to_ascii_lowercase();
+        let kc = k.trim_start_matches(['-', '+']);
+        k != n && kc.as_bytes().first() == core.as_bytes().first() && edit_distance(&n, &k) <= allowed
+    })
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 impl Builder {
+    fn new(root: &Path, build_file: &Path, env: &FxHashMap<String, String>, inspecting: bool) -> Builder {
+        let mut b = Builder {
+            cfg: BuildConfig { root: root.to_path_buf(), build_file: Some(build_file.to_path_buf()), ..Default::default() },
+            cur: None,
+            env: env.clone(),
+            comp_root: root.to_path_buf(),
+            base_change: None,
+            uvm: None,
+            depth: 0,
+            reading: vec![std::fs::canonicalize(build_file).unwrap_or_else(|_| build_file.to_path_buf())],
+            files_read: 0,
+            span: (0, 0),
+            word: (0, String::new()),
+            inspecting,
+            notes: Vec::new(),
+            links: Vec::new(),
+        };
+        b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
+        if let Some(p) = root.parent() {
+            b.env.insert("DVICODE_PROJECT_PARENT_LOC".into(), p.display().to_string());
+        }
+        b
+    }
+
+    /// Points problems and notes at `part` of the current word (an argument of `+opt+a+b`).
+    fn focus(&mut self, part: &str) {
+        if let Some(off) = self.word.1.find(part).filter(|_| !part.is_empty()) {
+            let start = self.word.0 + off as u32;
+            self.span = (start, start + part.len() as u32);
+        }
+    }
+
+    /// A note on what the current word (or part) means, for [`inspect`].
+    fn note(&mut self, file: &Path, text: String) {
+        if self.inspecting {
+            self.notes.push((file.to_path_buf(), self.span.0, self.span.1, text));
+        }
+    }
+
+    fn link(&mut self, file: &Path, target: &Path) {
+        if self.inspecting && target.is_file() {
+            self.links.push((file.to_path_buf(), self.span.0, self.span.1, target.to_path_buf()));
+        }
+    }
+
+    /// "`/abs/path` (exists)" with how a variable expanded, for notes.
+    fn describe_path(written: &str, expanded: &str, abs: &Path, kind: &str) -> String {
+        let exists = if kind.ends_with("directory") { abs.is_dir() } else { abs.is_file() };
+        let mut s = format!("**{kind}** `{}` — {}", abs.display(), if exists { "found" } else { "**not found**" });
+        if written != expanded {
+            s.push_str(&format!("\n\n`{written}` expands to `{expanded}`"));
+        }
+        s
+    }
+
     fn inv(&mut self) -> &mut Invocation {
         self.cur.get_or_insert_with(|| Invocation { mode: "default".into(), ..Default::default() })
     }
@@ -225,8 +383,9 @@ impl Builder {
         // `+dvicode_init_auto` sections are completed by scanning the project.
         let root = self.cfg.root.clone();
         let env = self.env.clone();
+        let inspecting = self.inspecting;
         for inv in &mut self.cfg.invocations {
-            if inv.auto {
+            if inv.auto && !inspecting {
                 let a = auto_config(&root, &env);
                 let mut files = a.files;
                 files.extend(std::mem::take(&mut inv.files));
@@ -246,8 +405,14 @@ impl Builder {
         self.cfg
     }
 
+    /// A problem at the current word (`span`) of `file`.
     fn problem(&mut self, file: &Path, line: u32, msg: String) {
-        self.cfg.problems.push((file.to_path_buf(), line, msg));
+        let range = Some(self.span).filter(|(s, e)| e > s);
+        self.cfg.problems.push(BuildProblem { file: file.to_path_buf(), line, range, message: msg });
+    }
+
+    fn missing_value(&mut self, file: &Path, line: u32, opt: &str, what: &str) {
+        self.problem(file, line, format!("{opt} needs {what}"));
     }
 
     fn parse_text(&mut self, file: &Path, text: &str, file_base: PathBuf) {
@@ -259,8 +424,18 @@ impl Builder {
             let line = w.line;
             let raw = w.text.clone();
             i += 1;
+            self.span = (w.start, w.end);
+            self.word = (w.start, text.get(w.start as usize..w.end as usize).unwrap_or("").to_string());
+            // The value of an option: the next word, unless that is another option.
+            let is_option = |w: &Word| (w.text.starts_with('-') && w.text.len() > 1) || w.text.starts_with('+');
+            // An option and its value are one thing to point at.
+            if VALUE_OPTIONS.contains(&raw.as_str()) || (OPTS_WITH_ARG.contains(&raw.as_str()) && !raw.contains('=')) {
+                if let Some(v) = words.get(i).filter(|v| !is_option(v)) {
+                    self.span.1 = v.end;
+                }
+            }
             let next = |i: &mut usize| -> Option<String> {
-                let v = words.get(*i).map(|w| w.text.clone());
+                let v = words.get(*i).filter(|v| !is_option(v)).map(|w| w.text.clone());
                 if v.is_some() {
                     *i += 1;
                 }
@@ -284,71 +459,80 @@ impl Builder {
                             let rel = raw == "-F" || mode == "default" || mode.starts_with("vcs");
                             self.include_file(file, line, &p, &base, rel)
                         }
-                        None => self.problem(file, line, format!("{raw} needs a file name")),
+                        None => self.missing_value(file, line, &raw, "a file name"),
                     },
-                    "-incdir" => {
-                        if let Some(p) = next(&mut i) {
-                            self.add_incdir(file, line, &p, &base);
-                        }
-                    }
-                    "-define" | "-D" => {
-                        if let Some(d) = next(&mut i) {
-                            self.add_define(&d);
-                        }
-                    }
-                    "-y" => {
-                        if let Some(p) = next(&mut i) {
-                            if let Some(p) = self.resolve(file, line, &p, &base) {
+                    "-incdir" => match next(&mut i) {
+                        Some(p) => self.add_incdir(file, line, &p, &base),
+                        None => self.missing_value(file, line, &raw, "a directory"),
+                    },
+                    "-define" | "-D" => match next(&mut i) {
+                        Some(d) => self.add_define(&d),
+                        None => self.missing_value(file, line, &raw, "a macro (NAME or NAME=VALUE)"),
+                    },
+                    "-y" => match next(&mut i) {
+                        Some(w) => {
+                            if let Some(p) = self.resolve(file, line, &w, &base) {
+                                let e = self.expand(&w, true).unwrap_or_default();
+                                self.note(file, Self::describe_path(&w, &e, &p, "library directory"));
                                 if !p.is_dir() {
                                     self.problem(file, line, format!("Library directory not found: {}", p.display()));
                                 }
                                 self.inv().lib_dirs.push(p);
                             }
                         }
-                    }
-                    "-v" => {
-                        if let Some(p) = next(&mut i) {
-                            if let Some(p) = self.resolve(file, line, &p, &base) {
+                        None => self.missing_value(file, line, &raw, "a directory"),
+                    },
+                    "-v" => match next(&mut i) {
+                        Some(w) => {
+                            if let Some(p) = self.resolve(file, line, &w, &base) {
+                                let e = self.expand(&w, true).unwrap_or_default();
+                                self.note(file, Self::describe_path(&w, &e, &p, "library file"));
+                                self.link(file, &p);
                                 if !p.is_file() {
                                     self.problem(file, line, format!("Library file not found: {}", p.display()));
                                 }
                                 self.inv().lib_files.push(p);
                             }
                         }
-                    }
-                    "-libext" => {
-                        if let Some(e) = next(&mut i) {
+                        None => self.missing_value(file, line, &raw, "a file name"),
+                    },
+                    "-libext" => match next(&mut i) {
+                        Some(e) => {
                             for x in e.split(|c| c == '+' || c == ',') {
                                 if !x.is_empty() {
                                     self.inv().libext.push(x.to_string());
                                 }
                             }
                         }
-                    }
-                    "-top" => {
-                        if let Some(t) = next(&mut i) {
+                        None => self.missing_value(file, line, &raw, "file extensions"),
+                    },
+                    "-top" => match next(&mut i) {
+                        Some(t) => {
+                            self.note(file, format!("**design top** `{t}` of the Design Hierarchy"));
                             self.inv().tops.push(t);
                         }
-                    }
-                    "-setenv" => {
-                        if let Some(kv) = next(&mut i) {
-                            self.setenv(&kv, true);
-                        }
-                    }
+                        None => self.missing_value(file, line, &raw, "a module name"),
+                    },
+                    "-setenv" => match next(&mut i) {
+                        Some(kv) => self.setenv(&kv, true),
+                        None => self.missing_value(file, line, &raw, "NAME=VALUE"),
+                    },
                     "-uvm" | "-ovm" => self.request_uvm(file, line, None),
-                    "-uvmhome" => {
-                        if let Some(p) = next(&mut i) {
-                            self.request_uvm(file, line, Some(p));
-                        }
-                    }
+                    "-uvmhome" => match next(&mut i) {
+                        Some(p) => self.request_uvm(file, line, Some(p)),
+                        None => self.missing_value(file, line, &raw, "the UVM directory"),
+                    },
                     "-endlib" => {}
                     _ => {
                         let opt = raw.split('=').next().unwrap_or("");
                         if OPTS_WITH_ARG.contains(&opt) && !raw.contains('=') {
-                            if raw == "-makelib" {
-                                // -makelib <lib> files... -endlib: keep the files.
-                            }
-                            i += 1;
+                            // -makelib <lib> files... -endlib: the files are kept.
+                            let _ = next(&mut i);
+                            self.note(file, format!("`{raw}` and its value are simulator settings; DVICode does not use them"));
+                        } else if let Some(known) = near_miss(opt, DASH_OPTIONS) {
+                            self.problem(file, line, format!("Unknown option {raw} (ignored); did you mean {known}?"));
+                        } else {
+                            self.note(file, format!("`{raw}` is a simulator option; DVICode does not use it"));
                         }
                     }
                 }
@@ -365,9 +549,22 @@ impl Builder {
             self.tool_directive(file, line, "dvicode", d, raw, args, base);
             return;
         }
+        let needs = match name {
+            "incdir" => Some("a directory"),
+            "define" => Some("a macro (NAME or NAME=VALUE)"),
+            "undefine" => Some("a macro name"),
+            "libext" => Some("file extensions"),
+            "xmtop" | "nctop" => Some("a module name"),
+            _ => None,
+        };
+        if let Some(what) = needs.filter(|_| args.is_empty()) {
+            self.problem(file, line, format!("+{name}+ needs {what}"));
+            return;
+        }
         match name {
             "incdir" => {
                 for a in args {
+                    self.focus(&a);
                     self.add_incdir(file, line, &a, base);
                 }
             }
@@ -375,6 +572,7 @@ impl Builder {
                 // Values may contain '+': split only on '+' followed by NAME= or NAME.
                 let rest = raw.trim_start_matches("+define+");
                 for d in split_defines(rest) {
+                    self.focus(&d);
                     self.add_define(&d);
                 }
             }
@@ -390,6 +588,8 @@ impl Builder {
             }
             "xmtop" | "nctop" => {
                 for a in args {
+                    self.focus(&a);
+                    self.note(file, format!("**design top** `{a}` of the Design Hierarchy"));
                     self.inv().tops.push(a);
                 }
             }
@@ -399,10 +599,31 @@ impl Builder {
                     Some((n, v)) => (n.to_string(), Some(v.to_string())),
                     None => (name.to_string(), args.first().cloned()),
                 };
-                if !n.is_empty() {
-                    let v = v.map(|v| self.expand(&v, false).unwrap_or(v));
-                    self.inv().plusargs.push((n, v));
+                if n.is_empty() {
+                    self.problem(file, line, format!("{raw}: a name is missing after +"));
+                    return;
                 }
+                if !name.contains('=') {
+                    if let Some(known) = near_miss(&n, PLUS_OPTIONS) {
+                        self.problem(file, line, format!("Unknown option +{n}+ (taken as a plusarg); did you mean +{known}+?"));
+                    }
+                }
+                // `+dvicod_init+`, `+dvicodeinit+`: a directive with a misspelt prefix.
+                let lower = n.to_ascii_lowercase();
+                let directive = match lower.split_once('_') {
+                    Some((pre, d)) if edit_distance(pre, "dvicode") <= 2 => Some(d.to_string()),
+                    _ => lower.strip_prefix("dvicode").map(str::to_string),
+                };
+                if let Some(d) = directive {
+                    let d = if DIRECTIVES.contains(&d.as_str()) { Some(d.as_str()) } else { near_miss(&d, DIRECTIVES) };
+                    let hint = d.map(|d| format!("; did you mean +dvicode_{d}?")).unwrap_or_default();
+                    self.problem(file, line, format!("Unknown directive +{n} (taken as a plusarg){hint}"));
+                }
+                let v = v.map(|v| self.expand(&v, false).unwrap_or(v));
+                let shown = v.as_deref().map(|v| format!(" = `{v}`")).unwrap_or_default();
+                let what = if n == "UVM_TESTNAME" { "the UVM test, for the Verification Hierarchy" } else { "a simulation argument" };
+                self.note(file, format!("**plusarg** `{n}`{shown}: {what}"));
+                self.inv().plusargs.push((n, v));
             }
         }
     }
@@ -412,6 +633,26 @@ impl Builder {
     fn tool_directive(&mut self, file: &Path, line: u32, prefix: &str, d: &str, raw: &str, args: Vec<String>, base: &Path) {
         // Everything after `+<prefix>_<d>+`, unsplit (values may contain '+').
         let value = || raw.splitn(3, '+').nth(2).unwrap_or("").to_string();
+        let needs = match d {
+            "setenv" | "env" | "setenv_no_override" => Some("NAME=VALUE"),
+            "undefine" => Some("a macro name"),
+            "skip_compile" => Some("a file pattern"),
+            "compilation_root" | "uvmhome_override" | "uvm_home" => Some("a directory"),
+            "include_config" => Some("a file name"),
+            "test" => Some("a file"),
+            _ => None,
+        };
+        if let Some(what) = needs {
+            if args.is_empty() {
+                self.problem(file, line, format!("+{prefix}_{d}+ needs {what}"));
+                return;
+            }
+            if what == "NAME=VALUE" && !value().contains('=') {
+                self.focus(&value());
+                self.problem(file, line, format!("+{prefix}_{d}+ needs NAME=VALUE"));
+                return;
+            }
+        }
         match d {
             "init" | "init_auto" | "init_from_simlog" => {
                 let mode = args.first().cloned().unwrap_or_default();
@@ -423,8 +664,15 @@ impl Builder {
                     }
                 }
             }
-            "setenv" | "env" => self.setenv(&value(), true),
-            "setenv_no_override" => self.setenv(&value(), false),
+            "setenv" | "env" | "setenv_no_override" => {
+                let kv = value();
+                self.focus(&kv);
+                self.setenv(&kv, d != "setenv_no_override");
+                if let Some((k, _)) = kv.split_once('=') {
+                    let v = self.env.get(k).cloned().or_else(|| std::env::var(k).ok()).unwrap_or_default();
+                    self.note(file, format!("**environment variable** `{k}` = `{v}`"));
+                }
+            }
             "undefine" => {
                 for a in args {
                     self.inv().undefines.push(a);
@@ -439,7 +687,13 @@ impl Builder {
             }
             "compilation_root" => {
                 if let Some(a) = args.first() {
+                    self.focus(a);
                     if let Some(p) = self.resolve(file, line, a, base) {
+                        let e = self.expand(a, true).unwrap_or_default();
+                        self.note(file, Self::describe_path(a, &e, &p, "compilation root directory"));
+                        if !p.is_dir() {
+                            self.problem(file, line, format!("Compilation root directory not found: {}", p.display()));
+                        }
                         self.comp_root = p.clone();
                         self.base_change = Some(Some(p));
                     }
@@ -447,21 +701,25 @@ impl Builder {
             }
             "uvmhome_override" | "uvm_home" => {
                 if let Some(a) = args.first() {
+                    self.focus(a);
                     self.request_uvm(file, line, Some(a.clone()));
                 }
             }
             "include_config" => {
                 for a in args {
+                    self.focus(&a);
                     self.include_file(file, line, &a, base, true);
                 }
             }
             "test" => {
                 for a in args {
+                    self.focus(&a);
                     self.add_file(file, line, &a, base);
                 }
             }
             _ => {
-                self.problem(file, line, format!("Unknown directive +{prefix}_{d} (see docs/build-files.md)"));
+                let hint = near_miss(d, DIRECTIVES).map(|k| format!("; did you mean +{prefix}_{k}?")).unwrap_or_else(|| " (see docs/build-files.md)".into());
+                self.problem(file, line, format!("Unknown directive +{prefix}_{d}{hint}"));
             }
         }
     }
@@ -492,7 +750,8 @@ impl Builder {
             let inv = self.inv();
             (inv.files.len(), inv.incdirs.len())
         };
-        let req = self.uvm.get_or_insert_with(|| UvmRequest { file: file.to_path_buf(), line, home: None, files_at, incdirs_at });
+        let span = self.span;
+        let req = self.uvm.get_or_insert_with(|| UvmRequest { file: file.to_path_buf(), line, span, home: None, files_at, incdirs_at });
         if home.is_some() {
             req.home = home;
         }
@@ -501,6 +760,12 @@ impl Builder {
     /// Adds the UVM library requested in the current invocation.
     fn apply_uvm(&mut self) {
         let Some(req) = self.uvm.take() else { return };
+        let span = std::mem::replace(&mut self.span, req.span);
+        self.apply_uvm_request(req);
+        self.span = span;
+    }
+
+    fn apply_uvm_request(&mut self, req: UvmRequest) {
         let home = req
             .home
             .or_else(|| self.env.get("UVM_HOME").cloned())
@@ -515,6 +780,7 @@ impl Builder {
         let home = PathBuf::from(home);
         let src = if home.join("src").is_dir() { home.join("src") } else { home };
         let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| p.is_file());
+        self.note(&req.file, format!("**UVM library** `{}` — {}", src.display(), if pkg.is_some() { "found" } else { "**not found**" }));
         if pkg.is_none() {
             self.problem(&req.file, req.line, format!("-uvm: no uvm_pkg.sv in {}", src.display()));
         }
@@ -539,39 +805,47 @@ impl Builder {
             return;
         }
         let Some(path) = self.resolve(file, line, p, base) else { return };
+        let e = self.expand(p, true).unwrap_or_default();
+        self.note(file, Self::describe_path(p, &e, &path, "argument file"));
+        self.link(file, &path);
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if self.reading.contains(&key) {
             self.problem(file, line, format!("Argument file {} includes itself", path.display()));
             return;
         }
         self.files_read += 1;
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            self.problem(file, line, format!("Cannot read argument file {}", path.display()));
-            return;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) if !path.exists() => return self.problem(file, line, format!("Argument file not found: {}", path.display())),
+            Err(e) => return self.problem(file, line, format!("Cannot read argument file {}: {e}", path.display())),
         };
         let nested_base = if relative_to_file { path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.to_path_buf()) } else { self.comp_root.clone() };
+        if !self.inspecting {
+            let mode = self.inv().mode.clone();
+            self.cfg.arg_files.push(ArgFile { path: path.clone(), base: nested_base.clone(), env: self.env.clone(), mode, comp_root: self.comp_root.clone() });
+        }
+        let (span, word) = (self.span, std::mem::take(&mut self.word));
         self.depth += 1;
         self.reading.push(key);
         self.parse_text(&path, &text, nested_base);
         self.reading.pop();
         self.depth -= 1;
+        (self.span, self.word) = (span, word);
     }
 
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
-        let Some(e) = self.expand(p, true) else {
-            self.problem(file, line, format!("Undefined environment variable in {p}"));
-            return;
-        };
+        let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
+        let abs = absolutize(&e, base);
         if glob::has_wildcard(&e) {
-            let abs = absolutize(&e, base);
-            for d in glob::expand(&abs) {
-                if d.is_dir() {
-                    self.inv().incdirs.push(d);
-                }
+            let found: Vec<PathBuf> = glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect();
+            self.note(file, Self::describe_matches(p, &e, &abs, &found, "include directories"));
+            if found.is_empty() {
+                self.problem(file, line, format!("No directories match {}", abs.display()));
             }
+            self.inv().incdirs.extend(found);
             return;
         }
-        let abs = absolutize(&e, base);
+        self.note(file, Self::describe_path(p, &e, &abs, "include directory"));
         if !abs.is_dir() {
             self.problem(file, line, format!("Include directory not found: {}", abs.display()));
         }
@@ -579,23 +853,23 @@ impl Builder {
     }
 
     fn add_file(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
-        let Some(e) = self.expand(p, true) else {
-            self.problem(file, line, format!("Undefined environment variable in {p}"));
-            return;
-        };
+        let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
+        let abs = absolutize(&e, base);
         if glob::has_wildcard(&e) {
-            let abs = absolutize(&e, base);
             let mut found = glob::expand(&abs);
             found.retain(|f| f.is_file());
             found.sort();
+            self.note(file, Self::describe_matches(p, &e, &abs, &found, "files"));
             if found.is_empty() {
-                self.problem(file, line, format!("No files match {e}"));
+                self.problem(file, line, format!("No files match {}", abs.display()));
             }
             found.retain(|f| !is_foreign_source(f));
             self.inv().files.extend(found);
             return;
         }
-        let abs = absolutize(&e, base);
+        let kind = if is_foreign_source(&abs) { "file (not SystemVerilog; skipped)" } else { "source file" };
+        self.note(file, Self::describe_path(p, &e, &abs, kind));
+        self.link(file, &abs);
         if !abs.is_file() {
             self.problem(file, line, format!("File not found: {}", abs.display()));
         }
@@ -604,11 +878,35 @@ impl Builder {
         }
     }
 
+    /// A note for a wildcard: how many it matches, and the first few.
+    fn describe_matches(written: &str, expanded: &str, abs: &Path, found: &[PathBuf], what: &str) -> String {
+        let mut s = format!("**{} {what}** match `{}`", found.len(), abs.display());
+        for f in found.iter().take(10) {
+            s.push_str(&format!("\n- `{}`", f.display()));
+        }
+        if found.len() > 10 {
+            s.push_str(&format!("\n- … and {} more", found.len() - 10));
+        }
+        if written != expanded {
+            s.push_str(&format!("\n\n`{written}` expands to `{expanded}`"));
+        }
+        s
+    }
+
+    /// A path with an environment variable that is not set.
+    fn undefined(&mut self, file: &Path, line: u32, p: &str) {
+        let msg = match undefined_var(p, &self.env) {
+            Some(v) => format!("Environment variable {v} is not set (in {p}); set it before starting VS Code or with +dvicode_setenv+{v}=<value>"),
+            None => format!("Undefined environment variable in {p}"),
+        };
+        self.problem(file, line, msg);
+    }
+
     fn resolve(&mut self, file: &Path, line: u32, p: &str, base: &Path) -> Option<PathBuf> {
         match self.expand(p, true) {
             Some(e) => Some(absolutize(&e, base)),
             None => {
-                self.problem(file, line, format!("Undefined environment variable in {p}"));
+                self.undefined(file, line, p);
                 None
             }
         }
@@ -677,6 +975,27 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
         i += 1;
     }
     Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The first variable in `s` that [`expand_env`] cannot find.
+fn undefined_var(s: &str, env: &FxHashMap<String, String>) -> Option<String> {
+    let mut rest = s;
+    while let Some(i) = rest.find('$') {
+        let after = &rest[i + 1..];
+        let name = if let Some(a) = after.strip_prefix('{').or_else(|| after.strip_prefix('(')) {
+            a.split(['}', ')']).next().unwrap_or("")
+        } else if after.starts_with(":env(") || after.starts_with("::env(") {
+            after.split_once('(').map(|(_, a)| a.split(')').next().unwrap_or("")).unwrap_or("")
+        } else {
+            let e = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(after.len());
+            &after[..e]
+        };
+        if !name.is_empty() && !env.contains_key(name) && std::env::var_os(name).is_none() {
+            return Some(name.to_string());
+        }
+        rest = after;
+    }
+    None
 }
 
 /// C/C++ (DPI) sources, object files, libraries and VHDL in a file list: the simulator hands
@@ -783,7 +1102,7 @@ fn split_words(text: &str) -> Vec<Word> {
             continue;
         }
         at_line_start = false;
-        let start_line = line;
+        let (start_line, start) = (line, i);
         // Bytes, decoded at the end: every split point is ASCII, so UTF-8 stays intact.
         let mut wb: Vec<u8> = Vec::new();
         while i < b.len() && !b[i].is_ascii_whitespace() {
@@ -823,7 +1142,7 @@ fn split_words(text: &str) -> Vec<Word> {
         } else {
             w
         };
-        out.push(Word { text: w, line: start_line });
+        out.push(Word { text: w, line: start_line, start: start as u32, end: i as u32 });
     }
     out
 }
@@ -941,7 +1260,7 @@ mod tests {
         std::fs::write(dir.join("loop.f"), "-f loop.f\n-f loop.f\n").unwrap();
         std::fs::write(dir.join("x.build"), "-f loop.f\n-f x.build\n").unwrap();
         let cfg = load(&dir, Some(&dir.join("x.build")), &FxHashMap::default());
-        assert!(cfg.problems.iter().filter(|p| p.2.contains("includes itself")).count() >= 3, "{:?}", cfg.problems);
+        assert!(cfg.problems.iter().filter(|p| p.message.contains("includes itself")).count() >= 3, "{:?}", cfg.problems);
     }
 
     #[test]
@@ -949,7 +1268,7 @@ mod tests {
         let dir = std::env::temp_dir().join("dvicode_build_test_missing");
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = load(&dir, Some(&dir.join("nope.build")), &FxHashMap::default());
-        assert!(cfg.problems.iter().any(|p| p.2.contains("Cannot read the build file")), "{:?}", cfg.problems);
+        assert!(cfg.problems.iter().any(|p| p.message.contains("Cannot read the build file")), "{:?}", cfg.problems);
     }
 
     #[test]
@@ -1020,5 +1339,111 @@ mod tests {
         assert_eq!(expand_env("$A/${A}/$(A)/%A%", &env, true).unwrap(), "x/x/x/x");
         assert_eq!(expand_env("$NOPE_DVICODE/y", &env, true), None);
         assert_eq!(expand_env("$NOPE_DVICODE/y", &env, false).unwrap(), "$NOPE_DVICODE/y");
+    }
+
+    /// The text a problem points at.
+    fn at<'a>(text: &'a str, p: &BuildProblem) -> &'a str {
+        let (s, e) = p.range.expect("a range");
+        &text[s as usize..e as usize]
+    }
+
+    fn messages(problems: &[BuildProblem]) -> Vec<String> {
+        problems.iter().map(|p| p.message.clone()).collect()
+    }
+
+    #[test]
+    fn problems_point_at_what_is_wrong() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_ranges");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.sv"), "").unwrap();
+        let text = "a.sv  missing.sv\n-incdir  nodir\n+incdir+.+gone\n$NOPE_DVICODE/b.sv\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        let p = &cfg.problems;
+        assert_eq!(p.len(), 4, "{p:?}");
+        assert_eq!((p[0].line, at(text, &p[0])), (0, "missing.sv"));
+        assert_eq!((p[1].line, at(text, &p[1])), (1, "-incdir  nodir"));
+        assert_eq!((p[2].line, at(text, &p[2])), (2, "gone"));
+        assert_eq!(at(text, &p[3]), "$NOPE_DVICODE/b.sv");
+        assert!(p[3].message.contains("NOPE_DVICODE is not set"), "{}", p[3].message);
+    }
+
+    #[test]
+    fn missing_values_are_reported() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_missing");
+        let text = "-incdir\n-f -top\n+incdir+\n+define+\n+dvicode_setenv+NAME\n+dvicode_compilation_root\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        assert_eq!(
+            messages(&cfg.problems),
+            vec![
+                "-incdir needs a directory",
+                "-f needs a file name",
+                "-top needs a module name",
+                "+incdir+ needs a directory",
+                "+define+ needs a macro (NAME or NAME=VALUE)",
+                "+dvicode_setenv+ needs NAME=VALUE",
+                "+dvicode_compilation_root+ needs a directory",
+            ]
+        );
+        assert_eq!(at(text, &cfg.problems[0]), "-incdir");
+    }
+
+    #[test]
+    fn misspellings_are_suggested() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_typos");
+        std::fs::create_dir_all(dir.join("inc")).unwrap();
+        let text = "-incdr=inc\n+incdri+inc\n+dvicode_skip_compil+x\n+dvicod_init+vcs\n+dvicode_setnv+A=1\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        let m = messages(&cfg.problems).join("\n");
+        for hint in ["did you mean -incdir?", "did you mean +incdir+?", "did you mean +dvicode_skip_compile?", "did you mean +dvicode_init?", "did you mean +dvicode_setenv?"] {
+            assert!(m.contains(hint), "no {hint:?} in\n{m}");
+        }
+        // Simulator options near ours are not typos.
+        let text = "-sv -64 -full64 -debug_access+all +acc +vcs+lic+wait -timescale=1ns/1ps -access +rwc -uvm\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
+        assert!(!messages(&cfg.problems).join("\n").contains("did you mean"), "{:?}", cfg.problems);
+    }
+
+    #[test]
+    fn inspection_explains_paths_and_links_files() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_inspect");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for f in ["src/a.sv", "src/b.sv", "sub/c.sv"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        std::fs::write(dir.join("sub/list.f"), "c.sv\n").unwrap();
+        let mut env = FxHashMap::default();
+        env.insert("SRC".to_string(), "src".to_string());
+        let file = dir.join(".dvicode/default.build");
+        let text = "$SRC/a.sv\nsrc/*.sv\n-f sub/list.f\nsub/none.sv\n";
+        let ins = inspect(&dir, &file, text, &env, None);
+        let note = |word: &str| {
+            let s = text.find(word).unwrap() as u32;
+            ins.notes.iter().find(|(a, b, _)| *a <= s && s < *b).map(|n| n.2.clone()).unwrap_or_default()
+        };
+        assert!(note("$SRC").contains("found") && note("$SRC").contains("expands to `src/a.sv`"), "{}", note("$SRC"));
+        assert!(note("src/*").contains("**2 files** match"), "{}", note("src/*"));
+        assert!(note("sub/list.f").contains("argument file"), "{}", note("sub/list.f"));
+        assert!(note("sub/none").contains("**not found**"), "{}", note("sub/none"));
+        let links: Vec<_> = ins.links.iter().map(|l| l.2.clone()).collect();
+        assert_eq!(links, vec![dir.join("src/a.sv"), dir.join("sub/list.f")]);
+        assert_eq!(messages(&ins.problems), vec![format!("File not found: {}", dir.join("sub").join("none.sv").display())]);
+    }
+
+    #[test]
+    fn argument_files_are_inspected_the_way_the_build_reads_them() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_inspect_f");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/c.sv"), "").unwrap();
+        std::fs::write(dir.join("sub/list.f"), "c.sv\n").unwrap();
+        let file = dir.join(".dvicode/default.build");
+        let cfg = parse_build(&dir, &file, "+dvicode_setenv+X=$DVICODE_PROJECT_LOC/sub\n-f sub/list.f\n", &FxHashMap::default());
+        let arg = cfg.arg_files.iter().find(|a| a.path == dir.join("sub/list.f")).expect("recorded");
+        assert_eq!(arg.base, dir.join("sub"));
+        // As edited: relative to its own folder, with the build file's variables.
+        let text = "c.sv\n$X/c.sv\nd.sv\n";
+        let ins = inspect(&dir, &arg.path, text, &FxHashMap::default(), Some(arg));
+        assert_eq!(messages(&ins.problems), vec![format!("File not found: {}", dir.join("sub").join("d.sv").display())]);
+        assert_eq!(at(text, &ins.problems[0]), "d.sv");
     }
 }

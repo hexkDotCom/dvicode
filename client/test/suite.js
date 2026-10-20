@@ -146,6 +146,26 @@ async function run() {
     return codes.join(' ');
   });
 
+  await test('the build file is checked as it is typed, with hover', async () => {
+    const doc = await open('.dvicode/default.build');
+    if (doc.languageId !== 'dvicode-build') throw new Error(`language ${doc.languageId}`);
+    const ed = await vscode.window.showTextDocument(doc);
+    const p = lineOf(doc, 'rtl/fifo.sv');
+    await ed.edit((b) => b.insert(new vscode.Position(p.line, 0), '-incdr rtl\nrtl/nofile.sv\n'));
+    try {
+      const diags = await waitFor('build file problems', async () => {
+        const d = vscode.languages.getDiagnostics(doc.uri);
+        return d.some((x) => x.message.includes('did you mean -incdir')) && d.some((x) => x.message.includes('nofile.sv')) ? d : undefined;
+      }, 20000);
+      const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', doc.uri, lineOf(doc, '$TB/tb_pkg.sv').translate(0, 5));
+      const text = hovers.map((h) => h.contents.map((c) => (typeof c === 'string' ? c : c.value)).join('\n')).join('\n');
+      if (!text.includes('tb_pkg.sv') || !text.includes('expands to')) throw new Error(`hover: ${text}`);
+      return diags.map((d) => `${d.range.start.line + 1}: ${d.message}`).join('; ');
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   await test('edits are analysed incrementally', async () => {
     const doc = await open('rtl/top.sv');
     const ed = await vscode.window.showTextDocument(doc);
