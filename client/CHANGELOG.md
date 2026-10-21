@@ -14,6 +14,19 @@
 - The build notification shows how far the build is (files scanned or compiled, percentage), and
   the DVICode log shows progress and timings. A new build request cancels the running one, and
   DVICode says when it starts using another build file.
+- Filelists written as Jinja templates (`{% if "x" in fl_switches %} ... {% endif %}`) are read,
+  with the switches given by `+dvicode_switches+a+b` in the build file.
+
+**Fewer false errors** (found on large closed-source testbenches)
+
+- Undeclared names connected to primitive and UDP instances are implicit nets (standard-cell
+  libraries); unnamed DPI import arguments; `` `M(x) `` where `M` is a macro argument; macros whose
+  body defines another macro; `foreach` in `randomize() with` through a macro; `solve ... hard`.
+- Names in modules with encrypted (`pragma protect`) parts are not reported as undeclared.
+- Without a build file, uses of names that `` `ifdef `` code may declare (a package body inside
+  `` `ifdef UVM ``) are no longer errors; one notice on the `` `ifdef `` line names the macro, how
+  many uses depend on it, and the `+define+` to add to a build file.
+- `dvicode-server check` on a folder that does not exist is an error.
 
 ## 0.1.2 (preview)
 

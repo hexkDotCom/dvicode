@@ -188,6 +188,19 @@ stops after 50,000 files. Auto-configuration
 is a good start; a build file is better for projects with several copies of the same files or
 files that must not be compiled together.
 
+Auto-configuration cannot know the defines your simulator is given (`+define+UVM`,
+`-define FULL_ENV`). When code removed by `` `ifdef `` in a package or class may declare names
+used elsewhere, those uses are not reported as errors. Instead, one notice (SKIPPED_CODE) on the
+`` `ifdef NAME `` line says how many uses depend on it, for example:
+
+```
+`FULL_ENV` is not defined, so this code is skipped. 12 uses in the project may need names
+declared here and are not checked. ... add +define+FULL_ENV to a build file.
+```
+
+The count is updated at each full build. Adding the define to a build file compiles the code and
+checks those uses again.
+
 ## Plusargs
 
 Other `+NAME=VALUE` arguments are kept as simulation plusargs. DVICode uses:

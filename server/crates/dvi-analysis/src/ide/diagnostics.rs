@@ -5,7 +5,7 @@ use crate::resolve::{CLASS_BUILTINS, COVERGROUP_BUILTINS};
 use crate::world::{Analysis, DeclRef, UnitId};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, ParsedUnit, RefKind, Sep};
 use dvi_syntax::{Diag, FileId, Span};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 /// Names that are never reported as undeclared.
@@ -14,6 +14,59 @@ const BUILTIN_NAMES: &[&str] = &[
     "sample", "new", "srandom", "get_randstate", "set_randstate", "rand_mode", "constraint_mode",
     "pre_randomize", "post_randomize", "triggered", "matched",
 ];
+
+/// The conditional directive that starts a region of removed code at byte `start` (just after
+/// its keyword): the byte range of the macro it tests (of `` `else `` when there is none), the
+/// macro name, and whether the code is removed because the macro is defined (`` `ifndef ``, or
+/// the `` `else `` of an `` `ifdef ``). `None` for anything else.
+fn guarding_macro(text: &str, start: u32) -> Option<((u32, u32), String, bool)> {
+    let start = start as usize;
+    if start > text.len() || !text.is_char_boundary(start) {
+        return None;
+    }
+    // The region starts right after the directive's keyword.
+    let kw_start = text[..start].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_').map_or(0, |i| i + 1);
+    if !text[..kw_start].ends_with('`') {
+        return None;
+    }
+    let kw = &text[kw_start..start];
+    let tick = kw_start - 1;
+    let line_end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+    let name_of = |s: &str, at: usize| -> Option<((u32, u32), String)> {
+        let lead = s.len() - s.trim_start().len();
+        let s = s.trim_start();
+        let len = s.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(s.len());
+        (len > 0).then(|| (((at + lead) as u32, (at + lead + len) as u32), s[..len].to_string()))
+    };
+    match kw {
+        "ifdef" | "elsif" | "ifndef" => {
+            let (span, name) = name_of(&text[start..line_end], start)?;
+            Some((span, name, kw == "ifndef"))
+        }
+        "else" => {
+            // The `ifdef or `ifndef it belongs to.
+            let mut depth = 0usize;
+            let before = &text[..tick];
+            let mut rest = before;
+            while let Some(i) = rest.rfind('`') {
+                let word: String = rest[i + 1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                match word.as_str() {
+                    "endif" => depth += 1,
+                    "ifdef" | "ifndef" if depth > 0 => depth -= 1,
+                    "ifdef" | "ifndef" => {
+                        let at = i + 1 + word.len();
+                        let (_, name) = name_of(&before[at..], at)?;
+                        return Some(((tick as u32, start as u32), name, word == "ifdef"));
+                    }
+                    _ => {}
+                }
+                rest = &rest[..i];
+            }
+            None
+        }
+        _ => None,
+    }
+}
 
 pub const MAX_DIAGS_PER_FILE: usize = 500;
 /// Syntax errors cascade; more than this per file is noise.
@@ -57,6 +110,12 @@ impl Analysis {
                 }
             }
         }
+        // Code removed by `ifdef (no build file) that hid names used elsewhere.
+        let mut notices = Vec::new();
+        self.hidden_code_notices(file, &mut notices);
+        for d in notices {
+            push(d, &mut out);
+        }
         let mut syntax = 0usize;
         out.retain(|d| {
             if d.code == "SYNTAX_ERROR" {
@@ -71,6 +130,12 @@ impl Analysis {
     }
 
     fn semantic_diags(&self, uid: UnitId, file: FileId) -> Vec<Diag> {
+        self.semantic_check(uid, file, &mut Vec::new())
+    }
+
+    /// The semantic problems of `file` in unit `uid`; `hidden` gets, for each name not checked
+    /// because code that may declare it is removed by `` `ifdef `` (no build file), that code.
+    fn semantic_check(&self, uid: UnitId, file: FileId, hidden: &mut Vec<Span>) -> Vec<Diag> {
         let u = self.unit(uid);
         let Some(pos) = u.positions.get(&file) else { return Vec::new() };
         let mut out = Vec::new();
@@ -110,16 +175,20 @@ impl Analysis {
                             }
                         }
                     }
-                    RefKind::Type | RefKind::Base => {
-                        if !self.scope_is_open(uid, chain.scope) && chain.segs.len() == 1 {
-                            out.push(Diag::error(*span, "NON_EXISTING_TYPE", format!("NON_EXISTING_TYPE: Type '{name}' is not defined")));
-                        } else if chain.segs.len() > 1 && !self.scope_is_open(uid, chain.scope) {
-                            out.push(Diag::error(*span, "NON_EXISTING_TYPE", format!("NON_EXISTING_TYPE: '{name}' is not defined")));
-                        }
-                    }
+                    RefKind::Type | RefKind::Base => match self.scope_gap(uid, chain.scope) {
+                        None if chain.segs.len() == 1 => out.push(Diag::error(*span, "NON_EXISTING_TYPE", format!("NON_EXISTING_TYPE: Type '{name}' is not defined"))),
+                        None => out.push(Diag::error(*span, "NON_EXISTING_TYPE", format!("NON_EXISTING_TYPE: '{name}' is not defined"))),
+                        Some(Some(region)) => hidden.push(region),
+                        Some(None) => {}
+                    },
                     RefKind::Expr | RefKind::ImportItem => {
-                        if self.scope_is_open(uid, chain.scope) {
-                            continue;
+                        match self.scope_gap(uid, chain.scope) {
+                            Some(Some(region)) => {
+                                hidden.push(region);
+                                continue;
+                            }
+                            Some(None) => continue,
+                            None => {}
                         }
                         if let Some(design) = self.design_scope(uid, chain.scope) {
                             // Hierarchical references and implicit nets are legal in designs.
@@ -149,8 +218,10 @@ impl Analysis {
                         if seg.sep == Sep::Dot && (chain.segs[i - 1].selects as u32) < self.array_dims(cur) {
                             break;
                         }
-                        if let Some(msg) = self.missing_member_message(cur, &seg.name, seg.sep) {
-                            out.push(Diag::error(seg.span, "NOT_A_MEMBER", msg));
+                        match self.missing_member_message(cur, &seg.name, seg.sep) {
+                            Ok(Some(msg)) => out.push(Diag::error(seg.span, "NOT_A_MEMBER", msg)),
+                            Ok(None) => {}
+                            Err(region) => hidden.push(region),
                         }
                         break;
                     }
@@ -160,22 +231,28 @@ impl Analysis {
         out
     }
 
-    fn missing_member_message(&self, prev: DeclRef, name: &str, sep: Sep) -> Option<String> {
+    /// The problem for `name`, not found after `prev`: `Ok(None)` when it is not reported,
+    /// `Err(region)` when code that may declare it is removed by `` `ifdef `` in `region`.
+    fn missing_member_message(&self, prev: DeclRef, name: &str, sep: Sep) -> Result<Option<String>, Span> {
         let pd = self.decl(prev);
         let container = match (sep, pd.kind) {
             (Sep::Scope, DeclKind::Package | DeclKind::Class | DeclKind::InterfaceClass) => Some(prev),
             (Sep::Scope, DeclKind::Typedef) => self.follow_typedef(prev),
             (Sep::Scope, _) => None,
             _ => self.type_of(prev),
-        }?;
+        };
+        let Some(container) = container else { return Ok(None) };
         let cd = self.decl(container);
-        if cd.has(dflags::ENCRYPTED) || self.may_hide_members(container) {
-            return None;
+        if cd.has(dflags::ENCRYPTED) {
+            return Ok(None);
         }
-        match cd.kind {
+        if let Some(region) = self.hiding_region(container) {
+            return Err(region);
+        }
+        Ok(match cd.kind {
             DeclKind::Class | DeclKind::InterfaceClass => {
                 if CLASS_BUILTINS.contains(&name) || !self.class_chain_complete(container) {
-                    return None;
+                    return Ok(None);
                 }
                 // A type parameter in the chain makes the class generic: be lenient.
                 Some(format!("NOT_A_MEMBER: '{name}' is not a member of class '{}'", cd.name))
@@ -185,55 +262,67 @@ impl Analysis {
             DeclKind::Covergroup if !COVERGROUP_BUILTINS.contains(&name) => Some(format!("NOT_A_MEMBER: '{name}' is not a member of covergroup '{}'", cd.name)),
             DeclKind::Interface | DeclKind::Module | DeclKind::Program => Some(format!("NOT_A_MEMBER: '{name}' is not declared in {} '{}'", cd.kind.label(), cd.name)),
             _ => None,
-        }
+        })
     }
 
     /// The scope may see names we cannot know: a class whose base does not resolve, or an
     /// import of a missing package.
     pub fn scope_is_open(&self, uid: UnitId, scope: DeclId) -> bool {
+        self.scope_gap(uid, scope).is_some()
+    }
+
+    /// Why the scope may see names we cannot know: `Some(Some(region))` when an imported
+    /// package has code removed by `` `ifdef `` in `region`, `Some(None)` for other reasons.
+    fn scope_gap(&self, uid: UnitId, scope: DeclId) -> Option<Option<Span>> {
         let u = self.unit(uid);
         let mut cur = Some(scope);
         while let Some(s) = cur {
             let d = u.parsed.decl(s);
             if d.has(dflags::ENCRYPTED) {
-                return true;
+                return Some(None);
             }
             if matches!(d.kind, DeclKind::Class | DeclKind::InterfaceClass) && !self.class_chain_complete(DeclRef { unit: uid, decl: s }) {
-                return true;
+                return Some(None);
             }
             if d.has(dflags::OUT_OF_BLOCK) {
                 match self.owner_class(DeclRef { unit: uid, decl: s }) {
                     Some(c) if self.class_chain_complete(c) => {}
-                    _ => return true,
+                    _ => return Some(None),
                 }
             }
             for imp in &d.imports {
-                if !self.import_is_complete(imp) {
-                    return true;
+                if let Some(gap) = self.import_gap(imp) {
+                    return Some(gap);
                 }
             }
             cur = d.parent;
         }
         let root = u.parsed.decl(ParsedUnit::ROOT);
-        root.imports.iter().any(|i| !self.import_is_complete(i))
+        root.imports.iter().find_map(|i| self.import_gap(i))
     }
 
-    /// The import brings in only names we know: its package exists and, for `pkg::*`, has no
-    /// members we cannot see; `pkg::item` is complete when the item is found.
-    fn import_is_complete(&self, imp: &dvi_syntax::ast::Import) -> bool {
-        let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()).copied() else { return false };
-        match &imp.item {
-            Some(item) => self.member_of(p, item).is_some() || !self.may_hide_members(p),
-            None => !self.may_hide_members(p),
+    /// `None` when the import brings in only names we know: its package exists and, for
+    /// `pkg::*`, has no members we cannot see; `pkg::item` is complete when the item is found.
+    /// Otherwise the region of the package removed by `` `ifdef `` (`None`: no such package).
+    fn import_gap(&self, imp: &dvi_syntax::ast::Import) -> Option<Option<Span>> {
+        let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()).copied() else { return Some(None) };
+        if imp.item.as_ref().is_some_and(|item| self.member_of(p, item).is_some()) {
+            return None;
         }
+        self.hiding_region(p).map(Some)
     }
 
     /// Without a build file the defines are unknown: a declaration with code removed by
     /// `` `ifdef `` may have members under the defines of the real build (a package whose body
     /// is inside `` `ifdef UVM ``, defined on the simulator command line).
     pub fn may_hide_members(&self, d: DeclRef) -> bool {
+        self.hiding_region(d).is_some()
+    }
+
+    /// The first region of [`Self::may_hide_members`]: code removed by `` `ifdef `` directly in `d`.
+    fn hiding_region(&self, d: DeclRef) -> Option<Span> {
         if self.setup.config.build_file.is_some() {
-            return false;
+            return None;
         }
         let decl = self.decl(d);
         let span = decl.span;
@@ -252,7 +341,63 @@ impl Analysis {
                 }
             }
         };
-        u.inactive.iter().filter(|s| within(span, s)).any(direct)
+        u.inactive.iter().find(|s| within(span, s) && direct(s)).copied()
+    }
+
+    /// For each region of code removed by `` `ifdef `` that may declare names used elsewhere
+    /// (no build file), how many uses in the project were not checked because of it. Computed
+    /// over every project file: once per full build ([`Analysis::hidden_uses`]).
+    pub fn count_hidden_uses(&self) -> FxHashMap<(FileId, u32), usize> {
+        let mut counts: FxHashMap<(FileId, u32), usize> = FxHashMap::default();
+        if self.setup.config.build_file.is_some() {
+            return counts;
+        }
+        use rayon::prelude::*;
+        let hidden: Vec<Span> = self
+            .project_files()
+            .par_iter()
+            .flat_map_iter(|&file| {
+                let mut hidden = Vec::new();
+                for uid in self.units_for(file) {
+                    let _ = self.semantic_check(uid, file, &mut hidden);
+                    // A header is analysed once, in its first unit (as for its problems).
+                    if self.unit(uid).root != file {
+                        break;
+                    }
+                }
+                hidden
+            })
+            .collect();
+        for s in hidden {
+            *counts.entry((s.file, s.start)).or_default() += 1;
+        }
+        counts
+    }
+
+    /// The notice on the `` `ifdef NAME `` line of a removed region that hid names used elsewhere.
+    fn hidden_code_notices(&self, file: FileId, out: &mut Vec<Diag>) {
+        if self.setup.config.build_file.is_some() {
+            return;
+        }
+        let Some(text) = self.file_text(file) else { return };
+        let still_inactive = |start: u32| self.units_for(file).iter().any(|u| self.unit(*u).inactive.iter().any(|s| s.file == file && s.start == start));
+        let mut regions: Vec<(u32, usize)> = self.hidden_uses.iter().filter(|((f, _), _)| *f == file).map(|((_, s), n)| (*s, *n)).collect();
+        regions.sort_unstable();
+        for (start, uses) in regions {
+            // An edit since the build may have moved it.
+            if !still_inactive(start) {
+                continue;
+            }
+            let Some((span, name, defined)) = guarding_macro(&text, start) else { continue };
+            let span = Span::new(file, span.0, span.1);
+            let uses = if uses == 1 { "1 use".to_string() } else { format!("{uses} uses") };
+            let msg = if defined {
+                format!("SKIPPED_CODE: This code is skipped because `{name}` is defined. {uses} in the project may need names declared here and are not checked. Without a build file DVICode does not know your simulator's defines.")
+            } else {
+                format!("SKIPPED_CODE: `{name}` is not defined, so this code is skipped. {uses} in the project may need names declared here and are not checked. Without a build file DVICode does not know your simulator's defines: add +define+{name} to a build file (docs/build-files.md).")
+            };
+            out.push(Diag::info(span, "SKIPPED_CODE", msg));
+        }
     }
 
     /// Enclosing module/interface/program/checker.

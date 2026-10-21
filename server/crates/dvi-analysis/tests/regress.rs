@@ -659,11 +659,38 @@ fn auto_config_does_not_know_the_defines_of_conditional_package_members() {
     let (_, root) = project("autocond", &files);
     let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
     let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
-    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // One notice instead, on the `ifdef, naming the macro and the uses it hides.
+    let p = problems(&a);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].starts_with("env_pkg.sv: SKIPPED_CODE: `FULL_ENV` is not defined") && p[0].contains("2 uses") && p[0].contains("+define+FULL_ENV"), "{p:?}");
+    let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with("env_pkg.sv")).unwrap();
+    let d = a.file_diagnostics(f).into_iter().next().unwrap();
+    assert_eq!(d.severity, dvi_syntax::Severity::Info);
+    assert_eq!(&*a.file_text(f).unwrap(), &files[0].1[..]);
+    assert_eq!(&files[0].1[d.span.start as usize..d.span.end as usize], "FULL_ENV");
     // With a build file the defines are known, and the members are missing.
     let (a, _) = project("autocond2", &files);
     let p = problems(&a);
     assert!(p.len() == 2 && p.iter().all(|m| m.contains("'NUM_AGENTS'")), "{p:?}");
+}
+
+#[test]
+fn the_else_of_an_ifndef_names_the_macro_to_define() {
+    // `else of `ifndef LITE: skipped because LITE is not defined.
+    let files = [
+        ("p.sv", "package p;\n`ifndef LITE\n  int a;\n`else\n  int b;\n`endif\nendpackage\n"),
+        ("m.sv", "module m;\n  initial p::b = 1;\nendmodule\n"),
+    ];
+    let (_, root) = project("autoelse", &files);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].contains("`LITE` is not defined") && p[0].contains("1 use ") && p[0].contains("+define+LITE"), "{p:?}");
+    // Nothing used from it: no notice.
+    let (_, root) = project("autoelse2", &[files[0], ("m.sv", "module m;\n  initial p::a = 1;\nendmodule\n")]);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
 
 // ---- Review of the fixes above ------------------------------------------------------------
@@ -759,7 +786,9 @@ fn conditional_enum_items_are_package_members() {
     );
     let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
     let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
-    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // Not an error: only the notice on the `ifdef.
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].starts_with("p.sv: SKIPPED_CODE: `OPTIONAL` is not defined"), "{p:?}");
 }
 
 #[test]

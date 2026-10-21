@@ -154,6 +154,10 @@ pub struct Analysis {
     pub global: Arc<GlobalIndex>,
     pub file_units: Arc<FxHashMap<FileId, Vec<UnitId>>>,
     pub build_ms: u128,
+    /// Without a build file: uses not checked because code that may declare them is removed by
+    /// `` `ifdef ``, by region (file, start). Counted at each full build and kept through edits
+    /// (`Analysis::count_hidden_uses`).
+    pub hidden_uses: Arc<FxHashMap<(FileId, u32), usize>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -356,10 +360,15 @@ impl Analysis {
             global: Arc::new(GlobalIndex::default()),
             file_units: Arc::new(FxHashMap::default()),
             build_ms: 0,
+            hidden_uses: Arc::default(),
         };
         a.reindex();
         a.update_library_units(Some(progress));
         // Cancelled while indexing or compiling `-y`/`-v` libraries: a newer build replaces it.
+        if progress.is_cancelled() {
+            return None;
+        }
+        a.hidden_uses = Arc::new(a.count_hidden_uses());
         if progress.is_cancelled() {
             return None;
         }

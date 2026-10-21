@@ -27,4 +27,8 @@ impl Diag {
     pub fn warning(span: Span, code: &'static str, message: impl Into<String>) -> Diag {
         Diag { span, severity: Severity::Warning, code, message: message.into() }
     }
+
+    pub fn info(span: Span, code: &'static str, message: impl Into<String>) -> Diag {
+        Diag { span, severity: Severity::Info, code, message: message.into() }
+    }
 }

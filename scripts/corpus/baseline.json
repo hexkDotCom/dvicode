@@ -89,11 +89,12 @@
     "NOT_A_MEMBER": 30,
     "NON_EXISTING_PACKAGE": 30,
     "NON_EXISTING_PORT": 14,
-    "SYNTAX_ERROR": 3
+    "SYNTAX_ERROR": 3,
+    "SKIPPED_CODE": 1
    },
    "files": 828,
-   "build_ms": 112,
-   "config_ms": 29
+   "build_ms": 119,
+   "config_ms": 93
   },
   "cva6-rtl": {
    "commit": "81245a47fad8fe1a5d562d953ef2662e099def76",
@@ -158,11 +159,12 @@
     "UNDEFINED_MACRO": 14,
     "SYNTAX_ERROR": 9,
     "NON_EXISTING_PACKAGE": 6,
-    "INCLUDE_NOT_FOUND": 5
+    "INCLUDE_NOT_FOUND": 5,
+    "SKIPPED_CODE": 3
    },
    "files": 756,
-   "build_ms": 127,
-   "config_ms": 13
+   "build_ms": 131,
+   "config_ms": 85
   },
   "ibex-dv": {
    "commit": "65368a4c41d8e6c2e56ce816e418e21fc4e7b328",
@@ -202,12 +204,13 @@
     "NON_EXISTING_TYPE": 78,
     "NON_EXISTING_PACKAGE": 73,
     "SYNTAX_ERROR": 10,
+    "SKIPPED_CODE": 5,
     "INCLUDE_NOT_FOUND": 3,
     "INCLUDE_SYNTAX": 1
    },
    "files": 3730,
-   "build_ms": 790,
-   "config_ms": 201
+   "build_ms": 794,
+   "config_ms": 545
   },
   "opentitan-earlgrey-rtl": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
