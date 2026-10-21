@@ -155,9 +155,9 @@ pub struct Analysis {
     pub file_units: Arc<FxHashMap<FileId, Vec<UnitId>>>,
     pub build_ms: u128,
     /// Without a build file: uses not checked because code that may declare them is removed by
-    /// `` `ifdef ``, by region (file, start). Counted at each full build and kept through edits
-    /// (`Analysis::count_hidden_uses`).
-    pub hidden_uses: Arc<FxHashMap<(FileId, u32), usize>>,
+    /// `` `ifdef ``, by region (file, start). Counted for each snapshot when first needed
+    /// (`Analysis::hidden_uses`).
+    pub hidden_uses: Arc<std::sync::OnceLock<FxHashMap<(FileId, u32), usize>>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -365,10 +365,6 @@ impl Analysis {
         a.reindex();
         a.update_library_units(Some(progress));
         // Cancelled while indexing or compiling `-y`/`-v` libraries: a newer build replaces it.
-        if progress.is_cancelled() {
-            return None;
-        }
-        a.hidden_uses = Arc::new(a.count_hidden_uses());
         if progress.is_cancelled() {
             return None;
         }
@@ -625,6 +621,7 @@ impl Analysis {
             return self.clone();
         }
         let mut next = self.clone();
+        next.hidden_uses = Arc::default();
         let rebuilt: Vec<Unit> = affected
             .par_iter()
             .map(|&uid| {
@@ -800,6 +797,7 @@ impl Analysis {
             return self.clone();
         }
         let mut next = self.clone();
+        next.hidden_uses = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
         let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
@@ -822,6 +820,7 @@ impl Analysis {
             return self.clone();
         }
         let mut next = self.clone();
+        next.hidden_uses = Arc::default();
         for id in ids {
             next.units[id as usize] = None;
         }

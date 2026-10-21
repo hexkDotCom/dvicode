@@ -599,6 +599,8 @@ impl Server {
         for f in self.open.keys() {
             targets.insert(*f);
         }
+        // Their SKIPPED_CODE notices count uses in every file (no build file).
+        targets.extend(self.analysis.files_with_skipped_code());
         self.publish(targets.into_iter().collect(), false);
     }
 

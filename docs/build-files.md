@@ -198,7 +198,7 @@ used elsewhere, those uses are not reported as errors. Instead, one notice (SKIP
 declared here and are not checked. ... add +define+FULL_ENV to a build file.
 ```
 
-The count is updated at each full build. Adding the define to a build file compiles the code and
+The count follows your edits. Adding the define to a build file compiles the code and
 checks those uses again.
 
 ## Plusargs

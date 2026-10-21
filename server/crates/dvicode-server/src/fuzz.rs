@@ -251,6 +251,8 @@ impl Incr {
         for p in self.open.keys() {
             targets.insert(self.vfs.file_id(p));
         }
+        // As the server does: notices that count uses in every file.
+        targets.extend(self.a.files_with_skipped_code());
         for f in targets {
             if self.vfs.is_builtin(f) {
                 continue;

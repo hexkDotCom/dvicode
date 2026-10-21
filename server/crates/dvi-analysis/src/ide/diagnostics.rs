@@ -346,8 +346,12 @@ impl Analysis {
 
     /// For each region of code removed by `` `ifdef `` that may declare names used elsewhere
     /// (no build file), how many uses in the project were not checked because of it. Computed
-    /// over every project file: once per full build ([`Analysis::hidden_uses`]).
-    pub fn count_hidden_uses(&self) -> FxHashMap<(FileId, u32), usize> {
+    /// over every project file, once per snapshot.
+    pub fn hidden_uses(&self) -> &FxHashMap<(FileId, u32), usize> {
+        self.hidden_uses.get_or_init(|| self.count_hidden_uses())
+    }
+
+    fn count_hidden_uses(&self) -> FxHashMap<(FileId, u32), usize> {
         let mut counts: FxHashMap<(FileId, u32), usize> = FxHashMap::default();
         if self.setup.config.build_file.is_some() {
             return counts;
@@ -374,20 +378,44 @@ impl Analysis {
         counts
     }
 
+    /// Files that may show a SKIPPED_CODE notice (no build file): those with code removed by
+    /// `` `ifdef `` directly in a package, class or other scope that names are looked up in. Their
+    /// notices count uses in every file, so an edit anywhere may change them. Cheap: no counting.
+    pub fn files_with_skipped_code(&self) -> Vec<FileId> {
+        if self.setup.config.build_file.is_some() {
+            return Vec::new();
+        }
+        let mut out: FxHashSet<FileId> = FxHashSet::default();
+        for u in self.units.iter().flatten() {
+            if u.inactive.is_empty() {
+                continue;
+            }
+            for (i, d) in u.parsed.decls.iter().enumerate() {
+                let container = matches!(
+                    d.kind,
+                    DeclKind::Package | DeclKind::Class | DeclKind::InterfaceClass | DeclKind::StructType | DeclKind::Covergroup | DeclKind::Interface | DeclKind::Module | DeclKind::Program
+                );
+                if container && !out.contains(&d.span.file) && self.hiding_region(DeclRef { unit: u.id, decl: i as DeclId }).is_some() {
+                    out.insert(d.span.file);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// The notice on the `` `ifdef NAME `` line of a removed region that hid names used elsewhere.
     fn hidden_code_notices(&self, file: FileId, out: &mut Vec<Diag>) {
         if self.setup.config.build_file.is_some() {
             return;
         }
+        // Counting needs every file: only for a file with removed code.
+        if !self.units_for(file).iter().any(|u| self.unit(*u).inactive.iter().any(|s| s.file == file)) {
+            return;
+        }
         let Some(text) = self.file_text(file) else { return };
-        let still_inactive = |start: u32| self.units_for(file).iter().any(|u| self.unit(*u).inactive.iter().any(|s| s.file == file && s.start == start));
-        let mut regions: Vec<(u32, usize)> = self.hidden_uses.iter().filter(|((f, _), _)| *f == file).map(|((_, s), n)| (*s, *n)).collect();
+        let mut regions: Vec<(u32, usize)> = self.hidden_uses().iter().filter(|((f, _), _)| *f == file).map(|((_, s), n)| (*s, *n)).collect();
         regions.sort_unstable();
         for (start, uses) in regions {
-            // An edit since the build may have moved it.
-            if !still_inactive(start) {
-                continue;
-            }
             let Some((span, name, defined)) = guarding_macro(&text, start) else { continue };
             let span = Span::new(file, span.0, span.1);
             let uses = if uses == 1 { "1 use".to_string() } else { format!("{uses} uses") };
