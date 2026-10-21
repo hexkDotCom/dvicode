@@ -42,8 +42,14 @@ param(
   [string]$SshDistro = 'dvicode-remote',
   [string]$SshUser = 'dv',
   [int]$SshPort = 2222,
-  [string]$SshKey = "$env:LOCALAPPDATA\dvicode-test\e2e_key"
+  # In the user profile, not AppData: Windows redirects what packaged apps (such as the Claude
+  # desktop app) write under AppData, so a terminal outside them would not see the key there.
+  [string]$SshKey = "$env:USERPROFILE\.dvicode-test\e2e_key"
 )
+# Where earlier versions of this script kept it.
+if (-not (Test-Path $SshKey) -and (Test-Path "$env:LOCALAPPDATA\dvicode-test\e2e_key")) {
+  $SshKey = "$env:LOCALAPPDATA\dvicode-test\e2e_key"
+}
 
 # Native tools write progress to stderr, which Windows PowerShell turns into errors under
 # 'Stop'; failures are detected from exit codes instead, and cmdlets stop explicitly.
@@ -132,7 +138,9 @@ function DemoToWsl {
 # Starts sshd in the SSH test distribution and copies the demo project to ~/demo there.
 function DemoToSsh {
   if (-not (Test-Path $SshKey)) { throw "no SSH test key at $SshKey (see docs/development.md)" }
-  Run 'start sshd' { wsl.exe -d $SshDistro -u root -e sh -c 'mkdir -p /run/sshd; pgrep -f sshd_dvicode.conf >/dev/null || /usr/sbin/sshd -f /etc/ssh/sshd_dvicode.conf' }
+  # The pattern is anchored: unanchored, it also matches this very `sh -c` command line, so sshd
+  # would never be started.
+  Run 'start sshd' { wsl.exe -d $SshDistro -u root -e sh -c "mkdir -p /run/sshd; pgrep -f '^/usr/sbin/sshd -f /etc/ssh/sshd_dvicode.conf' >/dev/null || /usr/sbin/sshd -f /etc/ssh/sshd_dvicode.conf" }
   $sshOpts = @('-p', "$SshPort", '-i', $SshKey, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
   Push-Location (Split-Path $Demo)
   try {

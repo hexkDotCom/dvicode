@@ -177,7 +177,9 @@ One-time setup on the Windows machine:
   ```
 
   Create a key pair for the test (`ssh-keygen -t ed25519 -N "" -f
-  %LOCALAPPDATA%\dvicode-test\e2e_key`), put the public key into `~dv/.ssh/authorized_keys` in that
+  %USERPROFILE%\.dvicode-test\e2e_key`; not under `%LOCALAPPDATA%`, which Windows redirects for
+  packaged apps such as the Claude desktop app, so a terminal outside them would not find the key),
+  put the public key into `~dv/.ssh/authorized_keys` in that
   distribution, and allow only your user to read the private key (`icacls ... /inheritance:r
   /grant:r %USERNAME%:R`). The script starts that `sshd` itself. `e2e-remote-ssh` reaches the
   same host through Remote - SSH (with an ssh config file the script writes); the distribution
