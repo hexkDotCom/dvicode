@@ -113,8 +113,8 @@ later).
 - Publish from the public repository (or point `repository`, `bugs` and `homepage` in
   `client/package.json` at it): the Marketplace page links there, and links to a private
   repository do not work for users.
-- Add a short animation and a screenshot or two to the README (both READMEs: the
-  Marketplace page shows `client/README.md`), for example navigating a UVM method, expanding
-  a macro and opening the Verification Hierarchy on the demo project.
+- When the user interface changes, record the README animation and screenshots again
+  ([development.md](development.md#readme-media)). Both READMEs show them; the Marketplace
+  page (`client/README.md`) loads them from `main` on GitHub.
 - `"preview": true` in `client/package.json` shows a **Preview** badge; remove it when the
   extension is ready to be called stable.

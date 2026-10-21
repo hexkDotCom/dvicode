@@ -12,6 +12,8 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Start with a
 project discovery, then add your existing file lists for full control. Apache-2.0 licensed;
 currently in preview.
 
+![Hovering a UVM macro shows its expansion, F12 opens uvm_env in the UVM 1.2 library, Expand Macro shows the generated code, and the Verification Hierarchy shows the components of the test](docs/images/dvicode-demo.gif)
+
 ## Features
 
 - **Errors as you type**: undeclared names, unknown types, members and ports, missing
@@ -39,6 +41,10 @@ currently in preview.
 - **Lightweight**: a single engine of about 5 MB per platform, installed for you. It parses
   and indexes the whole UVM 1.2 library (142 files, 75,000 lines) in about 50 ms on a desktop
   PC ([how this was measured](docs/development.md#performance)).
+
+| Macro hover | Design and UVM hierarchies | Problems and quick fixes |
+|---|---|---|
+| [![Hover on `uvm_component_utils showing the UVM definition and its expansion](docs/images/hover.png)](docs/images/hover.png) | [![The Design Hierarchy and the UVM Verification Hierarchy of demo_full_test next to the environment class](docs/images/hierarchy.png)](docs/images/hierarchy.png) | [![Deliberate mistakes in the Problems view, with the quick fix "Did you mean 'state_e'?"](docs/images/problems.png)](docs/images/problems.png) |
 
 ## Getting started
 

@@ -6,6 +6,8 @@ Follow definitions across packages and class hierarchies, see what a macro expan
 explore your design and UVM testbench without starting a simulator. DVICode runs on your
 desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in preview.
 
+![Hovering a UVM macro shows its expansion, F12 opens uvm_env in the UVM 1.2 library, Expand Macro shows the generated code, and the Verification Hierarchy shows the components of the test](https://raw.githubusercontent.com/hexkDotCom/dvicode/main/docs/images/dvicode-demo.gif)
+
 ## Features
 
 - **Errors as you type**: undeclared names, unknown types, members and ports, missing
@@ -24,6 +26,10 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Works where your sources live**: natively on Windows, Linux and macOS, in WSL, or on a
   Linux host over SSH, even for files that exist only on the server.
 - **Lightweight**: a single engine of about 5 MB, installed for you. No telemetry.
+
+| Macro hover | Design and UVM hierarchies | Problems and quick fixes |
+|---|---|---|
+| ![Hover on `uvm_component_utils showing the UVM definition and its expansion](https://raw.githubusercontent.com/hexkDotCom/dvicode/main/docs/images/hover.png) | ![The Design Hierarchy and the UVM Verification Hierarchy of demo_full_test next to the environment class](https://raw.githubusercontent.com/hexkDotCom/dvicode/main/docs/images/hierarchy.png) | ![Deliberate mistakes in the Problems view, with the quick fix "Did you mean 'state_e'?"](https://raw.githubusercontent.com/hexkDotCom/dvicode/main/docs/images/problems.png) |
 
 ## Getting started
 

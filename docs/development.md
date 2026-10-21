@@ -17,6 +17,7 @@ docs/                      architecture, build file reference, this file
 examples/demo-project      sample project used by the tests
 scripts/package.sh         build the static server, notices and the VSIX
 scripts/third_party_notices.py   regenerate THIRD_PARTY_NOTICES.md
+scripts/media/record.mjs   record the README animation and screenshots
 ```
 
 ## Building
@@ -186,6 +187,22 @@ One-time setup on the Windows machine:
   needs `tar` and internet access (or a proxy) for VS Code to download its server. A distribution of another Linux
   family than the first one (for example a RHEL clone next to Ubuntu) also tests the engine on a
   second distribution.
+
+## README media
+
+`docs/images/dvicode-demo.gif` and the screenshots `hover.png`, `hierarchy.png` and
+`problems.png` are recorded by a script, on Windows with VS Code and ffmpeg installed:
+
+```powershell
+node scripts\media\record.mjs C:\path\to\uvm-1.2      # [out-dir] [gif|shots|all]
+```
+
+It copies the demo project to `build/media/ws` with the real UVM library (`-uvm`) in place of
+its stand-in, starts VS Code with an empty profile and DVICode from the Marketplace, drives it
+through its DevTools port (keys, mouse and a caption for each step) and records the window at
+1280×760. It writes the GIF (about 2 MB), an MP4 for posts and the PNG screenshots to
+`build/media`; leave the window alone while it runs (about three minutes), check the results,
+and copy them to `docs/images`.
 
 ## Releasing
 

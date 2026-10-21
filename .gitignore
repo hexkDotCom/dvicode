@@ -9,3 +9,5 @@
 /client/THIRD_PARTY_NOTICES.md
 /client/licenses/
 /client/.vscode-test/
+# scripts/media/record.mjs: profile, frames and outputs
+/build/media/
