@@ -967,3 +967,19 @@ fn auto_config_reports_macros_defined_nowhere_once_per_file() {
     let (a, _) = project("automacro2", &files);
     assert_eq!(problems(&a).iter().filter(|m| m.contains("`WIDTH is not defined")).count(), 3);
 }
+
+#[test]
+fn components_created_in_helpers_called_by_build_phase() {
+    // Large testbenches build in helpers: `build_phase` calls `build_envs()` and
+    // `this.build_agents()`, which a derived test may override (virtual dispatch).
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_agent extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = "package tb_pkg;\n  import uvm_pkg::*;\n  class my_agent extends uvm_agent; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class my_env extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class other_env extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class base_test extends uvm_test;\n    my_env env; my_agent agt;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    virtual function void build_envs(); env = my_env::type_id::create(\"env\", this); endfunction\n    function void build_agents(); this.agt = my_agent::type_id::create(\"agt\", this); endfunction\n    function void build_phase(uvm_phase phase); build_envs(); this.build_agents(); endfunction\n  endclass\n  class other_test extends base_test;\n    other_env oenv;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    virtual function void build_envs(); oenv = other_env::type_id::create(\"oenv\", this); endfunction\n  endclass\nendpackage\n";
+    let (a, _) = project("buildhelpers", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let names = |test: &str| -> Vec<String> {
+        let h = a.verification_hierarchy(Some(test), 100);
+        h.roots.first().map(|r| r.children.iter().map(|c| format!("{}:{}", c.name, c.class)).collect()).unwrap_or_default()
+    };
+    assert_eq!(names("base_test"), vec!["env:my_env", "agt:my_agent"]);
+    // The derived test's override of the helper is the one called.
+    assert_eq!(names("other_test"), vec!["oenv:other_env", "agt:my_agent"]);
+}

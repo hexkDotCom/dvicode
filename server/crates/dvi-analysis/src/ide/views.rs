@@ -465,9 +465,12 @@ impl Analysis {
             chain.push(c);
             cur = self.class_base(c);
         }
+        // Methods are looked up from the most derived class, as a virtual call would be.
+        let derived_first = chain.clone();
         chain.reverse();
         // (body unit, creation); a derived class creating the same variable replaces it.
         let mut made: Vec<(DeclRef, Creation)> = Vec::new();
+        let mut scanned: FxHashSet<DeclRef> = FxHashSet::default();
         for c in chain {
             for method in ["new", "build", "build_phase"] {
                 let u = self.unit(c.unit);
@@ -477,12 +480,7 @@ impl Analysis {
                         continue;
                     }
                     let body = self.implementation_of(mr).unwrap_or(mr);
-                    for cr in self.scan_creations(body) {
-                        match made.iter_mut().find(|(_, x)| x.lhs == cr.lhs) {
-                            Some(slot) => *slot = (body, cr),
-                            None => made.push((body, cr)),
-                        }
-                    }
+                    self.scan_build_method(body, &derived_first, &mut scanned, &mut made, 0);
                 }
             }
         }
@@ -506,7 +504,7 @@ impl Analysis {
                 break;
             }
             *budget -= 1;
-            let name = cr.name.clone().unwrap_or_else(|| cr.lhs.clone());
+            let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
             let child_path = format!("{path}.{name}");
             let loc = self.to_location(cr.lhs_head);
             let def_loc = cls.and_then(|c| self.decl_location(c));
@@ -537,6 +535,62 @@ impl Analysis {
                 }
             }
             out.push(node);
+        }
+        out
+    }
+
+    /// The component creations of a build method, and of the methods of the same class it
+    /// calls (`build_envs()`, `this.build_agents()`): large testbenches build in helpers.
+    fn scan_build_method(&self, body: DeclRef, derived_first: &[DeclRef], scanned: &mut FxHashSet<DeclRef>, made: &mut Vec<(DeclRef, Creation)>, depth: usize) {
+        if !scanned.insert(body) || scanned.len() > 256 {
+            return;
+        }
+        for cr in self.scan_creations(body) {
+            match made.iter_mut().find(|(_, x)| x.lhs == cr.lhs) {
+                Some(slot) => *slot = (body, cr),
+                None => made.push((body, cr)),
+            }
+        }
+        if depth >= 8 {
+            return;
+        }
+        for name in self.called_method_names(body) {
+            let found = derived_first.iter().find_map(|c| {
+                let u = self.unit(c.unit);
+                u.parsed
+                    .lookup_member(c.decl, &name)
+                    .iter()
+                    .map(|&m| DeclRef { unit: c.unit, decl: m })
+                    .find(|m| matches!(self.decl(*m).kind, DeclKind::Function | DeclKind::Task))
+            });
+            if let Some(m) = found {
+                let callee = self.implementation_of(m).unwrap_or(m);
+                self.scan_build_method(callee, derived_first, scanned, made, depth + 1);
+            }
+        }
+    }
+
+    /// Names called as methods of the object itself in a method body: `f(...)` and
+    /// `this.f(...)` (not `obj.f(...)`, `super.f(...)` or `pkg::f(...)`).
+    fn called_method_names(&self, body: DeclRef) -> Vec<String> {
+        let d = self.decl(body);
+        if d.has(dflags::FROM_MACRO) || d.has(dflags::PROTOTYPE) {
+            return Vec::new();
+        }
+        let Some(toks) = self.file_tokens(d.span.file) else { return Vec::new() };
+        let lo = toks.partition_point(|t| t.span.start < d.span.start);
+        let hi = toks.partition_point(|t| t.span.start < d.span.end);
+        let t = &toks[lo..hi];
+        let mut out: Vec<String> = Vec::new();
+        for i in 1..t.len().saturating_sub(1) {
+            if !t[i].is_ident() || !t[i + 1].is_punct("(") {
+                continue;
+            }
+            let own = if t[i - 1].is_punct(".") { i >= 2 && t[i - 2].is_kw("this") } else { !t[i - 1].is_punct("::") };
+            let name = t[i].text.to_string();
+            if own && name != d.name.as_str() && !out.contains(&name) {
+                out.push(name);
+            }
         }
         out
     }
