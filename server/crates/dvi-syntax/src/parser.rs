@@ -8,7 +8,7 @@
 use crate::ast::*;
 use crate::diag::Diag;
 use crate::span::{FileId, Span};
-use crate::token::{is_builtin_type_kw, is_end_kw, is_net_type_kw, TokKind, Token};
+use crate::token::{flags as tflags, is_builtin_type_kw, is_end_kw, is_net_type_kw, TokKind, Token};
 use smol_str::SmolStr;
 
 pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
@@ -819,7 +819,12 @@ impl<'t> Parser<'t> {
         };
         let id = self.new_decl(kind, name.as_ref(), start);
         self.push_scope(id);
+        // An encrypted region in the header holds the rest of it (ports, parameters, `;`).
+        let after_protected = |p: &Self| p.tok().flags & tflags::AFTER_PROTECTED != 0;
         loop {
+            if after_protected(self) {
+                break;
+            }
             if self.at_kw("import") {
                 self.import_item();
             } else if self.at_p("#") && self.nth(1).is_punct("(") {
@@ -831,7 +836,7 @@ impl<'t> Parser<'t> {
                 break;
             }
         }
-        if !self.eat_p(";") {
+        if !after_protected(self) && !self.eat_p(";") {
             let sp = self.prev_span();
             self.error(Span::new(sp.file, sp.end, sp.end), "Expected ';'");
         }
@@ -1898,7 +1903,13 @@ impl<'t> Parser<'t> {
             format!("{} {} {}{}", kind.label(), ret_text, name.text, if args_text.is_empty() { "()".into() } else { args_text.to_string() })
         };
         self.u.decls[id as usize].detail = SmolStr::new(detail);
-        self.expect_p(";");
+        // A prototype in a modport ends at `,` or `)`: `modport m(export task t(int x), ...)`.
+        let in_modport = fl & dflags::PROTOTYPE != 0
+            && (self.at_p(",") || self.at_p(")"))
+            && self.u.decls[id as usize].parent.is_some_and(|p| self.u.decls[p as usize].kind == DeclKind::Modport);
+        if !in_modport {
+            self.expect_p(";");
+        }
         if fl & dflags::PROTOTYPE != 0 {
             self.pop_scope();
             self.finish(id);
@@ -2135,13 +2146,18 @@ impl<'t> Parser<'t> {
                 continue;
             }
             if self.at_p("[") {
-                // Either a select inside the array path or the loop variable list; the
-                // loop variable list is the last bracket group before `)`.
-                let close = self.skip_group_from(self.pos);
+                // Either selects inside the array path (`a[i].b[j][k].c`) or the loop variable
+                // list; the loop variable list is the last bracket group before `)`.
+                let mut close = self.skip_group_from(self.pos);
+                while self.toks.get(close).is_some_and(|t| t.is_punct("[")) {
+                    close = self.skip_group_from(close);
+                }
                 if self.toks.get(close).is_some_and(|t| t.is_punct(".")) {
-                    self.bump();
-                    self.scan_expr(STOP_NONE, RefKind::Expr);
-                    self.eat_p("]");
+                    while self.at_p("[") {
+                        self.bump();
+                        self.scan_expr(STOP_NONE, RefKind::Expr);
+                        self.eat_p("]");
+                    }
                     self.bump(); // .
                     sep = Sep::Dot;
                     continue;
@@ -3239,8 +3255,12 @@ impl<'t> Parser<'t> {
                     }
                 }
                 TokKind::Ident => {
-                    // Member name in an assignment pattern: '{ a: 1 }
-                    if (stack.last() == Some(&b'\'') && self.nth(1).is_punct(":")) || self.expr_too_deep() {
+                    // Member name in an assignment pattern: '{ a: 1 }. VCS also takes it without
+                    // the apostrophe, `{ a: 1, b: 2 }` (a concatenation never has `name:` there).
+                    let after_open_or_comma = self.pos > 0 && (self.toks[self.pos - 1].is_punct("{") || self.toks[self.pos - 1].is_punct(","));
+                    let label = self.nth(1).is_punct(":")
+                        && (stack.last() == Some(&b'\'') || (stack.last() == Some(&b'{') && after_open_or_comma));
+                    if label || self.expr_too_deep() {
                         self.bump();
                         continue;
                     }

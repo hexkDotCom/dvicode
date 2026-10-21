@@ -169,7 +169,9 @@ impl Analysis {
                         let inst_ref = DeclRef { unit: uid, decl: inst };
                         if let Some(m) = self.type_of(inst_ref) {
                             let md = self.decl(m);
-                            if md.kind.is_definition() {
+                            // Ports and parameters of a module with encrypted parts may be in the
+                            // ciphertext.
+                            if md.kind.is_definition() && !md.has(dflags::ENCRYPTED) {
                                 let what = if matches!(chain.kind, RefKind::Port { .. }) { "Port" } else { "Parameter" };
                                 out.push(Diag::error(*span, "NON_EXISTING_PORT", format!("NON_EXISTING_PORT: {what} '{name}' is not declared in {} '{}'", md.kind.label(), md.name)));
                             }

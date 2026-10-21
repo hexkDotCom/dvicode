@@ -40,6 +40,9 @@ pub mod flags {
     /// A line continuation (backslash, newline) comes before this token: a line break of the
     /// macro body it belongs to.
     pub const CONT_BEFORE: u8 = 32;
+    /// An encrypted region (`` `protected ``, `` `pragma protect ``) comes before this token: text
+    /// the parser does not see, such as the rest of a module header.
+    pub const AFTER_PROTECTED: u8 = 64;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

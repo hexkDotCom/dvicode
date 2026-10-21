@@ -817,3 +817,84 @@ fn a_variable_named_hard_after_a_comma_in_solve_before() {
     assert_eq!(uses, vec![(2, col)], "{uses:?}");
     let _ = a.vfs.text(f);
 }
+
+#[test]
+fn macros_inside_backtick_quotes_are_expanded() {
+    // A vendor library builds include paths as `"dir/`VENDOR/name`" (IEEE 1800 22.5.1: the
+    // expansion of `" includes the expansion of embedded macros).
+    clean(
+        "quotedmacro",
+        &[
+            ("lib/vcs/a.svh", "int from_vcs;\n"),
+            ("m.sv", "`define VENDOR vcs\n`define LIB(x) `\"lib/`VENDOR/x`\"\nmodule m;\n`include `LIB(a.svh)\n  initial from_vcs = 1;\nendmodule\n"),
+        ],
+    );
+    // An undefined macro stays as written.
+    let (a, _) = project("quotedmacro2", &[("m.sv", "`define LIB(x) `\"lib/`NOPE/x`\"\nmodule m;\n  string s = `LIB(a);\nendmodule\n")]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn modport_subroutine_prototypes_with_arguments() {
+    // A vendor interface's modport lists `export task name(args)` prototypes.
+    clean(
+        "modportproto",
+        &[(
+            "i.sv",
+            "interface bus_if;\n  logic a;\n  modport mst(\n    export task start_exp(),\n    export task log_exp(ref int n, input string s),\n    import function int get(int x),\n    output a\n  );\nendinterface\n",
+        )],
+    );
+}
+
+#[test]
+fn a_module_whose_header_is_encrypted() {
+    // `module m` followed by an encrypted region: its `;`, ports and parameters are in the
+    // ciphertext, so neither the header nor the instance connections are errors.
+    let enc = "module enc_mod\n`pragma protect begin_protected\n`pragma protect data_method = \"aes128-cbc\"\n`pragma protect encoding = (enctype = \"base64\")\n`pragma protect data_block\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n`pragma protect end_protected\nendmodule\n";
+    let top = "module top;\n  logic x;\n  enc_mod #(.WIDTH(8)) u (.clk(x), .data(x));\nendmodule\n";
+    clean("encheader", &[("enc.sv", enc), ("top.sv", top)]);
+    // Without the encrypted region a missing `;` is still an error.
+    let (a, _) = project("encheader2", &[("m.sv", "module plain\n  logic x;\nendmodule\n")]);
+    assert!(problems(&a).iter().any(|p| p.contains("Expected ';'")), "{:?}", problems(&a));
+}
+
+#[test]
+fn a_module_header_cut_by_an_encrypted_region_then_an_include() {
+    // A vendor checker: `module m`, the header in `protected text, then an include that starts
+    // with an import.
+    clean(
+        "encinclude",
+        &[
+            ("disp.svi", "  import pkg_a::*;\n  int shown;\n"),
+            ("pkg.sv", "package pkg_a;\n  int x;\nendpackage\n"),
+            ("chk.sv", "module chk\n`protected\nQUJDREVGR0hJSktM\n`endprotected\n`include \"disp.svi\"\nendmodule\n"),
+        ],
+    );
+}
+
+#[test]
+fn foreach_over_an_array_reached_through_several_selects() {
+    // `foreach (f.lines[i].tiles[j][k].subs[l])`: i, j and k come from outer loops; l is new.
+    clean(
+        "foreachpath",
+        &[(
+            "t.sv",
+            "class tile; int subs[4]; endclass\nclass line_c; tile tiles[2][2]; endclass\nclass frame; line_c lines[3]; endclass\nmodule t;\n  frame f;\n  initial foreach (f.lines[i]) foreach (f.lines[i].tiles[j, k]) foreach (f.lines[i].tiles[j][k].subs[l]) f.lines[i].tiles[j][k].subs[l] = l;\nendmodule\n",
+        )],
+    );
+}
+
+#[test]
+fn member_labels_in_braces_without_an_apostrophe() {
+    // `x = {valid: 1, ready: 0}`: accepted by VCS as an assignment pattern; the labels are struct
+    // members, not variables. Names in a ternary inside braces are still checked.
+    let (a, _) = project(
+        "bracelabels",
+        &[(
+            "t.sv",
+            "module t;\n  typedef struct packed { logic valid; logic ready; } s_t;\n  s_t s;\n  logic c;\n  initial begin\n    s = {valid: 1, ready: 0};\n    s = {c ? 1'b1 : nope, 1'b0};\n  end\nendmodule\n",
+        )],
+    );
+    let p = problems(&a);
+    assert!(p.len() == 1 && p[0].contains("'nope'"), "{p:?}");
+}

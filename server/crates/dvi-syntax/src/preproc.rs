@@ -196,6 +196,9 @@ pub struct PpResult {
     pub inactive: Vec<Span>,
     /// Encrypted regions (`` `pragma protect begin_protected ``, `` `protected ``).
     pub protected: Vec<Span>,
+    /// Indexes in `tokens` of the tokens right after an encrypted region (flagged
+    /// [`flags::AFTER_PROTECTED`] at the end).
+    after_protected: Vec<usize>,
     pub macros_after: MacroTable,
     /// The text of every file read, exactly as it was lexed.
     pub sources: Vec<(FileId, Arc<str>)>,
@@ -222,6 +225,11 @@ pub fn preprocess(
     pp.enter_file(root);
     pp.run();
     let mut res = pp.res;
+    for i in std::mem::take(&mut res.after_protected) {
+        if let Some(t) = res.tokens.get_mut(i) {
+            t.flags |= flags::AFTER_PROTECTED;
+        }
+    }
     res.macros_after = pp.macros;
     res
 }
@@ -598,6 +606,7 @@ impl<'a> Pp<'a> {
             None => begin.span,
         };
         self.res.protected.push(span);
+        self.res.after_protected.push(self.res.tokens.len());
     }
 
     fn defined(&self, name: &str) -> bool {
@@ -956,7 +965,7 @@ impl<'a> Pp<'a> {
             return;
         }
         let first_flags = tok.flags & (flags::NL_BEFORE | flags::WS_BEFORE);
-        let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site));
+        let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site), &|a| self.expand_tokens(a, site));
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
@@ -972,10 +981,18 @@ impl<'a> Pp<'a> {
     fn called_name(&self, actual: &[Token], site: Span) -> Option<SmolStr> {
         let name = |t: &Token| matches!(t.kind, TokKind::Ident | TokKind::Keyword).then(|| t.text.clone());
         match actual {
-            [t] if t.kind != TokKind::Directive => return name(t),
-            [t, ..] if t.kind == TokKind::Directive => {}
-            _ => return None,
+            [t] if t.kind != TokKind::Directive => name(t),
+            [t, ..] if t.kind == TokKind::Directive => match self.expand_tokens(actual, site)?.as_slice() {
+                [t] => name(t),
+                _ => None,
+            },
+            _ => None,
         }
+    }
+
+    /// `actual`, starting with a macro call, expanded with the macros defined so far (within
+    /// the depth limit); `None` when that fails (an undefined macro).
+    fn expand_tokens(&self, actual: &[Token], site: Span) -> Option<Vec<Token>> {
         let depth = self.macro_depth() + 1;
         if depth >= self.depth_limit {
             return None;
@@ -994,10 +1011,10 @@ impl<'a> Pp<'a> {
         };
         pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
         pp.run();
-        match pp.res.tokens.as_slice() {
-            [t] => name(t),
-            _ => None,
+        if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO") {
+            return None;
         }
+        Some(std::mem::take(&mut pp.res.tokens))
     }
 
     /// Collects macro actual arguments after the opening parenthesis. Returns the arguments
@@ -1067,7 +1084,14 @@ const COMPILER_DIRECTIVES: &[&str] = &[
 ];
 
 /// `called` gives the macro an actual names after a backtick (see [`Pp::called_name`]).
-fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8, called: &dyn Fn(&[Token]) -> Option<SmolStr>) -> Vec<Token> {
+fn substitute(
+    def: &MacroDef,
+    args: &[Vec<Token>],
+    site: Span,
+    first_flags: u8,
+    called: &dyn Fn(&[Token]) -> Option<SmolStr>,
+    expand: &dyn Fn(&[Token]) -> Option<Vec<Token>>,
+) -> Vec<Token> {
     let params = def.params.as_deref().unwrap_or(&[]);
     let param_index = |name: &str| params.iter().position(|p| p.name == name);
     let body_tok = |t: &Token| -> Token {
@@ -1113,10 +1137,21 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8, 
                         TokKind::Ident if param_index(&b.text).is_some() => {
                             s.push_str(&join_tokens(&actual(param_index(&b.text).unwrap())));
                         }
-                        TokKind::Directive => {
-                            s.push('`');
-                            s.push_str(&b.text);
-                        }
+                        // Macros inside `" are expanded (IEEE 1800 22.5.1): `"dir/`VENDOR/x`".
+                        TokKind::Directive => match (!COMPILER_DIRECTIVES.contains(&b.text.as_str())).then(|| expand(std::slice::from_ref(b))).flatten() {
+                            Some(toks) => {
+                                for (k, e) in toks.iter().enumerate() {
+                                    if k > 0 && e.ws_before() {
+                                        s.push(' ');
+                                    }
+                                    s.push_str(if e.kind == TokKind::String { e.text.trim_matches('"') } else { &e.text });
+                                }
+                            }
+                            None => {
+                                s.push('`');
+                                s.push_str(&b.text);
+                            }
+                        },
                         TokKind::String => s.push_str(b.text.trim_matches('"')),
                         _ => s.push_str(&b.text),
                     }
