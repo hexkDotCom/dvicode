@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.4 (preview)
+
+**Opening a project without a build file**
+
+- When a folder holds several copies of a package or module (one per top, generated variants,
+  a vendored or deprecated copy), a name now means the nearest copy in the folder that fits the
+  use: the package that declares the member used, the module that has the ports and parameters
+  an instance connects. Go to definition follows the same choice. An OpenTitan checkout showed
+  2,873 problems before, 585 now; with a build file nothing changes.
+- A macro that no file in the folder defines (from the simulator's command line, or a library
+  outside the folder) gets one notice in each file that uses it, instead of an error on every
+  use.
+
+**Finding out why a project is read wrong**
+
+- With `dvicode.server.logLevel` set to `debug`, the DVICode output shows each build and
+  argument file as it is read, what wildcards matched, defines, variables and the UVM library;
+  without a build file, the folders skipped and why, headers no file includes, included files
+  missing from the folder and packages defined more than once. `trace` lists every file in
+  compile order. `dvicode-server check <folder> --log-level debug` prints the same.
+
+**Fewer false errors** (found on encrypted vendor verification IP)
+
+- Macros inside `` `" `` strings are expanded, so include paths built as
+  `` `"dir/`VENDOR/name`" `` resolve.
+- Modports take subroutine prototypes with arguments (`modport m(export task t(int x))`).
+- A module header cut by an encrypted region ends there, and the ports and parameters of its
+  instances are not reported.
+- `foreach` over an array reached through several selects declares its loop variable.
+- `{name: value}` without the apostrophe is an assignment pattern, as in VCS.
+
+**Install**
+
+- DVICode is on the VS Code Marketplace and Open VSX: search for **DVICode** in the Extensions
+  view.
+
 ## 0.1.3 (preview)
 
 Checked on 68 configurations of large closed-source UVM testbenches, besides the public corpus,

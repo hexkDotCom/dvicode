@@ -2,7 +2,7 @@
   "name": "dvicode",
   "displayName": "DVICode - DV Intelligence",
   "description": "SystemVerilog and UVM navigation, problems, design and UVM hierarchies, and macro expansion, from a fast Rust engine that runs natively on Windows, Linux and macOS, in WSL, or on a Linux server over SSH.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "hexk",
   "license": "Apache-2.0",
   "preview": true,
