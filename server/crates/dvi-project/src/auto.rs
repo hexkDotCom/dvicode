@@ -39,23 +39,26 @@ fn is_regular_file(ft: &std::fs::FileType, p: &Path) -> bool {
 
 /// The patterns of the project's top-level `.gitignore`: build output, scratch files and
 /// downloaded tools usually live there. Negations (`!pattern`) are not supported and skipped.
-struct GitIgnore(Vec<(String, bool)>);
+/// The project's top-level `.gitignore`: (pattern, directories only, `!` re-include), in order.
+struct GitIgnore(Vec<(String, bool, bool)>);
 
 impl GitIgnore {
     fn load(root: &Path) -> GitIgnore {
-        let text = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+        GitIgnore::parse(&std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default())
+    }
+
+    fn parse(text: &str) -> GitIgnore {
         let mut pats = Vec::new();
         for line in text.lines() {
             let l = line.trim();
-            if l.starts_with('!') {
-                log::debug!("auto-configuration: .gitignore line `{l}` ignored: `!` exceptions are not supported");
-            }
-            if l.is_empty() || l.starts_with('#') || l.starts_with('!') {
+            if l.is_empty() || l.starts_with('#') {
                 continue;
             }
-            if l.contains('[') {
-                log::debug!("auto-configuration: .gitignore line `{l}`: `[...]` character classes are not supported, so it may not match");
-            }
+            // `!pattern` re-includes what an earlier line ignored; `\!` and `\#` are literal.
+            let (negate, l) = match l.strip_prefix('!') {
+                Some(rest) => (true, rest),
+                None => (false, l.strip_prefix('\\').filter(|r| r.starts_with('!') || r.starts_with('#')).unwrap_or(l)),
+            };
             let dir_only = l.ends_with('/');
             let l = l.trim_end_matches('/');
             if l.is_empty() {
@@ -63,17 +66,23 @@ impl GitIgnore {
             }
             // A slash other than a trailing one anchors the pattern at the project folder.
             let pat = if l.contains('/') { format!("/{}", l.trim_start_matches('/')) } else { l.to_string() };
-            pats.push((pat, dir_only));
+            pats.push((pat, dir_only, negate));
         }
         if !pats.is_empty() {
-            log::debug!("auto-configuration: skipping what {} patterns of .gitignore match: {}", pats.len(), pats.iter().map(|(p, d)| if *d { format!("{p}/") } else { p.clone() }).collect::<Vec<_>>().join(" "));
+            let shown: Vec<String> = pats.iter().map(|(p, d, n)| format!("{}{p}{}", if *n { "!" } else { "" }, if *d { "/" } else { "" })).collect();
+            log::debug!("auto-configuration: skipping what {} patterns of .gitignore match: {}", pats.len(), shown.join(" "));
         }
         GitIgnore(pats)
     }
 
-    /// `rel`: path relative to the project folder.
+    /// `rel`: path relative to the project folder. The last line that matches decides, as in
+    /// Git; a file in an ignored folder is not seen at all (the folder is not walked).
     fn ignores(&self, rel: &Path, is_dir: bool) -> bool {
-        self.0.iter().any(|(p, dir_only)| (is_dir || !dir_only) && crate::glob::matches_path(p, rel))
+        self.0
+            .iter()
+            .rev()
+            .find(|(p, dir_only, _)| (is_dir || !dir_only) && crate::glob::matches_path(p, rel))
+            .is_some_and(|(_, _, negate)| !negate)
     }
 }
 
@@ -413,5 +422,25 @@ fn log_summary(facts: &[(PathBuf, FileFacts)], tops: &[usize], included: &FxHash
     }
     for (n, &i) in order.iter().enumerate() {
         log::trace!("auto-configuration: compile order {}: {}", n + 1, facts[i].0.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gitignore_exceptions_and_character_classes() {
+        let g = GitIgnore::parse("# generated\n*.log\n!keep.log\nbuild*/\n!build_rtl/\nsim[0-9]/\n\\!literal\ntmp/\n!tmp/x.sv\n");
+        let ig = |p: &str, dir: bool| g.ignores(Path::new(p), dir);
+        assert!(ig("run.log", false));
+        // `!` re-includes; the last matching line wins.
+        assert!(!ig("keep.log", false));
+        assert!(ig("build_x", true) && !ig("build_rtl", true));
+        assert!(ig("sim3", true) && !ig("simx", true));
+        // `\!` is a literal `!`.
+        assert!(ig("!literal", false));
+        // A file in an ignored folder is not re-included: the folder is skipped, as in Git.
+        assert!(ig("tmp", true));
     }
 }

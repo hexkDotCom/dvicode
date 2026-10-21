@@ -1,4 +1,5 @@
-//! Ant-style wildcards: `?`, `*` (within one path component) and `**` (any depth).
+//! Ant-style wildcards: `?`, `*` (within one path component), `**` (any depth) and character
+//! classes `[abc]`, `[a-z]`, `[!abc]` (as in `.gitignore`).
 
 use std::path::{Path, PathBuf};
 
@@ -8,14 +9,41 @@ pub fn has_wildcard(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
-/// Matches one path component against a pattern with `*` and `?`.
+/// The character class starting at `p[i]` (`[`): whether it matches `c`, and the index after
+/// its `]`. `None` when there is no closing `]` (the `[` is then an ordinary character). A `]`
+/// right after `[` or `[!` belongs to the class; `!` or `^` first negates it.
+fn class_at(p: &[char], i: usize, c: char) -> Option<(bool, usize)> {
+    let mut j = i + 1;
+    let negate = matches!(p.get(j), Some('!') | Some('^'));
+    if negate {
+        j += 1;
+    }
+    let first = j;
+    let mut found = false;
+    while j < p.len() && (p[j] != ']' || j == first) {
+        if j + 2 < p.len() && p[j + 1] == '-' && p[j + 2] != ']' {
+            found |= p[j] <= c && c <= p[j + 2];
+            j += 3;
+        } else {
+            found |= p[j] == c;
+            j += 1;
+        }
+    }
+    (j < p.len()).then_some((found != negate, j + 1))
+}
+
+/// Matches one path component against a pattern with `*`, `?` and `[...]`.
 pub fn match_component(pat: &str, s: &str) -> bool {
     let p: Vec<char> = pat.chars().collect();
     let t: Vec<char> = s.chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star, mut mark) = (None::<usize>, 0usize);
     while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+        let class = (pi < p.len() && p[pi] == '[').then(|| class_at(&p, pi, t[ti])).flatten();
+        if let Some((true, next)) = class {
+            pi = next;
+            ti += 1;
+        } else if class.is_none() && pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
             pi += 1;
             ti += 1;
         } else if pi < p.len() && p[pi] == '*' {
@@ -131,6 +159,23 @@ mod tests {
         assert!(match_component("*.sv", "a.sv"));
         assert!(match_component("a?c*", "abcdef"));
         assert!(!match_component("*.sv", "a.svh"));
+    }
+
+    #[test]
+    fn character_classes() {
+        assert!(match_component("[abc].sv", "b.sv"));
+        assert!(!match_component("[abc].sv", "d.sv"));
+        assert!(match_component("v[0-9]*", "v7_old"));
+        assert!(!match_component("v[0-9]*", "vx"));
+        assert!(match_component("[!a-c]x", "dx"));
+        assert!(!match_component("[!a-c]x", "bx"));
+        assert!(match_component("[^a]x", "bx"));
+        // `]` first is a member; `-` last is a member; no `]` means a plain `[`.
+        assert!(match_component("[]a]", "]"));
+        assert!(match_component("[a-]", "-"));
+        assert!(match_component("a[b", "a[b"));
+        assert!(match_component("*[0-9].log", "run12.log"));
+        assert!(!match_component("*[0-9].log", "run.log"));
     }
 
     #[test]
