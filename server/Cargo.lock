@@ -101,6 +101,7 @@ name = "dvi-project"
 version = "0.1.3"
 dependencies = [
  "dvi-syntax",
+ "log",
  "rayon",
  "rustc-hash",
  "smol_str",

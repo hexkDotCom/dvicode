@@ -400,6 +400,9 @@ impl Builder {
         if let Some(c) = self.cur.take() {
             self.cfg.invocations.push(c);
         }
+        if !self.inspecting {
+            log::debug!("build: invocation {} starts (mode {}{})", self.cfg.invocations.len() + 1, if mode.is_empty() { "default" } else { mode }, if auto { ", auto-configured" } else { "" });
+        }
         self.comp_root = self.cfg.root.clone();
         self.cur = Some(Invocation { mode: if mode.is_empty() { "default".into() } else { mode.to_string() }, auto, ..Default::default() });
     }
@@ -426,16 +429,44 @@ impl Builder {
             // `+dvicode_skip_compile+`
             if !inv.skip.is_empty() {
                 let pats = inv.skip.clone();
+                let before = inv.files.len();
                 inv.files.retain(|f| !pats.iter().any(|p| glob::matches_path(p, f)));
+                if !inspecting {
+                    log::debug!("build: +dvicode_skip_compile+ {:?} removed {} file(s)", pats, before - inv.files.len());
+                }
             }
             dedup_paths(&mut inv.files);
             dedup_paths(&mut inv.incdirs);
+        }
+        if !inspecting {
+            for (i, inv) in self.cfg.invocations.iter().enumerate() {
+                log::debug!(
+                    "build: invocation {} (mode {}{}): {} files, {} include directories, {} defines, {} -y directories, {} -v files",
+                    i + 1,
+                    inv.mode,
+                    if inv.auto { ", auto-configured" } else { "" },
+                    inv.files.len(),
+                    inv.incdirs.len(),
+                    inv.defines.len(),
+                    inv.lib_dirs.len(),
+                    inv.lib_files.len()
+                );
+                for d in &inv.incdirs {
+                    log::trace!("build:   include directory {}", d.display());
+                }
+                for f in &inv.files {
+                    log::trace!("build:   compiles {}", f.display());
+                }
+            }
         }
         self.cfg
     }
 
     /// A problem at the current word (`span`) of `file`.
     fn problem(&mut self, file: &Path, line: u32, msg: String) {
+        if !self.inspecting {
+            log::info!("build file problem: {}:{}: {msg}", file.display(), line + 1);
+        }
         let range = Some(self.span).filter(|(s, e)| e > s);
         self.cfg.problems.push(BuildProblem { file: file.to_path_buf(), line, range, message: msg });
     }
@@ -445,6 +476,9 @@ impl Builder {
     }
 
     fn parse_text(&mut self, file: &Path, text: &str, file_base: PathBuf) {
+        if !self.inspecting {
+            log::debug!("build: reading {} ({} bytes; relative paths from {})", file.display(), text.len(), file_base.display());
+        }
         // Jinja conditions (`{% if "x" in fl_switches %}`): keep the text of the true branches.
         let original = text;
         let rendered;
@@ -789,7 +823,12 @@ impl Builder {
         if let Some((k, v)) = kv.split_once('=') {
             let v = self.expand(v, false).unwrap_or_else(|| v.to_string());
             if overwrite || !(self.env.contains_key(k) || std::env::var_os(k).is_some()) {
+                if !self.inspecting {
+                    log::debug!("build: environment {k}={}", v.trim_matches('"'));
+                }
                 self.env.insert(k.to_string(), v.trim_matches('"').to_string());
+            } else if !self.inspecting {
+                log::debug!("build: environment {k} already set, kept");
             }
         }
     }
@@ -800,6 +839,12 @@ impl Builder {
             None => (d.to_string(), None),
         };
         if !n.is_empty() {
+            if !self.inspecting {
+                match &v {
+                    Some(v) => log::debug!("build: define {n}={v}"),
+                    None => log::debug!("build: define {n}"),
+                }
+            }
             self.inv().defines.push((n, v));
         }
     }
@@ -844,6 +889,9 @@ impl Builder {
         let home = PathBuf::from(home);
         let src = if home.join("src").is_dir() { home.join("src") } else { home };
         let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| p.is_file());
+        if !self.inspecting {
+            log::debug!("build: UVM library {} ({})", src.display(), if pkg.is_some() { "found" } else { "no uvm_pkg.sv there" });
+        }
         self.note(&req.file, format!("**UVM library** `{}` — {}", src.display(), if pkg.is_some() { "found" } else { "**not found**" }));
         if pkg.is_none() {
             self.problem(&req.file, req.line, format!("-uvm: no uvm_pkg.sv in {}", src.display()));
@@ -870,6 +918,9 @@ impl Builder {
         }
         let Some(path) = self.resolve(file, line, p, base) else { return };
         let e = self.expand(p, true).unwrap_or_default();
+        if !self.inspecting {
+            log::debug!("build: {}:{}: argument file {p}{} -> {}", file.display(), line + 1, if e != p { format!(" (= {e})") } else { String::new() }, path.display());
+        }
         self.note(file, Self::describe_path(p, &e, &path, "argument file"));
         self.link(file, &path);
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
@@ -909,6 +960,9 @@ impl Builder {
         let abs = absolutize(&e, base);
         if glob::has_wildcard(&e) {
             let found: Vec<PathBuf> = glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect();
+            if !self.inspecting {
+                log::debug!("build: {}:{}: +incdir+{p} matches {} directories", file.display(), line + 1, found.len());
+            }
             self.note(file, Self::describe_matches(p, &e, &abs, &found, "include directories"));
             if found.is_empty() {
                 self.problem(file, line, format!("No directories match {}", abs.display()));
@@ -930,6 +984,9 @@ impl Builder {
             let mut found = glob::expand(&abs);
             found.retain(|f| f.is_file());
             found.sort();
+            if !self.inspecting {
+                log::debug!("build: {}:{}: {p} matches {} files", file.display(), line + 1, found.len());
+            }
             self.note(file, Self::describe_matches(p, &e, &abs, &found, "files"));
             if found.is_empty() {
                 self.problem(file, line, format!("No files match {}", abs.display()));
@@ -939,6 +996,9 @@ impl Builder {
             return;
         }
         let kind = if is_foreign_source(&abs) { "file (not SystemVerilog; skipped)" } else { "source file" };
+        if !self.inspecting && is_foreign_source(&abs) {
+            log::debug!("build: {}:{}: {} is not SystemVerilog, skipped", file.display(), line + 1, abs.display());
+        }
         self.note(file, Self::describe_path(p, &e, &abs, kind));
         self.link(file, &abs);
         if !abs.is_file() {

@@ -1,8 +1,10 @@
 //! Name resolution: lexical scopes, class inheritance, package imports, `pkg::name` and
 //! member chains (`a.b.c`).
 
-use crate::world::{Analysis, DeclRef, UnitId};
+use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefId, RefKind, Sep, TypeRef};
+use dvi_syntax::Span;
+use rustc_hash::FxHashMap;
 
 const MAX_DEPTH: usize = 32;
 
@@ -98,11 +100,14 @@ impl Analysis {
                 let module = self.type_of(DeclRef { unit, decl: inst })?;
                 return self.member_of(module, name);
             }
-            RefKind::Package => return self.global.packages.get(name).and_then(|v| v.first().copied()),
-            RefKind::ImportItem if idx == 0 => return self.global.packages.get(name).and_then(|v| v.first().copied()),
+            RefKind::Package => return self.package_next(unit, chain, idx),
+            RefKind::ImportItem if idx == 0 => return self.package_next(unit, chain, idx),
             RefKind::Definition => {
-                if let Some(d) = self.global.definitions.get(name).and_then(|v| v.first()) {
+                if let Some(d) = self.instance_definitions().get(&(unit, seg.span)) {
                     return Some(*d);
+                }
+                if let Some(d) = self.definition(unit, name) {
+                    return Some(d);
                 }
             }
             RefKind::With { target } => {
@@ -123,12 +128,15 @@ impl Analysis {
             // `X::y`: X is a class/type in scope or a package.
             if let Some(r) = self.lookup(unit, scope, name) {
                 let k = self.decl(r).kind;
-                if k.is_type() || k == DeclKind::Package {
+                if k.is_type() {
                     return Some(r);
                 }
+                if k == DeclKind::Package {
+                    return self.package_next(unit, chain, idx).or(Some(r));
+                }
             }
-            if let Some(p) = self.global.packages.get(name).and_then(|v| v.first()) {
-                return Some(*p);
+            if let Some(p) = self.package_next(unit, chain, idx) {
+                return Some(p);
             }
         }
         self.lookup(unit, scope, name)
@@ -204,8 +212,8 @@ impl Analysis {
                 if imp.item.as_ref().is_some_and(|i| i != name) {
                     continue;
                 }
-                if let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()) {
-                    if let Some(m) = self.member_of(*p, name) {
+                if let Some(p) = self.package_with(unit, &imp.pkg, name) {
+                    if let Some(m) = self.member_of(p, name) {
                         return Some(m);
                     }
                 }
@@ -215,17 +223,110 @@ impl Analysis {
         self.lookup_global(unit, name)
     }
 
+    /// Which of several packages, design elements or compilation-unit items of one name a use
+    /// in `from` means. With a build file it is the first one compiled, as in a simulator.
+    /// Auto-configuration compiles every copy in the folder (one per top or per generated
+    /// configuration, a vendored copy next to the original, ...), so in auto-configured code it
+    /// is the copy nearest to `from` in the folder tree, and the first compiled one among
+    /// copies that are equally near.
+    pub fn pick_global(&self, from: UnitId, v: &[DeclRef]) -> Option<DeclRef> {
+        self.candidates(from, v).into_iter().next()
+    }
+
+    /// The definitions of a name in the order `pick_global` prefers them: only the first one
+    /// with a build file, all of them, nearest first, in auto-configured code.
+    fn candidates(&self, from: UnitId, v: &[DeclRef]) -> Vec<DeclRef> {
+        if v.len() < 2 || !self.nearest_wins(from) {
+            return v.first().copied().into_iter().collect();
+        }
+        let here = self.path(self.unit(from).root);
+        let mut ranked: Vec<(usize, DeclRef)> = v
+            .iter()
+            .map(|r| (here.components().zip(self.path(self.unit(r.unit).root).components()).take_while(|(a, b)| a == b).count(), *r))
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.into_iter().map(|(_, r)| r).collect()
+    }
+
+    /// The package `name` as a use in `from` sees it (see `pick_global`).
+    pub fn package(&self, from: UnitId, name: &str) -> Option<DeclRef> {
+        self.global.packages.get(name).and_then(|v| self.pick_global(from, v))
+    }
+
+    /// The package `name` for a use of its member `member` in `from`: in auto-configured code,
+    /// the nearest copy that declares the member, so that a use is not checked against a
+    /// different version of the package (see `pick_global`).
+    pub fn package_with(&self, from: UnitId, name: &str, member: &str) -> Option<DeclRef> {
+        let c = self.candidates(from, self.global.packages.get(name)?);
+        c.iter().copied().find(|p| self.member_of(*p, member).is_some()).or_else(|| c.first().copied())
+    }
+
+    /// The package named by segment `idx` of a chain (`pkg::name`, `import pkg::name`), for a
+    /// use of the member in the next segment.
+    fn package_next(&self, unit: UnitId, chain: &RefChain, idx: usize) -> Option<DeclRef> {
+        let name = chain.segs[idx].name.as_str();
+        match chain.segs.get(idx + 1) {
+            Some(next) if next.sep == Sep::Scope || chain.kind == RefKind::ImportItem => self.package_with(unit, name, &next.name),
+            _ => self.package(unit, name),
+        }
+    }
+
+    /// The design element `name` as a use in `from` sees it (see `pick_global`).
+    pub fn definition(&self, from: UnitId, name: &str) -> Option<DeclRef> {
+        self.global.definitions.get(name).and_then(|v| self.pick_global(from, v))
+    }
+
+    fn nearest_wins(&self, unit: UnitId) -> bool {
+        self.try_unit(unit).is_some_and(|u| u.kind != UnitKind::Builtin && self.setup.config.invocations.get(u.invocation).is_some_and(|i| i.auto))
+    }
+
+    /// For instances in auto-configured code of design elements defined more than once: the
+    /// nearest copy that has every port and parameter the instance connects by name, by the
+    /// span of the element's name in the instantiation. Computed once per snapshot.
+    fn instance_definitions(&self) -> &FxHashMap<(UnitId, Span), DeclRef> {
+        self.instance_defs.get_or_init(|| {
+            let mut out = FxHashMap::default();
+            for u in self.units.iter().flatten() {
+                if !self.nearest_wins(u.id) {
+                    continue;
+                }
+                let mut named: FxHashMap<DeclId, Vec<&str>> = FxHashMap::default();
+                for c in &u.parsed.refs {
+                    if let RefKind::Port { inst } | RefKind::Param { inst } = c.kind {
+                        if let Some(s) = c.segs.first() {
+                            named.entry(inst).or_default().push(s.name.as_str());
+                        }
+                    }
+                }
+                for (inst, names) in named {
+                    let Some(rid) = u.parsed.decl(inst).ty.as_ref().and_then(|t| t.ref_id) else { continue };
+                    let Some(seg) = u.parsed.reference(rid).segs.first().filter(|s| !s.from_macro) else { continue };
+                    let Some(v) = self.global.definitions.get(&seg.name).filter(|v| v.len() > 1) else { continue };
+                    // Own members only: following `bind`s would resolve instances again.
+                    let fits = |c: &DeclRef| {
+                        let p = &self.unit(c.unit).parsed;
+                        names.iter().all(|n| !p.lookup_member(c.decl, n).is_empty())
+                    };
+                    if let Some(c) = self.candidates(u.id, v).into_iter().find(fits) {
+                        out.insert((u.id, seg.span), c);
+                    }
+                }
+            }
+            out
+        })
+    }
+
     pub fn lookup_global(&self, unit: UnitId, name: &str) -> Option<DeclRef> {
         if let Some(v) = self.global.unit_items.get(name) {
-            if let Some(r) = v.iter().find(|r| r.unit == unit).or_else(|| v.first()) {
-                return Some(*r);
+            if let Some(r) = v.iter().find(|r| r.unit == unit).copied().or_else(|| self.pick_global(unit, v)) {
+                return Some(r);
             }
         }
-        if let Some(v) = self.global.definitions.get(name) {
-            return v.first().copied();
+        if let Some(r) = self.definition(unit, name) {
+            return Some(r);
         }
-        if let Some(v) = self.global.packages.get(name) {
-            return v.first().copied();
+        if let Some(r) = self.package(unit, name) {
+            return Some(r);
         }
         // `import p::*;` outside any design element in an earlier file of the same invocation.
         if let Some(inv) = self.units.get(unit as usize).and_then(|u| u.as_ref()).map(|u| u.invocation) {
@@ -233,7 +334,7 @@ impl Analysis {
                 if *i != inv || *u >= unit || item.as_ref().is_some_and(|it| it != name) {
                     continue;
                 }
-                if let Some(m) = self.global.packages.get(pkg).and_then(|v| v.first()).and_then(|p| self.member_of(*p, name)) {
+                if let Some(m) = self.package_with(unit, pkg, name).and_then(|p| self.member_of(p, name)) {
                     return Some(m);
                 }
             }
@@ -434,8 +535,8 @@ impl Analysis {
                 vec![e.pkg.as_str()]
             };
             for s in sources {
-                if let Some(p) = self.global.packages.get(s).and_then(|v| v.first()) {
-                    if let Some(m) = self.member_of_depth(*p, name, depth + 1) {
+                if let Some(p) = self.package_with(pkg.unit, s, name) {
+                    if let Some(m) = self.member_of_depth(p, name, depth + 1) {
                         return Some(m);
                     }
                 }

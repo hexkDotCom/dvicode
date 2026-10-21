@@ -898,3 +898,72 @@ fn member_labels_in_braces_without_an_apostrophe() {
     let p = problems(&a);
     assert!(p.len() == 1 && p[0].contains("'nope'"), "{p:?}");
 }
+
+#[test]
+fn auto_config_resolves_names_defined_more_than_once_to_the_nearest_fitting_copy() {
+    // Two tops, each with its own generated copy of a register package and block; a nearer
+    // standalone stub of a package that lacks what the code uses; a deprecated copy of a
+    // module, nearer than the real one, without the ports the code connects.
+    let files = [
+        ("top_a/reg_pkg.sv", "package reg_pkg;\n  parameter int NUM_A = 2;\nendpackage\n"),
+        ("top_a/reg_top.sv", "module reg_top (input logic clk_i, input logic [reg_pkg::NUM_A-1:0] a_i);\nendmodule\n"),
+        ("top_a/top.sv", "module top_a;\n  logic clk;\n  logic [1:0] a;\n  reg_top u_reg (.clk_i(clk), .a_i(a));\nendmodule\n"),
+        ("top_b/reg_pkg.sv", "package reg_pkg;\n  parameter int NUM_B = 3;\nendpackage\n"),
+        ("top_b/reg_top.sv", "module reg_top (input logic clk_i, input logic [reg_pkg::NUM_B-1:0] b_i);\nendmodule\n"),
+        ("top_b/top.sv", "module top_b;\n  import reg_pkg::*;\n  logic clk;\n  logic [NUM_B-1:0] b;\n  reg_top u_reg (.clk_i(clk), .b_i(b));\nendmodule\n"),
+        ("core/include/riscv_pkg.sv", "package riscv;\n  parameter int LD_FAULT = 5;\n  parameter int XLEN = 64;\nendpackage\n"),
+        ("core/pmp/include/riscv.sv", "package riscv;\n  parameter int XLEN = 64;\nendpackage\n"),
+        ("core/pmp/src/pmp_if.sv", "module pmp_if;\n  int c = riscv::LD_FAULT;\nendmodule\n"),
+        ("core/cvfpu/deprecated/sram.sv", "module sram (input logic clk_i);\nendmodule\n"),
+        ("common/util/sram.sv", "module sram #(parameter int USER_WIDTH = 1) (input logic clk_i, input logic rst_ni);\nendmodule\n"),
+        ("core/cache/nbdcache.sv", "module nbdcache;\n  logic clk, rst;\n  sram #(.USER_WIDTH(2)) u_sram (.clk_i(clk), .rst_ni(rst));\nendmodule\n"),
+    ];
+    let (_, root) = project("autodup", &files);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // Go to definition lands in the copy that was used.
+    let at = |file: &str, text: &str| {
+        let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with(file)).unwrap();
+        let off = files.iter().find(|(n, _)| *n == file).unwrap().1.find(text).unwrap() as u32;
+        let d: Vec<String> = a.goto_definition(f, off).iter().map(|l| l.uri.path().rsplit("autodup-").next().unwrap().split_once('/').unwrap().1.to_string()).collect();
+        d
+    };
+    assert_eq!(at("top_b/top.sv", "reg_top u_reg"), vec!["top_b/reg_top.sv"]);
+    assert_eq!(at("top_a/reg_top.sv", "reg_pkg::NUM_A"), vec!["top_a/reg_pkg.sv"]);
+    assert_eq!(at("core/pmp/src/pmp_if.sv", "riscv::"), vec!["core/include/riscv_pkg.sv"]);
+    assert_eq!(at("core/cache/nbdcache.sv", "sram #"), vec!["common/util/sram.sv"]);
+    // With a build file the first compiled copy wins, as in a simulator.
+    let (a, _) = project("autodup2", &files);
+    assert!(!problems(&a).is_empty());
+}
+
+#[test]
+fn auto_config_reports_macros_defined_nowhere_once_per_file() {
+    // `WIDTH comes from the simulator's command line; `LOCAL is defined in the folder, but after
+    // its use.
+    let files = [
+        ("a.sv", "module a;\n  logic [`WIDTH-1:0] x;\n  logic [`WIDTH-1:0] y;\n  int z = `LOCAL;\nendmodule\n"),
+        ("b.sv", "module b;\n  logic [`WIDTH-1:0] w;\nendmodule\n`define LOCAL 1\n"),
+    ];
+    let (_, root) = project("automacro", &files);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let mut diags: Vec<(String, dvi_syntax::Severity, String)> = Vec::new();
+    for f in a.project_files() {
+        for d in a.file_diagnostics(f) {
+            diags.push((a.path(f).file_name().unwrap().to_string_lossy().into_owned(), d.severity, d.message));
+        }
+    }
+    diags.sort_by(|x, y| x.0.cmp(&y.0));
+    let width: Vec<_> = diags.iter().filter(|d| d.2.contains("`WIDTH")).collect();
+    assert_eq!(width.len(), 2, "{diags:?}");
+    assert!(width.iter().all(|d| d.1 == dvi_syntax::Severity::Info && d.2.contains("+define+WIDTH")), "{diags:?}");
+    assert!(width[0].0 == "a.sv" && width[0].2.contains("Its 2 uses in this file"), "{diags:?}");
+    assert!(width[1].0 == "b.sv" && width[1].2.contains("Its use in this file"), "{diags:?}");
+    // Defined in the folder: still an error.
+    assert!(diags.iter().any(|d| d.2 == "Macro `LOCAL is not defined" && d.1 == dvi_syntax::Severity::Error), "{diags:?}");
+    // With a build file every use is an error.
+    let (a, _) = project("automacro2", &files);
+    assert_eq!(problems(&a).iter().filter(|m| m.contains("`WIDTH is not defined")).count(), 3);
+}

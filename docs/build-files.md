@@ -184,9 +184,18 @@ top-level `.gitignore` ignores are skipped. Its patterns may use `*`, `?` and `*
 exceptions and `[...]` character classes are not supported. UVM from `$UVM_HOME` (or
 `dvicode.uvmHome` when `$UVM_HOME` is not set) is still used when it lives in an ignored folder.
 Symbolic links to directories are not followed (list such sources in a build file), and the scan
-stops after 50,000 files. Auto-configuration
-is a good start; a build file is better for projects with several copies of the same files or
-files that must not be compiled together.
+stops after 50,000 files.
+
+A folder often holds several packages or modules of the same name: one copy per top or per
+generated configuration, a vendored copy next to the original, an old copy kept in a
+`deprecated` folder. A simulator compiles only one of them; auto-configuration compiles them all,
+so a name used in the code resolves to the nearest copy in the folder tree that fits the use:
+the package that declares the member used (`pkg::name`, `import pkg::name`), the module that has
+the ports and parameters an instance connects by name. Go to definition follows the same choice.
+With a build file the first copy compiled is used, as in a simulator.
+
+Auto-configuration is a good start; a build file is better for projects with several copies of
+the same files or files that must not be compiled together.
 
 Auto-configuration cannot know the defines your simulator is given (`+define+UVM`,
 `-define FULL_ENV`). When code removed by `` `ifdef `` in a package or class may declare names
@@ -200,6 +209,25 @@ declared here and are not checked. ... add +define+FULL_ENV to a build file.
 
 The count follows your edits. Adding the define to a build file compiles the code and
 checks those uses again.
+
+The same goes for a macro that no file in the folder defines: it usually comes from the
+simulator's command line (`+define+RNG_BUS_WIDTH=4`) or from a library outside the folder.
+Instead of an error on each use, each file that uses it gets one notice (UNDEFINED_MACRO, as
+information) on the first use, saying how many uses there are not expanded. A macro that is
+defined in the folder, but only after its use in the compile order, is still an error. With a
+build file every use of an undefined macro is an error.
+
+### Seeing what was read
+
+With `dvicode.server.logLevel` set to `debug`, the DVICode output channel shows each build
+and argument file as it is read (with the folder its relative paths start from), the argument
+files, wildcards and how many files they matched, defines, `+dvicode_setenv+` variables, the UVM
+library, a summary of each invocation, and every build-file problem. Without a build file it
+shows the folders auto-configuration skipped and why (hidden, build output, `.gitignore`,
+symbolic link), `.gitignore` lines it cannot apply, how many sources it found, headers that no
+file includes, included files that are not in the folder, packages defined more than once, and
+whether UVM was added. `trace` adds every file and the compile order. From a terminal:
+`dvicode-server check <folder> [--build FILE] --log-level debug`.
 
 ## Plusargs
 

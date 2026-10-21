@@ -47,8 +47,14 @@ impl GitIgnore {
         let mut pats = Vec::new();
         for line in text.lines() {
             let l = line.trim();
+            if l.starts_with('!') {
+                log::debug!("auto-configuration: .gitignore line `{l}` ignored: `!` exceptions are not supported");
+            }
             if l.is_empty() || l.starts_with('#') || l.starts_with('!') {
                 continue;
+            }
+            if l.contains('[') {
+                log::debug!("auto-configuration: .gitignore line `{l}`: `[...]` character classes are not supported, so it may not match");
             }
             let dir_only = l.ends_with('/');
             let l = l.trim_end_matches('/');
@@ -58,6 +64,9 @@ impl GitIgnore {
             // A slash other than a trailing one anchors the pattern at the project folder.
             let pat = if l.contains('/') { format!("/{}", l.trim_start_matches('/')) } else { l.to_string() };
             pats.push((pat, dir_only));
+        }
+        if !pats.is_empty() {
+            log::debug!("auto-configuration: skipping what {} patterns of .gitignore match: {}", pats.len(), pats.iter().map(|(p, d)| if *d { format!("{p}/") } else { p.clone() }).collect::<Vec<_>>().join(" "));
         }
         GitIgnore(pats)
     }
@@ -70,15 +79,24 @@ impl GitIgnore {
 
 /// The project's sources; counts them on `progress`, and stops early when it is cancelled.
 pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
+    log::debug!("auto-configuration: scanning {} for sources", root.display());
     let ignore = GitIgnore::load(root);
     let rel = |p: &Path| p.strip_prefix(root).map(|r| r.to_path_buf()).unwrap_or_default();
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut dirs = 0usize;
     while let Some(dir) = stack.pop() {
         if progress.is_cancelled() {
             return out;
         }
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        dirs += 1;
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                log::debug!("auto-configuration: cannot read folder {}: {e}", dir.display());
+                continue;
+            }
+        };
         let mut entries: Vec<_> = rd.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
@@ -86,18 +104,38 @@ pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
             let p = e.path();
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_dir() {
-                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) && !ignore.ignores(&rel(&p), true) {
-                    stack.push(p);
+                let why = if name.starts_with('.') {
+                    Some("hidden folder")
+                } else if SKIP_DIRS.contains(&name.as_str()) {
+                    Some("build output or tool folder")
+                } else if ignore.ignores(&rel(&p), true) {
+                    Some("matched by .gitignore")
+                } else {
+                    None
+                };
+                match why {
+                    None => stack.push(p),
+                    Some(why) if name != ".git" => log::debug!("auto-configuration: skipped {} ({why})", p.display()),
+                    Some(_) => {}
                 }
-            } else if is_regular_file(&ft, &p) && is_source(&p) && !ignore.ignores(&rel(&p), false) {
+            } else if ft.is_symlink() && std::fs::metadata(&p).is_ok_and(|m| m.is_dir()) {
+                log::debug!("auto-configuration: not followed: {} (symbolic link to a folder; list its sources in a build file)", p.display());
+            } else if is_regular_file(&ft, &p) && is_source(&p) {
+                if ignore.ignores(&rel(&p), false) {
+                    log::debug!("auto-configuration: skipped {} (matched by .gitignore)", p.display());
+                    continue;
+                }
+                log::trace!("auto-configuration: found {}", p.display());
                 out.push(p);
                 progress.step();
                 if out.len() >= MAX_FILES {
+                    log::info!("auto-configuration: stopped after {MAX_FILES} source files; describe large projects with a build file");
                     return out;
                 }
             }
         }
     }
+    log::debug!("auto-configuration: {} source files in {dirs} folders", out.len());
     out.sort();
     out
 }
@@ -300,9 +338,17 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
     for &t in &tops {
         visit(t, &top_uses, &pkg_file, &mut placed, &mut visiting, &mut order);
     }
+    if log::log_enabled!(log::Level::Debug) {
+        log_summary(&facts, &tops, &included, &order);
+    }
     let mut inv = Invocation { mode: "default".into(), auto: true, ..Default::default() };
     // UVM used but not part of the project.
     let uses_uvm = top_uses.values().any(|u| u.contains("uvm_pkg")) || included.contains("uvm_macros.svh");
+    if !uses_uvm {
+        log::debug!("auto-configuration: the sources do not use UVM");
+    } else if pkg_file.contains_key("uvm_pkg") {
+        log::debug!("auto-configuration: UVM is part of the folder ({})", facts[pkg_file["uvm_pkg"]].0.display());
+    }
     if uses_uvm && !pkg_file.contains_key("uvm_pkg") {
         // The same order as `-uvm`: UVM_HOME wins over the dvicode.uvmHome setting.
         let home = env
@@ -312,16 +358,60 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
             .or_else(|| env.get("DVICODE_UVM_HOME").cloned())
             .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
             .filter(|h| !h.is_empty());
-        if let Some(h) = home {
-            let h = PathBuf::from(h);
-            let src = if h.join("src").is_dir() { h.join("src") } else { h };
-            if src.join("uvm_pkg.sv").is_file() {
-                inv.incdirs.push(src.clone());
-                inv.files.push(src.join("uvm_pkg.sv"));
+        match home {
+            Some(h) => {
+                let h = PathBuf::from(h);
+                let src = if h.join("src").is_dir() { h.join("src") } else { h };
+                if src.join("uvm_pkg.sv").is_file() {
+                    log::debug!("auto-configuration: the sources use UVM; compiling it from {}", src.display());
+                    inv.incdirs.push(src.clone());
+                    inv.files.push(src.join("uvm_pkg.sv"));
+                } else {
+                    log::info!("auto-configuration: the sources use UVM, but there is no uvm_pkg.sv in {} (UVM_HOME or dvicode.uvmHome)", src.display());
+                }
             }
+            None => log::info!("auto-configuration: the sources use UVM, but neither UVM_HOME nor dvicode.uvmHome is set, so UVM is not compiled"),
         }
     }
     inv.files.extend(order.into_iter().map(|i| facts[i].0.clone()));
     inv.incdirs.extend(incdirs);
+    log::debug!("auto-configuration: {} files to compile, {} include directories", inv.files.len(), inv.incdirs.len());
     inv
+}
+
+/// What auto-configuration found, for the log: where a project that is set up wrongly shows.
+fn log_summary(facts: &[(PathBuf, FileFacts)], tops: &[usize], included: &FxHashSet<String>, order: &[usize]) {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let headers = facts.len() - tops.len();
+    log::debug!("auto-configuration: {} files compiled on their own, {headers} only through `include", tops.len());
+    // Headers by extension that nothing includes are never compiled.
+    let unused: Vec<&PathBuf> = facts.iter().map(|(p, _)| p).filter(|p| is_header(p) && !included.contains(&name(p))).collect();
+    if !unused.is_empty() {
+        log::debug!("auto-configuration: {} headers are included by no file and not compiled, e.g. {}", unused.len(), unused.iter().take(5).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
+    }
+    // Files that `include files whose name no file in the folder has.
+    let names: FxHashSet<String> = facts.iter().map(|(p, _)| name(p)).collect();
+    let mut missing: Vec<&String> = included.iter().filter(|i| !names.contains(*i) && i.as_str() != "uvm_macros.svh").collect();
+    missing.sort();
+    if !missing.is_empty() {
+        log::debug!("auto-configuration: {} included files are not in the folder: {}", missing.len(), missing.iter().take(20).map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    // Packages defined more than once: each use picks the nearest copy.
+    let mut pkgs: FxHashMap<&str, Vec<&PathBuf>> = FxHashMap::default();
+    for (p, f) in facts {
+        for pk in &f.packages {
+            pkgs.entry(pk.as_str()).or_default().push(p);
+        }
+    }
+    let mut dups: Vec<(&str, Vec<&PathBuf>)> = pkgs.into_iter().filter(|(_, v)| v.len() > 1).collect();
+    dups.sort();
+    if !dups.is_empty() {
+        log::debug!("auto-configuration: {} packages are defined in more than one file; uses pick the nearest copy that fits", dups.len());
+        for (pk, v) in &dups {
+            log::debug!("auto-configuration:   package {pk}: {}", v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
+        }
+    }
+    for (n, &i) in order.iter().enumerate() {
+        log::trace!("auto-configuration: compile order {}: {}", n + 1, facts[i].0.display());
+    }
 }

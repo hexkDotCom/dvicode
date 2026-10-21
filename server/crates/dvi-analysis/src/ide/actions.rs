@@ -114,8 +114,8 @@ impl Analysis {
                 _ => out.extend(self.scope_members(sr)),
             }
             for imp in &d.imports {
-                if let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()) {
-                    for m in self.scope_members(*p) {
+                if let Some(p) = self.package(sr.unit, &imp.pkg) {
+                    for m in self.scope_members(p) {
                         if imp.item.as_ref().map_or(true, |i| *i == self.decl(m).name) {
                             out.push(m);
                         }

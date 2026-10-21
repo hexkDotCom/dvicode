@@ -158,6 +158,9 @@ pub struct Analysis {
     /// `` `ifdef ``, by region (file, start). Counted for each snapshot when first needed
     /// (`Analysis::hidden_uses`).
     pub hidden_uses: Arc<std::sync::OnceLock<FxHashMap<(FileId, u32), usize>>>,
+    /// Without a build file: the copy of a design element defined more than once that each
+    /// instance means (`Analysis::instance_definitions`).
+    pub instance_defs: Arc<std::sync::OnceLock<FxHashMap<(UnitId, Span), DeclRef>>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -361,6 +364,7 @@ impl Analysis {
             file_units: Arc::new(FxHashMap::default()),
             build_ms: 0,
             hidden_uses: Arc::default(),
+            instance_defs: Arc::default(),
         };
         a.reindex();
         a.update_library_units(Some(progress));
@@ -589,6 +593,7 @@ impl Analysis {
         }
         self.global = Arc::new(g);
         self.file_units = Arc::new(fu);
+        self.instance_defs = Arc::default();
     }
 
     pub fn unit(&self, id: UnitId) -> &Arc<Unit> {
@@ -622,6 +627,7 @@ impl Analysis {
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
+        next.instance_defs = Arc::default();
         let rebuilt: Vec<Unit> = affected
             .par_iter()
             .map(|&uid| {
@@ -798,6 +804,7 @@ impl Analysis {
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
+        next.instance_defs = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
         let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
@@ -821,6 +828,7 @@ impl Analysis {
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
+        next.instance_defs = Arc::default();
         for id in ids {
             next.units[id as usize] = None;
         }

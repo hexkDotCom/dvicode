@@ -113,6 +113,7 @@ impl Analysis {
         // Code removed by `ifdef (no build file) that hid names used elsewhere.
         let mut notices = Vec::new();
         self.hidden_code_notices(file, &mut notices);
+        self.missing_macro_notices(&mut out, &mut notices);
         for d in notices {
             push(d, &mut out);
         }
@@ -293,21 +294,25 @@ impl Analysis {
                 }
             }
             for imp in &d.imports {
-                if let Some(gap) = self.import_gap(imp) {
+                if let Some(gap) = self.import_gap(uid, imp) {
                     return Some(gap);
                 }
             }
             cur = d.parent;
         }
         let root = u.parsed.decl(ParsedUnit::ROOT);
-        root.imports.iter().find_map(|i| self.import_gap(i))
+        root.imports.iter().find_map(|i| self.import_gap(uid, i))
     }
 
     /// `None` when the import brings in only names we know: its package exists and, for
     /// `pkg::*`, has no members we cannot see; `pkg::item` is complete when the item is found.
     /// Otherwise the region of the package removed by `` `ifdef `` (`None`: no such package).
-    fn import_gap(&self, imp: &dvi_syntax::ast::Import) -> Option<Option<Span>> {
-        let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()).copied() else { return Some(None) };
+    fn import_gap(&self, uid: UnitId, imp: &dvi_syntax::ast::Import) -> Option<Option<Span>> {
+        let found = match &imp.item {
+            Some(item) => self.package_with(uid, &imp.pkg, item),
+            None => self.package(uid, &imp.pkg),
+        };
+        let Some(p) = found else { return Some(None) };
         if imp.item.as_ref().is_some_and(|item| self.member_of(p, item).is_some()) {
             return None;
         }
@@ -427,6 +432,49 @@ impl Analysis {
                 format!("SKIPPED_CODE: `{name}` is not defined, so this code is skipped. {uses} in the project may need names declared here and are not checked. Without a build file DVICode does not know your simulator's defines: add +define+{name} to a build file (docs/build-files.md).")
             };
             out.push(Diag::info(span, "SKIPPED_CODE", msg));
+        }
+    }
+
+    /// Without a build file, a macro that no file in the folder defines usually comes from the
+    /// simulator's command line (`+define+WIDTH=4`) or from a library outside the folder, which
+    /// DVICode cannot know. Instead of an error on each use, one notice in each file, on the
+    /// first use of the macro there, says how many uses are not expanded.
+    fn missing_macro_notices(&self, out: &mut Vec<Diag>, notices: &mut Vec<Diag>) {
+        if self.setup.config.build_file.is_some() {
+            return;
+        }
+        let mut uses: Vec<(SmolStr, Span)> = Vec::new();
+        out.retain(|d| {
+            if d.code != "UNDEFINED_MACRO" {
+                return true;
+            }
+            let Some(name) = d.message.strip_prefix("Macro `").and_then(|m| m.strip_suffix(" is not defined")) else { return true };
+            if self.global.macros.contains_key(name) {
+                return true;
+            }
+            uses.push((SmolStr::new(name), d.span));
+            false
+        });
+        let mut first: Vec<(Span, SmolStr, usize)> = Vec::new();
+        for (name, span) in uses {
+            match first.iter_mut().find(|(_, n, _)| *n == name) {
+                Some(f) => {
+                    f.2 += 1;
+                    if span.start < f.0.start {
+                        f.0 = span;
+                    }
+                }
+                None => first.push((span, name, 1)),
+            }
+        }
+        first.sort_by_key(|(s, _, _)| s.start);
+        for (span, name, n) in first {
+            let uses = if n == 1 { "Its use in this file is".to_string() } else { format!("Its {n} uses in this file are") };
+            notices.push(Diag::info(
+                span,
+                "UNDEFINED_MACRO",
+                format!("Macro `{name} is not defined in any file of the folder. {uses} not expanded. Without a build file DVICode does not know your simulator's defines or libraries outside the folder: add +define+{name}=... or the files that define it to a build file (docs/build-files.md)."),
+            ));
         }
     }
 

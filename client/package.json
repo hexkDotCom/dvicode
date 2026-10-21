@@ -250,7 +250,7 @@
             "trace"
           ],
           "default": "info",
-          "description": "Server log level (shown in the DVICode output channel)."
+          "description": "Server log level (shown in the DVICode output channel). `debug` also shows how the build file and its argument files were read and, without a build file, which folders auto-configuration skipped and why; `trace` lists every file and the compile order."
         },
         "dvicode.server.extraArgs": {
           "type": "array",

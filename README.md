@@ -121,6 +121,7 @@ testbench; it needs no UVM installation.
 | `dvicode.buildFile` | | Build configuration (relative to the folder), or `auto` |
 | `dvicode.env` | `{}` | Variables for `$VAR` in build files |
 | `dvicode.uvmHome` | | UVM location for `-uvm` when `$UVM_HOME` is not set |
+| `dvicode.server.logLevel` | `info` | Engine log in the DVICode output channel; `debug` shows how the build file or the folder was read, `trace` every file |
 | `dvicode.maxProblems` | `1000` | Problems shown after a full build. Open files are exempt from this limit; per-file limits still apply |
 
 ## FAQ
@@ -142,6 +143,15 @@ names.
 **How do I set up UVM?** Put `-uvm` in the build file and set `UVM_HOME` (or the
 `dvicode.uvmHome` setting, or `-uvmhome DIR` in the build file) to the UVM installation.
 Auto-configuration adds UVM by itself when the sources use it.
+
+**DVICode reports errors on code that compiles. How do I find out why?** Most often the
+project is read differently from your simulator's flow: a missing define, include directory or
+file. Set `dvicode.server.logLevel` to `debug` and choose **Restart Server** when DVICode
+offers it: the DVICode output channel then shows every argument file read and what it
+added, or, without a build file, which folders were skipped and why, headers that no file
+includes, included files that are not in the folder and packages defined more than once.
+`trace` also lists every file in compile order. On the command line,
+`dvicode-server check <folder> --log-level debug` prints the same.
 
 **Can it run next to another SystemVerilog extension?** Yes, but both will report problems
 and offer completions. If that is noisy, turn those features off in the other extension's

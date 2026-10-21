@@ -350,8 +350,8 @@ impl Analysis {
                 push(self, m, &mut out, &mut seen);
             }
             for imp in &d.imports {
-                if let Some(p) = self.global.packages.get(&imp.pkg).and_then(|v| v.first()) {
-                    for m in self.scope_members(*p) {
+                if let Some(p) = self.package(sr.unit, &imp.pkg) {
+                    for m in self.scope_members(p) {
                         if imp.item.as_ref().map_or(true, |i| *i == self.decl(m).name) {
                             push(self, m, &mut out, &mut seen);
                         }

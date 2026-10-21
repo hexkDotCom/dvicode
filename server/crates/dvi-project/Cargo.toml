@@ -9,3 +9,4 @@ dvi-syntax.workspace = true
 smol_str.workspace = true
 rustc-hash.workspace = true
 rayon.workspace = true
+log.workspace = true

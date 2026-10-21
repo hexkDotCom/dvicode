@@ -43,8 +43,15 @@ fn main() {
                 return;
             }
             "check" => {
-                logger::init(log::LevelFilter::Warn, None);
-                std::process::exit(check::run(&args[i + 1..]));
+                // `check ... --log-level debug` shows how the build file or the folder was read.
+                let mut rest: Vec<String> = args[i + 1..].to_vec();
+                let mut level = log::LevelFilter::Warn;
+                if let Some(at) = rest.iter().position(|a| a == "--log-level") {
+                    level = rest.get(at + 1).and_then(|l| l.parse().ok()).unwrap_or(log::LevelFilter::Debug);
+                    rest.drain(at..(at + 2).min(rest.len()));
+                }
+                logger::init(level, None);
+                std::process::exit(check::run(&rest));
             }
             "--stdio" => {}
             "--listen" | "--token" => {
