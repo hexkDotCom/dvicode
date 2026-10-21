@@ -746,3 +746,45 @@ fn unnamed_instance_delay_names_a_parameter() {
     let p = problems(&a);
     assert!(p.len() == 1 && p[0].contains("'NO_SUCH'"), "{p:?}");
 }
+
+#[test]
+fn conditional_enum_items_are_package_members() {
+    // Enum items are visible in the package: code removed inside the enum may declare one.
+    let (_, root) = project(
+        "hiddenenum",
+        &[
+            ("p.sv", "package p;\n  typedef enum { A,\n`ifdef OPTIONAL\n    B,\n`endif\n    C } e_t;\nendpackage\n"),
+            ("m.sv", "module m;\n  import p::*;\n  e_t e;\n  initial e = B;\nendmodule\n"),
+        ],
+    );
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn macro_named_by_an_actual_expanded_through_a_function_macro() {
+    clean(
+        "formalexpanded2",
+        &[("t.sv", "`define ID(X) X\n`define SELECT `ID(DECL)\n`define DECL(N) int N;\n`define APPLY(M, N) `M(N)\nmodule m;\n  `APPLY(`SELECT, n)\n  initial n = 0;\nendmodule\n")],
+    );
+    // A macro that names itself through the actual stops at the depth limit.
+    let (a, _) = project("formalrecursive", &[("t.sv", "`define APPLY(M, N) `M(N)\n`define SELF `APPLY(`SELF, x)\nmodule m;\n  `SELF\nendmodule\n")]);
+    let _ = problems(&a);
+}
+
+#[test]
+fn a_variable_named_hard_after_a_comma_in_solve_before() {
+    use dvi_syntax::SourceProvider;
+    let text = "class C;\n  rand int a, b, hard;\n  constraint c { solve a before b, hard; solve a before b hard; }\nendclass\n";
+    let (a, root) = project("solvecomma", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    // Both uses of the variable are references of its declaration.
+    let decl = text.find("hard;").unwrap() as u32;
+    let mut uses: Vec<(u32, u32)> = a.references(f, decl, false).iter().map(|l| (l.range.start.line, l.range.start.character)).collect();
+    uses.sort();
+    let col = text.lines().nth(2).unwrap().find("b, hard").unwrap() as u32 + 3;
+    assert_eq!(uses, vec![(2, col)], "{uses:?}");
+    let _ = a.vfs.text(f);
+}

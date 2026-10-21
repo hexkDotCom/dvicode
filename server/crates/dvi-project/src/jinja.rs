@@ -23,6 +23,9 @@ pub struct Rendered {
     pub problems: Vec<(u32, u32, String)>,
     /// What each condition evaluated to: byte range of the tag and text.
     pub notes: Vec<(u32, u32, String)>,
+    /// For each offset in `text` (and its end), the offset in the original text: they differ
+    /// where a word was joined up over a tag.
+    pub map: Vec<u32>,
 }
 
 struct Branch {
@@ -125,8 +128,11 @@ pub fn render(text: &str, switches: &[String]) -> Rendered {
     for f in stack {
         problems.push((f.start.0, f.start.1, "{% if %} without {% endif %}".to_string()));
     }
-    let out = compact(b, &removed);
-    Rendered { text: String::from_utf8(out).unwrap_or_else(|_| text.to_string()), problems, notes }
+    let (out, map) = compact(b, &removed);
+    match String::from_utf8(out) {
+        Ok(t) => Rendered { text: t, problems, notes, map },
+        Err(_) => Rendered { text: text.to_string(), problems, notes, map: (0..=text.len() as u32).collect() },
+    }
 }
 
 /// Where `close` ends the tag whose text starts at `from`: outside the quoted strings of `{% %}`
@@ -151,33 +157,61 @@ fn find_close(b: &[u8], from: usize, close: &[u8]) -> Option<usize> {
 }
 
 /// The rendered bytes: spaces for removed ones, newlines kept. In a word (bytes up to kept
-/// whitespace), the kept bytes join up where its first kept byte was, and the spaces follow:
-/// `rtl/{% if x %}a{% else %}b{% endif %}.sv` becomes `rtl/a.sv` and spaces.
-fn compact(b: &[u8], removed: &[bool]) -> Vec<u8> {
-    let sep = |j: usize| b[j] == b'\n' || (!removed[j] && b[j].is_ascii_whitespace());
+/// whitespace outside quotes, as argument files split words), the kept bytes join up where its
+/// first kept byte was, and the spaces follow: `rtl/{% if x %}a{% else %}b{% endif %}.sv`
+/// becomes `rtl/a.sv` and spaces, `"a{# x #} b.f"` becomes `"a b.f"` and spaces. Also returns
+/// the original offset of each rendered offset.
+fn compact(b: &[u8], removed: &[bool]) -> (Vec<u8>, Vec<u32>) {
     let mut out = Vec::with_capacity(b.len());
+    let mut map: Vec<u32> = Vec::with_capacity(b.len() + 1);
     let mut i = 0;
     while i < b.len() {
-        if sep(i) {
+        if b[i] == b'\n' || (!removed[i] && b[i].is_ascii_whitespace()) {
             out.push(b[i]);
+            map.push(i as u32);
             i += 1;
             continue;
         }
+        // The word: up to kept whitespace outside quotes, or a newline.
         let start = i;
-        while i < b.len() && !sep(i) {
+        let mut quote: Option<u8> = None;
+        let mut prev_kept: Option<u8> = None;
+        while i < b.len() && b[i] != b'\n' {
+            let c = b[i];
+            if !removed[i] {
+                match quote {
+                    Some(q) if c == q => quote = None,
+                    Some(_) => {}
+                    None if c.is_ascii_whitespace() => break,
+                    None if c == b'"' || (c == b'\'' && !prev_kept.is_some_and(|p| p.is_ascii_alphanumeric() || p == b'_')) => quote = Some(c),
+                    None => {}
+                }
+                prev_kept = Some(c);
+            }
             i += 1;
         }
         let mut j = start;
         while j < i && removed[j] {
             out.push(b' ');
+            map.push(j as u32);
             j += 1;
         }
-        let before = out.len();
-        out.extend((j..i).filter(|k| !removed[*k]).map(|k| b[k]));
-        let kept = out.len() - before;
-        out.resize(out.len() + (i - j - kept), b' ');
+        let mut end = j;
+        for k in j..i {
+            if !removed[k] {
+                out.push(b[k]);
+                map.push(k as u32);
+                end = k + 1;
+            }
+        }
+        // The padding (and the end of the word) maps to just after its last kept byte.
+        while out.len() < i {
+            out.push(b' ');
+            map.push(end as u32);
+        }
     }
-    out
+    map.push(b.len() as u32);
+    (out, map)
 }
 
 fn eval_reported(expr: &str, switches: &[String], span: (u32, u32), problems: &mut Vec<(u32, u32, String)>) -> bool {
@@ -429,6 +463,21 @@ mod tests {
         assert_eq!(r.text.find("rtl/a.sv"), t.find("rtl/"));
         assert_eq!(r.text.find("post.sv"), t.find("post.sv"));
         assert_eq!(kept(t, &[]).0, vec!["pre.sv", "rtl/b.sv", "post.sv"]);
+    }
+
+    #[test]
+    fn quoted_words_and_offsets_of_joined_words() {
+        // Spaces inside quotes belong to the word; the padding goes after the closing quote.
+        let t = "-f \"a{# x #} b.f\" c.f\n";
+        let r = render(t, &[]);
+        assert!(r.text.starts_with("-f \"a b.f\" "), "{:?}", r.text);
+        assert_eq!(r.text.find("c.f"), t.find("c.f"));
+        // Offsets in the rendered text map back to the original.
+        let t = "rtl/{# x #}a.sv\n";
+        let r = render(t, &[]);
+        assert_eq!(&r.text[..8], "rtl/a.sv");
+        assert_eq!(r.map.len(), t.len() + 1);
+        assert_eq!((r.map[0], r.map[4], r.map[8]), (0, t.find("a.sv").unwrap() as u32, t.find('\n').unwrap() as u32));
     }
 
     #[test]

@@ -446,8 +446,9 @@ impl Builder {
 
     fn parse_text(&mut self, file: &Path, text: &str, file_base: PathBuf) {
         // Jinja conditions (`{% if "x" in fl_switches %}`): keep the text of the true branches.
+        let original = text;
         let rendered;
-        let text = if jinja::has_tags(text) {
+        let (text, map) = if jinja::has_tags(text) {
             rendered = jinja::render(text, &self.switches);
             let line_of = |off: u32| text.as_bytes()[..(off as usize).min(text.len())].iter().filter(|c| **c == b'\n').count() as u32;
             for (s, e, msg) in &rendered.problems {
@@ -458,11 +459,18 @@ impl Builder {
                 self.span = (*s, *e);
                 self.note(file, note.clone());
             }
-            rendered.text.as_str()
+            (rendered.text.as_str(), Some(&rendered.map))
         } else {
-            text
+            (text, None)
         };
-        let words = split_words(text);
+        let mut words = split_words(text);
+        // Ranges in the file: a word joined up over a tag maps back to where its text is.
+        if let Some(m) = map {
+            for w in &mut words {
+                w.start = m.get(w.start as usize).copied().unwrap_or(w.start);
+                w.end = m.get(w.end as usize).copied().unwrap_or(w.end);
+            }
+        }
         let mut base = file_base.clone();
         let mut i = 0;
         while i < words.len() {
@@ -471,7 +479,7 @@ impl Builder {
             let raw = w.text.clone();
             i += 1;
             self.span = (w.start, w.end);
-            self.word = (w.start, text.get(w.start as usize..w.end as usize).unwrap_or("").to_string());
+            self.word = (w.start, original.get(w.start as usize..w.end as usize).unwrap_or("").to_string());
             // `+name+arg`: arguments start after the name.
             self.focus_at = if self.word.1.starts_with('+') { self.word.1[1..].find('+').map_or(0, |i| i + 2) } else { 0 };
             // The value of an option: the next word, unless that is another option.
@@ -1308,6 +1316,25 @@ mod tests {
         assert_eq!(cfg.arg_files[0].switches, vec!["sim", "stub"]);
         let cfg = parse_build(&dir, &dir.join("x.build"), "-f list.f\n", &env);
         assert_eq!(files(&cfg), vec!["top.sv", "rtl.sv"]);
+    }
+
+    #[test]
+    fn jinja_joined_words_keep_their_ranges() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_jinja_ranges");
+        std::fs::create_dir_all(dir.join("rtl")).unwrap();
+        std::fs::write(dir.join("rtl/a.sv"), "").unwrap();
+        std::fs::write(dir.join("a b.f"), "").unwrap();
+        let text = "rtl/{# x #}a.sv\nrtl/{# x #}b.sv\n-f \"a{# x #} b.f\"\n";
+        let env = FxHashMap::default();
+        let ins = inspect(&dir, &dir.join("x.build"), text, &env, None);
+        // The link and the problem cover the whole word as written.
+        let a = (0u32, text.find('\n').unwrap() as u32);
+        assert!(ins.links.iter().any(|(s, e, p)| (*s, *e) == a && p.ends_with("a.sv")), "{:?}", ins.links);
+        let b_start = text.find("rtl/{# x #}b").unwrap() as u32;
+        assert_eq!(ins.problems.len(), 1, "{:?}", ins.problems);
+        assert_eq!(ins.problems[0].range, Some((b_start, b_start + 15)));
+        // A quoted name with a space is one argument file, and it is found.
+        assert!(ins.links.iter().any(|(_, _, p)| p.ends_with("a b.f")), "{:?}", ins.links);
     }
 
     #[test]

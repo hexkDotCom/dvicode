@@ -2079,7 +2079,8 @@ impl<'t> Parser<'t> {
             // `solve a, b before c [hard];` (`hard` is a VCS extension, after a variable).
             self.bump();
             let mut after_before = false;
-            let mut rhs = 0;
+            // The last thing read on the right of `before` was a variable (no `,` after it).
+            let mut var_done = false;
             loop {
                 let t = self.tok();
                 if t.kind == TokKind::Eof || t.is_punct(";") || t.is_punct("}") || t.kind == TokKind::Keyword && is_end_kw(&t.text) {
@@ -2088,13 +2089,12 @@ impl<'t> Parser<'t> {
                 if t.is_kw("before") {
                     after_before = true;
                 }
-                let modifier = t.text == "hard" && after_before && rhs > 0 && self.nth(1).is_punct(";");
+                let modifier = t.text == "hard" && var_done && self.nth(1).is_punct(";");
                 if t.kind == TokKind::Ident && !modifier {
                     self.chain(RefKind::Expr);
-                    if after_before {
-                        rhs += 1;
-                    }
+                    var_done = after_before;
                 } else {
+                    var_done = false;
                     self.bump();
                 }
             }

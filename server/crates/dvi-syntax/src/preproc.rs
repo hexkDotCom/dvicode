@@ -217,6 +217,7 @@ pub fn preprocess(
         inactive_start: None,
         file_set: FxHashMap::default(),
         depth_limit: MAX_MACRO_DEPTH,
+        outer_depth: 0,
     };
     pp.enter_file(root);
     pp.run();
@@ -245,6 +246,7 @@ pub fn expand_snippet(
         inactive_start: None,
         file_set: FxHashMap::default(),
         depth_limit: MAX_MACRO_DEPTH,
+        outer_depth: 0,
     };
     pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
@@ -303,6 +305,9 @@ struct Pp<'a> {
     inactive_start: Option<(FileId, u32)>,
     file_set: FxHashMap<FileId, ()>,
     depth_limit: usize,
+    /// Macro levels already open around this preprocessor (when it expands an actual argument
+    /// for [`Pp::called_name`]); they count against the depth limit.
+    outer_depth: usize,
 }
 
 impl<'a> Pp<'a> {
@@ -336,7 +341,7 @@ impl<'a> Pp<'a> {
     }
 
     fn macro_depth(&self) -> usize {
-        self.frames.iter().filter(|f| matches!(f.kind, FrameKind::Macro { .. })).count()
+        self.outer_depth + self.frames.iter().filter(|f| matches!(f.kind, FrameKind::Macro { .. })).count()
     }
 
     fn in_macro(&self) -> Option<Span> {
@@ -951,7 +956,7 @@ impl<'a> Pp<'a> {
             return;
         }
         let first_flags = tok.flags & (flags::NL_BEFORE | flags::WS_BEFORE);
-        let toks = substitute(&def, &args, site, first_flags, &|t| self.called_name(t));
+        let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site));
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
@@ -962,20 +967,37 @@ impl<'a> Pp<'a> {
 
     /// The macro an actual argument names in `` `FORMAL(...) ``: an identifier names itself; a
     /// `` `NAME `` is expanded first (when it is a plain name, as in `` `define SELECT DECL ``).
-    fn called_name(&self, t: &Token) -> SmolStr {
-        let mut cur = t;
-        for _ in 0..MAX_MACRO_DEPTH {
-            if cur.kind != TokKind::Directive {
-                break;
-            }
-            match self.macros.get(&cur.text) {
-                Some(d) if d.params.is_none() && d.body.len() == 1 && matches!(d.body[0].kind, TokKind::Ident | TokKind::Keyword | TokKind::Directive) => {
-                    cur = &d.body[0];
-                }
-                _ => break,
-            }
+    /// Expanded like any other text (`` `define SELECT `ID(DECL) `` names DECL), within the depth
+    /// limit of the expansion it is part of. `None` when it is not one name.
+    fn called_name(&self, actual: &[Token], site: Span) -> Option<SmolStr> {
+        let name = |t: &Token| matches!(t.kind, TokKind::Ident | TokKind::Keyword).then(|| t.text.clone());
+        match actual {
+            [t] if t.kind != TokKind::Directive => return name(t),
+            [t, ..] if t.kind == TokKind::Directive => {}
+            _ => return None,
         }
-        cur.text.clone()
+        let depth = self.macro_depth() + 1;
+        if depth >= self.depth_limit {
+            return None;
+        }
+        let mut pp = Pp {
+            src: self.src,
+            cfg: self.cfg,
+            macros: self.macros.clone(),
+            frames: Vec::new(),
+            conds: Vec::new(),
+            res: PpResult::default(),
+            inactive_start: None,
+            file_set: FxHashMap::default(),
+            depth_limit: self.depth_limit,
+            outer_depth: depth,
+        };
+        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
+        pp.run();
+        match pp.res.tokens.as_slice() {
+            [t] => name(t),
+            _ => None,
+        }
     }
 
     /// Collects macro actual arguments after the opening parenthesis. Returns the arguments
@@ -1045,7 +1067,7 @@ const COMPILER_DIRECTIVES: &[&str] = &[
 ];
 
 /// `called` gives the macro an actual names after a backtick (see [`Pp::called_name`]).
-fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8, called: &dyn Fn(&Token) -> SmolStr) -> Vec<Token> {
+fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8, called: &dyn Fn(&[Token]) -> Option<SmolStr>) -> Vec<Token> {
     let params = def.params.as_deref().unwrap_or(&[]);
     let param_index = |name: &str| params.iter().position(|p| p.name == name);
     let body_tok = |t: &Token| -> Token {
@@ -1120,14 +1142,11 @@ fn substitute(def: &MacroDef, args: &[Vec<Token>], site: Span, first_flags: u8, 
                 let a = actual(param_index(&t.text).unwrap());
                 let mut d = body_tok(t);
                 d.flags |= flags::PASTED;
-                match a.first() {
-                    Some(f) if a.len() == 1 && matches!(f.kind, TokKind::Ident | TokKind::Keyword | TokKind::Directive) => {
-                        d.text = called(f);
-                        out.push(d);
-                    }
-                    // Anything else (empty, several tokens): the formal's own name.
-                    _ => out.push(d),
+                // Anything else (empty, several names): the formal's own name.
+                if let Some(n) = called(&a) {
+                    d.text = n;
                 }
+                out.push(d);
             }
             _ => out.push(body_tok(t)),
         }

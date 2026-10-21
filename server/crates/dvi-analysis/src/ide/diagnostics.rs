@@ -240,11 +240,19 @@ impl Analysis {
         let u = self.unit(d.unit);
         let within = |outer: Span, s: &Span| s.file == outer.file && outer.start <= s.start && s.end <= outer.end;
         // Only code removed directly in its scope: in a method or a struct it would declare
-        // locals or fields, not members.
-        u.inactive
-            .iter()
-            .filter(|s| within(span, s))
-            .any(|s| !decl.children.iter().any(|c| within(u.parsed.decl(*c).span, s)))
+        // locals or fields, not members. Enum items are members of the enclosing scope, so
+        // code removed in an enum type (or its typedef) counts.
+        let direct = |s: &Span| {
+            let mut cur = decl;
+            loop {
+                match cur.children.iter().map(|c| u.parsed.decl(*c)).find(|c| within(c.span, s)) {
+                    None => return true,
+                    Some(c) if matches!(c.kind, DeclKind::EnumType | DeclKind::Typedef) => cur = c,
+                    Some(_) => return false,
+                }
+            }
+        };
+        u.inactive.iter().filter(|s| within(span, s)).any(direct)
     }
 
     /// Enclosing module/interface/program/checker.
