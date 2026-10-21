@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 (preview)
+
+Checked on 68 configurations of large closed-source UVM testbenches, besides the public corpus,
+and reviewed in three rounds.
 
 **Build files**
 
