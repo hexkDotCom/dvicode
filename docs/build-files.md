@@ -11,8 +11,10 @@ skipped. DVICode adds a few directives of its own, all starting with `+dvicode_`
 - [Simulator options](#simulator-options)
 - [DVICode directives](#dvicode-directives)
 - [Paths, wildcards and environment variables](#paths-wildcards-and-environment-variables)
+- [Jinja-templated argument files](#jinja-templated-argument-files)
 - [Invocations](#invocations)
 - [Auto-configuration](#auto-configuration)
+- [From FuseSoC and Bender](#from-fusesoc-and-bender)
 - [Plusargs](#plusargs)
 - [Problems in build files](#problems-in-build-files)
 - [Examples](#examples)
@@ -74,6 +76,7 @@ value. Other `+options+` and `-options` are skipped.
 |---|---|
 | `+dvicode_init[+MODE]` | Start a new [invocation](#invocations): forget the macros, include directories and libraries of the previous one. `MODE` names the compiler being emulated and only changes how relative paths in `-f` files resolve. |
 | `+dvicode_init_auto[+MODE]` | Start an invocation that is [auto-configured](#auto-configuration). Files (and wildcards) listed after it are added to what auto-configuration finds. |
+| `+dvicode_init_from_simlog[+MODE]+LOG` | Start an invocation with what a VCS or vlogan compile log shows: the files of its `Parsing design file` lines in order, its `Parsing library file` lines as library files, the `+define+` and `+incdir+` of its command line (`Command: vcs ...`), and the folders of its `Parsing included file` lines as include directories. Relative paths are from the log's folder. Use one line per log (one per `vlogan` run, for example). Hover over the log path to see what was read. |
 | `+dvicode_setenv+NAME=VALUE` | Set an environment variable for the rest of the build file (and for nested `-f` files). `VALUE` may use other variables. |
 | `+dvicode_setenv_no_override+NAME=VALUE` | Same, unless `NAME` is already set (in the environment, in `dvicode.env`, or earlier in the file). |
 | `+dvicode_undefine+NAME` | Same as `+undefine+NAME`. |
@@ -180,8 +183,10 @@ folder and:
 
 Hidden directories, common build output directories (`work`, `INCA_libs`, `xcelium.d`,
 `csrc`, `simv.daidir`, `obj_dir`, `node_modules`, `target`, ...) and whatever the project's
-top-level `.gitignore` ignores are skipped. Its patterns may use `*`, `?` and `**`; `!`
-exceptions and `[...]` character classes are not supported. UVM from `$UVM_HOME` (or
+top-level `.gitignore` ignores are skipped. Its patterns may use `*`, `?`, `**`, character
+classes (`[abc]`, `[a-z]`, `[!abc]`) and `!` lines that re-include what an earlier line
+ignored (the last matching line wins, and, as in Git, nothing is re-included from a folder
+that is itself ignored). UVM from `$UVM_HOME` (or
 `dvicode.uvmHome` when `$UVM_HOME` is not set) is still used when it lives in an ignored folder.
 Symbolic links to directories are not followed (list such sources in a build file), and the scan
 stops after 50,000 files.
@@ -224,10 +229,55 @@ and argument file as it is read (with the folder its relative paths start from),
 files, wildcards and how many files they matched, defines, `+dvicode_setenv+` variables, the UVM
 library, a summary of each invocation, and every build-file problem. Without a build file it
 shows the folders auto-configuration skipped and why (hidden, build output, `.gitignore`,
-symbolic link), `.gitignore` lines it cannot apply, how many sources it found, headers that no
+symbolic link), the `.gitignore` patterns it applies, how many sources it found, headers that no
 file includes, included files that are not in the folder, packages defined more than once, and
 whether UVM was added. `trace` adds every file and the compile order. From a terminal:
 `dvicode-server check <folder> [--build FILE] --log-level debug`.
+
+## From FuseSoC and Bender
+
+Projects described as [FuseSoC](https://github.com/olofk/fusesoc) cores or
+[Bender](https://github.com/pulp-platform/bender) manifests (OpenTitan, PULP) can give DVICode
+the file list their own tool produces; reference it from `.dvicode/default.build` with `-F`
+(relative paths from the list's own folder). Regenerate the list when the core or manifest
+changes.
+
+**FuseSoC.** `--setup` writes the simulator's files without running anything, including what
+the core's generators produce (register packages, for example). From the project folder:
+
+```bash
+fusesoc --cores-root hw run --no-export --target=sim --setup lowrisc:dv:uart_sim:0.1
+```
+
+OpenTitan also needs `--mapping=lowrisc:prim_generic:all:0.1`, as its `dvsim` flow passes it.
+The list is `build/<core>/sim-<tool>/<core>.scr` (or `.f`, depending on the tool), with
+`+incdir+`, `+define+` and the files in compile order. The build file adds what the flow gives
+the simulator on its command line:
+
+```
+// .dvicode/default.build
+-uvm
++define+UVM
++define+SIMULATION
+-F build/lowrisc_dv_uart_sim_0.1/sim-vcs/lowrisc_dv_uart_sim_0.1.scr
+-top tb
+```
+
+**Bender.** `bender script flist` prints the files of the manifest and its dependencies;
+`bender script flist-plus` adds the `+incdir+` and `+define+` lines. Pick the targets the
+simulation uses with `-t`:
+
+```bash
+bender script flist-plus -t simulation -t test > bender.f
+```
+
+```
+// .dvicode/default.build
+-F bender.f
+```
+
+DVICode's own test corpus builds OpenTitan and PULP projects this way
+(`scripts/corpus/fusesoc_build.py`, `scripts/corpus/bender_flist.py`).
 
 ## Plusargs
 

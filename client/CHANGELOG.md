@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- `+dvicode_init_from_simlog+MODE+LOG` in a build file compiles what a VCS or vlogan compile log
+  shows: its parsed design and library files in order, the defines and include directories of
+  its command line, and the folders of the files it included. Before, it fell back to
+  auto-configuration.
+- The UVM Verification Hierarchy follows the helper methods `build_phase` calls
+  (`build_envs()`, `this.build_agents()`), so tests of large testbenches that build their
+  environment in helpers expand instead of showing no children.
+- Snippets for UVM sequence items, sequences, drivers, monitors, agents, environments, tests and
+  scoreboards (type `uvm_` in a SystemVerilog file).
+- Auto-configuration applies `!` lines and `[...]` character classes of the project's
+  `.gitignore`, as Git does.
+- docs/build-files.md: how to use the file lists FuseSoC and Bender produce.
+
 ## 0.1.4 (preview)
 
 **Opening a project without a build file**
