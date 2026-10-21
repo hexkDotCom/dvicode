@@ -1,0 +1,53 @@
+name: Setup problem
+description: The engine does not start, cannot reach your files, or the project is not found (WSL, SSH, bsub, path mappings).
+labels: [setup]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **DVICode: Report Issue** in VS Code fills in the setup and the log for you. Please
+        check that nothing you paste here is confidential: logs contain host names and paths.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and the message or status you saw.
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Where the engine should run
+      options:
+        - On this computer (Windows)
+        - On this computer (macOS)
+        - On this computer (Linux)
+        - WSL
+        - SSH host (Open Folder on the Server)
+        - Remote-SSH or Remote-WSL window
+        - TCP or custom launch command (bsub, qrsh, ...)
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: DVICode settings
+      description: Your `dvicode.*` settings (replace host names if you need to).
+      render: json
+  - type: textarea
+    id: versions
+    attributes:
+      label: Setup
+      description: DVICode version, VS Code version, your operating system and the remote host's distribution.
+      placeholder: |
+        DVICode 0.1.3
+        VS Code 1.105, Windows 11 x64
+        Remote: RHEL 8 x64
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: 'From **DVICode: Show Server Output**.'
+      render: text

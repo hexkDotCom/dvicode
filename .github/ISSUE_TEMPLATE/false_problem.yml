@@ -1,0 +1,45 @@
+name: False problem
+description: DVICode reports an error or warning on code that your simulator accepts.
+labels: [bug, false-problem]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! False problems are the bugs we most want to hear about. Please
+        reduce the code to a small sample with invented names: nothing you paste here should be
+        confidential.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem shown
+      description: The message from the Problems view, with its code (for example `UNDECLARED_IDENTIFIER`).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Code sample
+      description: The smallest SystemVerilog code that shows the problem, and the line it is reported on.
+      render: systemverilog
+    validations:
+      required: true
+  - type: input
+    id: simulator
+    attributes:
+      label: Simulator that accepts it
+      description: Which simulator (and options, if they matter) compiles this code without the error.
+      placeholder: e.g. Questa 2024.1, VCS, Xcelium, Verilator 5.028
+  - type: textarea
+    id: build
+    attributes:
+      label: Build file
+      description: Your `.dvicode/*.build` file, or "auto-configuration".
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: DVICode version
+      placeholder: "0.1.3"
+    validations:
+      required: true

@@ -9,7 +9,8 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 ## Features
 
 - **Errors as you type**: undeclared names, unknown types, members and ports, missing
-  includes and macros, syntax mistakes.
+  includes and macros, syntax mistakes. No errors on UVM 1.2, OpenTitan, Ibex, core-v-verif,
+  CVA6 and PULP AXI with their own file lists.
 - **Go anywhere**: definitions, references, implementations and overrides, through macros,
   packages, class inheritance and port connections.
 - **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,

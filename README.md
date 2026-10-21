@@ -1,5 +1,9 @@
 # DVICode: DV Intelligence for VS Code
 
+[![VS Code Marketplace](https://img.shields.io/badge/VS%20Code%20Marketplace-hexk.dvicode-007ACC)](https://marketplace.visualstudio.com/items?itemName=hexk.dvicode)
+[![Open VSX](https://img.shields.io/open-vsx/v/hexk/dvicode?label=Open%20VSX)](https://open-vsx.org/extension/hexk/dvicode)
+[![License](https://img.shields.io/github/license/hexkDotCom/dvicode)](LICENSE)
+
 **Free, open-source SystemVerilog and UVM navigation for VS Code.**
 
 Follow definitions across packages and class hierarchies, see what a macro expands to, and
@@ -12,7 +16,8 @@ currently in preview.
 
 - **Errors as you type**: undeclared names, unknown types, members and ports, missing
   includes and macros, syntax mistakes. Tested to report no problems on UVM 1.2, UVM 1.1d and
-  the UBUS example.
+  the UBUS example, and no errors on OpenTitan, Ibex, core-v-verif, CVA6 and PULP AXI with
+  their own file lists (see [the test corpus](scripts/corpus/README.md)).
 - **Go anywhere**: definitions, references, implementations and overrides, through macros,
   packages, class inheritance and port connections.
 - **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,
@@ -37,9 +42,13 @@ currently in preview.
 
 ## Getting started
 
-1. **Install** the extension: download the `.vsix` for your platform from the
-   [releases page](https://github.com/hexkDotCom/dvicode/releases), then in VS Code open the
-   Extensions view, choose **...** > **Install from VSIX...** and pick the file.
+1. **Install** the extension: in VS Code, open the Extensions view (**Ctrl+Shift+X**),
+   search for **DVICode** and choose **Install**, or run
+   `code --install-extension hexk.dvicode`. VSCodium, Cursor, Windsurf and other VS Code
+   editors install it from [Open VSX](https://open-vsx.org/extension/hexk/dvicode).
+   Without internet access, download the `.vsix` for your platform from the
+   [releases page](https://github.com/hexkDotCom/dvicode/releases), then choose **...** >
+   **Install from VSIX...** in the Extensions view.
 2. **Open your project folder.** DVICode picks where to run:
 
    | Your setup | What happens |

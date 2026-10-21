@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/hexkDotCom/dvicode/discussions
+    about: How do I set up my project, does DVICode support X, show what you built.
   - name: Documentation
     url: https://github.com/hexkDotCom/dvicode#readme
     about: Settings, build files and remote setups.

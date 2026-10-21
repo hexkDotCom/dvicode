@@ -1,5 +1,5 @@
 name: Bug report
-description: Something DVICode gets wrong, a false problem, a crash or an internal error.
+description: A crash, an internal error, or wrong navigation, hover, completion, hierarchy or macro expansion.
 labels: [bug]
 body:
   - type: markdown
@@ -45,7 +45,7 @@ body:
     id: versions
     attributes:
       label: Setup
-      description: DVICode version, VS Code version and operating system (**DVICode: Report Issue** fills this in).
+      description: 'DVICode version, VS Code version and operating system (**DVICode: Report Issue** fills this in).'
       placeholder: |
         DVICode 0.1.0, engine 0.1.0
         VS Code 1.96, Windows 11 x64
@@ -55,5 +55,5 @@ body:
     id: log
     attributes:
       label: Log
-      description: From **DVICode: Show Server Output**, especially lines with "internal error".
+      description: 'From **DVICode: Show Server Output**, especially lines with "internal error".'
       render: text

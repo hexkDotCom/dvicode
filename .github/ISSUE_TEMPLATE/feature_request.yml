@@ -1,0 +1,28 @@
+name: Feature request
+description: Something DVICode should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you are trying to do
+      description: The task in your daily work, and how you do it today (another tool, grep, the simulator's GUI, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How DVICode could support it. A code sample shows best what you would like to see.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Navigation, hover, completion
+        - Problems
+        - Design or UVM hierarchy
+        - Macros and preprocessor
+        - Build files and auto-configuration
+        - Remote setups (WSL, SSH, farm)
+        - Other

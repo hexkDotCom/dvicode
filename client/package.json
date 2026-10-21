@@ -49,7 +49,21 @@
     "verilog",
     "uvm",
     "verification",
-    "hdl"
+    "hdl",
+    "sv",
+    "verilog-hdl",
+    "system verilog",
+    "language server",
+    "lsp",
+    "design verification",
+    "dv",
+    "asic",
+    "fpga",
+    "rtl",
+    "testbench",
+    "eda",
+    "ssh",
+    "wsl"
   ],
   "icon": "images/icon.png",
   "extensionKind": [
