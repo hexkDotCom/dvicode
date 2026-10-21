@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.5 (preview)
 
 - `+dvicode_init_from_simlog+MODE+LOG` in a build file compiles what a VCS or vlogan compile log
   shows: its parsed design and library files in order, the defines and include directories of
