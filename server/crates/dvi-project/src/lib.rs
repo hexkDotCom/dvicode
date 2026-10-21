@@ -8,6 +8,7 @@ mod auto;
 mod glob;
 mod jinja;
 mod progress;
+mod simlog;
 
 pub use auto::{auto_config, auto_config_with};
 pub use progress::{Phase, Progress};
@@ -745,15 +746,23 @@ impl Builder {
             }
         }
         match d {
-            "init" | "init_auto" | "init_from_simlog" => {
+            "init" | "init_auto" => {
                 let mode = args.first().cloned().unwrap_or_default();
                 self.start_invocation(&mode, d == "init_auto");
-                if d == "init_from_simlog" {
-                    self.problem(file, line, format!("+{prefix}_init_from_simlog is not supported yet; using auto-configuration"));
-                    if let Some(c) = self.cur.as_mut() {
-                        c.auto = true;
+            }
+            // `+dvicode_init_from_simlog[+MODE]+LOG`: an invocation with what the log shows.
+            "init_from_simlog" => {
+                let (mode, log) = match args.as_slice() {
+                    [log] => (String::new(), log.clone()),
+                    [mode, log, ..] => (mode.clone(), log.clone()),
+                    [] => {
+                        self.problem(file, line, format!("+{prefix}_init_from_simlog+ needs a simulation log"));
+                        return;
                     }
-                }
+                };
+                self.start_invocation(&mode, false);
+                self.focus(&log);
+                self.read_simlog(file, line, &log, base);
             }
             "setenv" | "env" | "setenv_no_override" => {
                 let kv = value();
@@ -953,6 +962,85 @@ impl Builder {
         self.reading.pop();
         self.depth -= 1;
         (self.span, self.word, self.focus_at) = (span, word, focus_at);
+    }
+
+    /// The files, library files, defines and include directories of a VCS or vlogan compile
+    /// log ([`simlog`]), into the current invocation. Relative paths in the log are from its
+    /// folder; the folders of the files it includes become include directories too (they cover
+    /// the `+incdir+` of `-f` lists the log does not show).
+    fn read_simlog(&mut self, file: &Path, line: u32, log: &str, base: &Path) {
+        let Some(path) = self.resolve(file, line, log, base) else { return };
+        let e = self.expand(log, true).unwrap_or_default();
+        self.link(file, &path);
+        let text = match std::fs::read(&path) {
+            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            Err(_) if !path.exists() => {
+                self.note(file, Self::describe_path(log, &e, &path, "simulation log"));
+                return self.problem(file, line, format!("Simulation log not found: {}", path.display()));
+            }
+            Err(err) => return self.problem(file, line, format!("Cannot read simulation log {}: {err}", path.display())),
+        };
+        let s = simlog::parse(&text);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
+        if s.files.is_empty() {
+            self.note(file, Self::describe_path(log, &e, &path, "simulation log"));
+            return self.problem(
+                file,
+                line,
+                format!("No compiled files in {}: not a VCS or vlogan compile log, or the compile stopped before parsing (look for 'Parsing design file')", path.display()),
+            );
+        }
+        for d in &s.defines {
+            self.add_define(d);
+        }
+        let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| absolutize(d, &dir)).collect();
+        for f in &s.included {
+            if let Some(parent) = absolutize(f, &dir).parent() {
+                if !incdirs.iter().any(|d| d == parent) {
+                    incdirs.push(parent.to_path_buf());
+                }
+            }
+        }
+        let files: Vec<PathBuf> = s.files.iter().map(|f| absolutize(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
+        let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| absolutize(f, &dir)).collect();
+        let missing: Vec<&PathBuf> = files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).collect();
+        log::debug!(
+            "build: simulation log {}: {} files, {} library files, {} defines, {} include directories ({} from included files){}",
+            path.display(),
+            files.len(),
+            lib_files.len(),
+            s.defines.len(),
+            incdirs.len(),
+            incdirs.len().saturating_sub(s.incdirs.len()),
+            if s.command { "" } else { "; no command line found" }
+        );
+        let mut note = format!(
+            "**simulation log** `{}`\n\n{} files, {} library files, {} defines, {} include directories",
+            path.display(),
+            files.len(),
+            lib_files.len(),
+            s.defines.len(),
+            incdirs.len()
+        );
+        if !s.command {
+            note.push_str("\n\nNo command line found in the log: no defines from it.");
+        }
+        if !missing.is_empty() {
+            note.push_str(&format!("\n\n{} of them are not on this machine", missing.len()));
+        }
+        self.note(file, note);
+        if !missing.is_empty() {
+            let first = missing[0].display().to_string();
+            self.problem(
+                file,
+                line,
+                format!("{} of the {} files in {} are not on this machine (first: {first}); the log may come from another machine", missing.len(), files.len() + lib_files.len(), path.display()),
+            );
+        }
+        let inv = self.inv();
+        inv.incdirs.extend(incdirs);
+        inv.files.extend(files);
+        inv.lib_files.extend(lib_files);
     }
 
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
@@ -1675,5 +1763,42 @@ mod tests {
         assert!(cfg.invocations[0].files.is_empty(), "{:?}", cfg.invocations[0].files);
         let cfg = parse_build(&dir, &file, "+dvicode_init_auto\n", &FxHashMap::default());
         assert_eq!(cfg.invocations[0].files, vec![dir.join("a.sv")]);
+    }
+
+    #[test]
+    fn an_invocation_from_a_vcs_compile_log() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_simlog");
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["run", "rtl", "inc", "lib"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        for f in ["rtl/pkg.sv", "rtl/top.sv", "inc/defs.svh", "lib/and2.v"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let top = dir.join("rtl/top.sv").display().to_string();
+        let log = format!(
+            "Command: vcs -sverilog +define+SIM +define+W=8 +incdir+../rtl -f files.f\nParsing design file '../rtl/pkg.sv'\nParsing included file '../inc/defs.svh'.\nParsing design file '{top}'\nParsing library file '../lib/and2.v'\nParsing design file '/elsewhere/gone.sv'\n"
+        );
+        std::fs::write(dir.join("run/compile.log"), log).unwrap();
+        let file = dir.join(".dvicode/default.build");
+        let text = "+dvicode_init_from_simlog+vcs.vlogan+run/compile.log\n";
+        let cfg = parse_build(&dir, &file, text, &FxHashMap::default());
+        let inv = &cfg.invocations[0];
+        assert_eq!(inv.mode, "vcs.vlogan");
+        // Relative paths from the log's folder, in the log's order.
+        assert_eq!(inv.files[..2], [dir.join("rtl/pkg.sv"), dir.join("rtl/top.sv")]);
+        assert_eq!(inv.lib_files, vec![dir.join("lib/and2.v")]);
+        assert_eq!(inv.incdirs, vec![dir.join("rtl"), dir.join("inc")]);
+        let defs: Vec<String> = inv.defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
+        assert_eq!(defs, vec!["SIM=", "W=8"]);
+        // One problem for the files that are not here, at the log path.
+        assert_eq!(cfg.problems.len(), 1, "{:?}", cfg.problems);
+        assert!(cfg.problems[0].message.starts_with("1 of the 4 files"), "{}", cfg.problems[0].message);
+        assert_eq!(at(text, &cfg.problems[0]), "run/compile.log");
+        // A log that is not a compile log, and one that is not there.
+        std::fs::write(dir.join("run/other.log"), "Simulation finished\n").unwrap();
+        let cfg = parse_build(&dir, &file, "+dvicode_init_from_simlog+run/other.log\n+dvicode_init_from_simlog+vcs+run/none.log\n", &FxHashMap::default());
+        let m = messages(&cfg.problems).join("\n");
+        assert!(m.contains("No compiled files in") && m.contains("Simulation log not found"), "{m}");
     }
 }
