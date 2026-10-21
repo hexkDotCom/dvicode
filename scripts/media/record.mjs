@@ -2,10 +2,12 @@
 // with the real UVM library: starts VS Code with an empty profile and the published DVICode,
 // drives it through its DevTools port, and records the window.
 //
-//   node scripts/media/record.mjs <uvm-home> [out-dir] [gif|shots|all]
+//   node scripts/media/record.mjs <uvm-home> [out-dir] [gif|gif-mouse|gif-edit|variants|shots|all]
 //
 // Windows, with VS Code installed and ffmpeg on the PATH. Leave the window alone while it runs.
-// Writes <out-dir>/dvicode-demo.gif and .mp4, hover.png, hierarchy.png and problems.png.
+// Writes <out-dir>/dvicode-demo.gif and .mp4 (keyboard), dvicode-demo-mouse.* (mouse only),
+// dvicode-demo-edit.* (mouse, a wrong type fixed from the lightbulb and a missing `;`: the README
+// animation), hover.png, hierarchy.png and problems.png.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const [uvmHome, outArg = path.join(repo, 'build', 'media'), what = 'all'] = process.argv.slice(2);
 if (!uvmHome || !fs.existsSync(path.join(uvmHome, 'src', 'uvm_pkg.sv'))) {
-  console.error('usage: node scripts/media/record.mjs <uvm-home (with src/uvm_pkg.sv)> [out-dir] [gif|shots|all]');
+  console.error('usage: node scripts/media/record.mjs <uvm-home (with src/uvm_pkg.sv)> [out-dir] [gif|gif-mouse|gif-edit|variants|shots|all]');
   process.exit(2);
 }
 const out = path.resolve(outArg);
@@ -63,12 +65,16 @@ function prepareProfile() {
     'editor.lineHeight': 22,
     'editor.minimap.enabled': false,
     'editor.stickyScroll.enabled': false,
-    'editor.hover.delay': 200,
+    'editor.hover.delay': 700,
     'editor.inlayHints.enabled': 'off',
     'editor.renderWhitespace': 'none',
     'breadcrumbs.enabled': false,
+    'window.menuStyle': 'custom',
+    'editor.lightbulb.enabled': 'on',
     'dvicode.uvmHome': uvmHome,
   }, null, 2));
+  // Closes the unsaved macro expansion without a visible command.
+  fs.writeFileSync(path.join(profile, 'User', 'keybindings.json'), JSON.stringify([{ key: 'ctrl+alt+shift+f9', command: 'workbench.action.revertAndCloseActiveEditor' }]));
   if (!fs.existsSync(exts) || !fs.readdirSync(exts).some((d) => d.startsWith('hexk.dvicode'))) {
     execFileSync(`"${CLI}"`, ['--extensions-dir', `"${exts}"`, '--user-data-dir', `"${profile}"`, '--install-extension', 'hexk.dvicode', '--force'], { stdio: 'inherit', shell: true });
   }
@@ -110,7 +116,7 @@ let mouse = { x: W / 2, y: H / 2 };
 
 const KEYS = {
   Enter: [13, 'Enter'], Escape: [27, 'Escape'], F12: [123, 'F12'], ArrowLeft: [37, 'ArrowLeft'], ArrowRight: [39, 'ArrowRight'],
-  ArrowDown: [40, 'ArrowDown'], Tab: [9, 'Tab'], Backspace: [8, 'Backspace'], '.': [190, '.', 'Period'],
+  ArrowDown: [40, 'ArrowDown'], Tab: [9, 'Tab'], Backspace: [8, 'Backspace'], '.': [190, '.', 'Period'], F9: [120, 'F9'], End: [35, 'End'],
 };
 async function key(spec) {
   // "ctrl+shift+p", "F12", "alt+ArrowLeft"
@@ -267,6 +273,75 @@ async function collapsePane(view) {
   const p = await cdp.eval(`(() => { const h = [...document.querySelectorAll('[id="workbench.view.extension.dvicode"] .pane-header')].find(h => h.textContent.includes(${JSON.stringify(view)}) && h.getAttribute('aria-expanded') === 'true'); if (!h) return null; const b = h.getBoundingClientRect(); return { x: b.left + 60, y: b.top + b.height / 2 }; })()`);
   if (p) await click(p.x, p.y);
 }
+async function rightClick(x, y) {
+  await moveTo(x, y);
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', clickCount: 1 });
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 });
+  await sleep(400);
+}
+async function doubleClick(x, y) {
+  await moveTo(x, y);
+  for (const n of [1, 2]) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: n });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: n });
+  }
+  await sleep(300);
+}
+/** Scrolls the active editor by dragging its scrollbar until line `line` is the first visible one. */
+async function scrollTo(line) {
+  const top = () => cdp.eval(`Math.min(...[...document.querySelectorAll('.editor-group-container.active .line-numbers')].map(e => +e.textContent).filter(n => n > 0))`);
+  const sb = await cdp.eval(`(() => { const s = document.querySelector('.editor-group-container.active .editor-scrollable > .scrollbar.vertical > .slider'); const r = s.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(r.height / 2, 20) }; })()`);
+  await moveTo(sb.x, sb.y, 14);
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: sb.x, y: sb.y, button: 'left', clickCount: 1 });
+  let y = sb.y;
+  for (let i = 0; i < 400 && (await top()) < line; i++) {
+    y += 2;
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: sb.x, y, button: 'left', buttons: 1 });
+    await cdp.eval(`window.__ptr(${sb.x}, ${y})`);
+    await sleep(12);
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: sb.x, y, button: 'left', clickCount: 1 });
+  mouse = { x: sb.x, y };
+  await sleep(400);
+}
+/** Center of the first visible element matching `sel` whose text or label includes `text`. */
+async function find(sel, text = '', ms = 6000) {
+  return waitFor(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(sel)})].find(e => e.offsetParent && (e.textContent + ' ' + (e.getAttribute('aria-label') || '')).includes(${JSON.stringify(text)})); if (!e) return null; const r = e.getBoundingClientRect(); return { x: r.left + Math.min(r.width / 2, 60), y: r.top + r.height / 2 }; })()`, ms, `${sel} "${text}"`);
+}
+/** Clicks an item of the open context menu (VS Code draws it in a shadow root). */
+async function menu(label) {
+  const p = await waitFor(`(() => {
+    const roots = [document, ...[...document.querySelectorAll('*')].filter(e => e.shadowRoot).map(e => e.shadowRoot)];
+    for (const r of roots) {
+      const it = [...r.querySelectorAll('[role="menuitem"], .action-menu-item, .action-item')].find(e => (e.textContent + ' ' + (e.getAttribute('aria-label') || '')).includes(${JSON.stringify(label)}) && e.getBoundingClientRect().height > 0);
+      if (it) { const b = it.getBoundingClientRect(); return { x: b.left + 50, y: b.top + b.height / 2 }; }
+    }
+    return null;
+  })()`, 6000, 'menu item ' + label);
+  await click(p.x, p.y);
+}
+async function explorerOpen(...names) {
+  for (const n of names) {
+    const p = await find('.explorer-folders-view .monaco-list-row', n);
+    await click(p.x, p.y);
+    await sleep(350);
+  }
+}
+/** Clicks a row of a DVICode view; with `inline`, its action button at the right instead. */
+async function rowClick(view, label, inline = false) {
+  const rows = await rowsOf(view);
+  const r = rows.find((x) => x.label.startsWith(label));
+  if (!r) throw new Error(`no row ${label} in ${view}`);
+  if (inline) {
+    const b = await cdp.eval(`(() => { const row = [...document.querySelectorAll('[id="workbench.view.extension.dvicode"] .monaco-list-row')].find(r => r.textContent.trim().startsWith(${JSON.stringify(label)})); const a = row && row.querySelector('.actions .action-label'); if (!a) return null; const b = a.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+    if (b) {
+      await moveTo(r.x, r.y, 10);
+      await sleep(250);
+      return click(b.x, b.y);
+    }
+  }
+  await click(r.x, r.y);
+}
 async function expandAll(view, max = 12) {
   for (let i = 0; i < max; i++) {
     const rows = await rowsOf(view);
@@ -324,6 +399,105 @@ async function shot(file, scale = 1.5) {
 }
 
 // ------------------------------------------------------------------ scenes
+
+/** Mouse only: the Explorer, right-click menus, the back button and the hierarchy views;
+ * with `edit`, a wrong type and a missing `;` typed into the code instead of Expand Macro. */
+async function scenesMouse(edit) {
+  const dir = path.join(out, 'frames');
+  await closeAllEditors();
+  await command('View: Show Explorer');
+  await sleep(500);
+  await startRecording(dir);
+  await sleep(600);
+
+  await caption('Open a file: DVICode compiles the testbench with UVM 1.2');
+  await explorerOpen('tb', 'demo_env_pkg.sv');
+  await sleep(700);
+  await scrollTo(40);
+  await sleep(500);
+
+  await caption('Hover a UVM macro to see what it expands to');
+  let p = await textPos('uvm_component_utils', 1);
+  await moveTo(p.x, p.y);
+  await waitFor(`!!document.querySelector('.monaco-hover:not(.hidden) .hover-contents, .monaco-resizable-hover')`, 6000, 'hover');
+  await sleep(2400);
+  await hideHover();
+
+  await caption('Right-click › Go to Definition, into the UVM library');
+  p = await textPos('uvm_env');
+  await rightClick(p.x, p.y);
+  await sleep(500);
+  await menu('Go to Definition');
+  await waitFor(`[...document.querySelectorAll('.tab.active .label-name')].some(e => e.textContent.includes('uvm_env'))`, 8000, 'uvm_env.svh');
+  await sleep(2000);
+  p = await find('.titlebar-container .action-label', 'Go Back');
+  await click(p.x, p.y);
+  await sleep(700);
+
+  if (edit) {
+    await caption('Change a type: the error shows as you type');
+    p = await textPos('demo_cfg        cfg');
+    await doubleClick(p.x - 40, p.y);
+    await sleep(300);
+    await type('demo_config', 90);
+    await waitFor(`!!document.querySelector('.editor-group-container.active .squiggly-error')`, 6000, 'squiggle');
+    await sleep(600);
+    p = await textPos('demo_config');
+    await moveTo(p.x, p.y + 2);
+    await waitFor(`!!document.querySelector('.monaco-hover:not(.hidden) .hover-contents, .monaco-resizable-hover')`, 6000, 'error hover');
+    await sleep(1800);
+    await caption('…and the lightbulb fixes it');
+    await click(p.x, p.y);
+    await sleep(500);
+    p = await find('.lightBulbWidget, .codicon-light-bulb, .codicon-lightbulb', '');
+    await click(p.x, p.y);
+    await sleep(500);
+    p = await find('.action-widget .monaco-list-row', 'Did you mean');
+    await sleep(500);
+    await click(p.x, p.y);
+    await sleep(1200);
+
+    await caption('A missing ; is flagged at once');
+    const end = await textPos('sb;');
+    await click(end.x + 16, end.y);
+    await key('End');
+    await sleep(400);
+    await key('Backspace');
+    await waitFor(`!!document.querySelector('.editor-group-container.active .squiggly-error')`, 6000, 'syntax squiggle');
+    await sleep(1800);
+    await type(';', 90);
+    await sleep(1400);
+  } else {
+    await caption('Right-click › Expand Macro: the code a `uvm_* macro generates');
+    p = await textPos('uvm_component_utils', 1);
+    await rightClick(p.x, p.y);
+    await sleep(500);
+    await menu('Expand Macro One Level');
+    await waitFor(`document.querySelectorAll('.editor-group-container').length > 1`, 8000, 'expansion editor');
+    await sleep(2800);
+    await key('ctrl+alt+shift+F9');
+    await sleep(500);
+  }
+
+  await caption('The UVM Verification Hierarchy of the test');
+  p = await find('.activitybar .action-item .action-label', 'DVICode');
+  await click(p.x, p.y);
+  await sleep(900);
+  await collapsePane('Compiled Files');
+  await expandAll('Verification Hierarchy');
+  await sleep(700);
+  await caption('Click a component to jump to where it is created');
+  await rowClick('Verification Hierarchy', 'mon');
+  await sleep(1600);
+  await rowClick('Verification Hierarchy', 'sb');
+  await sleep(1600);
+  await caption('…or to its class');
+  await rowClick('Verification Hierarchy', 'drv', true);
+  await sleep(1800);
+  await caption('');
+  const n = await stopRecording(dir, 1.2);
+  console.log('frames', n);
+}
 
 async function scenesGif() {
   const dir = path.join(out, 'frames');
@@ -423,12 +597,12 @@ async function scenesShots() {
 }
 
 /** The GIF for the READMEs (about 2 MB) and an MP4 for posts. */
-function encode() {
+function encode(name = 'dvicode-demo') {
   const list = path.join(out, 'frames', 'list.txt');
   const ff = (args) => execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, ...args], { stdio: 'inherit' });
-  ff(['-vf', 'fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', path.join(out, 'dvicode-demo.gif')]);
-  ff(['-vf', 'fps=30,scale=1280:-2:flags=lanczos,format=yuv420p', '-c:v', 'libx264', '-crf', '20', '-preset', 'slow', '-movflags', '+faststart', path.join(out, 'dvicode-demo.mp4')]);
-  console.log('wrote', path.join(out, 'dvicode-demo.gif'), 'and .mp4');
+  ff(['-vf', 'fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', path.join(out, name + '.gif')]);
+  ff(['-vf', 'fps=30,scale=1280:-2:flags=lanczos,format=yuv420p', '-c:v', 'libx264', '-crf', '20', '-preset', 'slow', '-movflags', '+faststart', path.join(out, name + '.mp4')]);
+  console.log('wrote', path.join(out, name + '.gif'), 'and .mp4');
 }
 
 // ------------------------------------------------------------------ main
@@ -457,9 +631,20 @@ try {
   await command('Notifications: Clear All Notifications');
   await waitEngineReady();
   await sleep(1500);
-  if (what === 'gif' || what === 'all') await scenesGif();
+  if (what === 'gif' || what === 'all') {
+    await scenesGif();
+    encode();
+  }
+  // Variants to compare: mouse only, and mouse with live editing.
+  if (what === 'variants' || what === 'gif-mouse') {
+    await scenesMouse(false);
+    encode('dvicode-demo-mouse');
+  }
+  if (what === 'variants' || what === 'gif-edit') {
+    await scenesMouse(true);
+    encode('dvicode-demo-edit');
+  }
   if (what === 'shots' || what === 'all') await scenesShots();
-  if (what === 'gif' || what === 'all') encode();
 } catch (e) {
   console.error('FAILED:', e.message);
   if (cdp) {

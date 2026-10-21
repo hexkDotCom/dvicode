@@ -6,7 +6,7 @@ Follow definitions across packages and class hierarchies, see what a macro expan
 explore your design and UVM testbench without starting a simulator. DVICode runs on your
 desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in preview.
 
-![Hovering a UVM macro shows its expansion, F12 opens uvm_env in the UVM 1.2 library, Expand Macro shows the generated code, and the Verification Hierarchy shows the components of the test](https://raw.githubusercontent.com/hexkDotCom/dvicode/main/docs/images/dvicode-demo.gif)
+![Hovering a UVM macro shows its expansion, right-click Go to Definition opens uvm_env in the UVM 1.2 library, a misspelled type is underlined as you type and fixed from the lightbulb, a deleted semicolon is flagged at once, and clicking components in the Verification Hierarchy jumps to their code](https://raw.githubusercontent.com/hexkDotCom/dvicode/main/docs/images/dvicode-demo.gif)
 
 ## Features
 

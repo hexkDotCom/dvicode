@@ -12,7 +12,7 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Start with a
 project discovery, then add your existing file lists for full control. Apache-2.0 licensed;
 currently in preview.
 
-![Hovering a UVM macro shows its expansion, F12 opens uvm_env in the UVM 1.2 library, Expand Macro shows the generated code, and the Verification Hierarchy shows the components of the test](docs/images/dvicode-demo.gif)
+![Hovering a UVM macro shows its expansion, right-click Go to Definition opens uvm_env in the UVM 1.2 library, a misspelled type is underlined as you type and fixed from the lightbulb, a deleted semicolon is flagged at once, and clicking components in the Verification Hierarchy jumps to their code](docs/images/dvicode-demo.gif)
 
 ## Features
 

@@ -194,8 +194,14 @@ One-time setup on the Windows machine:
 `problems.png` are recorded by a script, on Windows with VS Code and ffmpeg installed:
 
 ```powershell
-node scripts\media\record.mjs C:\path\to\uvm-1.2      # [out-dir] [gif|shots|all]
+node scripts\media\record.mjs C:\path\to\uvm-1.2 build\media gif-edit   # the README animation
+node scripts\media\record.mjs C:\path\to\uvm-1.2 build\media shots      # the screenshots
 ```
+
+The README animation is `gif-edit` (`build/media/dvicode-demo-edit.gif`, copied to
+`docs/images/dvicode-demo.gif`): only the mouse and ordinary typing in the code, a wrong type
+fixed from the lightbulb, a missing `;`, and the hierarchy views. `gif` (keyboard and command
+palette) and `gif-mouse` (right-click Expand Macro instead of the edits) are alternatives.
 
 It copies the demo project to `build/media/ws` with the real UVM library (`-uvm`) in place of
 its stand-in, starts VS Code with an empty profile and DVICode from the Marketplace, drives it
