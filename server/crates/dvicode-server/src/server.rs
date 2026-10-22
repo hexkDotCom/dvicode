@@ -1169,6 +1169,8 @@ struct TreeParams {
     max_nodes: Option<usize>,
     /// Verification Hierarchy: TLM ports are shown (default: yes, as older clients expect).
     ports: Option<bool>,
+    /// Verification Hierarchy: objects (configurations, register models, sequences) are shown.
+    objects: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1186,6 +1188,7 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
     q.reveal = p.reveal.unwrap_or_default();
     q.target = p.target;
     q.ports = p.ports.unwrap_or(true);
+    q.objects = p.objects.unwrap_or(false);
     if q.target.is_some() {
         // Every occurrence counts ("1 of N").
         q.max_matches = q.max_nodes;

@@ -18,6 +18,13 @@ pub(crate) struct OverrideCall {
     pub relative: bool,
     /// Type overrides: replace an earlier override of the same type (`replace` argument).
     pub replace: bool,
+    /// The `replace` argument is not a literal: the override may or may not replace one.
+    pub replace_unknown: bool,
+    /// A class is written with parameter values (`A#(8)::get_type()`): which specialization it
+    /// is cannot be told, so the override is never applied for certain.
+    pub params: bool,
+    /// Given by name (`set_type_override("A", "B")`).
+    pub by_name: bool,
     /// The called method's name, for the tooltip.
     pub span: Span,
 }
@@ -74,13 +81,16 @@ impl Analysis {
                     names.iter().position(|f| *f == formal).and_then(|p| args.get(p).copied())
                 }
             };
+            let params = std::cell::Cell::new(false);
             let class_arg = |formal: &str| -> Option<DeclRef> {
                 if formal.ends_with("_name") {
                     let a = arg(formal)?;
                     let [s] = a else { return None };
                     (s.kind == TokKind::String).then(|| self.class_by_factory_name(s.text.trim_matches('"')))?
                 } else {
-                    self.type_handle(body, arg(formal)?)
+                    let (c, p) = self.type_handle(body, arg(formal)?)?;
+                    params.set(params.get() || p);
+                    Some(c)
                 }
             };
             let instance = x.text.starts_with("set_inst_");
@@ -93,10 +103,14 @@ impl Analysis {
                 _ => (class_arg("original_type_name"), class_arg("override_type_name")),
             };
             let (Some(from), Some(to)) = (from, to) else { continue };
-            let replace = match arg("replace") {
-                None => true,
-                Some([n]) if n.kind == TokKind::Number => super::loops::literal(&n.text) != Some(0),
-                Some(_) => true,
+            let by_name = !names.contains(&"original_type") && !matches!(recv, Receiver::Registry(_));
+            let (replace, replace_unknown) = match arg("replace") {
+                None => (true, false),
+                Some([n]) if n.kind == TokKind::Number => match super::loops::literal(&n.text) {
+                    Some(v) => (v != 0, false),
+                    None => (true, true),
+                },
+                Some(_) => (true, true),
             };
             let (mut path, mut relative) = (String::new(), false);
             if instance {
@@ -120,7 +134,7 @@ impl Analysis {
                 path = s.text.trim_matches('"').to_string();
                 relative = rel;
             }
-            out.push((i, OverrideCall { instance, from, to, path, relative, replace, span: x.span }));
+            out.push((i, OverrideCall { instance, from, to, path, relative, replace, replace_unknown, params: params.get(), by_name, span: x.span }));
         }
         out
     }
@@ -166,45 +180,51 @@ impl Analysis {
         }
     }
 
-    /// The class of a type handle argument: `X::get_type()`, `X::type_id::get()`,
-    /// `pkg::X#(8)::get_type()`.
-    fn type_handle(&self, body: DeclRef, a: &[Token]) -> Option<DeclRef> {
+    /// The class of a type handle argument, the whole argument being `X::get_type()`,
+    /// `X::type_id::get()`, `pkg::X::get_type()` or `X#(8)::get_type()`; and whether it is written
+    /// with parameter values.
+    fn type_handle(&self, body: DeclRef, a: &[Token]) -> Option<(DeclRef, bool)> {
         let n = a.len();
         let end = match a {
             [.., c, g, open, close] if c.is_punct("::") && g.text == "get_type" && open.is_punct("(") && close.is_punct(")") => n - 4,
             [.., c1, ti, c2, g, open, close] if c1.is_punct("::") && ti.text == "type_id" && c2.is_punct("::") && g.text == "get" && open.is_punct("(") && close.is_punct(")") => n - 6,
             _ => return None,
         };
-        // The class name: before a `#(...)` when there is one.
-        let mut k = end.checked_sub(1)?;
-        if a[k].is_punct(")") {
-            let mut depth = 0i32;
-            loop {
-                if a[k].is_punct(")") {
-                    depth += 1;
-                } else if a[k].is_punct("(") {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                k = k.checked_sub(1)?;
-            }
-            k = k.checked_sub(2)?;
-            if !a[k + 1].is_punct("#") {
+        // The class name, after `pkg::` scopes and before a `#(...)`.
+        let mut k = 0;
+        let mut name = None;
+        while k < end {
+            if !a[k].is_ident() {
                 return None;
             }
+            name = Some(k);
+            k += 1;
+            if k < end && a[k].is_punct("::") {
+                k += 1;
+                continue;
+            }
+            break;
         }
-        let x = &a[k];
-        if !x.is_ident() {
+        let mut params = false;
+        if k < end {
+            if !(a[k].is_punct("#") && a.get(k + 1).is_some_and(|x| x.is_punct("("))) {
+                return None;
+            }
+            k = super::views::skip_group(a, k + 1);
+            params = true;
+        }
+        if k != end {
             return None;
         }
-        self.resolve_at_span(body.unit, x.span).and_then(|r| self.follow_typedef(r)).filter(|r| self.decl(*r).kind == DeclKind::Class)
+        let x = &a[name?];
+        let c = self.resolve_at_span(body.unit, x.span).and_then(|r| self.follow_typedef(r)).filter(|r| self.decl(*r).kind == DeclKind::Class)?;
+        Some((c, params))
     }
 
-    /// The class registered with the factory under `name`: the one non-parameterized class of
-    /// that name (`` `uvm_component_utils(X) `` registers "X"; the `_param_utils` macros register
-    /// no name). `None` when there is none, or several.
+    /// The class registered with the factory under `name`: the one class that registers that
+    /// name (`` `uvm_component_utils(X) ``, `` `uvm_object_utils(X) `` and their `_begin` forms
+    /// register "X"; the `_param_utils` macros register no name). `None` when there is none, or
+    /// several.
     pub(crate) fn class_by_factory_name(&self, name: &str) -> Option<DeclRef> {
         let mut found: Option<DeclRef> = None;
         for u in self.units.iter().flatten() {
@@ -216,9 +236,8 @@ impl Analysis {
                     continue;
                 }
                 let r = DeclRef { unit: u.id, decl: i as DeclId };
-                let parameterized = d.children.iter().any(|c| matches!(u.parsed.decl(*c).kind, DeclKind::Parameter | DeclKind::TypeParam));
-                if parameterized {
-                    return None;
+                if !self.registers_name(r, name) {
+                    continue;
                 }
                 match found {
                     Some(f) if self.decl_key(f) != self.decl_key(r) => return None,
@@ -227,6 +246,23 @@ impl Analysis {
             }
         }
         found
+    }
+
+    /// Whether a class registers `name` with the factory: one of the utils macros with `name`
+    /// in its body.
+    fn registers_name(&self, class: DeclRef, name: &str) -> bool {
+        let d = self.decl(class);
+        let Some(toks) = self.file_tokens(d.span.file) else { return false };
+        let lo = toks.partition_point(|t| t.span.start < d.span.start);
+        let hi = toks.partition_point(|t| t.span.start < d.span.end);
+        let t = &toks[lo..hi];
+        t.windows(4).any(|w| {
+            w[0].kind == TokKind::Directive
+                && matches!(w[0].text.as_str(), "uvm_component_utils" | "uvm_object_utils" | "uvm_component_utils_begin" | "uvm_object_utils_begin")
+                && w[1].is_punct("(")
+                && w[2].text == name
+                && w[3].is_punct(")")
+        })
     }
 }
 

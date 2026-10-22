@@ -1152,14 +1152,14 @@ endpackage
 
 #[test]
 fn factory_overrides() {
-    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_factory; endclass\n  uvm_factory factory;\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let uvm = "`define uvm_component_utils(T)\npackage uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_factory; endclass\n  uvm_factory factory;\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
     let tb = r#"package tb_pkg;
   import uvm_pkg::*;
   class leaf extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
   class err_leaf extends leaf; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
   class worse_leaf extends err_leaf; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
-  class drv extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
-  class err_drv extends drv; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class drv extends uvm_env; `uvm_component_utils(drv) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class err_drv extends drv; `uvm_component_utils(err_drv) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
   class agent extends uvm_env;
     drv d;
     function new(string name, uvm_component parent); super.new(name, parent); endfunction
@@ -1263,6 +1263,322 @@ endpackage
     // A loop builds the class where it closes, as UVM's factory does.
     let t = tree("t_chain");
     assert!(t.contains(&"agt1.d:drv [drv>err_drv@t_chain::build_phase; err_drv>drv@t_chain::build_phase]".to_string()), "{t:?}");
+}
+
+#[test]
+fn factory_review_cases() {
+    let uvm = "`define uvm_component_utils(T)\npackage uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_factory; endclass\n  uvm_factory factory;\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let mut chain = String::new();
+    for k in 0..18 {
+        chain.push_str(&format!("  class z{k} extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n"));
+    }
+    let chain_overrides: String = (0..17).map(|k| format!("      set_type_override_by_type(z{k}::get_type(), z{}::get_type());\n", k + 1)).collect();
+    let tb = format!(
+        r#"package tb_pkg;
+  import uvm_pkg::*;
+  class a extends uvm_env; `uvm_component_utils(a) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class b extends a; `uvm_component_utils(b) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class c extends a; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class p #(int W = 8) extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class q #(int W = 8) extends p #(W); function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+{chain}
+  class installer extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); set_type_override_by_type(a::get_type(), b::get_type()); endfunction
+  endclass
+  class t_ctor extends uvm_test;
+    installer i; a x;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      i = installer::type_id::create("i", this);
+      x = a::type_id::create("x", this);
+    endfunction
+  endclass
+  class t_cond_inst extends uvm_test;
+    installer i; a x;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (enabled) i = installer::type_id::create("i", this);
+      repeat (0) set_type_override_by_type(a::get_type(), c::get_type());
+      x = a::type_id::create("x", this);
+    endfunction
+  endclass
+  class t_args extends uvm_test;
+    a x, y, w; p #(16) wide;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      set_type_override_by_type(a::get_type(), pick ? b::get_type() : c::get_type());
+      set_type_override_by_type(p#(8)::get_type(), q#(8)::get_type());
+      factory.set_inst_override_by_type(a::get_type(), b::get_type(), "special.y");
+      x = a::type_id::create("x", this);
+      y = a::type_id::create("y", this, "special");
+      wide = p#(16)::type_id::create("wide", this);
+      set_type_override("a", "c");
+      w = a::type_id::create("w", this);
+    endfunction
+  endclass
+  class t_possible extends uvm_test;
+    a x;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (mode) set_type_override_by_type(a::get_type(), b::get_type());
+      set_type_override_by_type(a::get_type(), c::get_type());
+      x = a::type_id::create("x", this);
+    endfunction
+  endclass
+  class t_merge extends uvm_test;
+    a child;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void make_child(); child = a::type_id::create("child", this); endfunction
+    function void build_phase(uvm_phase phase);
+      if (mode) make_child();
+      set_type_override_by_type(a::get_type(), b::get_type());
+      if (!mode) make_child();
+    endfunction
+  endclass
+  class t_long extends uvm_test;
+    z0 x;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+{chain_overrides}      x = z0::type_id::create("x", this);
+    endfunction
+  endclass
+endpackage
+"#
+    );
+    let (an, _) = project("factoryreview", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let kids = |test: &str| -> Vec<String> {
+        let h = an.verification_hierarchy(Some(test), 100);
+        h.roots[0]
+            .children
+            .iter()
+            .map(|c| {
+                let possible = c.overrides.iter().filter(|o| !o.applied).map(|o| o.to.clone()).collect::<Vec<_>>();
+                let alts = c.alternatives.iter().map(|x| x.class.clone()).collect::<Vec<_>>();
+                format!("{}:{}{}{}", c.name, c.class, if possible.is_empty() { String::new() } else { format!(" ?{}", possible.join("/")) }, if alts.is_empty() { String::new() } else { format!(" |{}", alts.join("/")) })
+            })
+            .collect()
+    };
+    // A constructor's override applies to what is made after it.
+    assert_eq!(kids("t_ctor"), ["i:installer", "x:b"]);
+    // A component made under a condition registers its override under that condition; so does
+    // a loop that may not run.
+    assert_eq!(kids("t_cond_inst"), ["i:installer", "x:a ?b"]);
+    // A computed type handle is not an override; parameter values make it uncertain; the context
+    // is the factory's path; by name, an unregistered class is not an override.
+    assert_eq!(kids("t_args"), ["x:a", "y:b", "wide:p ?q", "w:a"]);
+    // A conditional override replaced by a later certain one cannot win.
+    assert_eq!(kids("t_possible"), ["x:c"]);
+    // One helper creating before and after an override: two classes.
+    assert_eq!(kids("t_merge"), ["child:a |b"]);
+    // A long chain is followed to its end, as UVM does.
+    assert_eq!(kids("t_long"), ["x:z17"]);
+}
+
+#[test]
+fn build_review_cases_2() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let deep = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
+    let tb = format!(
+        r#"package tb_pkg;
+  import uvm_pkg::*;
+  class e extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class with_leaf extends uvm_env;
+    e leaf;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); leaf = e::type_id::create("leaf", this); endfunction
+  endclass
+  class t_limits extends uvm_test;
+    with_leaf a; e b;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      a = with_leaf::type_id::create("a", this);
+      b = e::type_id::create("b", this);
+    endfunction
+  endclass
+  class base_t extends uvm_test;
+    e x;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void make_phase(); x = e::type_id::create("base_made", this); endfunction
+    function void build_phase(uvm_phase phase); make_phase(); endfunction
+  endclass
+  class derived_t extends base_t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void make_phase(); x = e::type_id::create("derived_made", this); endfunction
+  endclass
+  class t_misc extends uvm_test;
+    e huge[8], deep_e, s;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void make_child(string n); e c; c = e::type_id::create(n, this); endfunction
+    function void wrapper(string n); n = "actual"; make_child(n); endfunction
+    function void build_phase(uvm_phase phase);
+      for (longint i = 0; i <= 9223372036854775807; i++) huge[i] = e::type_id::create($sformatf("h%0d", i), this);
+      repeat ({deep}) deep_e = e::type_id::create("deep_e", this);
+      for (int i = 0; i < 4; i++) begin i++; s = e::type_id::create("s", this); end
+      wrapper("original");
+    endfunction
+  endclass
+endpackage
+"#
+    );
+    let (a, _) = project("buildreview2", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    // Limits keep the depth-first prefix; a match beyond a dropped sibling still fits.
+    let mut q = dvi_analysis::ide::views::TreeQuery::new(2);
+    let (h, _) = a.verification_tree(Some("t_limits"), &q);
+    let mut names = Vec::new();
+    fn walk(n: &dvi_analysis::ide::views::VerifNode, out: &mut Vec<String>) {
+        for c in &n.children {
+            out.push(c.path.clone());
+            walk(c, out);
+        }
+    }
+    walk(&h.roots[0], &mut names);
+    assert_eq!(names, ["uvm_test_top.a", "uvm_test_top.a.leaf"]);
+    q = dvi_analysis::ide::views::TreeQuery::new(1);
+    q.filter = dvi_analysis::ide::filter::Filter::new("b");
+    let (h, _) = a.verification_tree(Some("t_limits"), &q);
+    assert_eq!(h.roots[0].children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["b"]);
+    // A helper whose name ends in `_phase` is not virtual for that.
+    assert_eq!(a.verification_hierarchy(Some("derived_t"), 10).roots[0].children[0].name, "base_made");
+    let h = a.verification_hierarchy(Some("t_misc"), 10);
+    let by = |n: &str| h.roots[0].children.iter().find(|c| c.name == n).cloned();
+    // Overflowing and deeply nested bounds are not counted (and do not crash); a loop whose
+    // body changes its variable is not counted.
+    assert_eq!(by("huge[i]").and_then(|c| c.count), Some("?".into()));
+    assert_eq!(by("deep_e").and_then(|c| c.count), Some("?".into()));
+    assert_eq!(by("s").and_then(|c| c.count), Some("?".into()));
+    // An argument changed in the helper does not pass on the caller's value.
+    assert!(by("original").is_none() && by("c").is_some(), "{:?}", h.roots[0].children.iter().map(|c| &c.name).collect::<Vec<_>>());
+}
+
+#[test]
+fn objects_switch() {
+    let uvm = r#"`define uvm_object_utils(T)
+`define uvm_do(S) begin S = new(); S.start(m_sequencer, this); end
+`define uvm_do_on(S, Q) begin S = new(); S.start(Q, this); end
+package uvm_pkg;
+  class uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_component extends uvm_object; function new(string name, uvm_component parent); endfunction endclass
+  class uvm_sequence_item extends uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_sequence_base extends uvm_sequence_item; function new(string name = ""); endfunction endclass
+  class uvm_sequence #(type REQ = int) extends uvm_sequence_base; function new(string name = ""); endfunction endclass
+  class uvm_reg_block extends uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_reg extends uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_reg_adapter extends uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_event extends uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_object_wrapper; endclass
+  class uvm_config_db #(type T = int); static function void set(uvm_component c, string i, string f, T v); endfunction endclass
+  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_sequencer extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+endpackage
+"#;
+    let tb = r#"package tb_pkg;
+  import uvm_pkg::*;
+  class item extends uvm_sequence_item; function new(string name = ""); super.new(name); endfunction endclass
+  class cfg_c extends uvm_object; function new(string name = ""); super.new(name); endfunction endclass
+  class regs extends uvm_reg_block; function new(string name = ""); super.new(name); endfunction endclass
+  class one_reg extends uvm_reg; function new(string name = ""); super.new(name); endfunction endclass
+  class adapter_c extends uvm_reg_adapter; function new(string name = ""); super.new(name); endfunction endclass
+  class leaf_seq extends uvm_sequence #(item);
+    item req;
+    function new(string name = ""); super.new(name); endfunction
+    task body(); `uvm_do(req) endtask
+  endclass
+  class vseq extends uvm_sequence #(item);
+    leaf_seq a, b;
+    function new(string name = ""); super.new(name); endfunction
+    task body();
+      `uvm_do(a)
+      `uvm_do_on(b, p_sequencer.other)
+    endtask
+  endclass
+  class sqr_c extends uvm_sequencer; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class agent extends uvm_env;
+    sqr_c sqr;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); sqr = sqr_c::type_id::create("sqr", this); endfunction
+  endclass
+  class env extends uvm_env;
+    agent agt;
+    regs model;
+    one_reg r;
+    adapter_c adapter;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      agt = agent::type_id::create("agt", this);
+      model = regs::type_id::create("model");
+      r = one_reg::type_id::create("r");
+    endfunction
+    function void connect_phase(uvm_phase phase);
+      adapter = adapter_c::type_id::create("adapter");
+    endfunction
+  endclass
+  class base_t extends uvm_test;
+    env env_h;
+    cfg_c cfg;
+    uvm_event ev;
+    vseq top_seq;
+    leaf_seq other_seq;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (cfg == null) cfg = cfg_c::type_id::create("cfg");
+      uvm_config_db#(cfg_c)::set(this, "env*", "cfg", cfg);
+      ev = new("ev");
+      env_h = env::type_id::create("environment", this);
+      top_seq = vseq::type_id::create("top_seq");
+      uvm_config_db#(uvm_object_wrapper)::set(this, "environment.agt.sqr.main_phase", "default_sequence", leaf_seq::type_id::get());
+    endfunction
+    task main_phase(uvm_phase phase);
+      top_seq.start(env_h.agt.sqr);
+      other_seq.start(null);
+    endtask
+  endclass
+endpackage
+"#;
+    let (a, _) = project("objects", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let show = |objects: bool| -> Vec<String> {
+        let mut q = dvi_analysis::ide::views::TreeQuery::new(1000);
+        q.objects = objects;
+        let (h, _) = a.verification_tree(Some("base_t"), &q);
+        let mut out = Vec::new();
+        fn walk(n: &dvi_analysis::ide::views::VerifNode, d: usize, out: &mut Vec<String>) {
+            for c in &n.children {
+                let starts: Vec<String> = c.starts.iter().map(|s| format!("{}{}@{}", if s.path { "" } else { "~" }, s.on, s.phase)).collect();
+                let mut line = format!("{}{} : {} [{}]", "  ".repeat(d), c.name, c.class, c.kind);
+                if !starts.is_empty() {
+                    line.push_str(&format!(" on {}", starts.join(", ")));
+                }
+                if !c.notes.is_empty() {
+                    line.push_str(&format!(" ({})", c.notes.join("; ")));
+                }
+                if c.allocated.is_some() {
+                    line.push_str(" elsewhere");
+                }
+                out.push(line);
+                walk(c, d + 1, out);
+            }
+        }
+        walk(&h.roots[0], 0, &mut out);
+        out
+    };
+    // Off: components only, as before.
+    assert_eq!(show(false), ["environment : env [env]", "  agt : agent [env]", "    sqr : sqr_c [sequencer]"]);
+    assert_eq!(
+        show(true),
+        [
+            "environment : env [env]",
+            "  agt : agent [env]",
+            "    sqr : sqr_c [sequencer]",
+            "  model : regs [register model]",
+            "  adapter : adapter_c [adapter]",
+            "cfg : cfg_c [object] (set in config_db for uvm_test_top.env* as \"cfg\")",
+            "top_seq : vseq [sequence] on uvm_test_top.environment.agt.sqr@main_phase",
+            "  a : leaf_seq [sequence] on uvm_test_top.environment.agt.sqr@body",
+            "  b : leaf_seq [sequence] on ~p_sequencer.other@body",
+            "other_seq : leaf_seq [sequence] on ~null (no sequencer)@main_phase elsewhere",
+            "leaf_seq : leaf_seq [sequence] on uvm_test_top.environment.agt.sqr@main_phase (default sequence for uvm_test_top.environment.agt.sqr (main_phase))",
+        ]
+    );
 }
 
 #[test]

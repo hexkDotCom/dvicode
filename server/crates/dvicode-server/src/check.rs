@@ -334,10 +334,13 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                     pr(c, d + 1);
                 }
             }
+            // `--uvm-tests objects`: with the objects.
+            let mut q = dvi_analysis::ide::views::TreeQuery::new(1_000_000);
+            q.objects = arg == "objects";
             for t in a.uvm_tests() {
                 let name = a.decl(t).name.to_string();
                 let start = std::time::Instant::now();
-                let h = a.verification_hierarchy(Some(&name), 1_000_000);
+                let (h, _) = a.verification_tree(Some(&name), &q);
                 let ms = start.elapsed().as_millis();
                 for r in &h.roots {
                     pr(r, 0);
