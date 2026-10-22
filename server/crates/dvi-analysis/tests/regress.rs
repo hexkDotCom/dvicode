@@ -2005,3 +2005,16 @@ fn classes_nested_by_a_macro_without_endclass() {
     let _ = problems(&a);
     assert!(t0.elapsed().as_secs() < 5, "took {:?}", t0.elapsed());
 }
+
+#[test]
+fn class_bases_past_the_depth_limit_with_the_memo() {
+    // `R`'s base needs `Helper`'s at the depth limit, where `Helper`'s own base is refused:
+    // a base found earlier at a shallower depth (through `Warm`) must not be reused there.
+    let chain: String = (0..28).map(|i| format!("  class C{i} extends C{}::T; endclass\n", i + 1)).collect();
+    let src = format!("package p;\n  class Leaf;\n    typedef Leaf T;\n    class A extends C0::T; endclass\n  endclass\n  class HelperBase extends Leaf; endclass\n  class Helper extends HelperBase::T; endclass\n  class Warm extends Helper::T; endclass\n{chain}  class C28 extends Helper::T; endclass\n  class R extends Warm::A::T; endclass\nendpackage\n");
+    let (a, _) = project("basedepth", &[("p.sv", &src)]);
+    let p = a.global.packages["p"][0];
+    let class = |n: &str| a.member_of(p, n).unwrap();
+    assert_eq!(a.class_base(class("Helper")), Some(class("Leaf")));
+    assert_eq!(a.class_base(class("R")), None);
+}
