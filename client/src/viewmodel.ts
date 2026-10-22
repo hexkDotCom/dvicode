@@ -374,3 +374,50 @@ export function viewMessage(s: ViewState): string | undefined {
   }
   return s.syncNote;
 }
+
+/** A Structure node, as `dvicode/structure` gives it. */
+export interface StructNode {
+  id: string;
+  name: string;
+  kind: string;
+  detail?: string;
+  extent?: { uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } };
+  target?: { uri: string; range: { start: { line: number; character: number } } };
+  inherited_from?: string;
+  mark?: string;
+  inactive?: boolean;
+  collapsed?: boolean;
+  children: StructNode[];
+}
+
+/**
+ * The innermost Structure node (not a group) whose extent is in the document `uri` (as the
+ * engine names it) and contains the position; with the nodes from the top down to it.
+ */
+export function innermostAt(nodes: StructNode[], uri: string, line: number, character: number): StructNode[] {
+  const inside = (n: StructNode): boolean => {
+    const e = n.extent;
+    if (!e || e.uri !== uri) {
+      return false;
+    }
+    const { start, end } = e.range;
+    const afterStart = line > start.line || (line === start.line && character >= start.character);
+    const beforeEnd = line < end.line || (line === end.line && character <= end.character);
+    return afterStart && beforeEnd;
+  };
+  for (const n of nodes) {
+    // Groups have no extent: look inside them.
+    if (n.kind === 'group') {
+      const below = innermostAt(n.children, uri, line, character);
+      if (below.length) {
+        return [n, ...below];
+      }
+      continue;
+    }
+    if (n.inherited_from || !inside(n)) {
+      continue;
+    }
+    return [n, ...innermostAt(n.children, uri, line, character)];
+  }
+  return [];
+}

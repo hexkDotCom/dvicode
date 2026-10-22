@@ -473,6 +473,30 @@
         "icon": "$(arrow-up)"
       },
       {
+        "command": "dvicode.structure.filter",
+        "title": "Filter... (Structure)",
+        "category": "DVICode",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "dvicode.structure.clearFilter",
+        "title": "Clear Filter (Structure)",
+        "category": "DVICode",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "dvicode.structure.syncOn",
+        "title": "Follow the Cursor (Structure)",
+        "category": "DVICode",
+        "icon": "$(link)"
+      },
+      {
+        "command": "dvicode.structure.syncOff",
+        "title": "Stop Following the Cursor (Structure)",
+        "category": "DVICode",
+        "icon": "$(sync)"
+      },
+      {
         "command": "dvicode.verification.showObjects",
         "title": "Show UVM Objects",
         "category": "DVICode"
@@ -611,6 +635,31 @@
         {
           "command": "dvicode.verification.filter",
           "when": "view == dvicode.verificationHierarchy && dvicode.verification.filtered",
+          "group": "filter@1"
+        },
+        {
+          "command": "dvicode.structure.filter",
+          "when": "view == dvicode.structure && !dvicode.structure.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.structure.clearFilter",
+          "when": "view == dvicode.structure && dvicode.structure.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.structure.syncOn",
+          "when": "view == dvicode.structure && !dvicode.structure.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.structure.syncOff",
+          "when": "view == dvicode.structure && dvicode.structure.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.structure.filter",
+          "when": "view == dvicode.structure && dvicode.structure.filtered",
           "group": "filter@1"
         },
         {
@@ -753,6 +802,11 @@
         {
           "id": "dvicode.compiledFiles",
           "name": "Compiled Files"
+        },
+        {
+          "id": "dvicode.structure",
+          "name": "Structure",
+          "when": "dvicode.engine.structure"
         }
       ]
     }
