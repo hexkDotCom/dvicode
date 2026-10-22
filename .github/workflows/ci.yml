@@ -2,7 +2,7 @@
 #
 # - server:   `cargo test` for the Rust crates on Linux, Windows and macOS; on Linux also
 #             `dvicode-server check` on the demo project (clean, and with its deliberate errors).
-# - client:   type check, unit tests (`npm run unit`: path mapping, remote file system) and
+# - client:   type check, unit tests (`npm run unit`: path mapping, remote file system, views) and
 #             the bundle, on Linux and Windows.
 # - e2e:      the end-to-end suite (client/test/suite.js) in a downloaded VS Code against
 #             examples/demo-project, with an engine built in the job:

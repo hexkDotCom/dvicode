@@ -18,7 +18,9 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,
   and complete module instantiations in one step.
 - **Hover documentation**: signatures, doc comments and what a macro expands to.
-- **Design Hierarchy** and **UVM Verification Hierarchy** views, worked out from the source.
+- **Design Hierarchy** and **UVM Verification Hierarchy** views, worked out from the source:
+  filter them by name or path, and let them follow the editor (jump with F12 and the view
+  selects where you landed).
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".

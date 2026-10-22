@@ -399,6 +399,114 @@
         "command": "dvicode.reportIssue",
         "title": "Report Issue",
         "category": "DVICode"
+      },
+      {
+        "command": "dvicode.design.filter",
+        "title": "Filter... (Design Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "dvicode.design.clearFilter",
+        "title": "Clear Filter (Design Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "dvicode.design.syncOn",
+        "title": "Follow the Editor (Design Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(link)"
+      },
+      {
+        "command": "dvicode.design.syncOff",
+        "title": "Stop Following the Editor (Design Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "dvicode.design.nextOccurrence",
+        "title": "Next Occurrence of the Editor Position (Design Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "dvicode.design.previousOccurrence",
+        "title": "Previous Occurrence of the Editor Position (Design Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "dvicode.verification.filter",
+        "title": "Filter... (Verification Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "dvicode.verification.clearFilter",
+        "title": "Clear Filter (Verification Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "dvicode.verification.syncOn",
+        "title": "Follow the Editor (Verification Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(link)"
+      },
+      {
+        "command": "dvicode.verification.syncOff",
+        "title": "Stop Following the Editor (Verification Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "dvicode.verification.nextOccurrence",
+        "title": "Next Occurrence of the Editor Position (Verification Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "dvicode.verification.previousOccurrence",
+        "title": "Previous Occurrence of the Editor Position (Verification Hierarchy)",
+        "category": "DVICode",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "dvicode.files.filter",
+        "title": "Filter... (Compiled Files)",
+        "category": "DVICode",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "dvicode.files.clearFilter",
+        "title": "Clear Filter (Compiled Files)",
+        "category": "DVICode",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "dvicode.files.syncOn",
+        "title": "Follow the Editor (Compiled Files)",
+        "category": "DVICode",
+        "icon": "$(link)"
+      },
+      {
+        "command": "dvicode.files.syncOff",
+        "title": "Stop Following the Editor (Compiled Files)",
+        "category": "DVICode",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "dvicode.files.nextOccurrence",
+        "title": "Next Occurrence of the Editor Position (Compiled Files)",
+        "category": "DVICode",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "dvicode.files.previousOccurrence",
+        "title": "Previous Occurrence of the Editor Position (Compiled Files)",
+        "category": "DVICode",
+        "icon": "$(arrow-up)"
       }
     ],
     "menus": {
@@ -416,24 +524,129 @@
       ],
       "view/title": [
         {
+          "command": "dvicode.design.filter",
+          "when": "view == dvicode.designHierarchy && !dvicode.design.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.design.clearFilter",
+          "when": "view == dvicode.designHierarchy && dvicode.design.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.design.syncOn",
+          "when": "view == dvicode.designHierarchy && !dvicode.design.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.design.syncOff",
+          "when": "view == dvicode.designHierarchy && dvicode.design.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.design.previousOccurrence",
+          "when": "view == dvicode.designHierarchy && dvicode.design.sync",
+          "group": "occurrence@1"
+        },
+        {
+          "command": "dvicode.design.nextOccurrence",
+          "when": "view == dvicode.designHierarchy && dvicode.design.sync",
+          "group": "occurrence@2"
+        },
+        {
+          "command": "dvicode.design.filter",
+          "when": "view == dvicode.designHierarchy && dvicode.design.filtered",
+          "group": "filter@1"
+        },
+        {
+          "command": "dvicode.verification.filter",
+          "when": "view == dvicode.verificationHierarchy && !dvicode.verification.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.verification.clearFilter",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.verification.syncOn",
+          "when": "view == dvicode.verificationHierarchy && !dvicode.verification.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.verification.syncOff",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.verification.previousOccurrence",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.sync",
+          "group": "occurrence@1"
+        },
+        {
+          "command": "dvicode.verification.nextOccurrence",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.sync",
+          "group": "occurrence@2"
+        },
+        {
+          "command": "dvicode.verification.filter",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.filtered",
+          "group": "filter@1"
+        },
+        {
+          "command": "dvicode.files.filter",
+          "when": "view == dvicode.compiledFiles && !dvicode.files.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.files.clearFilter",
+          "when": "view == dvicode.compiledFiles && dvicode.files.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.files.syncOn",
+          "when": "view == dvicode.compiledFiles && !dvicode.files.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.files.syncOff",
+          "when": "view == dvicode.compiledFiles && dvicode.files.sync",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.files.previousOccurrence",
+          "when": "view == dvicode.compiledFiles && dvicode.files.sync",
+          "group": "occurrence@1"
+        },
+        {
+          "command": "dvicode.files.nextOccurrence",
+          "when": "view == dvicode.compiledFiles && dvicode.files.sync",
+          "group": "occurrence@2"
+        },
+        {
+          "command": "dvicode.files.filter",
+          "when": "view == dvicode.compiledFiles && dvicode.files.filtered",
+          "group": "filter@1"
+        },
+        {
           "command": "dvicode.selectUvmTest",
           "when": "view == dvicode.verificationHierarchy",
-          "group": "navigation"
+          "group": "navigation@9"
         },
         {
           "command": "dvicode.selectDesignTop",
           "when": "view == dvicode.designHierarchy",
-          "group": "navigation"
+          "group": "navigation@9"
         },
         {
           "command": "dvicode.refreshViews",
           "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy || view == dvicode.compiledFiles",
-          "group": "navigation"
+          "group": "navigation@9"
         },
         {
           "command": "dvicode.rebuild",
           "when": "view == dvicode.compiledFiles",
-          "group": "navigation"
+          "group": "navigation@9"
         }
       ],
       "view/item/context": [
@@ -494,7 +707,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node test/runTest.js",
-    "unit": "tsc -p tsconfig.unit.json && node --test test/unit/pathmap.test.js test/unit/remotefs.test.js",
+    "unit": "tsc -p tsconfig.unit.json && node --test test/unit/all.js",
     "package": "vsce package --no-dependencies"
   },
   "dependencies": {

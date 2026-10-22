@@ -1,15 +1,33 @@
-// Tree views: design hierarchy, UVM verification hierarchy and compiled files.
+// Tree views: design hierarchy, UVM verification hierarchy and compiled files. Each view can be
+// filtered and can follow the editor (see viewmodel.ts for the rules).
 
 import * as vscode from 'vscode';
 import type { LanguageClient } from 'vscode-languageclient/node';
 import type { Mapper } from './pathmap';
+import {
+  Cycle,
+  Placed,
+  PlacedTree,
+  Target,
+  TreeNode,
+  ViewState,
+  describeTarget,
+  isClassTarget,
+  isDesignTarget,
+  namesKey,
+  occurrences,
+  placeTree,
+  targetKey,
+  viewDescription,
+  viewMessage,
+} from './viewmodel';
 
 export interface Conn {
   client(): LanguageClient | undefined;
   mapper(): Mapper | undefined;
 }
 
-interface HierNode {
+interface HierNode extends TreeNode {
   name: string;
   definition: string;
   kind: string;
@@ -22,142 +40,14 @@ interface HierNode {
   truncated: boolean;
 }
 
-interface FileNode {
+interface FileNode extends TreeNode {
   path: string;
   uri: string;
   kind: string;
   children: FileNode[];
 }
 
-class HierItem extends vscode.TreeItem {
-  constructor(
-    readonly node: HierNode,
-    readonly parent: HierItem | undefined,
-    conn: Conn,
-  ) {
-    super(
-      node.name,
-      node.children.length ? (parent ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded) : vscode.TreeItemCollapsibleState.None,
-    );
-    this.description = node.definition && node.definition !== node.name ? node.definition : undefined;
-    this.contextValue = 'dvicode.hierNode';
-    const icon =
-      node.kind === 'generate'
-        ? 'symbol-namespace'
-        : node.kind === 'interface'
-          ? 'symbol-interface'
-          : node.kind === 'unresolved'
-            ? 'warning'
-            : 'symbol-module';
-    this.iconPath = new vscode.ThemeIcon(icon);
-    const m = conn.mapper();
-    if (node.uri && m) {
-      const uri = m.toClient(node.uri);
-      const pos = new vscode.Position(node.line, node.character);
-      this.command = { command: 'vscode.open', title: 'Open', arguments: [uri, { selection: new vscode.Range(pos, pos) }] };
-      this.tooltip = new vscode.MarkdownString(`**${node.name}** : \`${node.definition || node.kind}\`\n\n${this.path()}`);
-    }
-  }
-
-  path(): string {
-    const parts: string[] = [];
-    let cur: HierItem | undefined = this;
-    while (cur) {
-      parts.unshift(cur.node.name);
-      cur = cur.parent;
-    }
-    return parts.join('.');
-  }
-}
-
-export class DesignHierarchy implements vscode.TreeDataProvider<HierItem> {
-  private readonly emitter = new vscode.EventEmitter<HierItem | undefined>();
-  readonly onDidChangeTreeData = this.emitter.event;
-  top: string | undefined;
-
-  constructor(private readonly conn: Conn) {}
-
-  refresh(): void {
-    this.emitter.fire(undefined);
-  }
-
-  getTreeItem(e: HierItem): vscode.TreeItem {
-    return e;
-  }
-
-  getParent(e: HierItem): HierItem | undefined {
-    return e.parent;
-  }
-
-  async getChildren(e?: HierItem): Promise<HierItem[]> {
-    if (e) {
-      return e.node.children.map((c) => new HierItem(c, e, this.conn));
-    }
-    const c = this.conn.client();
-    if (!c) {
-      return [];
-    }
-    try {
-      const nodes = await c.sendRequest<HierNode[]>('dvicode/designHierarchy', { top: this.top ?? null });
-      return nodes.map((n) => new HierItem(n, undefined, this.conn));
-    } catch {
-      return [];
-    }
-  }
-}
-
-class FileItem extends vscode.TreeItem {
-  constructor(readonly node: FileNode, conn: Conn) {
-    super(
-      conn.mapper()?.toClient(node.uri) ?? vscode.Uri.parse(node.uri),
-      node.children.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None,
-    );
-    const uri = conn.mapper()?.toClient(node.uri) ?? vscode.Uri.parse(node.uri);
-    this.description = node.kind === 'top' ? undefined : node.kind;
-    this.tooltip = node.path;
-    this.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
-  }
-}
-
-export class CompiledFiles implements vscode.TreeDataProvider<FileItem> {
-  private readonly emitter = new vscode.EventEmitter<FileItem | undefined>();
-  readonly onDidChangeTreeData = this.emitter.event;
-
-  constructor(private readonly conn: Conn) {}
-
-  refresh(): void {
-    this.emitter.fire(undefined);
-  }
-
-  getTreeItem(e: FileItem): vscode.TreeItem {
-    return e;
-  }
-
-  async getChildren(e?: FileItem): Promise<FileItem[]> {
-    if (e) {
-      return e.node.children.map((c) => new FileItem(c, this.conn));
-    }
-    const c = this.conn.client();
-    if (!c) {
-      return [];
-    }
-    try {
-      const nodes = await c.sendRequest<FileNode[]>('dvicode/compiledFiles');
-      return nodes.map((n) => new FileItem(n, this.conn));
-    } catch {
-      return [];
-    }
-  }
-}
-
-export function hierarchyPath(item: unknown): string | undefined {
-  if (item instanceof VerifItem) {
-    return item.node.path;
-  }
-  return item instanceof HierItem ? item.path() : undefined;
-}
-
-interface VerifNode {
+interface VerifNode extends TreeNode {
   name: string;
   path: string;
   class: string;
@@ -178,6 +68,501 @@ export interface VerifHierarchyResult {
   roots: VerifNode[];
 }
 
+/** `dvicode/tree`. */
+interface TreeResult<N> {
+  revision: number;
+  incomplete: string | null;
+  matches: number;
+  roots: N[];
+  test?: string | null;
+  configured?: string | null;
+  tests?: string[];
+}
+
+/** `dvicode/locate`. */
+export interface Located {
+  revision: number;
+  design: { name: string; uri: string | null } | null;
+  instance: string | null;
+  class: { name: string; uri: string | null } | null;
+}
+
+export type ViewName = 'design' | 'verification' | 'files';
+
+/** A node of a view. */
+export class Item<N extends TreeNode> extends vscode.TreeItem {
+  kids: Item<N>[] = [];
+  constructor(
+    readonly placed: Placed<N>,
+    readonly parent: Item<N> | undefined,
+    label: string | vscode.Uri,
+    state: vscode.TreeItemCollapsibleState,
+  ) {
+    super(label as string, state);
+  }
+
+  get node(): N {
+    return this.placed.node;
+  }
+}
+
+/** What a view remembers per build configuration (workspaceState). */
+interface Remembered {
+  filter?: string;
+  sync?: boolean;
+}
+
+/** The shared part of the three views. */
+export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataProvider<Item<N>> {
+  private readonly emitter = new vscode.EventEmitter<Item<N> | undefined>();
+  readonly onDidChangeTreeData = this.emitter.event;
+  view: vscode.TreeView<Item<N>> | undefined;
+  filter: string | undefined;
+  sync = false;
+  /** Changes with each filter, so items get new ids and the matches show expanded. */
+  private filterGen = 0;
+  private tree: PlacedTree<N> | undefined;
+  private items = new Map<string, Item<N>>();
+  private roots: Item<N>[] = [];
+  private revision = -1;
+  private error: string | undefined;
+  private incomplete: string | null = null;
+  private matches = 0;
+  /** Request generation: an answer to an older request is dropped. */
+  private gen = 0;
+  private loading: Promise<void> | undefined;
+  /** A fetch was started since the last change of parameters (getChildren fetches only once). */
+  private attempted = false;
+  /** The item the view selected itself, following the editor. */
+  private revealed: Item<N> | undefined;
+  /** Shown tree is older than the analysis (a visible view refreshes at once). */
+  stale = false;
+  syncNote: string | undefined;
+  readonly cycle = new Cycle();
+  /** When the user last selected a node in the view (not when following the editor did). */
+  lastPick = 0;
+  revealing = false;
+  /** Occurrences of the last target, for one revision of the tree. */
+  private found: { key: string; scope: string; revision: number; paths: string[][] } | undefined;
+
+  constructor(
+    readonly name: ViewName,
+    readonly viewId: string,
+    protected readonly conn: Conn,
+  ) {}
+
+  /** Request parameters besides the filter (top, test). */
+  protected abstract params(): Record<string, unknown>;
+  /** The name of a node in paths. */
+  protected abstract nameOf(n: N, root: boolean): string;
+  protected abstract makeItem(p: Placed<N>, parent: Item<N> | undefined, expand: boolean): Item<N>;
+  /** The description's first part (the top, the test). */
+  protected abstract scopeText(): string | undefined;
+  /** Why the tree is empty without a filter. */
+  protected abstract emptyText(): string | undefined;
+  /** Takes what else the answer holds (the tests). */
+  protected onResult(r: TreeResult<N>): void {
+    void r;
+  }
+
+  attach(view: vscode.TreeView<Item<N>>): void {
+    this.view = view;
+    view.onDidChangeSelection((e) => {
+      if (!this.revealing && e.selection[0] !== this.revealed) {
+        this.lastPick = Date.now();
+      }
+    });
+    view.onDidChangeVisibility((e) => {
+      if (e.visible && this.stale) {
+        void this.refresh();
+      }
+    });
+  }
+
+  getTreeItem(e: Item<N>): vscode.TreeItem {
+    return e;
+  }
+
+  getParent(e: Item<N>): Item<N> | undefined {
+    return e.parent;
+  }
+
+  async getChildren(e?: Item<N>): Promise<Item<N>[]> {
+    if (e) {
+      return e.kids;
+    }
+    if (!this.attempted) {
+      await (this.loading ?? this.refresh());
+    } else if (this.loading) {
+      await this.loading;
+    }
+    return this.roots;
+  }
+
+  /** Fetches the tree again (`reveal`: names of a node to include beyond the node limit). */
+  refresh(reveal?: string[]): Promise<void> {
+    const p = this.load(reveal);
+    this.loading = p;
+    void p.finally(() => {
+      if (this.loading === p) {
+        this.loading = undefined;
+      }
+    });
+    return p;
+  }
+
+  /** Forgets the tree (its parameters changed): the next getChildren fetches it. */
+  protected invalidate(): void {
+    this.gen++;
+    this.attempted = false;
+    this.tree = undefined;
+    this.error = undefined;
+    this.roots = [];
+    this.items.clear();
+  }
+
+  private async load(reveal?: string[]): Promise<void> {
+    const gen = ++this.gen;
+    this.attempted = true;
+    const c = this.conn.client();
+    if (!c) {
+      this.tree = undefined;
+      this.roots = [];
+      this.present();
+      this.emitter.fire(undefined);
+      return;
+    }
+    try {
+      const r = await c.sendRequest<TreeResult<N>>('dvicode/tree', {
+        view: this.name,
+        ...this.params(),
+        filter: this.filter ?? null,
+        reveal: reveal ?? null,
+      });
+      if (gen !== this.gen) {
+        return;
+      }
+      this.onResult(r);
+      this.revision = r.revision;
+      this.incomplete = r.incomplete;
+      this.matches = r.matches;
+      this.error = undefined;
+      this.stale = false;
+      this.setTree(r.roots);
+    } catch (e) {
+      if (gen !== this.gen) {
+        return;
+      }
+      this.error = e instanceof Error ? e.message : String(e);
+      this.tree = undefined;
+      this.roots = [];
+      this.items.clear();
+    }
+    this.present();
+    this.emitter.fire(undefined);
+  }
+
+  private setTree(roots: N[]): void {
+    const tree = placeTree(roots, (n, root) => this.nameOf(n, root));
+    this.tree = tree;
+    this.items.clear();
+    const prefix = this.filter ? `f${this.filterGen}:` : '';
+    const make = (ps: Placed<N>[], parent: Item<N> | undefined): Item<N>[] =>
+      ps.map((p) => {
+        // With a filter the parents of matches are open.
+        const item = this.makeItem(p, parent, this.filter !== undefined || (parent === undefined && this.expandRoots(tree)));
+        item.id = `${this.name}:${prefix}${p.key}`;
+        this.items.set(p.key, item);
+        item.kids = make(p.children, item);
+        return item;
+      });
+    this.roots = make(tree.roots, undefined);
+  }
+
+  /** Whether root nodes show open. */
+  protected expandRoots(tree: PlacedTree<N>): boolean {
+    void tree;
+    return true;
+  }
+
+  /** Sets the view's description and message. */
+  present(): void {
+    if (!this.view) {
+      return;
+    }
+    const s: ViewState = {
+      connected: this.conn.client() !== undefined,
+      error: this.error,
+      scope: this.scopeText(),
+      filter: this.filter,
+      matches: this.matches,
+      incomplete: this.incomplete,
+      empty: this.roots.length === 0,
+      emptyText: this.emptyText(),
+      position: this.sync && this.cycle.paths.length ? { index: this.cycle.index, count: this.cycle.paths.length } : undefined,
+      syncNote: this.sync ? this.syncNote : undefined,
+    };
+    this.view.description = viewDescription(s);
+    this.view.message = viewMessage(s);
+  }
+
+  async setFilter(text: string | undefined): Promise<void> {
+    const t = text?.trim() || undefined;
+    if (t === this.filter) {
+      return;
+    }
+    this.filter = t;
+    this.filterGen++;
+    await this.refresh();
+  }
+
+  // ---------------------------------------------------------------- following the editor
+
+  /** The occurrences of `t` in the whole tree (not only the nodes shown), in view order. */
+  protected async occurrencesOf(t: Target): Promise<string[][]> {
+    const key = targetKey(t);
+    const scope = JSON.stringify(this.params());
+    if (this.found && this.found.key === key && this.found.scope === scope && this.found.revision === this.revision) {
+      return this.found.paths;
+    }
+    const c = this.conn.client();
+    if (!c) {
+      return [];
+    }
+    const target = { definition: t.definition ?? null, instance: t.instance ?? null, class: t.class ?? null };
+    const r = await c.sendRequest<TreeResult<N>>('dvicode/tree', { view: this.name, ...this.params(), target, maxNodes: 100000 });
+    const tree = placeTree(r.roots, (n, root) => this.nameOf(n, root));
+    const paths = occurrences(tree, (p) => this.isTarget(p, t));
+    this.found = { key, scope, revision: r.revision, paths };
+    return paths;
+  }
+
+  protected abstract isTarget(p: Placed<N>, t: Target): boolean;
+
+  /** Why the target has no node here. */
+  protected abstract notFoundText(t: Target): string;
+
+  /** Shows the node of the editor's position (`t`: undefined when there is none). */
+  async follow(t: Target | undefined): Promise<void> {
+    if (!t) {
+      this.cycle.reset();
+      this.syncNote = this.name === 'verification' ? 'The cursor is not in a class.' : this.name === 'design' ? 'The cursor is not in a module.' : undefined;
+      this.present();
+      return;
+    }
+    const gen = this.gen;
+    const paths = t.file ? this.fileOccurrences(t.file) : await this.occurrencesOf(t);
+    if (gen !== this.gen && !this.tree) {
+      return;
+    }
+    if (!paths.length) {
+      this.cycle.reset();
+      this.syncNote = this.notFoundText(t);
+      this.present();
+      return;
+    }
+    const selected = this.view?.selection[0]?.placed.names;
+    this.cycle.update(targetKey(t), paths, selected);
+    await this.showCurrent(t);
+  }
+
+  /** Files view: the nodes of a file (a client URI string). */
+  protected fileOccurrences(file: string): string[][] {
+    void file;
+    return [];
+  }
+
+  async step(delta: number): Promise<void> {
+    if (this.cycle.step(delta)) {
+      await this.showCurrent(undefined);
+    }
+  }
+
+  private async showCurrent(t: Target | undefined): Promise<void> {
+    const names = this.cycle.current();
+    if (!names) {
+      return;
+    }
+    let item = this.itemByNames(names);
+    if (!item) {
+      if (this.filter) {
+        this.syncNote = `${t ? describeTarget(t) : 'The node'} is hidden by the filter.`;
+        this.present();
+        return;
+      }
+      // Beyond the node limit: fetch the tree with this node in it.
+      await this.refresh(names);
+      item = this.itemByNames(names);
+      if (!item) {
+        this.syncNote = `${t ? describeTarget(t) : 'The node'} is not in the view.`;
+        this.present();
+        return;
+      }
+    }
+    this.syncNote = undefined;
+    this.present();
+    if (!this.view || !this.view.visible) {
+      return;
+    }
+    this.revealing = true;
+    this.revealed = item;
+    try {
+      await this.view.reveal(item, { select: true, focus: false, expand: false });
+    } catch {
+      // The tree changed while revealing.
+    } finally {
+      this.revealing = false;
+    }
+  }
+
+  private itemByNames(names: string[]): Item<N> | undefined {
+    const placed = this.tree?.byNames.get(namesKey(names))?.[0];
+    return placed ? this.items.get(placed.key) : undefined;
+  }
+
+  /** Placed nodes of the tree shown, depth first. */
+  protected placed(): PlacedTree<N> | undefined {
+    return this.tree;
+  }
+}
+
+function openCommand(conn: Conn, uri: string | null, line: number, character: number): vscode.Command | undefined {
+  const m = conn.mapper();
+  if (!uri || !m) {
+    return undefined;
+  }
+  const pos = new vscode.Position(line, character);
+  return { command: 'vscode.open', title: 'Open', arguments: [m.toClient(uri), { selection: new vscode.Range(pos, pos) }] };
+}
+
+/** Uri of the engine as VS Code shows it, to compare with documents. */
+function clientUri(conn: Conn, uri: string | null): string | undefined {
+  const m = conn.mapper();
+  return uri && m ? m.toClient(uri).toString() : undefined;
+}
+
+const DESIGN_ICONS: Record<string, string> = { generate: 'symbol-namespace', interface: 'symbol-interface', unresolved: 'warning' };
+
+export class DesignHierarchy extends TreeBase<HierNode> {
+  private topValue: string | undefined;
+
+  constructor(conn: Conn) {
+    super('design', 'dvicode.designHierarchy', conn);
+  }
+
+  get top(): string | undefined {
+    return this.topValue;
+  }
+
+  set top(t: string | undefined) {
+    this.topValue = t;
+    this.invalidate();
+  }
+
+  protected params(): Record<string, unknown> {
+    return { top: this.topValue ?? null };
+  }
+
+  protected nameOf(n: HierNode): string {
+    return n.name;
+  }
+
+  protected makeItem(p: Placed<HierNode>, parent: Item<HierNode> | undefined, expand: boolean): Item<HierNode> {
+    const n = p.node;
+    const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
+    const item = new Item(p, parent, n.name, state);
+    item.description = (n.definition && n.definition !== n.name ? n.definition : '') + (n.truncated ? ' …' : '') || undefined;
+    item.contextValue = 'dvicode.hierNode';
+    item.iconPath = new vscode.ThemeIcon(DESIGN_ICONS[n.kind] ?? 'symbol-module');
+    item.command = openCommand(this.conn, n.uri, n.line, n.character);
+    if (item.command) {
+      item.tooltip = new vscode.MarkdownString(`**${n.name}** : \`${n.definition || n.kind}\`\n\n${p.names.join('.')}`);
+    }
+    return item;
+  }
+
+  protected scopeText(): string | undefined {
+    return this.topValue ? `top ${this.topValue}` : undefined;
+  }
+
+  protected emptyText(): string | undefined {
+    return this.topValue ? `No design element '${this.topValue}'.` : 'No design element in the project.';
+  }
+
+  protected isTarget(p: Placed<HierNode>, t: Target): boolean {
+    return isDesignTarget(p, t);
+  }
+
+  protected notFoundText(t: Target): string {
+    return `${describeTarget(t)} is not instantiated under ${this.topValue ? `'${this.topValue}'` : 'the tops shown'}.`;
+  }
+}
+
+export class CompiledFiles extends TreeBase<FileNode> {
+  constructor(conn: Conn) {
+    super('files', 'dvicode.compiledFiles', conn);
+  }
+
+  protected params(): Record<string, unknown> {
+    return {};
+  }
+
+  protected nameOf(n: FileNode): string {
+    return n.uri;
+  }
+
+  protected makeItem(p: Placed<FileNode>, parent: Item<FileNode> | undefined, expand: boolean): Item<FileNode> {
+    const n = p.node;
+    const uri = this.conn.mapper()?.toClient(n.uri) ?? vscode.Uri.parse(n.uri);
+    const state = n.children.length ? (expand && parent !== undefined ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
+    const item = new Item(p, parent, uri, state);
+    item.resourceUri = uri;
+    item.description = n.kind === 'top' ? undefined : n.kind;
+    item.tooltip = n.path;
+    item.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
+    return item;
+  }
+
+  protected expandRoots(): boolean {
+    return false;
+  }
+
+  protected scopeText(): string | undefined {
+    return undefined;
+  }
+
+  protected emptyText(): string | undefined {
+    return 'No file compiled.';
+  }
+
+  protected isTarget(): boolean {
+    return false;
+  }
+
+  protected notFoundText(t: Target): string {
+    return `${describeTarget(t)} is not compiled.`;
+  }
+
+  protected fileOccurrences(file: string): string[][] {
+    const tree = this.placed();
+    if (!tree) {
+      return [];
+    }
+    return occurrences(tree, (p) => clientUri(this.conn, p.node.uri) === file);
+  }
+}
+
+export function hierarchyPath(item: unknown): string | undefined {
+  if (!(item instanceof Item)) {
+    return undefined;
+  }
+  const n = item.node as Partial<VerifNode>;
+  if (typeof n.path === 'string' && typeof n.class === 'string') {
+    return n.path;
+  }
+  return 'definition' in item.node ? (item.placed.names as string[]).join('.') : undefined;
+}
+
 const VERIF_ICONS: Record<string, string> = {
   test: 'beaker',
   env: 'symbol-namespace',
@@ -192,78 +577,307 @@ const VERIF_ICONS: Record<string, string> = {
   unresolved: 'warning',
 };
 
-class VerifItem extends vscode.TreeItem {
-  constructor(
-    readonly node: VerifNode,
-    expand: boolean,
-    conn: Conn,
-  ) {
-    super(
-      node.name,
-      node.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None,
-    );
-    this.description = node.class + (node.truncated ? ' …' : '');
-    this.contextValue = node.def_uri ? 'dvicode.verifNode.class' : 'dvicode.verifNode';
-    this.iconPath = new vscode.ThemeIcon(VERIF_ICONS[node.kind] ?? 'symbol-class');
-    this.tooltip = new vscode.MarkdownString(`**${node.name}** : \`${node.class}\` (${node.kind})\n\n${node.path}`);
-    const m = conn.mapper();
-    if (node.uri && m) {
-      const uri = m.toClient(node.uri);
-      const pos = new vscode.Position(node.line, node.character);
-      this.command = { command: 'vscode.open', title: 'Open', arguments: [uri, { selection: new vscode.Range(pos, pos) }] };
-    }
-  }
-}
-
 /** UVM component tree of the selected test (`+UVM_TESTNAME` by default). */
-export class VerificationHierarchy implements vscode.TreeDataProvider<VerifItem> {
-  private readonly emitter = new vscode.EventEmitter<VerifItem | undefined>();
-  readonly onDidChangeTreeData = this.emitter.event;
-  /** Test class to show, `*` for all tests, undefined for the configured one. */
-  test: string | undefined;
-  view: vscode.TreeView<VerifItem> | undefined;
+export class VerificationHierarchy extends TreeBase<VerifNode> {
+  private testValue: string | undefined;
   last: VerifHierarchyResult | undefined;
 
-  constructor(private readonly conn: Conn) {}
-
-  refresh(): void {
-    this.emitter.fire(undefined);
+  constructor(conn: Conn) {
+    super('verification', 'dvicode.verificationHierarchy', conn);
   }
 
-  getTreeItem(e: VerifItem): vscode.TreeItem {
-    return e;
+  /** Test class to show, `*` for all tests, undefined for the configured one. */
+  get test(): string | undefined {
+    return this.testValue;
   }
 
-  async getChildren(e?: VerifItem): Promise<VerifItem[]> {
-    if (e) {
-      return e.node.children.map((c) => new VerifItem(c, false, this.conn));
+  set test(t: string | undefined) {
+    this.testValue = t;
+    this.invalidate();
+  }
+
+  protected params(): Record<string, unknown> {
+    return { test: this.testValue ?? null };
+  }
+
+  protected onResult(r: TreeResult<VerifNode>): void {
+    this.last = { test: r.test ?? null, configured: r.configured ?? null, tests: r.tests ?? [], roots: r.roots };
+  }
+
+  /** The test class names the root; components their instance names. */
+  protected nameOf(n: VerifNode, root: boolean): string {
+    return root ? n.class : n.name;
+  }
+
+  protected expandRoots(tree: PlacedTree<VerifNode>): boolean {
+    return tree.roots.length === 1;
+  }
+
+  protected makeItem(p: Placed<VerifNode>, parent: Item<VerifNode> | undefined, expand: boolean): Item<VerifNode> {
+    const n = p.node;
+    const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
+    const item = new Item(p, parent, n.name, state);
+    item.description = n.class + (n.truncated ? ' …' : '');
+    item.contextValue = n.def_uri ? 'dvicode.verifNode.class' : 'dvicode.verifNode';
+    item.iconPath = new vscode.ThemeIcon(VERIF_ICONS[n.kind] ?? 'symbol-class');
+    item.tooltip = new vscode.MarkdownString(`**${n.name}** : \`${n.class}\` (${n.kind})\n\n${n.path}`);
+    item.command = openCommand(this.conn, n.uri, n.line, n.character);
+    return item;
+  }
+
+  protected scopeText(): string | undefined {
+    const r = this.last;
+    if (!r) {
+      return undefined;
     }
-    const c = this.conn.client();
-    if (!c) {
-      return [];
+    return r.test ?? (r.roots.length ? 'all tests' : undefined);
+  }
+
+  protected emptyText(): string | undefined {
+    const r = this.last;
+    if (!r) {
+      return undefined;
     }
-    try {
-      const r = await c.sendRequest<VerifHierarchyResult>('dvicode/verificationHierarchy', { test: this.test ?? null });
-      this.last = r;
-      if (this.view) {
-        this.view.description = r.test ?? (r.roots.length ? 'all tests' : undefined);
-        this.view.message = r.roots.length
-          ? undefined
-          : r.tests.length
-            ? `Test '${r.test}' not found. Select one of the ${r.tests.length} tests.`
-            : 'No UVM test (class derived from uvm_test) in the project.';
-      }
-      return r.roots.map((n) => new VerifItem(n, r.roots.length === 1, this.conn));
-    } catch {
-      return [];
-    }
+    return r.tests.length ? `Test '${r.test}' not found. Select one of the ${r.tests.length} tests.` : 'No UVM test (class derived from uvm_test) in the project.';
+  }
+
+  protected isTarget(p: Placed<VerifNode>, t: Target): boolean {
+    return isClassTarget(p, t);
+  }
+
+  protected notFoundText(t: Target): string {
+    return `${describeTarget(t)} is not a component of ${this.last?.test ? `test '${this.last.test}'` : 'the tests shown'}.`;
   }
 }
 
 export function componentClassLocation(item: unknown, conn: Conn): { uri: vscode.Uri; line: number } | undefined {
-  if (!(item instanceof VerifItem) || !item.node.def_uri) {
+  if (!(item instanceof Item)) {
     return undefined;
   }
+  const n = item.node as Partial<VerifNode>;
   const m = conn.mapper();
-  return m ? { uri: m.toClient(item.node.def_uri), line: item.node.def_line } : undefined;
+  return n.def_uri && typeof n.class === 'string' && m ? { uri: m.toClient(n.def_uri), line: n.def_line ?? 0 } : undefined;
+}
+
+/** The three views, their commands, what they remember, and following the editor. */
+export class Views implements vscode.Disposable {
+  readonly design: DesignHierarchy;
+  readonly verification: VerificationHierarchy;
+  readonly files: CompiledFiles;
+  private readonly all: TreeBase<TreeNode>[];
+  private readonly subs: vscode.Disposable[] = [];
+  private timer: NodeJS.Timeout | undefined;
+  private revisionTimer: NodeJS.Timeout | undefined;
+  /** The last located position and what the engine said. */
+  private located: { key: string; at: Promise<Located | undefined> } | undefined;
+
+  constructor(
+    private readonly ctx: vscode.ExtensionContext,
+    private readonly conn: Conn,
+  ) {
+    this.design = new DesignHierarchy(conn);
+    this.verification = new VerificationHierarchy(conn);
+    this.files = new CompiledFiles(conn);
+    this.all = [this.design, this.verification, this.files] as unknown as TreeBase<TreeNode>[];
+    for (const v of this.all) {
+      const view = vscode.window.createTreeView(v.viewId, { treeDataProvider: v, showCollapseAll: v.name !== 'files' });
+      v.attach(view);
+      this.subs.push(
+        view,
+        view.onDidChangeVisibility((e) => {
+          if (e.visible && v.sync) {
+            this.schedule(0);
+          }
+        }),
+      );
+      this.registerCommands(v);
+    }
+    this.restore();
+    this.subs.push(
+      vscode.window.onDidChangeActiveTextEditor(() => this.schedule(100)),
+      vscode.window.onDidChangeTextEditorSelection((e) => {
+        if (e.textEditor === vscode.window.activeTextEditor) {
+          this.schedule(300);
+        }
+      }),
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('dvicode.buildFile')) {
+          this.restore();
+        }
+      }),
+    );
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+    clearTimeout(this.revisionTimer);
+    for (const s of this.subs) {
+      s.dispose();
+    }
+  }
+
+  /** After a full build: every view again. */
+  refreshAll(): void {
+    this.located = undefined;
+    for (const v of this.all) {
+      void v.refresh().then(() => {
+        if (v.sync) {
+          this.schedule(0);
+        }
+      });
+    }
+  }
+
+  /** The analysis changed after edits: visible views refresh (once the typing pauses). */
+  onRevision(): void {
+    this.located = undefined;
+    for (const v of this.all) {
+      v.stale = true;
+    }
+    clearTimeout(this.revisionTimer);
+    this.revisionTimer = setTimeout(() => {
+      for (const v of this.all) {
+        if (v.view?.visible) {
+          void v.refresh();
+        }
+      }
+    }, 1500);
+  }
+
+  /** The server stopped or started. */
+  presentAll(): void {
+    for (const v of this.all) {
+      v.present();
+    }
+  }
+
+  private registerCommands(v: TreeBase<TreeNode>): void {
+    const id = (c: string): string => `dvicode.${v.name}.${c}`;
+    this.subs.push(
+      vscode.commands.registerCommand(id('filter'), async () => {
+        const text = await vscode.window.showInputBox({
+          title: `Filter ${v.view?.title ?? v.name}`,
+          value: v.filter ?? '',
+          prompt: 'Text anywhere in a name or path; * within one level, ** across levels, ? one character. Empty: no filter.',
+        });
+        if (text !== undefined) {
+          await v.setFilter(text);
+          this.save(v);
+        }
+      }),
+      vscode.commands.registerCommand(id('clearFilter'), async () => {
+        await v.setFilter(undefined);
+        this.save(v);
+      }),
+      vscode.commands.registerCommand(id('syncOn'), () => this.setSync(v, true)),
+      vscode.commands.registerCommand(id('syncOff'), () => this.setSync(v, false)),
+      vscode.commands.registerCommand(id('nextOccurrence'), () => v.step(1)),
+      vscode.commands.registerCommand(id('previousOccurrence'), () => v.step(-1)),
+    );
+  }
+
+  private setSync(v: TreeBase<TreeNode>, on: boolean): void {
+    v.sync = on;
+    v.syncNote = undefined;
+    v.cycle.reset();
+    this.save(v);
+    v.present();
+    if (on) {
+      this.schedule(0);
+    }
+  }
+
+  /** Key of what the views remember: the build configuration. */
+  private stateKey(v: TreeBase<TreeNode>): string {
+    const build = vscode.workspace.getConfiguration('dvicode').get<string>('buildFile', '') || 'default';
+    return `dvicode.view.${v.name}:${build}`;
+  }
+
+  private save(v: TreeBase<TreeNode>): void {
+    const r: Remembered = { filter: v.filter, sync: v.sync };
+    void this.ctx.workspaceState.update(this.stateKey(v), r);
+    this.setContext(v);
+  }
+
+  private restore(): void {
+    for (const v of this.all) {
+      const r = this.ctx.workspaceState.get<Remembered>(this.stateKey(v)) ?? {};
+      const filter = r.filter || undefined;
+      v.sync = r.sync === true;
+      v.cycle.reset();
+      if (filter !== v.filter) {
+        void v.setFilter(filter);
+      }
+      this.setContext(v);
+      v.present();
+    }
+    this.schedule(0);
+  }
+
+  private setContext(v: TreeBase<TreeNode>): void {
+    void vscode.commands.executeCommand('setContext', `dvicode.${v.name}.filtered`, v.filter !== undefined);
+    void vscode.commands.executeCommand('setContext', `dvicode.${v.name}.sync`, v.sync);
+  }
+
+  private schedule(ms: number): void {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => void this.follow(), ms);
+  }
+
+  /** Each visible view that follows the editor shows the editor's position. */
+  private async follow(): Promise<void> {
+    const views = this.all.filter((v) => v.sync && v.view?.visible && Date.now() - v.lastPick > 1000);
+    const ed = vscode.window.activeTextEditor;
+    const m = this.conn.mapper();
+    if (!views.length || !ed || !m || !this.ours(ed.document.uri)) {
+      return;
+    }
+    const doc = ed.document.uri.toString();
+    const needLocate = views.some((v) => v.name !== 'files');
+    const located = needLocate ? await this.locate(ed, m) : undefined;
+    for (const v of views) {
+      try {
+        if (v.name === 'files') {
+          await v.follow({ file: doc });
+        } else if (v.name === 'design') {
+          await v.follow(located?.design ? { definition: located.design.name, instance: located.instance ?? undefined } : undefined);
+        } else {
+          await v.follow(located?.class ? { class: located.class.name } : undefined);
+        }
+      } catch {
+        // The server went away; the views say so when they refresh.
+      }
+    }
+  }
+
+  /** Documents this window's engine knows: local files, or files of its own dvicode:// host. */
+  private ours(uri: vscode.Uri): boolean {
+    if (uri.scheme === 'file') {
+      return true;
+    }
+    if (uri.scheme !== 'dvicode') {
+      return false;
+    }
+    const m = this.conn.mapper();
+    try {
+      return m !== undefined && m.toClient(m.toServer(uri)).authority === uri.authority;
+    } catch {
+      return false;
+    }
+  }
+
+  private locate(ed: vscode.TextEditor, m: Mapper): Promise<Located | undefined> {
+    const c = this.conn.client();
+    if (!c) {
+      return Promise.resolve(undefined);
+    }
+    const uri = m.toServer(ed.document.uri);
+    const position = ed.selection.active;
+    const key = `${uri}:${position.line}:${position.character}`;
+    if (this.located?.key !== key) {
+      const at = c.sendRequest<Located>('dvicode/locate', { textDocument: { uri }, position }).catch(() => undefined);
+      this.located = { key, at };
+    }
+    return this.located.at;
+  }
 }

@@ -227,6 +227,87 @@ async function run() {
     }
   });
 
+  /** Names of every node of a view, depth first. */
+  const allNodes = async (view) => {
+    const out = [];
+    const walk = async (items) => {
+      for (const i of items) {
+        out.push(i.placed.names.join('.'));
+        await walk(await view.getChildren(i));
+      }
+    };
+    await walk(await view.getChildren());
+    return out;
+  };
+
+  await test('views: filter', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const v = api.views();
+    try {
+      await v.design.setFilter('mon');
+      const design = (await allNodes(v.design)).join(' ');
+      if (design !== 'tb_top tb_top.dut tb_top.dut.g_mon tb_top.dut.g_mon.u_mon') throw new Error(`design: ${design}`);
+      await v.verification.setFilter('drv');
+      const verif = (await allNodes(v.verification)).join(' ');
+      if (verif !== 'demo_full_test demo_full_test.env demo_full_test.env.agents[i] demo_full_test.env.agents[i].drv') throw new Error(`verification: ${verif}`);
+      await v.files.setFilter('*_pkg.sv');
+      const files = (await v.files.getChildren()).map((i) => i.node.path.replace(/\\/g, '/').split('/').pop()).sort().join(' ');
+      if (files !== 'demo_env_pkg.sv demo_pkg.sv tb_pkg.sv uvm_pkg.sv') throw new Error(`files: ${files}`);
+      await v.design.setFilter('nothing_here');
+      if (v.design.view.message !== "Nothing matches 'nothing_here'.") throw new Error(`message: ${v.design.view.message}`);
+      return `${design} | ${verif} | ${files}`;
+    } finally {
+      for (const x of [v.design, v.verification, v.files]) {
+        await x.setFilter(undefined);
+      }
+    }
+  });
+
+  await test('views: follow the editor', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const v = api.views();
+    const sel = (view) => (view.view.selection[0] ? view.view.selection[0].placed.names.join('.') : '');
+    const at = async (doc, needle, down) => {
+      const ed = await vscode.window.showTextDocument(doc);
+      const p = lineOf(doc, needle).translate(down, 0);
+      ed.selection = new vscode.Selection(p, p);
+      return ed;
+    };
+    await vscode.commands.executeCommand('dvicode.designHierarchy.focus');
+    await vscode.commands.executeCommand('dvicode.design.syncOn');
+    try {
+      // In fifo: its first instance; the editor keeps the focus.
+      const fifo = await open('rtl/fifo.sv');
+      await at(fifo, 'module fifo', 3);
+      await waitFor('design selection', async () => sel(v.design) === 'tb_top.dut.u_fifo', 20000);
+      if (vscode.window.activeTextEditor.document !== fifo) throw new Error('the editor lost the focus');
+      const first = v.design.view.description;
+      if (first !== '1 of 2') throw new Error(`description: ${first}`);
+      await vscode.commands.executeCommand('dvicode.design.nextOccurrence');
+      await waitFor('next occurrence', async () => sel(v.design) === 'tb_top.dut.g_mon.u_mon', 20000);
+      // Moving inside fifo keeps the occurrence shown.
+      await at(fifo, 'module fifo', 4);
+      await sleep(1500);
+      if (sel(v.design) !== 'tb_top.dut.g_mon.u_mon') throw new Error(`moved to ${sel(v.design)}`);
+      // On an instantiation line: that instance.
+      const top = await open('rtl/top.sv');
+      await at(top, 'u_fifo (', 0);
+      await waitFor('instance selection', async () => sel(v.design) === 'tb_top.dut.u_fifo', 20000);
+      // The verification hierarchy follows classes.
+      await vscode.commands.executeCommand('dvicode.verificationHierarchy.focus');
+      await vscode.commands.executeCommand('dvicode.verification.syncOn');
+      const env = await open('tb/demo_env_pkg.sv');
+      await at(env, 'class demo_monitor', 2);
+      await waitFor('verification selection', async () => sel(v.verification) === 'demo_full_test.env.agents[i].mon', 20000);
+      return `${first} -> ${sel(v.design)}; ${sel(v.verification)}`;
+    } finally {
+      await vscode.commands.executeCommand('dvicode.design.syncOff');
+      await vscode.commands.executeCommand('dvicode.verification.syncOff');
+    }
+  });
+
   await test('call hierarchy: incoming and outgoing calls', async () => {
     const doc = await open('tb/tb_pkg.sv');
     const pos = lineOf(doc, 'extern function void print').translate(0, 'extern function void '.length);

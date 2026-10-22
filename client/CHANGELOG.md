@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**Filter and follow the editor in the DVICode views** (#4, #5)
+
+- Each of the three views (Design Hierarchy, Verification Hierarchy, Compiled Files) has a
+  **Filter...** button: it shows only the nodes whose name, module or class, or path matches,
+  with their parents. Plain text matches anywhere, ignoring case; `*` matches within one level
+  of a path, `**` across levels. The engine searches the whole design, not only the part shown;
+  on very large designs the view says when it stopped early.
+- **Follow the Editor**, per view: the view selects the instance, component or file the cursor
+  is in when you move, switch files, **F12** or **Ctrl+click**, without taking the focus. "1 of
+  N" in the title when a module or class is used in several places, with **Next** and
+  **Previous**. A node beyond the size limit of the tree is fetched when needed.
+- Views refresh after edits (when typing pauses), not only after a full build, and remember
+  their filter and following per build configuration.
+
 - UVM Verification Hierarchy: a base test that creates `T_ENV env` shows the environment class a
   derived test gives `T_ENV` in `extends base_test#(...)` (by name or position, through a
   typedef, or the default), with its whole tree, instead of `T_ENV [unresolved]`.

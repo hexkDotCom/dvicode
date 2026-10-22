@@ -28,6 +28,8 @@ currently in preview.
 - **Design Hierarchy**: browse the instance tree from your top module.
 - **UVM Verification Hierarchy**: explore the component hierarchy of the selected test
   (`+UVM_TESTNAME`), worked out from the source code.
+- **Filter and follow**: filter each view by name or path, and let it follow the editor:
+  jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.
 - **Type and call hierarchies**, outline, workspace symbol search, rename and semantic
   highlighting (inactive `` `ifdef `` code is dimmed).
@@ -103,7 +105,22 @@ testbench; it needs no UVM installation.
 
 - **DVICode** in the activity bar: Design Hierarchy (pick the top with **Select Design
   Hierarchy Top...**), Verification Hierarchy (pick the test with **Select UVM Test...**) and
-  Compiled Files.
+  Compiled Files. Each view's title bar has:
+  - **Filter...** (funnel button): show only what matches and its parents. Plain text matches
+    anywhere in a name or path, ignoring case (`fifo` finds `tb.dut.u_rx_fifo`); `*` matches
+    within one level of a path, `**` across levels, `?` one character
+    (`dut.*.mem`, `rtl/**.sv`). The Design Hierarchy matches instance names, module names and
+    paths; the Verification Hierarchy component names, their classes and paths; Compiled
+    Files file paths. On very large designs the view says when the search stopped early.
+  - **Follow the Editor** (link button): the view selects what the cursor is in, without taking
+    the focus from the editor: the instance of the module (on an instantiation line, that
+    instance), the component built from the class, the file. When a module or class is used
+    in several places the title shows "1 of N"; **Next** and **Previous**
+    move between them, and the view stays on the one shown while you move
+    inside the same module.
+
+  Each view remembers its filter and whether it follows the editor, per build configuration.
+  The commands are in the Command Palette too (**DVICode: Filter... (Design Hierarchy)**, ...).
 - **DVICode: Expand Macro One Level**, **Expand Macro All Levels** and **Show Including
   File**; the first and last are also in the editor's context menu.
 - **DVICode: Set Current Build Configuration...** to switch between `.dvicode/*.build` files.

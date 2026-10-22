@@ -7,7 +7,7 @@ import { Launch, makeLaunch, serverSettingsKey } from './launcher';
 import { Mapper } from './pathmap';
 import { RemoteFs } from './remotefs';
 import { InternalError, LogChannel, Reporter } from './report';
-import { CompiledFiles, DesignHierarchy, VerificationHierarchy, componentClassLocation, hierarchyPath } from './views';
+import { VerificationHierarchy, Views, componentClassLocation, hierarchyPath } from './views';
 
 interface Status {
   root: string;
@@ -40,9 +40,7 @@ let output: LogChannel;
 let reporter: Reporter;
 let statusItem: vscode.StatusBarItem;
 let lastStatus: Status | undefined;
-let hierarchy: DesignHierarchy;
-let compiled: CompiledFiles;
-let verification: VerificationHierarchy;
+let views: Views;
 
 const SV_SELECTOR = [
   { scheme: 'file', language: 'systemverilog' },
@@ -138,6 +136,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
       statusItem.text = '$(debug-disconnect) DVICode';
       statusItem.tooltip = 'The DVICode language server stopped. Click to restart.';
       statusItem.command = 'dvicode.restartServer';
+      views.presentAll();
     }
   });
   c.onNotification('dvicode/internalError', (e: InternalError) => reporter.onInternalError(e));
@@ -157,10 +156,9 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
       );
       statusItem.command = 'dvicode.showStatus';
     }
-    hierarchy.refresh();
-    verification.refresh();
-    compiled.refresh();
+    views.refreshAll();
   });
+  c.onNotification('dvicode/revision', () => views.onRevision());
   client = c;
   statusItem.text = '$(sync~spin) DVICode';
   statusItem.tooltip = `Building the project on ${launch.target}`;
@@ -326,8 +324,8 @@ async function selectDesignTop(): Promise<void> {
   const items = [{ label: '$(sparkle) Automatic', value: undefined as string | undefined }, ...tops.map((t) => ({ label: t, value: t as string | undefined }))];
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Top of the design hierarchy (any module name works)' });
   if (pick) {
-    hierarchy.top = pick.value;
-    hierarchy.refresh();
+    views.design.top = pick.value;
+    void views.design.refresh();
   }
 }
 
@@ -343,8 +341,8 @@ async function selectUvmTest(): Promise<void> {
   ];
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'UVM test of the verification hierarchy' });
   if (pick) {
-    verification.test = pick.value;
-    verification.refresh();
+    views.verification.test = pick.value;
+    void views.verification.refresh();
   }
 }
 
@@ -425,6 +423,8 @@ export interface DvicodeApi {
   target(): string | undefined;
   toServer(uri: vscode.Uri): string | undefined;
   verification(): VerificationHierarchy;
+  /** The three views (tests). */
+  views(): Views;
   /** The last internal error the engine reported. */
   lastInternalError(): InternalError | undefined;
   /** The text DVICode: Report Issue fills in. */
@@ -452,12 +452,9 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     client: () => client,
     mapper: (): Mapper | undefined => launch?.mapper,
   };
-  hierarchy = new DesignHierarchy(conn);
-  compiled = new CompiledFiles(conn);
-  verification = new VerificationHierarchy(conn);
-  verification.view = vscode.window.createTreeView('dvicode.verificationHierarchy', { treeDataProvider: verification, showCollapseAll: true });
+  views = new Views(ctx, conn);
   ctx.subscriptions.push(
-    verification.view,
+    views,
     vscode.commands.registerCommand('dvicode.selectUvmTest', selectUvmTest),
     vscode.commands.registerCommand('dvicode.openComponentClass', async (item: unknown) => {
       const l = componentClassLocation(item, conn);
@@ -466,8 +463,6 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
         await vscode.window.showTextDocument(l.uri, { selection: new vscode.Range(pos, pos) });
       }
     }),
-    vscode.window.registerTreeDataProvider('dvicode.designHierarchy', hierarchy),
-    vscode.window.registerTreeDataProvider('dvicode.compiledFiles', compiled),
     vscode.workspace.registerFileSystemProvider(
       'dvicode',
       new RemoteFs(
@@ -485,11 +480,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     vscode.commands.registerCommand('dvicode.showIncludingFiles', showIncludingFiles),
     vscode.commands.registerCommand('dvicode.openRemoteFolder', openRemoteFolder),
     vscode.commands.registerCommand('dvicode.selectDesignTop', selectDesignTop),
-    vscode.commands.registerCommand('dvicode.refreshViews', () => {
-      hierarchy.refresh();
-      verification.refresh();
-      compiled.refresh();
-    }),
+    vscode.commands.registerCommand('dvicode.refreshViews', () => views.refreshAll()),
     vscode.commands.registerCommand('dvicode.showOutput', () => output.show()),
     vscode.commands.registerCommand('dvicode.reportIssue', () => reporter.reportIssue()),
     vscode.commands.registerCommand('dvicode.copyHierarchyPath', async (item: unknown) => {
@@ -504,7 +495,8 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     ready: () => ensureClient(ctx),
     target: () => launch?.target,
     toServer: (uri) => launch?.mapper.toServer(uri),
-    verification: () => verification,
+    verification: () => views.verification,
+    views: () => views,
     lastInternalError: () => reporter.last,
     issueBody: () => reporter.issueBody(),
   };

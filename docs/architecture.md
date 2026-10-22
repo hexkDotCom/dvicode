@@ -76,6 +76,9 @@ folder of another host cannot be opened in the same window.
 | `dvicode/status` | project, file and symbol counts, build-file path, timing |
 | `dvicode/compiledFiles` | ordered list of compiled files with include children |
 | `dvicode/designHierarchy` | module instance tree from the top (auto-detected or `-top`) |
+| `dvicode/tree` | the tree of a view: `{view: "design" \| "verification" \| "files", top?, test?, filter?, target?, reveal?, maxNodes?}` → `{revision, roots, matches, incomplete}` (and `test`, `configured`, `tests` for the verification view). `filter` keeps matching nodes and their parents (rules in `ide/filter.rs`); `target` (`{definition, instance}` or `{class}`) keeps the nodes of one design element, instance or class instead; `reveal` (names from a root) returns that node even beyond `maxNodes`. `incomplete` says which limit cut the tree: `nodes`, `matches` or `visits` |
+| `dvicode/locate` | the design element, instance and class around a position (`{revision, design, instance, class}`), for the views that follow the editor |
+| `dvicode/revision` | notification to the client: the analysis changed after edits (the views refresh) |
 | `dvicode/expandMacro` | macro text at a position, one level or all levels |
 | `dvicode/includingFiles` | files that include the given file |
 | `dvicode/rebuild` | re-read the build file and recompile |
