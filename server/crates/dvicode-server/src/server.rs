@@ -1164,6 +1164,8 @@ struct TreeParams {
     filter: Option<String>,
     /// Names from a root to a node returned even beyond the node limit.
     reveal: Option<Vec<String>>,
+    /// Instead of a filter: the nodes of a design element, instance or class.
+    target: Option<dvi_analysis::ide::views::Target>,
     max_nodes: Option<usize>,
 }
 
@@ -1180,6 +1182,7 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
     let mut q = TreeQuery::new(p.max_nodes.unwrap_or(20_000).min(100_000));
     q.filter = p.filter.as_deref().and_then(Filter::new);
     q.reveal = p.reveal.unwrap_or_default();
+    q.target = p.target;
     let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
     match p.view.as_str() {
         "design" => {

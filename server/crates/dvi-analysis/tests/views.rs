@@ -117,3 +117,21 @@ fn verification_and_file_filters() {
     assert_eq!((files.len(), meta.matches), (1, 1));
     assert!(files[0].path.ends_with("tb_pkg.sv"));
 }
+
+#[test]
+fn targets_find_every_occurrence_in_tree_order() {
+    use dvi_analysis::ide::views::Target;
+    let (a, _) = project("dtarget", &[("d.sv", DESIGN)]);
+    let target = |definition: &str, instance: Option<&str>| {
+        let mut q = TreeQuery::new(1000);
+        q.target = Some(Target { definition: Some(definition.into()), instance: instance.map(Into::into), class: None });
+        let (t, meta) = a.design_tree(Some("top"), &q);
+        (paths(&t), meta.matches)
+    };
+    // Every fifo; the u_tx_fifo instance in core; core itself.
+    let (p, n) = target("fifo", None);
+    assert_eq!(n, 5);
+    assert!(p.contains(&"top.g.f".to_string()) && p.contains(&"top.c1.u_tx_fifo".to_string()));
+    assert_eq!(target("core", Some("u_tx_fifo")), (vec!["top".into(), "top.c0".into(), "top.c0.u_tx_fifo".into(), "top.c1".into(), "top.c1.u_tx_fifo".into()], 2));
+    assert_eq!(target("core", None).1, 2);
+}

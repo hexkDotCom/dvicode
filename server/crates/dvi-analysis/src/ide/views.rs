@@ -75,6 +75,9 @@ pub struct VerifHierarchy {
 #[derive(Clone, Debug)]
 pub struct TreeQuery {
     pub filter: Option<Filter>,
+    /// Instead of a filter: the nodes of one design element, instance or class (to find
+    /// every place the editor's position occurs in a view).
+    pub target: Option<Target>,
     /// Names from a root to a node that is returned even beyond the node limit (with its
     /// ancestors): for the Design Hierarchy the top's name, then instance names; for the
     /// Verification Hierarchy the test class, then component names.
@@ -89,8 +92,17 @@ pub struct TreeQuery {
 
 impl TreeQuery {
     pub fn new(max_nodes: usize) -> TreeQuery {
-        TreeQuery { filter: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000 }
+        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000 }
     }
+}
+
+/// What `dvicode/locate` found, as nodes of a view: instances of `definition` (or, with
+/// `instance`, the instance of that name in `definition`), or components of `class`.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct Target {
+    pub definition: Option<String>,
+    pub instance: Option<String>,
+    pub class: Option<String>,
 }
 
 /// How complete a tree is.
@@ -151,8 +163,25 @@ impl Walk<'_> {
     /// Whether a node with these texts (and their path separator) matches the filter; always
     /// true without one.
     fn matched(&mut self, texts: &[(&str, char)]) -> bool {
-        let Some(f) = &self.q.filter else { return true };
+        let Some(f) = self.q.filter.as_ref().filter(|_| self.q.target.is_none()) else { return self.q.target.is_none() };
         let m = texts.iter().any(|(t, sep)| f.matches(t, *sep));
+        self.count(m)
+    }
+
+    /// Whether a node is the target: an instance `name` of `definition` in `parent`, or a
+    /// component of class `class`.
+    fn hit(&mut self, name: &str, definition: &str, parent: &str, class: &str) -> bool {
+        let Some(t) = &self.q.target else { return false };
+        let m = match (&t.class, &t.definition, &t.instance) {
+            (Some(c), ..) => c == class,
+            (None, Some(d), Some(i)) => i == name && d == parent,
+            (None, Some(d), None) => d == definition,
+            _ => false,
+        };
+        self.count(m)
+    }
+
+    fn count(&mut self, m: bool) -> bool {
         if m {
             self.meta.matches += 1;
             if self.meta.matches >= self.q.max_matches {
@@ -382,7 +411,7 @@ impl Analysis {
             let loc = self.decl_location(t);
             let name = d.name.to_string();
             let pin = pin_below(Some(q.reveal.as_slice()), &name);
-            let matched = w.matched(&[(&name, '.')]);
+            let matched = if q.target.is_some() { w.hit(&name, &name, "", "") } else { w.matched(&[(&name, '.')]) };
             let mut node = HierNode {
                 name: name.clone(),
                 definition: name.clone(),
@@ -397,7 +426,7 @@ impl Analysis {
             };
             let mut stack = vec![self.decl_key(t)];
             if !w.stopped() {
-                node.children = self.hier_walk(t, &name, pin, &mut w, &mut stack, &mut node.truncated);
+                node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated);
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 roots.push(node);
@@ -407,7 +436,7 @@ impl Analysis {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn hier_walk(&self, scope: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<HierNode> {
+    fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<HierNode> {
         let mut out = Vec::new();
         let u = self.unit(scope.unit);
         let mut todo: Vec<DeclId> = u.parsed.decl(scope.decl).children.clone();
@@ -441,11 +470,11 @@ impl Analysis {
                     let def = self.type_of(cr);
                     let loc = self.decl_location(cr);
                     let def_loc = def.and_then(|m| self.decl_location(m));
-                    let def_name = d.ty.as_ref().map(|t| t.text.split(|ch: char| ch == ' ' || ch == '#').next().unwrap_or("").to_string()).unwrap_or_default();
+                    let ty_name = d.ty.as_ref().map(|t| t.text.split(|ch: char| ch == ' ' || ch == '#').next().unwrap_or("").to_string()).unwrap_or_default();
                     let child_path = format!("{path}.{}", d.name);
                     let mut node = HierNode {
                         name: d.name.to_string(),
-                        definition: def.map(|m| self.decl(m).name.to_string()).unwrap_or(def_name),
+                        definition: def.map(|m| self.decl(m).name.to_string()).unwrap_or(ty_name),
                         kind: def.map(|m| self.decl(m).kind.label().to_string()).unwrap_or_else(|| "unresolved".into()),
                         uri: loc.as_ref().map(|l| l.uri.to_string()),
                         line: loc.as_ref().map_or(0, |l| l.range.start.line),
@@ -455,12 +484,17 @@ impl Analysis {
                         children: Vec::new(),
                         truncated: false,
                     };
-                    let matched = w.matched(&[(&node.name, '.'), (&node.definition, '.'), (&child_path, '.')]);
+                    let matched = if w.q.target.is_some() {
+                        w.hit(&node.name, &node.definition, def_name, "")
+                    } else {
+                        w.matched(&[(&node.name, '.'), (&node.definition, '.'), (&child_path, '.')])
+                    };
                     if let Some(m) = def {
                         let key = self.decl_key(m);
                         if !stack.contains(&key) && stack.len() < 64 {
                             stack.push(key);
-                            node.children = self.hier_walk(m, &child_path, child_pin, w, stack, &mut node.truncated);
+                            let m_name = self.decl(m).name.to_string();
+                            node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated);
                             stack.pop();
                         }
                     }
@@ -475,7 +509,7 @@ impl Analysis {
                     let gr = DeclRef { unit: scope.unit, decl: c };
                     let named = d.kind == DeclKind::Generate;
                     let (gen_path, gen_pin) = if named { (format!("{path}.{}", d.name), pin_below(pin, &d.name)) } else { (path.to_string(), pin) };
-                    let kids = self.hier_walk(gr, &gen_path, gen_pin, w, stack, truncated);
+                    let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, truncated);
                     if kids.is_empty() {
                         continue;
                     }
@@ -625,7 +659,7 @@ impl Analysis {
             let d = self.decl(t);
             let loc = self.decl_location(t);
             let pin = pin_below(Some(q.reveal.as_slice()), &d.name);
-            let matched = w.matched(&[("uvm_test_top", '.'), (&d.name, '.')]);
+            let matched = if q.target.is_some() { w.hit("uvm_test_top", "", "", &d.name) } else { w.matched(&[("uvm_test_top", '.'), (&d.name, '.')]) };
             let mut node = VerifNode {
                 name: "uvm_test_top".into(),
                 path: "uvm_test_top".into(),
@@ -748,7 +782,7 @@ impl Analysis {
                     stack.pop();
                 }
             }
-            let matched = w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]);
+            let matched = if w.q.target.is_some() { w.hit(&node.name, "", "", &node.class) } else { w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]) };
             if matched || !node.children.is_empty() || child_pin.is_some() {
                 out.push(node);
             } else if reserved {
