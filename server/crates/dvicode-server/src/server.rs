@@ -1167,6 +1167,8 @@ struct TreeParams {
     /// Instead of a filter: the nodes of a design element, instance or class.
     target: Option<dvi_analysis::ide::views::Target>,
     max_nodes: Option<usize>,
+    /// Verification Hierarchy: TLM ports are shown (default: yes, as older clients expect).
+    ports: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1183,6 +1185,7 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
     q.filter = p.filter.as_deref().and_then(Filter::new);
     q.reveal = p.reveal.unwrap_or_default();
     q.target = p.target;
+    q.ports = p.ports.unwrap_or(true);
     if q.target.is_some() {
         // Every occurrence counts ("1 of N").
         q.max_matches = q.max_nodes;

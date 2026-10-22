@@ -73,6 +73,42 @@ pub struct VerifNode {
     /// When siblings share the name: which one this is (2, 3...). The views name it `name#2`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dup: Option<u32>,
+    /// The ways the component is created, each the conditions around it, outermost first
+    /// (`?`: not known); empty when one way is unconditional.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Vec<String>>,
+    /// Created in a loop: its iterations (`4`, `up to 4`: the loop can stop early), or `?`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<String>,
+    /// The loops it is created in, outermost first (`for (int i = 0; i < 4; i++)`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub loops: Vec<String>,
+    /// Other classes created instead, under other conditions
+    /// (`if (host) driver = A::...; else driver = B::...;`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<Alternative>,
+    /// TLM ports of the component left out (`TreeQuery::ports` off).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ports_hidden: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A class created instead of a node's, under other conditions.
+#[derive(Serialize, Debug, Clone)]
+pub struct Alternative {
+    pub class: String,
+    /// Where it is created.
+    pub uri: Option<String>,
+    pub line: u32,
+    pub character: u32,
+    /// Location of the class.
+    pub def_uri: Option<String>,
+    pub def_line: u32,
+    /// As [`VerifNode::conditions`].
+    pub conditions: Vec<Vec<String>>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -106,11 +142,13 @@ pub struct TreeQuery {
     pub max_matches: usize,
     /// Nodes looked at at most.
     pub max_visits: usize,
+    /// Verification Hierarchy: TLM ports are shown.
+    pub ports: bool,
 }
 
 impl TreeQuery {
     pub fn new(max_nodes: usize) -> TreeQuery {
-        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000 }
+        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000, ports: true }
     }
 }
 
@@ -282,12 +320,15 @@ enum What {
 }
 
 /// A component creation reached while building a component, with the guards of each way it
-/// is reached (an empty list: unconditionally).
+/// is reached (an empty list: unconditionally), and the other creations of the same variable
+/// and name that can run instead (`if (host) driver = A...; else driver = B...;`): UVM makes one
+/// of them.
 #[derive(Debug, Clone)]
 struct Made {
     body: DeclRef,
     cr: Creation,
     alts: Vec<Vec<Guard>>,
+    others: Vec<Made>,
 }
 
 /// Work shared by one request: tokens of files, summaries of method bodies, and a budget of
@@ -327,26 +368,79 @@ impl Scan {
 }
 
 /// Adds a creation, merging it with one of the same variable and name: the same creation
-/// reached another way adds that way; a later one at least as unconditional replaces it (a
-/// derived class re-creating it); otherwise both are kept (`if (a) x = A...; else x = B...;`).
+/// reached another way adds that way; a later one at least as unconditional as every earlier
+/// way replaces them (a derived class re-creating it); otherwise it is another creation that can
+/// run instead.
 fn add_made(made: &mut Vec<Made>, m: Made) {
-    let g = &m.alts[0];
+    let g = m.alts[0].clone();
+    let same_site = |x: &Made| x.body == m.body && x.cr.lhs_head == m.cr.lhs_head && x.cr.name == m.cr.name;
     for x in made.iter_mut() {
         if x.cr.lhs != m.cr.lhs || !(x.cr.name == m.cr.name || x.cr.name.is_none() || m.cr.name.is_none()) {
             continue;
         }
-        if x.body == m.body && x.cr.lhs_head == m.cr.lhs_head {
-            if !x.alts.contains(g) {
-                x.alts.push(g.clone());
+        if let Some(y) = std::iter::once(&mut *x).find(|y| same_site(y)) {
+            if !y.alts.contains(&g) {
+                y.alts.push(g);
             }
             return;
         }
-        if x.alts.iter().all(|a| a.starts_with(g)) {
-            *x = m;
+        if let Some(y) = x.others.iter_mut().find(|y| same_site(y)) {
+            if !y.alts.contains(&g) {
+                y.alts.push(g);
+            }
             return;
         }
+        if x.alts.iter().chain(x.others.iter().flat_map(|o| &o.alts)).all(|a| a.starts_with(&g)) {
+            *x = m;
+        } else {
+            x.others.push(m);
+        }
+        return;
     }
     made.push(m);
+}
+
+/// The conditions of each way a creation is reached (loops left out), as text; empty when one
+/// way has none.
+fn conditions_text(alts: &[Vec<Guard>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    for a in alts {
+        let c: Vec<String> = a
+            .iter()
+            .filter_map(|g| match g {
+                Guard::If { text, negated: false } => Some(short(text)),
+                Guard::If { text, negated: true } => Some(format!("!({})", short(text))),
+                Guard::Case { text } => Some(format!("case {}", short(text))),
+                Guard::Unknown => Some("?".to_string()),
+                Guard::Loop { .. } => None,
+            })
+            .collect();
+        if c.is_empty() {
+            return Vec::new();
+        }
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A loop guard as text: `for (int i = 0; i < 4; i++)`, `forever`.
+fn loop_text(g: &Guard) -> Option<String> {
+    let Guard::Loop { kind, header, .. } = g else { return None };
+    Some(match *kind {
+        "forever" => "forever".to_string(),
+        "do" => format!("do ... while ({})", short(&tokens_text(header))),
+        k => format!("{k} ({})", short(&tokens_text(header))),
+    })
+}
+
+/// A condition cut to 120 characters.
+fn short(s: &str) -> String {
+    match s.char_indices().nth(119) {
+        Some((i, _)) => format!("{}...", &s[..i]),
+        None => s.to_string(),
+    }
 }
 
 /// Nearest UVM base class names and the kind they give a component.
@@ -898,10 +992,15 @@ impl Analysis {
                 children: Vec::new(),
                 truncated: false,
                 dup,
+                conditions: Vec::new(),
+                count: None,
+                loops: Vec::new(),
+                alternatives: Vec::new(),
+                ports_hidden: 0,
             };
             let mut stack = vec![self.decl_key(t)];
             if !w.stopped() {
-                node.children = self.component_children(t, "uvm_test_top", pin, &mut w, &mut stack, &mut node.truncated, &scan);
+                node.children = self.component_children(t, "uvm_test_top", pin, &mut w, &mut stack, &mut node.truncated, &mut node.ports_hidden, &scan);
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 out.push(node);
@@ -913,7 +1012,7 @@ impl Analysis {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn component_children(&self, class: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, scan: &Scan) -> Vec<VerifNode> {
+    fn component_children(&self, class: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, ports_hidden: &mut u32, scan: &Scan) -> Vec<VerifNode> {
         // The class and its base classes below the UVM library, most derived first.
         let mut derived_first = Vec::new();
         let mut cur = Some(class);
@@ -930,18 +1029,41 @@ impl Analysis {
         }
         let mut out = Vec::new();
         let mut seen = FxHashMap::default();
-        for Made { body, cr, .. } in made {
-            // The created class: `T` of `T::type_id::create`, else the variable's type. A type
-            // parameter of a base class (`T_ENV env`) is the type a derived class gives it.
+        // The created class: `T` of `T::type_id::create`, else the variable's type. A type
+        // parameter of a base class (`T_ENV env`) is the type a derived class gives it.
+        let class_of = |body: DeclRef, cr: &Creation| -> Option<DeclRef> {
             let is_class = |c: &DeclRef| matches!(self.decl(*c).kind, DeclKind::Class);
             let from_ty = cr.ty.and_then(|s| self.resolve_at_span(body.unit, s)).and_then(|r| self.follow_typedef(r));
             let from_var = || self.resolve_at_span(body.unit, cr.lhs_head).and_then(|v| self.type_of(v));
-            let cls = cr.class.filter(is_class).or_else(|| {
+            cr.class.filter(is_class).or_else(|| {
                 from_ty
                     .and_then(|r| self.bind_type_param(r, &derived_first, scan))
                     .filter(is_class)
                     .or_else(|| from_var().and_then(|r| self.bind_type_param(r, &derived_first, scan)).filter(is_class))
-            });
+            })
+        };
+        for Made { body, cr, mut alts, others } in made {
+            let cls = class_of(body, &cr);
+            // Other creations of the same class only add ways to make it.
+            let mut alternatives: Vec<Alternative> = Vec::new();
+            for o in others {
+                let oc = class_of(o.body, &o.cr);
+                if oc.map(|c| self.decl_key(c)) == cls.map(|c| self.decl_key(c)) {
+                    alts.extend(o.alts);
+                    continue;
+                }
+                let loc = self.to_location(o.cr.lhs_head);
+                let def = oc.and_then(|c| self.decl_location(c));
+                alternatives.push(Alternative {
+                    class: oc.map_or_else(|| o.cr.ty_text.clone(), |c| self.decl(c).name.to_string()),
+                    uri: loc.as_ref().map(|l| l.uri.to_string()),
+                    line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                    character: loc.as_ref().map_or(0, |l| l.range.start.character),
+                    def_uri: def.as_ref().map(|l| l.uri.to_string()),
+                    def_line: def.as_ref().map_or(0, |l| l.range.start.line),
+                    conditions: conditions_text(&o.alts),
+                });
+            }
             let kind = match cls {
                 Some(c) => match self.uvm_kind(c) {
                     Some(k) => k,
@@ -953,6 +1075,11 @@ impl Analysis {
             };
             let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
             let dup = sibling(&mut seen, &name);
+            // Hidden ports still count for `#2` numbering, so hiding them renames nothing.
+            if kind == "port" && !w.q.ports {
+                *ports_hidden += 1;
+                continue;
+            }
             let child_pin = pin_below(pin, &keyed(&name, dup));
             if (w.stopped() || !w.visit()) && child_pin.is_none() {
                 *truncated = true;
@@ -989,6 +1116,11 @@ impl Analysis {
                 children: Vec::new(),
                 truncated: false,
                 dup,
+                conditions: conditions_text(&alts),
+                count: self.loops_count(&alts[0]),
+                loops: alts[0].iter().filter_map(loop_text).collect(),
+                alternatives,
+                ports_hidden: 0,
             };
             // Matched before the children, so the match limit counts in tree order.
             let matched = if w.q.target.is_some() { w.hit(&node.name, "", "", &node.class) } else { w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]) };
@@ -996,7 +1128,7 @@ impl Analysis {
                 let key = self.decl_key(c);
                 if !stack.contains(&key) && stack.len() < 64 {
                     stack.push(key);
-                    node.children = self.component_children(c, &child_path, child_pin, w, stack, &mut node.truncated, scan);
+                    node.children = self.component_children(c, &child_path, child_pin, w, stack, &mut node.truncated, &mut node.ports_hidden, scan);
                     stack.pop();
                 }
             }
@@ -1128,9 +1260,32 @@ impl Analysis {
         self.resolve_at_span(unit, last?)
     }
 
+    /// The iterations of the loops among `guards`: their product, `up to` it when a loop can
+    /// stop early, `?` when one is not a constant; `None` outside loops.
+    fn loops_count(&self, guards: &[Guard]) -> Option<String> {
+        let mut n: Option<u64> = Some(1);
+        let mut early = false;
+        let mut any = false;
+        for g in guards {
+            if let Guard::Loop { kind, header, unit, exits } = g {
+                any = true;
+                early |= *exits;
+                n = n.zip(self.loop_count(kind, header, *unit)).and_then(|(a, b)| a.checked_mul(b));
+            }
+        }
+        if !any {
+            return None;
+        }
+        Some(match n {
+            Some(n) if early => format!("up to {n}"),
+            Some(n) => n.to_string(),
+            None => "?".to_string(),
+        })
+    }
+
     /// The component creations of a class (`derived_first`: it and its base classes, most
     /// derived first), in the order they run: its construction (the most derived `new`, with
-    /// `super.new()` where it is called, first when it is not), then its build phase (the most
+    /// its base class's first, as `super.new()` runs), then its build phase (the most
     /// derived `build_phase`, with `super.build_phase()` where it is called; the UVM library's
     /// calls the most derived `build()`). Methods of the class they call are followed: large
     /// testbenches build in helpers.
@@ -1156,8 +1311,9 @@ impl Analysis {
         }
         stack.push(body);
         let s = self.summary(body, scan);
-        // A constructor that does not call `super.new()` calls it first.
-        if self.decl(body).name == "new" && !s.events.iter().any(|e| matches!(&e.what, What::Call { name, sup: true, .. } if name == "new")) {
+        // The base class's constructor runs first: `super.new()` must be a constructor's first
+        // statement, and is implied when it is not written.
+        if self.decl(body).name == "new" {
             if let Some((b, i)) = self.method_from("new", at + 1, derived_first) {
                 self.run_method(b, i, derived_first, &FxHashMap::default(), outer, stack, scan, made);
             }
@@ -1173,7 +1329,7 @@ impl Analysis {
                     if cr.name.is_none() {
                         cr.name = cr.name_arg.as_ref().and_then(|a| env.get(a)).cloned();
                     }
-                    add_made(made, Made { body, cr, alts: vec![guards] });
+                    add_made(made, Made { body, cr, alts: vec![guards], others: Vec::new() });
                 }
                 What::Call { name, sup, args } => {
                     let target = if *sup {
@@ -1618,6 +1774,9 @@ fn tokens_text(t: &[Token]) -> String {
     for (i, x) in t.iter().enumerate() {
         if i > 0 && x.ws_before() {
             s.push(' ');
+        }
+        if x.kind == TokKind::Directive {
+            s.push('`');
         }
         s.push_str(&x.text);
     }

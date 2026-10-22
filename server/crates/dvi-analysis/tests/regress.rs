@@ -1066,9 +1066,83 @@ endpackage
     assert_eq!(names("to_library"), ["env", "more"]);
     // `super.new()` runs before the derived constructor's own code.
     assert_eq!(names("implicit_super"), ["mon", "cov", "env"]);
-    // Two branches are two components; a helper given two names makes two; one reached two
-    // ways is one.
-    assert_eq!(names("branches"), ["env", "env#2", "a", "b", "d"]);
+    // Two branches make one component (one or the other); a helper given two names makes two;
+    // one reached two ways is one.
+    assert_eq!(names("branches"), ["env", "a", "b", "d"]);
+}
+
+#[test]
+fn conditions_loops_alternatives_and_ports() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_port_base; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_analysis_port #(type T = int) extends uvm_port_base; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_driver extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = r#"`define NUM 3
+package tb_pkg;
+  import uvm_pkg::*;
+  localparam int N = 4;
+  class c extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class d_a extends uvm_driver; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class d_b extends uvm_driver; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class t extends uvm_test;
+    c agents[N];
+    c grid[2][0:2];
+    c dyn[];
+    c three[`NUM];
+    c down[8];
+    c e, sb, drv0;
+    uvm_driver drv;
+    uvm_analysis_port #(int) ap, ap2;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      ap = new("ap", this);
+      ap2 = new("ap2", this);
+      if (cfg.is_active == UVM_ACTIVE) drv0 = c::type_id::create("drv0", this);
+      if (cfg.has_sb) build_sb();
+      else if (cfg.other) build_sb();
+      foreach (agents[i]) agents[i] = c::type_id::create($sformatf("a%0d", i), this);
+      foreach (grid[i, j]) grid[i][j] = c::type_id::create($sformatf("g%0d%0d", i, j), this);
+      foreach (dyn[i]) dyn[i] = c::type_id::create($sformatf("y%0d", i), this);
+      for (int i = 0; i < `NUM; i++) three[i] = c::type_id::create($sformatf("t%0d", i), this);
+      for (int i = N * 2 - 1; i >= 0; i--) down[i] = c::type_id::create($sformatf("d%0d", i), this);
+      repeat (2) begin if (stop) break; e = c::type_id::create("e", this); end
+      case (mode)
+        0: drv = d_a::type_id::create("drv", this);
+        default: drv = d_b::type_id::create("drv", this);
+      endcase
+    endfunction
+    function void build_sb(); sb = c::type_id::create("sb", this); endfunction
+  endclass
+endpackage
+"#;
+    let (a, _) = project("condloops", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let show = |ports: bool| -> Vec<String> {
+        let mut q = dvi_analysis::ide::views::TreeQuery::new(100);
+        q.ports = ports;
+        let (h, _) = a.verification_tree(Some("t"), &q);
+        let r = &h.roots[0];
+        let mut out = vec![format!("ports hidden {}", r.ports_hidden)];
+        for n in &r.children {
+            let conds: Vec<String> = n.conditions.iter().map(|w| w.join(" && ")).collect();
+            let alts: Vec<String> = n.alternatives.iter().map(|x| format!("{} when {}", x.class, x.conditions.iter().map(|w| w.join(" && ")).collect::<Vec<_>>().join(" or "))).collect();
+            out.push(format!("{} {} [{}] x{} {{{}}} <{}>", n.name, n.class, conds.join(" or "), n.count.as_deref().unwrap_or("-"), n.loops.join("; "), alts.join(", ")));
+        }
+        out
+    };
+    assert_eq!(
+        show(false),
+        [
+            "ports hidden 2",
+            "drv0 c [cfg.is_active == UVM_ACTIVE] x- {} <>",
+            "sb c [cfg.has_sb or !(cfg.has_sb) && cfg.other] x- {} <>",
+            "agents[i] c [] x4 {foreach (agents[i])} <>",
+            "grid[i][j] c [] x6 {foreach (grid[i, j])} <>",
+            "dyn[i] c [] x? {foreach (dyn[i])} <>",
+            "three[i] c [] x3 {for (int i = 0; i < `NUM; i++)} <>",
+            "down[i] c [] x8 {for (int i = N * 2 - 1; i >= 0; i--)} <>",
+            "e c [] xup to 2 {repeat (2)} <>",
+            "drv d_a [case mode: 0] x- {} <d_b when case mode: default>",
+        ]
+    );
+    let shown = show(true);
+    assert_eq!(&shown[..3], ["ports hidden 0", "ap uvm_analysis_port [] x- {} <>", "ap2 uvm_analysis_port [] x- {} <>"]);
 }
 
 #[test]

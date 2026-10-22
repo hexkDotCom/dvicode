@@ -6,6 +6,7 @@ pub mod completion;
 pub mod diagnostics;
 pub mod filter;
 pub mod hover;
+pub mod loops;
 pub mod nav;
 pub mod stmt;
 pub mod symbols;
