@@ -36,12 +36,16 @@ pub const NONE: u32 = u32::MAX;
 impl StmtMap {
     /// The frames around token `k`, outermost first.
     pub fn frames_at(&self, k: usize) -> Vec<&Frame> {
+        self.frame_ids_at(k).into_iter().map(|i| &self.frames[i as usize]).collect()
+    }
+
+    /// The indexes of the frames around token `k`, outermost first.
+    pub fn frame_ids_at(&self, k: usize) -> Vec<u32> {
         let mut out = Vec::new();
         let mut cur = self.at.get(k).copied().unwrap_or(NONE);
         while cur != NONE {
-            let f = &self.frames[cur as usize];
-            out.push(f);
-            cur = f.parent.unwrap_or(NONE);
+            out.push(cur);
+            cur = self.frames[cur as usize].parent.unwrap_or(NONE);
         }
         out.reverse();
         out
@@ -51,7 +55,7 @@ impl StmtMap {
 /// Walks the tokens of a function or task (header to `endfunction`/`endtask`). `None` when the
 /// body uses something the walker cannot follow: then nothing is known about its conditions.
 pub fn walk_method(t: &[Token]) -> Option<StmtMap> {
-    let mut w = Walker { t, frames: Vec::new(), at: vec![NONE; t.len()], steps: 0 };
+    let mut w = Walker { t, frames: Vec::new(), at: vec![NONE; t.len()], steps: 0, depth: 0 };
     // The header ends at the first `;` outside brackets after `function` or `task`.
     let kw = t.iter().position(|x| x.is_kw("function") || x.is_kw("task"))?;
     let mut k = kw;
@@ -72,9 +76,13 @@ struct Walker<'a> {
     t: &'a [Token],
     frames: Vec<Frame>,
     at: Vec<u32>,
-    /// Statements walked; a bound against pathological input.
+    /// Statements walked, and statements nested; bounds against pathological input.
     steps: usize,
+    depth: usize,
 }
+
+/// Statements nested at most (the parser's limit is similar).
+const MAX_DEPTH: usize = 200;
 
 /// Keywords that end a statement list; met where a statement should start, the body is not
 /// what the walker expects.
@@ -128,10 +136,24 @@ impl Walker<'_> {
     /// One statement starting at `k`, in frame `f`; the index after it.
     fn stmt(&mut self, k: usize, f: u32) -> Option<usize> {
         self.steps += 1;
-        if self.steps > 200_000 {
+        if self.steps > 200_000 || self.depth >= MAX_DEPTH {
             return None;
         }
+        self.depth += 1;
+        let r = self.stmt_inner(k, f);
+        self.depth -= 1;
+        r
+    }
+
+    fn stmt_inner(&mut self, k: usize, f: u32) -> Option<usize> {
         let t = self.t;
+        let mut k = k;
+        // Attributes: `(* keep = 1 *) if (...)`.
+        while t.get(k).is_some_and(|x| x.is_punct("(*")) {
+            let end = (k + 1..t.len()).find(|&j| t[j].is_punct("*)"))?;
+            self.mark(k, end + 1, f);
+            k = end + 1;
+        }
         let x = t.get(k)?;
         if x.kind == TokKind::Keyword && ENDS.contains(&x.text.as_str()) {
             return None;
@@ -371,13 +393,20 @@ impl Walker<'_> {
         }
     }
 
-    /// The `:` ending a case item's labels starting at `k` (outside brackets).
+    /// The `:` ending a case item's labels starting at `k` (outside brackets, and not the `:`
+    /// of a `? :`).
     fn item_colon(&self, k: usize) -> Option<usize> {
         let mut j = k;
+        let mut ternaries = 0;
         loop {
             let x = self.t.get(j)?;
-            if x.is_punct(":") {
-                return Some(j);
+            if x.is_punct("?") {
+                ternaries += 1;
+            } else if x.is_punct(":") {
+                if ternaries == 0 {
+                    return Some(j);
+                }
+                ternaries -= 1;
             }
             if x.is_punct(";") || x.kind == TokKind::Keyword && ENDS.contains(&x.text.as_str()) {
                 return None;
@@ -509,6 +538,21 @@ mod tests {
         assert_eq!(around(&src, "x"), ["!ok"]);
         assert_eq!(around(&src, "y"), ["ok2"]);
         assert_eq!(around(&src, "z"), ["!ok2"]);
+    }
+
+    #[test]
+    fn attributes_and_ternary_labels() {
+        let src = body("(* keep = 1 *) if (mode) x = 1;
+case (sel) p ? A : B: y = 1; p ? A : C: z = 1; endcase");
+        assert_eq!(around(&src, "x"), ["mode"]);
+        assert_eq!(around(&src, "y"), ["case sel: p ? A : B"]);
+        assert_eq!(around(&src, "z"), ["case sel: p ? A : C"]);
+    }
+
+    #[test]
+    fn deep_nesting_is_not_walked() {
+        let deep = format!("{}x = 1;{}", "begin ".repeat(5000), " end".repeat(5000));
+        assert!(walk_method(&lex(&body(&deep))).is_none());
     }
 
     #[test]

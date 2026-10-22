@@ -1072,6 +1072,85 @@ endpackage
 }
 
 #[test]
+fn build_scan_review_cases() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    // Ten classes, each with a constructor; a base constructor creating with its argument.
+    let mut chain = String::from("  class k0 extends uvm_test;\n    e first;\n    function new(string name, uvm_component parent, string child = \"first\");\n      super.new(name, parent);\n      first = e::type_id::create(child, this);\n    endfunction\n  endclass\n");
+    for k in 1..10 {
+        let args = if k == 1 { "super.new(name, parent, \"renamed\");" } else { "super.new(name, parent);" };
+        chain.push_str(&format!("  class k{k} extends k{};\n    function new(string name, uvm_component parent); {args} endfunction\n  endclass\n", k - 1));
+    }
+    // Fan-out: f7 calls f6 twenty times under different conditions, and so on.
+    let mut fan = String::from("    function void f0(); x = e::type_id::create(\"x\", this); endfunction\n");
+    for k in 1..8 {
+        let calls: String = (0..20).map(|j| format!("if (c{j}) f{}(); ", k - 1)).collect();
+        fan.push_str(&format!("    function void f{k}(); {calls}endfunction\n"));
+    }
+    let tb = format!(
+        r#"package tb_pkg;
+  import uvm_pkg::*;
+  class e extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class a_env extends e; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class b_env extends e; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class c_env extends e; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+{chain}
+  class base_t extends uvm_test;
+    e env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); build(); endfunction
+    function void build(); env = a_env::type_id::create("env", this); endfunction
+  endclass
+  class derived_t extends base_t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build(); env = b_env::type_id::create("env", this); endfunction
+  endclass
+  class replace_t extends uvm_test;
+    e env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (mode) env = a_env::type_id::create("env", this);
+      else env = b_env::type_id::create("env", this);
+      env = c_env::type_id::create("env", this);
+    endfunction
+  endclass
+  class forward_t extends uvm_test;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void make(string n); e c; c = e::type_id::create(n, this); endfunction
+    function void wrapper(string n); make(n); endfunction
+    function void build_phase(uvm_phase phase); wrapper("a"); wrapper("b"); endfunction
+  endclass
+  class fan_t extends uvm_test;
+    e x, first;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+{fan}    function void build_phase(uvm_phase phase); first = e::type_id::create("first", this); f7(); endfunction
+  endclass
+endpackage
+"#
+    );
+    let (a, _) = project("buildreview", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let names = |test: &str| -> Vec<String> {
+        let h = a.verification_hierarchy(Some(test), 100);
+        h.roots.first().map(|r| r.children.iter().map(|c| format!("{}:{}", c.name, c.class)).collect()).unwrap_or_default()
+    };
+    // `build()` is virtual in UVM: the derived one runs.
+    assert_eq!(names("derived_t"), ["env:b_env"]);
+    // An unconditional creation replaces both branches before it.
+    assert_eq!(names("replace_t"), ["env:c_env"]);
+    // Literal names passed on through a helper.
+    assert_eq!(names("forward_t"), ["a:e", "b:e"]);
+    // The whole constructor chain runs, with the arguments of `super.new(...)`.
+    assert_eq!(names("k9"), ["renamed:e"]);
+    // The fan-out stops at a budget, keeping what was found, in reasonable time.
+    let t0 = std::time::Instant::now();
+    let h = a.verification_hierarchy(Some("fan_t"), 100);
+    assert!(t0.elapsed().as_secs() < 10, "took {:?}", t0.elapsed());
+    let r = &h.roots[0];
+    assert_eq!(r.children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["first", "x"]);
+    assert!(r.truncated);
+    assert!(r.children[1].conditions.len() <= 16);
+}
+
+#[test]
 fn conditions_loops_alternatives_and_ports() {
     let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_port_base; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_analysis_port #(type T = int) extends uvm_port_base; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_driver extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
     let tb = r#"`define NUM 3

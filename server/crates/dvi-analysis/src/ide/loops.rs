@@ -253,6 +253,10 @@ fn number(s: &str) -> Option<i64> {
     let s: String = s.chars().filter(|c| *c != '_').collect();
     let Some(q) = s.find('\'') else { return s.parse().ok() };
     let rest = s[q + 1..].trim_start_matches(['s', 'S']);
+    // Unbased and unsized: `'0`, `'1`.
+    if q == 0 && (rest == "0" || rest == "1") {
+        return rest.parse().ok();
+    }
     let mut chars = rest.chars();
     let radix = match chars.next()?.to_ascii_lowercase() {
         'd' => 10,
@@ -262,6 +266,11 @@ fn number(s: &str) -> Option<i64> {
         _ => return None,
     };
     i64::from_str_radix(chars.as_str().trim(), radix).ok()
+}
+
+/// The value of an integer literal (see `number`).
+pub(crate) fn literal(s: &str) -> Option<i64> {
+    number(s)
 }
 
 fn is_one(x: &Token) -> bool {

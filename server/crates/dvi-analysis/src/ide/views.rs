@@ -313,10 +313,19 @@ struct Event {
 
 enum What {
     Create(Creation),
-    /// A call of a method of the object (`f()`, `this.f()`), or of the base class's (`super.f()`):
-    /// with the arguments given by name (`.n(v)`) or position, and their value when it is a
-    /// string literal.
-    Call { name: String, sup: bool, args: Vec<(Option<String>, Option<String>)> },
+    /// A call of a method of the object (`f()`, `this.f()`), or of the base class's (`super.f()`,
+    /// `super.new()`): with the arguments given by name (`.n(v)`) or position.
+    Call { name: String, sup: bool, args: Vec<(Option<String>, Arg)> },
+}
+
+/// An argument of a call, as far as the hierarchy needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Arg {
+    /// A string literal.
+    Lit(String),
+    /// A name: an argument of the calling method passed on.
+    Var(String),
+    Other,
 }
 
 /// A component creation reached while building a component, with the guards of each way it
@@ -337,14 +346,25 @@ struct Made {
 struct Scan {
     tokens: RefCell<FxHashMap<FileId, Arc<Vec<Token>>>>,
     summaries: RefCell<FxHashMap<DeclRef, Rc<Summary>>>,
+    /// The method a call reaches: (most derived class, name, index of the calling class,
+    /// `super` call) to (implementation, index of its class).
+    calls: RefCell<FxHashMap<(DeclRef, String, usize, bool), Option<(DeclRef, usize)>>>,
     events: Cell<usize>,
     exhausted: Cell<bool>,
+    /// Events instantiated for the component being built, and whether its creations were cut
+    /// (a budget or the call depth).
+    component_events: Cell<usize>,
+    cut: Cell<bool>,
 }
 
 /// Events instantiated per request at most.
 const MAX_EVENTS: usize = 2_000_000;
-/// Nested method calls followed at most.
+/// Events instantiated per component at most.
+const MAX_COMPONENT_EVENTS: usize = 20_000;
+/// Nested helper calls followed at most (`super` calls do not count).
 const MAX_CALL_DEPTH: usize = 8;
+/// Ways to reach one creation kept at most.
+const MAX_WAYS: usize = 16;
 
 impl Scan {
     fn tokens(&self, a: &Analysis, f: FileId) -> Option<Arc<Vec<Token>>> {
@@ -356,48 +376,61 @@ impl Scan {
         Some(t)
     }
 
-    /// Counts an instantiated event; false once the budget is spent.
+    /// Counts an instantiated event; false once a budget is spent.
     fn spend(&self) -> bool {
         let n = self.events.get() + 1;
         self.events.set(n);
+        let c = self.component_events.get() + 1;
+        self.component_events.set(c);
         if n > MAX_EVENTS {
             self.exhausted.set(true);
         }
-        n <= MAX_EVENTS
+        if n > MAX_EVENTS || c > MAX_COMPONENT_EVENTS {
+            self.cut.set(true);
+            return false;
+        }
+        true
     }
 }
 
-/// Adds a creation, merging it with one of the same variable and name: the same creation
+/// Adds a creation, merging it with those of the same variable and name: the same creation
 /// reached another way adds that way; a later one at least as unconditional as every earlier
 /// way replaces them (a derived class re-creating it); otherwise it is another creation that can
 /// run instead.
 fn add_made(made: &mut Vec<Made>, m: Made) {
     let g = m.alts[0].clone();
     let same_site = |x: &Made| x.body == m.body && x.cr.lhs_head == m.cr.lhs_head && x.cr.name == m.cr.name;
-    for x in made.iter_mut() {
-        if x.cr.lhs != m.cr.lhs || !(x.cr.name == m.cr.name || x.cr.name.is_none() || m.cr.name.is_none()) {
-            continue;
+    let add_way = |x: &mut Made, g: Vec<Guard>| {
+        if x.alts.len() < MAX_WAYS && !x.alts.contains(&g) {
+            x.alts.push(g);
         }
-        if let Some(y) = std::iter::once(&mut *x).find(|y| same_site(y)) {
-            if !y.alts.contains(&g) {
-                y.alts.push(g);
-            }
+    };
+    let compatible = |x: &Made| x.cr.lhs == m.cr.lhs && (x.cr.name == m.cr.name || x.cr.name.is_none() || m.cr.name.is_none());
+    let matching: Vec<usize> = (0..made.len()).filter(|&i| compatible(&made[i])).collect();
+    let Some(&first) = matching.first() else {
+        made.push(m);
+        return;
+    };
+    for &i in &matching {
+        let x = &mut made[i];
+        if same_site(x) {
+            add_way(x, g);
             return;
         }
         if let Some(y) = x.others.iter_mut().find(|y| same_site(y)) {
-            if !y.alts.contains(&g) {
-                y.alts.push(g);
-            }
+            add_way(y, g);
             return;
         }
-        if x.alts.iter().chain(x.others.iter().flat_map(|o| &o.alts)).all(|a| a.starts_with(&g)) {
-            *x = m;
-        } else {
-            x.others.push(m);
-        }
-        return;
     }
-    made.push(m);
+    let superseded = matching.iter().all(|&i| made[i].alts.iter().chain(made[i].others.iter().flat_map(|o| &o.alts)).all(|a| a.starts_with(&g)));
+    if superseded {
+        for &i in matching.iter().skip(1).rev() {
+            made.remove(i);
+        }
+        made[first] = m;
+    } else if made[first].others.len() < MAX_WAYS {
+        made[first].others.push(m);
+    }
 }
 
 /// The conditions of each way a creation is reached (loops left out), as text; empty when one
@@ -1024,8 +1057,12 @@ impl Analysis {
             cur = self.class_base(c);
         }
         let made = self.build_creations(&derived_first, scan);
-        if scan.exhausted.get() && w.meta.incomplete.is_none() {
-            w.meta.incomplete = Some("visits");
+        if scan.cut.get() {
+            // Creations beyond a budget or the call depth are missing.
+            *truncated = true;
+            if w.meta.incomplete.is_none() {
+                w.meta.incomplete = Some("nodes");
+            }
         }
         let mut out = Vec::new();
         let mut seen = FxHashMap::default();
@@ -1288,34 +1325,43 @@ impl Analysis {
     /// its base class's first, as `super.new()` runs), then its build phase (the most
     /// derived `build_phase`, with `super.build_phase()` where it is called; the UVM library's
     /// calls the most derived `build()`). Methods of the class they call are followed: large
-    /// testbenches build in helpers.
+    /// testbenches build in helpers. `scan.cut` tells whether some were not followed.
     fn build_creations(&self, derived_first: &[DeclRef], scan: &Scan) -> Vec<Made> {
         let mut made = Vec::new();
         let mut stack = Vec::new();
         let none = FxHashMap::default();
+        scan.component_events.set(0);
+        scan.cut.set(false);
         if let Some((body, at)) = self.method_from("new", 0, derived_first) {
-            self.run_method(body, at, derived_first, &none, &[], &mut stack, scan, &mut made);
+            self.run_method(body, at, derived_first, &none, &[], 0, &mut stack, scan, &mut made);
         }
-        if let Some((body, at)) = self.dispatch("build_phase", 0, derived_first).or_else(|| self.dispatch("build", 0, derived_first)) {
-            self.run_method(body, at, derived_first, &none, &[], &mut stack, scan, &mut made);
+        if let Some((body, at)) = self.call_target("build_phase", 0, false, derived_first, scan).or_else(|| self.call_target("build", 0, false, derived_first, scan)) {
+            self.run_method(body, at, derived_first, &none, &[], 0, &mut stack, scan, &mut made);
         }
         made
     }
 
     /// Adds the creations of a method body (of `derived_first[at]`) and of the methods it calls.
-    /// `env`: string literals given for its arguments; `outer`: the guards of the call.
+    /// `env`: string literals given for its arguments; `outer`: the guards of the call; `depth`:
+    /// helper calls on the way (`super` calls do not count, so long class chains are followed).
     #[allow(clippy::too_many_arguments)]
-    fn run_method(&self, body: DeclRef, at: usize, derived_first: &[DeclRef], env: &FxHashMap<String, String>, outer: &[Guard], stack: &mut Vec<DeclRef>, scan: &Scan, made: &mut Vec<Made>) {
-        if stack.contains(&body) || stack.len() > MAX_CALL_DEPTH || scan.exhausted.get() {
+    fn run_method(&self, body: DeclRef, at: usize, derived_first: &[DeclRef], env: &FxHashMap<String, String>, outer: &[Guard], depth: usize, stack: &mut Vec<DeclRef>, scan: &Scan, made: &mut Vec<Made>) {
+        // A spent budget stops everything; the call depth only this call.
+        if stack.contains(&body) || scan.exhausted.get() || scan.component_events.get() > MAX_COMPONENT_EVENTS {
+            return;
+        }
+        if depth > MAX_CALL_DEPTH || stack.len() >= 64 {
+            scan.cut.set(true);
             return;
         }
         stack.push(body);
         let s = self.summary(body, scan);
         // The base class's constructor runs first: `super.new()` must be a constructor's first
         // statement, and is implied when it is not written.
-        if self.decl(body).name == "new" {
-            if let Some((b, i)) = self.method_from("new", at + 1, derived_first) {
-                self.run_method(b, i, derived_first, &FxHashMap::default(), outer, stack, scan, made);
+        let explicit_super_new = s.events.iter().any(|e| matches!(&e.what, What::Call { name, sup: true, .. } if name == "new"));
+        if self.decl(body).name == "new" && !explicit_super_new {
+            if let Some((b, i)) = self.call_target("new", at, true, derived_first, scan) {
+                self.run_method(b, i, derived_first, &FxHashMap::default(), outer, depth, stack, scan, made);
             }
         }
         for e in &s.events {
@@ -1332,23 +1378,36 @@ impl Analysis {
                     add_made(made, Made { body, cr, alts: vec![guards], others: Vec::new() });
                 }
                 What::Call { name, sup, args } => {
-                    let target = if *sup {
-                        // The UVM library's `build_phase` calls `build()`.
-                        self.method_from(name, at + 1, derived_first).or_else(|| if name == "build_phase" { self.dispatch("build", 0, derived_first) } else { None })
-                    } else {
-                        self.dispatch(name, at, derived_first)
-                    };
-                    let Some((callee, ci)) = target else { continue };
-                    let env = self.literal_args(callee, args);
-                    self.run_method(callee, ci, derived_first, &env, &guards, stack, scan, made);
+                    let Some((callee, ci)) = self.call_target(name, at, *sup, derived_first, scan) else { continue };
+                    let callee_env = self.literal_args(callee, args, env);
+                    let d = if *sup { depth } else { depth + 1 };
+                    self.run_method(callee, ci, derived_first, &callee_env, &guards, d, stack, scan, made);
                 }
             }
         }
         stack.pop();
     }
 
-    /// The string literals a call gives the arguments of `callee`, by name.
-    fn literal_args(&self, callee: DeclRef, args: &[(Option<String>, Option<String>)]) -> FxHashMap<String, String> {
+    /// The method a call made in a method of `derived_first[at]` runs: `super.name()` (`sup`)
+    /// looks in the base classes, without virtual dispatch (the UVM library's `build_phase` calls
+    /// `build()`); `name()` is dispatched. Cached per request.
+    fn call_target(&self, name: &str, at: usize, sup: bool, derived_first: &[DeclRef], scan: &Scan) -> Option<(DeclRef, usize)> {
+        let key = (*derived_first.first()?, name.to_string(), at, sup);
+        if let Some(t) = scan.calls.borrow().get(&key) {
+            return *t;
+        }
+        let t = if sup {
+            self.method_from(name, at + 1, derived_first).or_else(|| if name == "build_phase" { self.call_target("build", 0, false, derived_first, scan) } else { None })
+        } else {
+            self.dispatch(name, at, derived_first)
+        };
+        scan.calls.borrow_mut().insert(key, t);
+        t
+    }
+
+    /// The string literals a call gives the arguments of `callee`, by name: written in the call,
+    /// or passed on from the caller's (`env`).
+    fn literal_args(&self, callee: DeclRef, args: &[(Option<String>, Arg)], env: &FxHashMap<String, String>) -> FxHashMap<String, String> {
         let u = self.unit(callee.unit);
         let formals: Vec<&str> = u.parsed.decl(callee.decl).children.iter().map(|c| u.parsed.decl(*c)).filter(|d| d.kind == DeclKind::Argument).map(|d| d.name.as_str()).collect();
         let mut out = FxHashMap::default();
@@ -1357,8 +1416,13 @@ impl Analysis {
                 Some(n) => Some(n.as_str()),
                 None => formals.get(i).copied(),
             };
+            let value = match value {
+                Arg::Lit(v) => Some(v.clone()),
+                Arg::Var(v) => env.get(v).cloned(),
+                Arg::Other => None,
+            };
             if let (Some(f), Some(v)) = (formal, value) {
-                out.insert(f.to_string(), v.clone());
+                out.insert(f.to_string(), v);
             }
         }
         out
@@ -1372,24 +1436,33 @@ impl Analysis {
         }
         let toks = self.body_tokens(body, scan);
         let map = stmt::walk_method(&toks);
+        // Each frame as a guard, once.
+        let frames: Vec<Guard> = map
+            .as_ref()
+            .map(|m| {
+                m.frames
+                    .iter()
+                    .map(|f| match &f.kind {
+                        FrameKind::If { cond, negated } => Guard::If { text: tokens_text(&toks[cond.0..cond.1]), negated: *negated },
+                        FrameKind::Case { expr, labels } => {
+                            let labels = labels.map_or_else(|| "default".to_string(), |l| tokens_text(&toks[l.0..l.1]));
+                            Guard::Case { text: format!("{}: {labels}", tokens_text(&toks[expr.0..expr.1])) }
+                        }
+                        FrameKind::Loop { kind, header, body: b } => Guard::Loop {
+                            kind,
+                            header: toks[header.0..header.1].to_vec(),
+                            unit: body.unit,
+                            exits: toks[b.0..b.1.min(toks.len())].iter().any(|x| x.is_kw("break") || x.is_kw("continue") || x.is_kw("return")),
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let guards_at = |k: usize| -> Vec<Guard> {
-            let Some(m) = &map else { return vec![Guard::Unknown] };
-            m.frames_at(k)
-                .into_iter()
-                .map(|f| match &f.kind {
-                    FrameKind::If { cond, negated } => Guard::If { text: tokens_text(&toks[cond.0..cond.1]), negated: *negated },
-                    FrameKind::Case { expr, labels } => {
-                        let labels = labels.map_or_else(|| "default".to_string(), |l| tokens_text(&toks[l.0..l.1]));
-                        Guard::Case { text: format!("{}: {labels}", tokens_text(&toks[expr.0..expr.1])) }
-                    }
-                    FrameKind::Loop { kind, header, body: b } => Guard::Loop {
-                        kind,
-                        header: toks[header.0..header.1].to_vec(),
-                        unit: body.unit,
-                        exits: toks[b.0..b.1.min(toks.len())].iter().any(|x| x.is_kw("break") || x.is_kw("continue") || x.is_kw("return")),
-                    },
-                })
-                .collect()
+            match &map {
+                None => vec![Guard::Unknown],
+                Some(m) => m.frame_ids_at(k).into_iter().map(|i| frames[i as usize].clone()).collect(),
+            }
         };
         let mut events: Vec<(usize, Event)> = Vec::new();
         let creations = scan_creations(&toks).into_iter().filter(|(_, c)| c.parent == "this").chain(self.factory_calls(body, &toks, scan));
@@ -1510,10 +1583,32 @@ impl Analysis {
         };
         let find = |from: usize| derived_first.iter().enumerate().skip(from).find_map(|(i, c)| methods(c).first().map(|m| (*m, i)));
         let (mut m, mut i) = find(at)?;
-        if derived_first[i..].iter().any(|c| methods(c).iter().any(|m| self.decl(*m).has(dflags::VIRTUAL))) {
+        if derived_first[i..].iter().any(|c| methods(c).iter().any(|m| self.decl(*m).has(dflags::VIRTUAL))) || self.virtual_in_library(name, derived_first) {
             (m, i) = find(0)?;
         }
         Some((self.implementation_of(m).unwrap_or(m), i))
+    }
+
+    /// Whether the UVM library classes above `derived_first` declare `name` virtual (then every
+    /// override is virtual too, written so or not). The phase methods (and their old names) are
+    /// virtual in every UVM and OVM version, also without the library's source.
+    fn virtual_in_library(&self, name: &str, derived_first: &[DeclRef]) -> bool {
+        if name.ends_with("_phase") || matches!(name, "build" | "connect" | "end_of_elaboration" | "start_of_simulation" | "run" | "extract" | "check" | "report") {
+            return true;
+        }
+        let mut cur = derived_first.last().and_then(|c| self.class_base(*c));
+        for _ in 0..32 {
+            let Some(c) = cur else { break };
+            let u = self.unit(c.unit);
+            if u.parsed.lookup_member(c.decl, name).iter().any(|&m| {
+                let d = u.parsed.decl(m);
+                matches!(d.kind, DeclKind::Function | DeclKind::Task) && d.has(dflags::VIRTUAL)
+            }) {
+                return true;
+            }
+            cur = self.class_base(c);
+        }
+        false
     }
 
     /// The tokens of a method body that are compiled (not those in `ifdef branches that are
@@ -1642,18 +1737,23 @@ fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Opti
 /// it is a `super` call, and its arguments: the name of each given by name, and its value when
 /// it is a string literal.
 #[allow(clippy::type_complexity)]
-fn method_calls(t: &[Token]) -> Vec<(usize, String, bool, Vec<(Option<String>, Option<String>)>)> {
+fn method_calls(t: &[Token]) -> Vec<(usize, String, bool, Vec<(Option<String>, Arg)>)> {
     let mut out = Vec::new();
     for i in 1..t.len().saturating_sub(1) {
-        if !t[i].is_ident() || !t[i + 1].is_punct("(") {
+        let sup = t[i - 1].is_punct(".") && i >= 2 && t[i - 2].is_kw("super");
+        // `new` is a keyword: only `super.new(...)` is a call of it.
+        if !(t[i].is_ident() || sup && t[i].is_kw("new")) || !t[i + 1].is_punct("(") {
             continue;
         }
-        let sup = t[i - 1].is_punct(".") && i >= 2 && t[i - 2].is_kw("super");
         let own = if t[i - 1].is_punct(".") { sup || (i >= 2 && t[i - 2].is_kw("this")) } else { !t[i - 1].is_punct("::") };
         if !own {
             continue;
         }
-        let literal = |a: &[Token]| (a.len() == 1 && a[0].kind == TokKind::String).then(|| a[0].text.trim_matches('"').to_string());
+        let literal = |a: &[Token]| match a {
+            [x] if x.kind == TokKind::String => Arg::Lit(x.text.trim_matches('"').to_string()),
+            [x] if x.is_ident() => Arg::Var(x.text.to_string()),
+            _ => Arg::Other,
+        };
         let args = call_args(t, i + 1)
             .into_iter()
             .map(|a| match a {
@@ -1747,7 +1847,7 @@ fn skip_group(t: &[Token], open: usize) -> usize {
 }
 
 /// Top-level arguments of the call whose `(` is `t[open]`.
-fn call_args(t: &[Token], open: usize) -> Vec<&[Token]> {
+pub(crate) fn call_args(t: &[Token], open: usize) -> Vec<&[Token]> {
     let end = skip_group(t, open).saturating_sub(1).max(open + 1);
     let mut out = Vec::new();
     let mut depth = 0i32;
