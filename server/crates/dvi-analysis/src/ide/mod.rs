@@ -10,6 +10,7 @@ pub mod hover;
 pub mod loops;
 pub mod nav;
 pub mod stmt;
+pub mod structure;
 pub mod symbols;
 pub mod tokens;
 pub mod views;

@@ -97,7 +97,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1 } })),
         ..Default::default()
     }
 }
@@ -1097,6 +1097,14 @@ impl Server {
                 let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
                 Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))
             }),
+            "dvicode/structure" => self.spawn(req, |a, p: StructureParams| {
+                use dvi_analysis::ide::filter::Filter;
+                let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(json!({ "revision": a.revision, "status": "none", "nodes": [] })) };
+                let filter = p.filter.as_deref().and_then(Filter::new);
+                let t = a.structure(f, filter.as_ref(), p.max_nodes.unwrap_or(20_000).min(100_000));
+                let version = a.source(f).and_then(|s| s.lsp_version);
+                Ok(json!({ "revision": a.revision, "version": version, "status": t.status, "context": t.context, "others": t.others, "incomplete": t.incomplete, "nodes": t.nodes }))
+            }),
             "dvicode/includingFiles" => self.spawn(req, |a, p: TextDocumentIdentifierParams| {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(Vec::new()) };
                 Ok(a.including_files(f))
@@ -1174,6 +1182,15 @@ struct TreeParams {
     ports: Option<bool>,
     /// Verification Hierarchy: objects (configurations, register models, sequences) are shown.
     objects: Option<bool>,
+}
+
+/// `dvicode/structure`: the Structure of a file.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructureParams {
+    text_document: TextDocumentIdentifier,
+    filter: Option<String>,
+    max_nodes: Option<usize>,
 }
 
 #[derive(Deserialize)]
