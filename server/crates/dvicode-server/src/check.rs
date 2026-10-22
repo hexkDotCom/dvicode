@@ -318,6 +318,9 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
             }
             let h = a.verification_hierarchy(if arg.is_empty() || arg == "-" { None } else { Some(arg) }, 5000);
             println!("tests: {} (configured: {})", h.tests.join(" "), h.configured.as_deref().unwrap_or("-"));
+            if let Some(hint) = &h.hint {
+                println!("{hint}");
+            }
             for r in &h.roots {
                 pr(r, 0);
             }

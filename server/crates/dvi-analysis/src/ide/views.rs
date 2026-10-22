@@ -80,6 +80,9 @@ pub struct VerifHierarchy {
     /// Every non-virtual class derived from `uvm_test`.
     pub tests: Vec<String>,
     pub roots: Vec<VerifNode>,
+    /// Without tests: why there may be none (classes whose UVM base class does not resolve).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// What a view asks for besides its root: a filter, a path to show, and limits.
@@ -664,6 +667,57 @@ impl Analysis {
         false
     }
 
+    /// Why no test is found when classes extend UVM base classes that do not resolve (UVM not
+    /// compiled, or `uvm_pkg` not imported where they are declared).
+    fn unresolved_uvm_bases(&self) -> Option<String> {
+        let mut bases: Vec<(String, usize)> = Vec::new();
+        let mut seen = FxHashSet::default();
+        for u in self.units.iter().flatten() {
+            if u.kind == UnitKind::Builtin {
+                continue;
+            }
+            for (i, d) in u.parsed.decls.iter().enumerate() {
+                if d.kind != DeclKind::Class || !seen.insert((d.span.file, d.span.start)) {
+                    continue;
+                }
+                // The last class of the chain, whose base does not resolve.
+                let mut c = DeclRef { unit: u.id, decl: i as DeclId };
+                for _ in 0..32 {
+                    match self.class_base(c) {
+                        Some(b) => c = b,
+                        None => break,
+                    }
+                }
+                let Some(ext) = self.decl(c).extends.as_ref() else { continue };
+                let base = ext.text.split(|ch: char| ch == '#' || ch == ' ').next().unwrap_or("").rsplit("::").next().unwrap_or("").to_string();
+                if !base.starts_with("uvm_") || self.class_base(c).is_some() {
+                    continue;
+                }
+                match bases.iter_mut().find(|(b, _)| *b == base) {
+                    Some((_, n)) => *n += 1,
+                    None => bases.push((base, 1)),
+                }
+            }
+        }
+        if bases.is_empty() {
+            return None;
+        }
+        bases.sort_by(|a, b| b.1.cmp(&a.1));
+        let total: usize = bases.iter().map(|(_, n)| n).sum();
+        let names: Vec<String> = bases.iter().take(3).map(|(b, _)| b.clone()).collect();
+        let why = if self.global.packages.contains_key("uvm_pkg") {
+            "uvm_pkg is not imported where they are declared"
+        } else {
+            "the UVM library is not compiled (set dvicode.uvmHome or add -uvm to the build file)"
+        };
+        let classes = if total == 1 { "1 class extends".to_string() } else { format!("{total} classes extend") };
+        let mut s = format!("No UVM test found: {classes} {} but {why}.", names.join(", "));
+        if self.setup.config.build_file.is_none() {
+            s.push_str(" Without a build file the simulator's defines are unknown: see the SKIPPED_CODE notices, or add a build file.");
+        }
+        Some(s)
+    }
+
     /// Non-virtual classes derived from `uvm_test`, by name.
     pub fn uvm_tests(&self) -> Vec<DeclRef> {
         let mut seen = FxHashSet::default();
@@ -742,7 +796,8 @@ impl Analysis {
                 out.push(node);
             }
         }
-        let h = VerifHierarchy { test: wanted, configured, tests: tests.iter().map(|r| self.decl(*r).name.to_string()).collect(), roots: out };
+        let hint = if tests.is_empty() { self.unresolved_uvm_bases() } else { None };
+        let h = VerifHierarchy { test: wanted, configured, tests: tests.iter().map(|r| self.decl(*r).name.to_string()).collect(), roots: out, hint };
         (h, w.meta)
     }
 

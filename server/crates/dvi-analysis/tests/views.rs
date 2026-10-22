@@ -245,3 +245,27 @@ fn tests_of_one_name_and_empty_parameter_values() {
     // The empty value keeps the default.
     assert_eq!(h.roots.iter().find(|r| r.class == "same_test" && r.dup.is_none()).unwrap().children[0].class, "env_a");
 }
+
+#[test]
+fn an_empty_verification_hierarchy_says_why() {
+    // The test extends uvm_test, but nothing imports uvm_pkg where it is declared.
+    let uvm = "package uvm_pkg;
+  class uvm_component; function new(string name, uvm_component parent); endfunction endclass
+  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+endpackage
+";
+    let (a, _) = project("nouvmimport", &[("uvm_pkg.sv", uvm), ("t.sv", "class my_test extends uvm_test;
+endclass
+")]);
+    let (h, _) = a.verification_tree(None, &TreeQuery::new(100));
+    assert!(h.tests.is_empty());
+    let hint = h.hint.unwrap_or_default();
+    assert!(hint.contains("1 class extends uvm_test") && hint.contains("uvm_pkg is not imported"), "{hint}");
+    // With the import there is a test and no hint.
+    let (a, _) = project("withuvmimport", &[("uvm_pkg.sv", uvm), ("t.sv", "import uvm_pkg::*;
+class my_test extends uvm_test;
+endclass
+")]);
+    let (h, _) = a.verification_tree(None, &TreeQuery::new(100));
+    assert_eq!((h.tests.len(), h.hint), (1, None));
+}

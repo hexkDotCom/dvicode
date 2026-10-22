@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- When no UVM test is found, the Verification Hierarchy says why if it can: classes extend
+  `uvm_test` (or other UVM base classes) but `uvm_pkg` is not imported where they are declared, or
+  the UVM library is not compiled. Without a build file it points to the skipped-code notices,
+  which name the define to add.
 - Snippets for the UVM report macros (`uvm_info` with a choice of verbosity, `uvm_warning`,
   `uvm_error`, `uvm_fatal`), `uvm_config_db` set and get (with the usual fatal when the get
   fails), and analysis ports and imps (#11).

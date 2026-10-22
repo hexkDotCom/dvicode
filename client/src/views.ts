@@ -72,6 +72,8 @@ export interface VerifHierarchyResult {
   configured: string | null;
   tests: string[];
   roots: VerifNode[];
+  /** Without tests: why there may be none. */
+  hint?: string;
 }
 
 /** `dvicode/tree`. */
@@ -83,6 +85,7 @@ interface TreeResult<N> {
   test?: string | null;
   configured?: string | null;
   tests?: string[];
+  hint?: string;
 }
 
 /** `dvicode/locate`. */
@@ -686,7 +689,7 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
   }
 
   protected onResult(r: TreeResult<VerifNode>): void {
-    this.last = { test: r.test ?? null, configured: r.configured ?? null, tests: r.tests ?? [], roots: r.roots };
+    this.last = { test: r.test ?? null, configured: r.configured ?? null, tests: r.tests ?? [], roots: r.roots, hint: r.hint };
   }
 
   /** The test class names the root; components their instance names. */
@@ -723,7 +726,10 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
     if (!r) {
       return undefined;
     }
-    return r.tests.length ? `Test '${r.test}' not found. Select one of the ${r.tests.length} tests.` : 'No UVM test (class derived from uvm_test) in the project.';
+    if (r.tests.length) {
+      return `Test '${r.test}' not found. Select one of the ${r.tests.length} tests.`;
+    }
+    return r.hint ?? 'No UVM test (class derived from uvm_test) in the project.';
   }
 
   protected isTarget(p: Placed<VerifNode>, t: Target): boolean {
