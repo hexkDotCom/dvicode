@@ -231,6 +231,11 @@ impl Build<'_> {
     fn element_groups(&mut self, id: DeclId) -> Vec<StructNode> {
         let d = self.decl(id).clone();
         let mut g = Groups::default();
+        for imp in &d.imports {
+            let name = format!("{}::{}", imp.pkg, imp.item.as_deref().unwrap_or("*"));
+            let n = self.leaf(&name, "import", None, imp.pkg_span, None);
+            g.add("Imports", n);
+        }
         for &c in &d.children {
             let cd = self.decl(c).clone();
             let key = match cd.kind {
@@ -268,6 +273,7 @@ impl Build<'_> {
             }
         }
         g.into_nodes(&[
+            "Imports",
             "Parameters",
             "Ports",
             "Modports",

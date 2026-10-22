@@ -106,7 +106,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -303,6 +303,24 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                     }
                 }
                 pr(&a.document_symbols(f), 0);
+            }
+        }
+        "--structure" => {
+            let p = canonical(Path::new(arg));
+            if let Some(f) = a.vfs.lookup(Path::new(&p)) {
+                fn pr(s: &[dvi_analysis::ide::structure::StructNode], d: usize) {
+                    for x in s {
+                        let extra = [x.detail.clone(), x.mark.clone(), x.inherited_from.clone().map(|c| format!("from {c}"))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                        println!("{}{} [{}] {extra}", "  ".repeat(d), x.name, x.kind);
+                        pr(&x.children, d + 1);
+                    }
+                }
+                let t = std::time::Instant::now();
+                let tree = a.structure(f, None, 20_000);
+                let ms = t.elapsed().as_millis();
+                println!("status {}, context {:?} (+{}), incomplete {}", tree.status, tree.context, tree.others, tree.incomplete);
+                pr(&tree.nodes, 0);
+                eprintln!("structure: {ms} ms");
             }
         }
         "--hier" => {
