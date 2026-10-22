@@ -159,12 +159,12 @@ test.describe('Structure', () => {
     n('c', 'class', at(22, 0, 40, 8), [n('Inherited from base', 'group', undefined, [n('x', 'field', at(2, 0, 2, 5), [], { inherited_from: 'base' })])]),
   ];
   test.it('finds the innermost node at the cursor, through groups', () => {
-    assert.deepEqual(vm.innermostAt(tree, 'file:///a.sv', 4, 0).map((x) => x.id), ['top', 'Processes', 'always_ff']);
-    assert.deepEqual(vm.innermostAt(tree, 'file:///a.sv', 10, 0).map((x) => x.id), ['top']);
+    assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///a.sv', 4, 0).map((x) => x.id), ['top', 'Processes', 'always_ff']);
+    assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///a.sv', 10, 0).map((x) => x.id), ['top']);
   });
   test.it('ignores other files and inherited members', () => {
-    assert.deepEqual(vm.innermostAt(tree, 'file:///b.sv', 4, 0), []);
-    assert.deepEqual(vm.innermostAt(tree, 'file:///a.sv', 2, 3).map((x) => x.id), ['top']);
-    assert.deepEqual(vm.innermostAt(tree, 'file:///a.sv', 30, 0).map((x) => x.id), ['c']);
+    assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///b.sv', 4, 0), []);
+    assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///a.sv', 2, 3).map((x) => x.id), ['top']);
+    assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///a.sv', 30, 0).map((x) => x.id), ['c']);
   });
 });

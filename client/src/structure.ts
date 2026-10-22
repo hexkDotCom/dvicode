@@ -2,7 +2,7 @@
 // (`dvicode/structure`), with a filter, following the cursor.
 
 import * as vscode from 'vscode';
-import type { Conn } from './views';
+import { Conn, uriKey } from './views';
 import { StructNode, innermostAt } from './viewmodel';
 
 /** `dvicode/structure`. */
@@ -72,7 +72,7 @@ const STATE = 'dvicode.view.structure';
 export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<Item | undefined>();
   readonly onDidChangeTreeData = this.emitter.event;
-  private readonly view: vscode.TreeView<Item>;
+  readonly view: vscode.TreeView<Item>;
   private readonly subs: vscode.Disposable[] = [];
   private roots: Item[] = [];
   private items = new Map<string, Item>();
@@ -320,7 +320,19 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
       return;
     }
     const pos = ed.selection.active;
-    const chain = innermostAt(this.result.nodes, d.uri, pos.line, pos.character);
+    // Engine URIs are compared as VS Code shows them (drive letters, case, remote authorities).
+    const m = this.conn.mapper();
+    const doc = uriKey(ed.document.uri);
+    const keys = new Map<string, boolean>();
+    const inDoc = (uri: string): boolean => {
+      let k = keys.get(uri);
+      if (k === undefined) {
+        k = m !== undefined && uriKey(m.toClient(uri)) === doc;
+        keys.set(uri, k);
+      }
+      return k;
+    };
+    const chain = innermostAt(this.result.nodes, inDoc, pos.line, pos.character);
     const last = chain[chain.length - 1];
     const item = last && this.items.get(last.id);
     if (!item || this.view.selection[0] === item) {

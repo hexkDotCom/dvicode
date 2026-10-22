@@ -54,6 +54,7 @@ IDE queries run without an editor; `LINE` and `COL` count from 1, like in the ed
 | `--fixes F` | quick fixes of a file |
 | `--hier TOP` or `--hier -` | design hierarchy |
 | `--uvm TEST` or `--uvm -` | verification hierarchy |
+| `--uvm-tests -` or `--uvm-tests objects` | every test's verification hierarchy (with objects), and the time each took |
 | `--symbols QUERY` | workspace symbols |
 
 A good regression check is that clean libraries (UVM, your own verified code) report zero

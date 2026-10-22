@@ -27,7 +27,13 @@ currently in preview.
 - **Hover documentation**: signatures, doc comments and what a macro expands to.
 - **Design Hierarchy**: browse the instance tree from your top module.
 - **UVM Verification Hierarchy**: explore the component hierarchy of the selected test
-  (`+UVM_TESTNAME`), worked out from the source code.
+  (`+UVM_TESTNAME`), worked out from the source code the way UVM builds it: factory overrides
+  applied, components made under a condition or in a loop marked, and, at the flip of a switch,
+  the configuration objects, register model and sequences, with the sequencer each sequence
+  starts on.
+- **Structure**: the current file's modules, packages and classes grouped by what they hold
+  (ports, signals, processes, fields, methods, the UVM phases...), with what a class inherits
+  from each base class and which methods override.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.
@@ -107,8 +113,8 @@ testbench; it needs no UVM installation.
 ## Commands and views
 
 - **DVICode** in the activity bar: Design Hierarchy (pick the top with **Select Design
-  Hierarchy Top...**), Verification Hierarchy (pick the test with **Select UVM Test...**) and
-  Compiled Files. Each view's title bar has:
+  Hierarchy Top...**), Verification Hierarchy (pick the test with **Select UVM Test...**),
+  Compiled Files and Structure. Each view's title bar has:
   - **Filter...** (funnel button): show only what matches and its parents. Plain text matches
     anywhere in a name or path, ignoring case (`fifo` finds `tb.dut.u_rx_fifo`); `*` matches
     within one level of a path, `**` across levels, `?` one character
@@ -124,6 +130,26 @@ testbench; it needs no UVM installation.
 
   Each view remembers its filter and whether it follows the editor, per build configuration.
   The commands are in the Command Palette too (**DVICode: Filter... (Design Hierarchy)**, ...).
+- **Verification Hierarchy**: the components the selected test builds, found by following its
+  `new` and `build_phase` (with `super` calls and helper methods) the way UVM runs them.
+  - A component's class is the one the factory builds: overrides the test (or any component)
+    sets with `set_type_override_by_type`, `set_inst_override_by_type`, `T::type_id::set_*`
+    and the by-name forms are applied in the order UVM registers them; the tooltip lists them.
+    An override set under a condition is not applied: the component says "may be overridden".
+  - "conditional": created inside an `if` or `case` (the tooltip has the condition);
+    "or B": another class is created instead in another branch; "×4": created in a loop of 4
+    iterations (×? when the count is not a constant).
+  - The **...** menu has **Show UVM Objects**: configuration objects, the register model (the
+    block itself), adapters, and the sequences each component starts in its run-time phases,
+    with the sequencer they start on and the sequences they start in turn; default sequences
+    show under their sequencer. **Show TLM Ports** shows the ports, exports and imps, hidden by
+    default (the tooltip of a component counts them).
+- **Structure**: the declarations of the active editor's file: includes and defines; modules
+  and interfaces with their parameters, ports, signals, instances, processes (`always_ff
+  @(posedge clk)`, `assign y`), generate blocks, functions, assertions; packages; classes with
+  their fields, constraints, covergroups and methods (UVM phases marked), then what each base
+  class gives them ("overridden in", "overrides", "hides"); code `` `ifdef `` leaves out, by
+  lines. It filters by name and follows the cursor.
 - **DVICode: Expand Macro One Level**, **Expand Macro All Levels** and **Show Including
   File**; the first and last are also in the editor's context menu.
 - **DVICode: Set Current Build Configuration...** to switch between `.dvicode/*.build` files.

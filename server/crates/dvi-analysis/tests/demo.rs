@@ -151,7 +151,7 @@ fn verification_hierarchy() {
     // +UVM_TESTNAME in the build file selects the test.
     let h = a.verification_hierarchy(None, 1000);
     assert_eq!(h.configured.as_deref(), Some("demo_full_test"));
-    assert_eq!(h.tests, vec!["demo_base_test", "demo_full_test", "demo_smoke_test"]);
+    assert_eq!(h.tests, vec!["demo_base_test", "demo_err_test", "demo_full_test", "demo_smoke_test"]);
     assert_eq!(h.roots.len(), 1);
     let root = &h.roots[0];
     // The configuration object created with a parent is not a component; the derived test
@@ -159,12 +159,12 @@ fn verification_hierarchy() {
     // are followed.
     assert_eq!(
         verif_tree(root),
-        "uvm_test_top:demo_full_test(env:demo_env(agents[i]:demo_agent(mon:demo_monitor(ap:uvm_analysis_port),drv:demo_driver,sqr:uvm_sequencer),sb:demo_scoreboard),extra_sb:demo_scoreboard)"
+        "uvm_test_top:demo_full_test(env:demo_env(agents[i]:demo_agent(mon:demo_monitor(ap:uvm_analysis_port),drv:demo_driver,sqr:uvm_sequencer),sb:demo_scoreboard,vsqr:uvm_sequencer),extra_sb:demo_scoreboard)"
     );
     let env = &root.children[0];
     assert_eq!((env.kind.as_str(), env.path.as_str()), ("env", "uvm_test_top.env"));
     assert!(env.uri.as_deref().unwrap().ends_with("tb/demo_env_pkg.sv"));
-    assert_eq!(env.line + 1, 81);
+    assert_eq!(env.line + 1, 129);
     let kinds: Vec<&str> = env.children[0].children.iter().map(|c| c.kind.as_str()).collect();
     assert_eq!(kinds, vec!["monitor", "driver", "sequencer"]);
     // Another test, picked explicitly: inherits the base test's build_phase.
@@ -174,7 +174,7 @@ fn verification_hierarchy() {
     assert_eq!(names, vec!["env"]);
     // Every test.
     let h = a.verification_hierarchy(Some("*"), 1000);
-    assert_eq!((h.test.as_deref(), h.roots.len()), (None, 3));
+    assert_eq!((h.test.as_deref(), h.roots.len()), (None, 4));
     // The node budget cuts the tree.
     let h = a.verification_hierarchy(Some("demo_full_test"), 2);
     assert!(h.roots[0].children[0].truncated || h.roots[0].truncated);

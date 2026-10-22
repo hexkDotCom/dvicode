@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+**UVM Verification Hierarchy: as UVM builds it**
+
+- The hierarchy follows what runs: each constructor (with `super.new()`), then the most derived
+  `build_phase` with `super.build_phase()` where it is called (and `build()` through the
+  library's), helper methods at every call with the literal names they are given; children are
+  built in name order, as UVM's build phase does. A derived `build_phase` that skips
+  `super.build_phase()` no longer shows its base class's components.
+- Factory overrides are applied: type and instance overrides set on a component, on the factory
+  or through `T::type_id`, by type or by registered name, in the order they are registered, with
+  `replace`; an instance override wins, a loop stops where it closes. The node shows the class
+  built and its tooltip the overrides; one set under a condition is shown as "may be
+  overridden" instead of applied.
+- Components made under an `if` or `case` are marked "conditional" with the condition; the two
+  branches of an `if (host) drv = A...; else drv = B...;` are one node "A · or B". Components
+  made in a loop show the number of iterations (`×4`, `×≤4` when it can stop early, `×?`).
+- **Show UVM Objects** (in the view's ... menu): configuration objects (with their
+  `uvm_config_db` sets), the register model (the block itself), adapters, and the sequences
+  each component starts in its run-time phases, with the sequencer each starts on (a tree path
+  when the handles lead to a component), the sequences they start in turn (`uvm_do` and its
+  variants, `start`), and default sequences under their sequencer.
+- **Show TLM Ports** (same menu): ports, exports and imps are hidden by default; a component's
+  tooltip counts them.
+- Following the editor finds a component from the class it was built from or the one it was
+  requested as, and says when the class is an object to show with the switch.
+- The hierarchy is faster on large testbenches: files are read once per request.
+
+**Structure view**
+
+- A new view, Structure: the active file's includes, defines, modules, packages and classes,
+  grouped (parameters, ports, signals, instances, processes, generate blocks, functions,
+  assertions; fields, constraints, methods with the UVM phases marked), with what each base
+  class gives a class and which methods override or hide. Code `` `ifdef `` leaves out is listed
+  by lines. It filters by name and follows the cursor.
+
+**Also**
+
 - `+dvicode_init_from_simlog` reads Questa compile logs and transcripts too: the `vlog`
   command lines, with their files, `-f` files, include directories and defines (Questa does not
   list the files it parses). Part of #9.

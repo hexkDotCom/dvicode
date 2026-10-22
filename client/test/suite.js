@@ -209,7 +209,7 @@ async function run() {
     const h = await c.sendRequest('dvicode/verificationHierarchy', { test: null });
     const s = (n) => `${n.name}${n.children.length ? '(' + n.children.map(s).join(',') + ')' : ''}`;
     const text = h.roots.map(s).join(' ');
-    if (h.test !== 'demo_full_test' || text !== 'uvm_test_top(env(agents[i](mon(ap),drv,sqr),sb),extra_sb)') {
+    if (h.test !== 'demo_full_test' || text !== 'uvm_test_top(env(agents[i](mon(ap),drv,sqr),sb,vsqr),extra_sb)') {
       throw new Error(`${h.test}: ${text}`);
     }
     // The tree view, with another test picked.
@@ -225,6 +225,66 @@ async function run() {
       view.test = undefined;
       view.refresh();
     }
+  });
+
+  await test('verification hierarchy: overrides, objects, ports', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    const c = await api.ready();
+    const r = await c.sendRequest('dvicode/tree', { view: 'verification', test: 'demo_err_test', objects: true, ports: false, filter: null, reveal: null });
+    const s = (n) => `${n.name}${n.children.length ? '(' + n.children.map(s).join(',') + ')' : ''}`;
+    const text = s(r.roots[0]);
+    if (text !== 'uvm_test_top(env(agents[i](mon,drv,sqr),sb,vsqr(demo_item_seq),cfg,regs,adapter),vseq(first,second))') throw new Error(text);
+    const env = r.roots[0].children[0];
+    const drv = env.children[0].children[1];
+    const cond = JSON.stringify(drv.conditions);
+    if (drv.class !== 'demo_err_driver' || drv.overrides[0].from !== 'demo_driver' || !drv.overrides[0].applied || cond !== '[["get_is_active() == UVM_ACTIVE"]]' || env.children[0].count !== '2') {
+      throw new Error(JSON.stringify({ drv, count: env.children[0].count }));
+    }
+    const vseq = r.roots[0].children[1];
+    if (vseq.starts[0].on !== 'uvm_test_top.env.vsqr' || vseq.children[0].starts[0].on !== 'uvm_test_top.env.vsqr') throw new Error(JSON.stringify(vseq));
+    // The view's switch.
+    const view = api.verification();
+    view.test = 'demo_err_test';
+    await vscode.commands.executeCommand('dvicode.verification.showObjects');
+    try {
+      const roots = await view.getChildren();
+      const kids = (await view.getChildren(roots[0])).map((k) => `${k.label}:${k.description}`);
+      if (kids.join(',') !== 'env:demo_env,vseq:demo_vseq · on env.vsqr') throw new Error(kids.join(','));
+      if (!String(view.view.description).includes('objects')) throw new Error(`description: ${view.view.description}`);
+      return `${text}; view: ${kids.join(', ')}`;
+    } finally {
+      await vscode.commands.executeCommand('dvicode.verification.hideObjects');
+      view.test = undefined;
+      view.refresh();
+    }
+  });
+
+  await test('structure view: groups, inherited members, follow the cursor', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    const c = await api.ready();
+    const doc = await open('tb/demo_env_pkg.sv');
+    await vscode.window.showTextDocument(doc);
+    // The request.
+    const r = await c.sendRequest('dvicode/structure', { textDocument: { uri: api.toServer(doc.uri) } });
+    const pkg = r.nodes.find((n) => n.name === 'demo_env_pkg');
+    const classes = pkg.children.find((n) => n.name === 'Classes');
+    const full = classes.children.find((n) => n.name === 'demo_full_test');
+    const groups = full.children.map((g) => g.name).join(',');
+    if (groups !== 'Fields,Methods,Inherited from demo_base_test,extends uvm_test') throw new Error(groups);
+    const inherited = full.children[2].children.map((m) => `${m.name}${m.mark ? ` {${m.mark}}` : ''}`).join(',');
+    if (!inherited.includes('build_phase {overridden in demo_full_test}')) throw new Error(inherited);
+    // The view follows the cursor (on by default).
+    await vscode.commands.executeCommand('dvicode.structure.focus');
+    const active = await vscode.window.showTextDocument(doc);
+    const s = api.structure();
+    await waitFor('structure items', async () => s.getChildren().length > 0, 30000);
+    const p = lineOf(doc, 'class demo_monitor').translate(4, 0);
+    active.selection = new vscode.Selection(p, p);
+    const sel = () => (s.view.selection[0] ? s.view.selection[0].label : '');
+    await waitFor('structure selection', async () => sel() === 'new', 20000).catch((e) => {
+      throw new Error(`${e.message}: selection '${sel()}', message '${s.view.message}'`);
+    });
+    return `${groups}; ${inherited}; selected ${sel()}`;
   });
 
   /** Names of every node of a view, depth first. */

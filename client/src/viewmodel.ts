@@ -391,13 +391,13 @@ export interface StructNode {
 }
 
 /**
- * The innermost Structure node (not a group) whose extent is in the document `uri` (as the
- * engine names it) and contains the position; with the nodes from the top down to it.
+ * The innermost Structure node (not a group) whose extent is in the document (`inDoc` tells for
+ * an engine URI) and contains the position; with the nodes from the top down to it.
  */
-export function innermostAt(nodes: StructNode[], uri: string, line: number, character: number): StructNode[] {
+export function innermostAt(nodes: StructNode[], inDoc: (uri: string) => boolean, line: number, character: number): StructNode[] {
   const inside = (n: StructNode): boolean => {
     const e = n.extent;
-    if (!e || e.uri !== uri) {
+    if (!e || !inDoc(e.uri)) {
       return false;
     }
     const { start, end } = e.range;
@@ -408,7 +408,7 @@ export function innermostAt(nodes: StructNode[], uri: string, line: number, char
   for (const n of nodes) {
     // Groups have no extent: look inside them.
     if (n.kind === 'group') {
-      const below = innermostAt(n.children, uri, line, character);
+      const below = innermostAt(n.children, inDoc, line, character);
       if (below.length) {
         return [n, ...below];
       }
@@ -417,7 +417,7 @@ export function innermostAt(nodes: StructNode[], uri: string, line: number, char
     if (n.inherited_from || !inside(n)) {
       continue;
     }
-    return [n, ...innermostAt(n.children, uri, line, character)];
+    return [n, ...innermostAt(n.children, inDoc, line, character)];
   }
   return [];
 }

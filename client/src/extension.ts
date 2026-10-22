@@ -436,6 +436,8 @@ export interface DvicodeApi {
   verification(): VerificationHierarchy;
   /** The three views (tests). */
   views(): Views;
+  /** The Structure view (tests). */
+  structure(): Structure;
   /** The last internal error the engine reported. */
   lastInternalError(): InternalError | undefined;
   /** The text DVICode: Report Issue fills in. */
@@ -510,6 +512,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     toServer: (uri) => launch?.mapper.toServer(uri),
     verification: () => views.verification,
     views: () => views,
+    structure: () => structure,
     lastInternalError: () => reporter.last,
     issueBody: () => reporter.issueBody(),
   };
