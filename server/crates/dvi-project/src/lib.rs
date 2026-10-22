@@ -658,6 +658,13 @@ impl Builder {
                         None => self.missing_value(file, line, &raw, "the UVM directory"),
                     },
                     "-endlib" => {}
+                    // `-top+tb_top`: the `-top tb_top` and `+xmtop+tb_top` spellings mixed up.
+                    _ if raw.starts_with("-top+") && raw.len() > "-top+".len() => {
+                        let t = raw["-top+".len()..].trim_end_matches('+').to_string();
+                        self.problem(file, line, format!("{raw}: use \"-top {t}\" (or +xmtop+{t})"));
+                        self.note(file, format!("**design top** `{t}` of the Design Hierarchy"));
+                        self.inv().tops.push(t);
+                    }
                     _ => {
                         let opt = raw.split('=').next().unwrap_or("");
                         if OPTS_WITH_ARG.contains(&opt) && !raw.contains('=') {
@@ -1481,6 +1488,11 @@ mod tests {
         assert_eq!(names, vec!["A", "B", "C", "FROM_F"]);
         assert_eq!(inv.defines[2].1.as_deref(), Some("\"x y\""));
         assert_eq!(inv.tops, vec!["top_tb".to_string()]);
+        // `-top+NAME` is explained and still names the top.
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), "a.sv\n-top+tb_top\n", &env);
+        assert_eq!(cfg.invocations[0].tops, vec!["tb_top".to_string()]);
+        assert_eq!(messages(&cfg.problems), vec!["-top+tb_top: use \"-top tb_top\" (or +xmtop+tb_top)".to_string()]);
+        assert_eq!(at("a.sv\n-top+tb_top\n", &cfg.problems[0]), "-top+tb_top");
     }
 
     #[test]
