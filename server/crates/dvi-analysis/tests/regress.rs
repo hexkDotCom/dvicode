@@ -1702,6 +1702,8 @@ fn sequence_review_cases() {
       s1::type_id::set_type_override(s3::get_type());
       r = s1::type_id::create("late");
       r.start(q3);
+      if (a) r = s2::type_id::create("maybe");
+      if (b) r.start(q4);
     endtask
   endclass
 endpackage
@@ -1721,7 +1723,9 @@ endpackage
             "one : s1 on q1",
             "two : s2 on q2",
             // An override registered at run time applies to what is made after it.
-            "late : s3 on q3",
+            "late : s3 on q3, q4",
+            // Conditions that can both hold: the start may run it.
+            "maybe : s2 on q4",
         ]
     );
 }

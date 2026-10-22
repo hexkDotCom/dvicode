@@ -771,12 +771,18 @@ fn filtered(nodes: Vec<StructNode>, f: &Filter) -> Vec<StructNode> {
 /// Ids from the names: `parent/kind:name`, with `#2`... for repeats among siblings.
 fn assign_ids(nodes: &mut [StructNode], parent: &str) {
     let mut seen: FxHashMap<String, u32> = FxHashMap::default();
+    let mut used: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
     for n in nodes.iter_mut() {
         // U+001F cannot be in a name (not even an escaped identifier).
         let base = format!("{parent}\u{1f}{}:{}", n.kind, n.name);
         let k = seen.entry(base.clone()).or_insert(0);
         *k += 1;
-        let id = if *k > 1 { format!("{base}#{k}") } else { base };
+        let mut id = if *k > 1 { format!("{base}#{k}") } else { base.clone() };
+        // A name may itself end in `#2` (an escaped identifier): count on until it is unique.
+        while !used.insert(id.clone()) {
+            *k += 1;
+            id = format!("{base}#{k}");
+        }
         n.id = id;
         let id = n.id.clone();
         assign_ids(&mut n.children, &id);

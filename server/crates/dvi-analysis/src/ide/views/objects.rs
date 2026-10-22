@@ -382,6 +382,10 @@ impl Analysis {
                 let key_name = name.clone();
                 let new = || Seq { class: Some(class), requested, overrides, name, at, ways: Vec::new(), starts: Vec::new(), made_here: true };
                 alloc(&mut seqs, &mut by_key, &mut current, var, self.decl_key(class), key_name, new, &e.guards, unconditional(&e.guards));
+                // A new sequence: no sequencer from an earlier `uvm_create_on`.
+                if let Some(v) = var {
+                    stored.remove(&v);
+                }
             }
             let RunWhat::Start(st) = &e.what else { continue };
             let Some(var) = var_of(e.body, st.var) else { continue };
@@ -415,8 +419,7 @@ impl Analysis {
             // What the variable may hold where the start is: an allocation in another branch
             // (neither's conditions within the other's) is not.
             let holds = current.get(&var).cloned().unwrap_or_default();
-            for (i, g) in holds.iter().filter(|(_, g)| g.starts_with(&e.guards) || e.guards.starts_with(g)) {
-                let _ = g;
+            for (i, _) in holds.iter().filter(|(_, g)| !exclusive(g, &e.guards)) {
                 for (on, path) in &ons {
                     let s = &mut seqs[*i];
                     if s.starts.len() < MAX_WAYS && !s.starts.iter().any(|x| x.on == *on && x.phase == e.phase && x.conditions == conditions) {
@@ -436,7 +439,7 @@ impl Analysis {
             let parent: Vec<(String, bool)> = node.starts.iter().map(|x| (x.on.clone(), x.path)).collect();
             let make_children = |w: &mut Walk, node: &mut VerifNode, child_pin: Option<&[String]>| -> Vec<VerifNode> {
                 match cls {
-                    Some(c) => self.sequence_children(c, node, parent, child_pin, w, stack, scan, factory),
+                    Some(c) => self.sequence_children(c, node, parent, child_pin, w, stack, scan, local.as_ref().unwrap_or(factory)),
                     None => Vec::new(),
                 }
             };
@@ -626,4 +629,15 @@ pub(super) struct MadeSeq {
     pub class: Option<DeclRef>,
     pub requested: Option<DeclRef>,
     pub overrides: Vec<OverrideStep>,
+}
+
+/// Whether two sets of conditions cannot both hold: where they first differ, one is the `else`
+/// of the other's `if`, or another item of the same `case`.
+fn exclusive(a: &[Guard], b: &[Guard]) -> bool {
+    let Some((x, y)) = a.iter().zip(b).find(|(x, y)| x != y) else { return false };
+    match (x, y) {
+        (Guard::If { text: t1, negated: n1 }, Guard::If { text: t2, negated: n2 }) => t1 == t2 && n1 != n2,
+        (Guard::Case { text: t1 }, Guard::Case { text: t2 }) => t1.split_once(": ").map(|p| p.0) == t2.split_once(": ").map(|p| p.0),
+        _ => false,
+    }
 }

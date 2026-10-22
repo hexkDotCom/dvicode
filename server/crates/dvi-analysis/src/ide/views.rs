@@ -1432,7 +1432,7 @@ impl Analysis {
                         [v] => a.resolve_at_span(s.body.unit, v.span).map(|x| a.decl_key(x)),
                         _ => None,
                     };
-                    let made_class = var.and_then(|k| inst.objs.iter().find(|o| o.kind == "sequence" && a.resolve_at_span(o.made.body.unit, o.made.cr.lhs_head).map(|x| a.decl_key(x)) == Some(k))).and_then(|o| o.class);
+                    let made_class = var.and_then(|k| inst.objs.iter().rev().find(|o| o.kind == "sequence" && a.resolve_at_span(o.made.body.unit, o.made.cr.lhs_head).map(|x| a.decl_key(x)) == Some(k))).and_then(|o| o.class);
                     out.push((inst.path.clone(), DefaultSeq { set: s.clone(), target: full, phase, placed: false, made_class }));
                 }
             }
@@ -1518,7 +1518,8 @@ impl Analysis {
             if factory.processed > MAX_MODEL || factory.entries.len() >= MAX_MODEL {
                 // Past the budget: what is built from here may miss overrides, and says so.
                 factory.dropped = true;
-                continue;
+                *cursor = built.regs.len();
+                return;
             }
             if let Some(e) = self.factory_entry(r, &inst.path, inst.certain, scan) {
                 factory.push(e);

@@ -171,3 +171,15 @@ fn structure_review_cases() {
     // A file of out-of-block implementations lists them.
     assert_eq!(structure(&a, &root, "impl.svh", None), ["f [function] void"]);
 }
+
+#[test]
+fn many_processes_are_fast() {
+    let body: String = (0..20_000).map(|k| format!("  assign x{k} = y;\n")).collect();
+    let (a, root) = project("manyassign", &[("m.sv", &format!("module m;\n  logic y;\n{body}endmodule\n"))]);
+    let f = a.vfs.lookup(&root.join("m.sv")).unwrap();
+    let t0 = std::time::Instant::now();
+    let t = a.structure(f, None, 100_000);
+    assert!(t0.elapsed().as_secs() < 5, "took {:?}", t0.elapsed());
+    let procs = t.nodes[0].children.iter().find(|g| g.name == "Processes").unwrap();
+    assert_eq!(procs.children.len(), 20_000);
+}
