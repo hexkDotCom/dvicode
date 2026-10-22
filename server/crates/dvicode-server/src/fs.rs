@@ -170,7 +170,12 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
                 }
                 // Replace the target, file or directory. It is moved aside first and put back
                 // if the rename fails, so that a failure loses nothing.
-                let aside = to.with_file_name(format!(".{}.dvicode-replaced-{}", to.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), std::process::id()));
+                // A name nothing has: on Unix the move would replace a file already there.
+                let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let aside = (0..1000)
+                    .map(|k| to.with_file_name(format!(".{name}.dvicode-replaced-{}-{k}", std::process::id())))
+                    .find(|a| std::fs::symlink_metadata(a).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))
+                    .ok_or_else(|| FsError { code: "Unavailable", message: format!("no free name to move {} aside", to.display()) })?;
                 std::fs::rename(&to, &aside).map_err(|e| err(e, &to))?;
                 if let Err(e) = std::fs::rename(&from, &to) {
                     let _ = std::fs::rename(&aside, &to);
@@ -251,10 +256,14 @@ mod tests {
         let (a, b) = (d.join("a.sv"), d.join("b.sv"));
         std::fs::write(&a, "a").unwrap();
         std::fs::write(&b, "b").unwrap();
+        // A file with the name the target would have been moved aside to is left alone.
+        let other = d.join(format!(".b.sv.dvicode-replaced-{}-0", std::process::id()));
+        std::fs::write(&other, "other").unwrap();
         let r = |overwrite: bool| call("rename", json!({ "from": a.display().to_string(), "to": b.display().to_string(), "overwrite": overwrite }));
         assert_eq!(r(false), Err("FileExists"));
         assert_eq!(r(true), Ok(Value::Null));
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "other");
 
         let sub = d.join("sub");
         call("createDirectory", json!({ "path": sub.display().to_string() })).unwrap();

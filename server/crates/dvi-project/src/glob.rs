@@ -1,6 +1,7 @@
 //! Ant-style wildcards: `?`, `*` (within one path component), `**` (any depth) and character
 //! classes `[abc]`, `[a-z]`, `[!abc]` (as in `.gitignore`).
 
+use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 
 pub fn has_wildcard(s: &str) -> bool {
@@ -75,11 +76,13 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
         i += 1;
     }
     let mut out = Vec::new();
-    walk(&base, &comps[i..], &mut out, 0);
+    walk(&base, &comps[i..], &mut out, 0, &mut FxHashSet::default());
     out
 }
 
-fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize) {
+/// `links`: the directories that `**` reached through symbolic links, each walked once (links
+/// between sibling folders would otherwise branch again at every level).
+fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links: &mut FxHashSet<PathBuf>) {
     if depth > 64 {
         return;
     }
@@ -89,13 +92,13 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize) {
     };
     if first == "**" {
         // Zero directories...
-        walk(dir, &rest[1..], out, depth + 1);
+        walk(dir, &rest[1..], out, depth + 1, links);
         // ...or one more.
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) {
-                    walk(&p, rest, out, depth + 1);
+                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, links) {
+                    walk(&p, rest, out, depth + 1, links);
                 }
             }
         }
@@ -104,7 +107,7 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize) {
     if !has_wildcard(first) {
         let p = dir.join(first);
         if p.exists() {
-            walk(&p, &rest[1..], out, depth + 1);
+            walk(&p, &rest[1..], out, depth + 1, links);
         }
         return;
     }
@@ -113,10 +116,18 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize) {
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
             if match_component(first, &e.file_name().to_string_lossy()) {
-                walk(&e.path(), &rest[1..], out, depth + 1);
+                walk(&e.path(), &rest[1..], out, depth + 1, links);
             }
         }
     }
+}
+
+/// Not a symbolic link, or the first one to its target.
+fn first_visit(e: &std::fs::DirEntry, links: &mut FxHashSet<PathBuf>) -> bool {
+    if !e.file_type().is_ok_and(|t| t.is_symlink()) {
+        return true;
+    }
+    std::fs::canonicalize(e.path()).is_ok_and(|t| links.insert(t))
 }
 
 /// A symbolic link in `dir` to `dir` itself or a directory above it (`a -> .`): following it
@@ -153,6 +164,26 @@ fn match_seq(pat: &[&str], comps: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn links_between_sibling_folders_end() {
+        // a/x, a/y -> b and b/x, b/y -> a: every level would branch again.
+        let dir = std::env::temp_dir().join(format!("dvicode_glob_links_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["a", "b"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join(format!("{d}.sv")), "").unwrap();
+        }
+        for (from, to) in [("a/x", "../b"), ("a/y", "../b"), ("b/x", "../a"), ("b/y", "../a")] {
+            std::os::unix::fs::symlink(to, dir.join(from)).unwrap();
+        }
+        let t = std::time::Instant::now();
+        let found = expand(&dir.join("**/*.sv"));
+        assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+        assert!(found.len() <= 8 && found.iter().any(|p| p.ends_with("a/a.sv")) && found.iter().any(|p| p.ends_with("b/b.sv")), "{found:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn components() {

@@ -2071,3 +2071,19 @@ endpackage
     // `++i` counts; an instance override at the component's path applies at run time.
     assert_eq!(kids, ["l[i]:leaf:4", "seq:d:"]);
 }
+
+#[test]
+fn auto_config_excludes_the_file_an_include_names_not_its_namesakes() {
+    // `include "rtl/common.sv"` is rtl/common.sv; tb/common.sv is still compiled.
+    let files = [
+        ("rtl/common.sv", "module rtl_block; endmodule\n"),
+        ("tb/common.sv", "module tb_block; endmodule\n"),
+        ("top.sv", "`include \"rtl/common.sv\"\nmodule top;\n  tb_block u();\n  rtl_block v();\nendmodule\n"),
+    ];
+    let (_, root) = project("autoinc", &files);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let tops: Vec<String> = cfg.invocations.iter().flat_map(|i| i.files.iter()).map(|f| f.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    assert!(tops.contains(&"tb/common.sv".to_string()) && !tops.contains(&"rtl/common.sv".to_string()), "{tops:?}");
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}

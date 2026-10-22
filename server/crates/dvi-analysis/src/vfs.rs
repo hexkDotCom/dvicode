@@ -239,7 +239,8 @@ impl Vfs {
                 }
                 (g.paths[id as usize].clone(), e.version)
             };
-            let text: Option<Arc<str>> = std::fs::read(&path).ok().map(|b| match String::from_utf8(b) {
+            // Regular files only: reading a FIFO named as a source would block.
+            let text: Option<Arc<str>> = std::fs::metadata(&path).ok().filter(|m| m.is_file()).and_then(|_| std::fs::read(&path).ok()).map(|b| match String::from_utf8(b) {
                 Ok(s) => Arc::from(s),
                 Err(e) => Arc::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
             });

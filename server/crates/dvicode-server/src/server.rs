@@ -182,7 +182,10 @@ pub fn run(conn: Connection) -> Res<()> {
         capabilities: capabilities(),
         server_info: Some(ServerInfo { name: "dvicode-server".into(), version: Some(crate::VERSION.into()) }),
     };
-    conn.initialize_finish(id, serde_json::to_value(result)?)?;
+    let mut result = serde_json::to_value(result)?;
+    // Not in this lsp-types' ServerCapabilities; clients register the feature only when told.
+    result["capabilities"]["typeHierarchyProvider"] = json!(true);
+    conn.initialize_finish(id, result)?;
 
     #[allow(deprecated)]
     let root = params

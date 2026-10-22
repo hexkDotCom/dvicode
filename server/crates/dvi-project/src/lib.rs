@@ -156,11 +156,31 @@ pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, Stri
     load_with(root, build_file, env, &Progress::new())
 }
 
+/// The largest build file or argument file read, and the largest compile log.
+const MAX_ARG_FILE: u64 = 256 << 20;
+const MAX_LOG: u64 = 2 << 30;
+
+/// Reads a build input: a regular file (a FIFO or a device such as `/dev/zero` could block or
+/// never end) of at most `limit` bytes.
+fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if meta.len() > limit {
+        return Err(Error::new(ErrorKind::InvalidInput, format!("larger than {} MB", limit >> 20)));
+    }
+    let mut b = Vec::new();
+    std::fs::File::open(path)?.take(limit).read_to_end(&mut b)?;
+    Ok(b)
+}
+
 /// [`load`], reporting the auto-configuration on (and cancelled through) `progress`.
 pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
     let bf = build_file.map(|p| p.to_path_buf()).or_else(|| find_build_file(root));
     match bf {
-        Some(bf) => match std::fs::read_to_string(&bf) {
+        Some(bf) => match read_input(&bf, MAX_ARG_FILE).map(|b| String::from_utf8_lossy(&b).into_owned()) {
             Ok(text) => parse_build_with(root, &bf, &text, env, progress),
             Err(e) => {
                 let mut cfg = parse_build_with(root, &bf, "", env, progress);
@@ -1000,8 +1020,8 @@ impl Builder {
             return;
         }
         self.files_read += 1;
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
+        let text = match read_input(&path, MAX_ARG_FILE) {
+            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(_) if !path.exists() => return self.problem(file, line, format!("Argument file not found: {}", path.display())),
             Err(e) => return self.problem(file, line, format!("Cannot read argument file {}: {e}", path.display())),
         };
@@ -1039,7 +1059,7 @@ impl Builder {
         }
         let e = self.expand(log, true).unwrap_or_default();
         self.link(file, &path);
-        let text = match std::fs::read(&path) {
+        let text = match read_input(&path, MAX_LOG) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(_) if !path.exists() => {
                 self.note(file, self.describe_path(log, &e, &path, "simulation log"));
@@ -1413,7 +1433,10 @@ fn split_defines(s: &str) -> Vec<String> {
         let c = chars[i];
         // `'` quotes only where a quote can start; `8'hFF` and `'hFF` are numbers.
         let quote_start = c == '"'
-            || (c == '\'' && !(i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_')) && chars[i + 1..].contains(&'\''));
+            || (c == '\''
+                && !(i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_'))
+                && !unsized_literal(chars.get(i + 1).copied(), chars.get(i + 2).copied())
+                && chars[i + 1..].contains(&'\''));
         match quote {
             Some(q) if c == q => quote = None,
             None if quote_start => quote = Some(c),
@@ -1438,10 +1461,19 @@ fn split_defines(s: &str) -> Vec<String> {
     out
 }
 
+/// Whether a `'` followed by `next` and `after` is an unsized literal (`'0`, `'1`, `'x`, `'z`
+/// not followed by a name), as in `+define+ONES='1+ZERO='0`, rather than an opening quote.
+fn unsized_literal(next: Option<char>, after: Option<char>) -> bool {
+    next.is_some_and(|c| matches!(c, '0' | '1' | 'x' | 'X' | 'z' | 'Z')) && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
 /// Whether the `'` at `b[i]` starts quoted text rather than a SystemVerilog number such as
 /// `8'hFF` or `'hFF`: not right after a letter or digit, and closed later on the same line.
 pub(crate) fn opens_quote(b: &[u8], i: usize) -> bool {
     if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+        return false;
+    }
+    if unsized_literal(b.get(i + 1).map(|c| *c as char), b.get(i + 2).map(|c| *c as char)) {
         return false;
     }
     b[i + 1..].iter().take_while(|c| **c != b'\n').any(|c| *c == b'\'')
@@ -1673,12 +1705,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.sv"), "").unwrap();
         std::fs::write(dir.join("b.sv"), "").unwrap();
-        let text = "+define+MASK=8'hFF+ALL='1\n-define W='hA\n+define+MSG='a b'\na.sv\nb.sv\n";
+        let text = "+define+MASK=8'hFF+ALL='1\n-define W='hA\n+define+MSG='a b'\n+define+ONES='1+ZERO='0+HIZ='z\na.sv\nb.sv\n";
         let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
         let inv = &cfg.invocations[0];
         assert_eq!(inv.files, vec![dir.join("a.sv"), dir.join("b.sv")]);
         let d: Vec<_> = inv.defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
-        assert_eq!(d, vec!["MASK=8'hFF", "ALL='1", "W='hA", "MSG='a b'"]);
+        assert_eq!(d, vec!["MASK=8'hFF", "ALL='1", "W='hA", "MSG='a b'", "ONES='1", "ZERO='0", "HIZ='z"]);
     }
 
     #[test]

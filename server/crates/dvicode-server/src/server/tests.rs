@@ -279,6 +279,7 @@ fn initialize_announces_capabilities_and_builds() {
     assert_eq!(caps["positionEncoding"], "utf-16");
     assert_eq!(caps["textDocumentSync"]["change"], 2, "incremental sync");
     assert_eq!(caps["renameProvider"]["prepareProvider"], true);
+    assert_eq!(caps["typeHierarchyProvider"], true);
     assert_eq!(init["serverInfo"]["name"], "dvicode-server");
     let mut c = c;
     let st = c.request_ok("dvicode/status", Value::Null);
@@ -689,4 +690,18 @@ fn a_setting_of_the_wrong_type_keeps_the_others() {
     let s: super::Settings = serde_json::from_value(json!({ "maxProblems": -1, "buildFile": "a.build", "uvmHome": 3, "env": { "A": "1" } })).unwrap();
     assert_eq!((s.build_file.as_deref(), s.max_problems, s.uvm_home), (Some("a.build"), None, None));
     assert_eq!(s.env.get("A").map(String::as_str), Some("1"));
+}
+
+#[test]
+fn type_hierarchy_walks_bases_and_subclasses() {
+    let text = "package p;\n  class base_c; endclass\n  class mid_c extends base_c; endclass\n  class leaf_c extends mid_c; endclass\nendpackage\n";
+    let root = project("typeh", &[("p.sv", text)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let u = uri(&root, "p.sv");
+    let items = c.request_ok("textDocument/prepareTypeHierarchy", json!({ "textDocument": { "uri": u }, "position": at(text, "mid_c extends") }));
+    assert_eq!(items[0]["name"], "mid_c", "{items}");
+    let sup = c.request_ok("typeHierarchy/supertypes", json!({ "item": items[0] }));
+    let sub = c.request_ok("typeHierarchy/subtypes", json!({ "item": items[0] }));
+    assert_eq!((sup[0]["name"].as_str(), sub[0]["name"].as_str()), (Some("base_c"), Some("leaf_c")), "{sup} {sub}");
+    c.shutdown();
 }

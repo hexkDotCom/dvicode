@@ -291,22 +291,41 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
             files_by_name.entry(n).or_default().push(p);
         }
     }
+    // What an include names: the files whose paths end with its operand (`rtl/common.sv` is not
+    // `tb/common.sv`); by name only for an operand without a folder or one not found so.
+    let mut included_files: FxHashSet<&PathBuf> = FxHashSet::default();
+    let mut included_names: FxHashSet<String> = FxHashSet::default();
+    for (_, f) in &facts {
+        let pathy: FxHashSet<&str> = f.include_paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
+        included_names.extend(f.includes.iter().filter(|b| !pathy.contains(b.as_str())).cloned());
+    }
     for inc in include_paths {
         let parts: Vec<&str> = inc.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+        let name = inc.rsplit('/').next().unwrap_or(inc);
         if parts.is_empty() || parts.contains(&"..") || inc.starts_with('/') {
+            included_names.insert(name.to_string());
             continue;
         }
-        let Some(candidates) = files_by_name.get(std::ffi::OsStr::new(parts[parts.len() - 1])) else { continue };
+        let Some(candidates) = files_by_name.get(std::ffi::OsStr::new(parts[parts.len() - 1])) else {
+            included_names.insert(name.to_string());
+            continue;
+        };
+        let mut found = false;
         for p in candidates {
             let mut comps: Vec<_> = p.components().collect();
             if comps.len() <= parts.len() || !comps.iter().rev().zip(parts.iter().rev()).all(|(c, s)| c.as_os_str() == *s) {
                 continue;
             }
+            found = true;
+            included_files.insert(*p);
             comps.truncate(comps.len() - parts.len());
             let base: PathBuf = comps.iter().collect();
             if seen_dirs.insert(base.clone()) {
                 incdirs.push(base);
             }
+        }
+        if !found {
+            included_names.insert(name.to_string());
         }
     }
     // Top files.
@@ -315,7 +334,7 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
         .enumerate()
         .filter(|(_, (p, _))| {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            !is_header(p) && !included.contains(&name)
+            !is_header(p) && !included_names.contains(&name) && !included_files.contains(p)
         })
         .map(|(i, _)| i)
         .collect();
@@ -394,7 +413,8 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
     }
     let mut visiting = FxHashSet::default();
     // Package files first, then the rest, each in path order.
-    let mut pkg_tops: Vec<usize> = tops.iter().copied().filter(|t| pkg_file.values().any(|v| v == t)).collect();
+    let providers: FxHashSet<usize> = pkg_file.values().copied().collect();
+    let mut pkg_tops: Vec<usize> = tops.iter().copied().filter(|t| providers.contains(t)).collect();
     pkg_tops.sort();
     for t in pkg_tops {
         visit(t, &top_uses, &pkg_file, &mut placed, &mut visiting, &mut order);

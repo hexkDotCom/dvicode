@@ -134,6 +134,11 @@ pub fn run(args: &[String]) -> i32 {
         b => dvi_project::load(&root, b, &env),
     };
     let cfg_ms = t0.elapsed().as_millis();
+    // Nothing was checked: say so in the exit status, not only in a message.
+    if let Some(bf) = cfg.build_file.as_ref().filter(|f| !f.is_file()) {
+        eprintln!("check: cannot read the build file {}", bf.display());
+        return 2;
+    }
     let setup = Arc::new(ProjectSetup::new(&root, cfg, env));
     if let Some(file) = replay {
         return match crate::fuzz::replay_file(setup, &file) {
