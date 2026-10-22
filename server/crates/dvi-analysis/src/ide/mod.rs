@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod filter;
 pub mod hover;
 pub mod nav;
+pub mod stmt;
 pub mod symbols;
 pub mod tokens;
 pub mod views;

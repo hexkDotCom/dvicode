@@ -985,6 +985,93 @@ fn components_created_in_helpers_called_by_build_phase() {
 }
 
 #[test]
+fn components_are_built_as_the_build_phase_runs() {
+    // `super.build_phase()` is followed where it is called; without it the base class builds
+    // nothing. The library's `build_phase` calls `build()`. Constructors call `super.new()`.
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = r#"package tb_pkg;
+  import uvm_pkg::*;
+  class e extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class base_test extends uvm_test;
+    e env, mon, cov;
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      mon = e::type_id::create("mon", this);
+    endfunction
+    function void build_phase(uvm_phase phase);
+      env = e::type_id::create("env", this);
+    endfunction
+  endclass
+  class calls_super extends base_test;
+    e extra;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      extra = e::type_id::create("extra", this);
+      super.build_phase(phase);
+    endfunction
+  endclass
+  class skips_super extends base_test;
+    e extra;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      extra = e::type_id::create("extra", this);
+    endfunction
+  endclass
+  class old_style extends uvm_test;
+    e env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build();
+      env = e::type_id::create("env", this);
+    endfunction
+  endclass
+  class to_library extends old_style;
+    e more;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      more = e::type_id::create("more", this);
+    endfunction
+  endclass
+  class implicit_super extends base_test;
+    function new(string name, uvm_component parent);
+      cov = e::type_id::create("cov", this);
+    endfunction
+  endclass
+  class branches extends uvm_test;
+    e env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (mode) env = e::type_id::create("env", this);
+      else env = e::type_id::create("env", this);
+      make("a"); make("b");
+      if (x) make2(); else make2();
+    endfunction
+    function void make(string n); e c; c = e::type_id::create(n, this); endfunction
+    function void make2(); e d; d = e::type_id::create("d", this); endfunction
+  endclass
+endpackage
+"#;
+    let (a, _) = project("buildorder", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let names = |test: &str| -> Vec<String> {
+        let h = a.verification_hierarchy(Some(test), 100);
+        h.roots.first().map(|r| r.children.iter().map(|c| keyed(&c.name, c.dup)).collect()).unwrap_or_default()
+    };
+    fn keyed(n: &str, dup: Option<u32>) -> String {
+        dup.map_or(n.to_string(), |d| format!("{n}#{d}"))
+    }
+    assert_eq!(names("base_test"), ["mon", "env"]);
+    assert_eq!(names("calls_super"), ["mon", "extra", "env"]);
+    assert_eq!(names("skips_super"), ["mon", "extra"]);
+    assert_eq!(names("old_style"), ["env"]);
+    assert_eq!(names("to_library"), ["env", "more"]);
+    // `super.new()` runs before the derived constructor's own code.
+    assert_eq!(names("implicit_super"), ["mon", "cov", "env"]);
+    // Two branches are two components; a helper given two names makes two; one reached two
+    // ways is one.
+    assert_eq!(names("branches"), ["env", "env#2", "a", "b", "d"]);
+}
+
+#[test]
 fn type_parameters_of_base_tests_are_bound() {
     // A base test creates `T_ENV env`; derived tests give T_ENV by name, by position, through
     // a typedef, or pass on their own parameter; without a value the default is used.

@@ -106,7 +106,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--hier" | "--uvm" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -323,6 +323,26 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
             }
             for r in &h.roots {
                 pr(r, 0);
+            }
+        }
+        "--uvm-tests" => {
+            // Every test's tree on its own, without a node limit, and the time each took.
+            fn pr(n: &dvi_analysis::ide::views::VerifNode, d: usize) {
+                let dup = n.dup.map(|k| format!("#{k}")).unwrap_or_default();
+                println!("{}{}{dup} : {} [{}]{}", "  ".repeat(d), n.name, n.class, n.kind, if n.truncated { " ..." } else { "" });
+                for c in &n.children {
+                    pr(c, d + 1);
+                }
+            }
+            for t in a.uvm_tests() {
+                let name = a.decl(t).name.to_string();
+                let start = std::time::Instant::now();
+                let h = a.verification_hierarchy(Some(&name), 1_000_000);
+                let ms = start.elapsed().as_millis();
+                for r in &h.roots {
+                    pr(r, 0);
+                }
+                eprintln!("uvm-tests: {name} {ms} ms");
             }
         }
         "--fixes" => {
