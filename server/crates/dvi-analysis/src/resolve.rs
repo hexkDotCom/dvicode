@@ -527,10 +527,18 @@ impl Analysis {
     /// Names a package re-exports with `export other_pkg::name;`, `export other_pkg::*;` or
     /// `export *::*;`. `seen`: the packages searched so far (packages may export each other).
     fn exported_member(&self, pkg: DeclRef, name: &str, seen: &mut FxHashSet<(u32, u32)>) -> Option<DeclRef> {
-        // Breadth first, each package once.
-        let mut todo = std::collections::VecDeque::from([pkg]);
-        while let Some(p) = todo.pop_front() {
+        // Depth first, each package once: the nearest copy of a package, and what it exports,
+        // before a farther copy.
+        let mut todo = vec![pkg];
+        while let Some(p) = todo.pop() {
+            if p != pkg {
+                let u = self.unit(p.unit);
+                if let Some(m) = pick(&u.parsed, u.parsed.lookup_member(p.decl, name)) {
+                    return Some(DeclRef { unit: p.unit, decl: m });
+                }
+            }
             let d = self.decl(p);
+            let mut next = Vec::new();
             for e in &d.exports {
                 if e.item.as_ref().is_some_and(|i| i != name) {
                     continue;
@@ -544,17 +552,14 @@ impl Analysis {
                 for s in sources {
                     let Some(all) = self.global.packages.get(s) else { continue };
                     for c in self.candidates(p.unit, all) {
-                        if !seen.insert(self.decl_key(c)) {
-                            continue;
+                        if seen.insert(self.decl_key(c)) {
+                            next.push(c);
                         }
-                        let u = self.unit(c.unit);
-                        if let Some(m) = pick(&u.parsed, u.parsed.lookup_member(c.decl, name)) {
-                            return Some(DeclRef { unit: c.unit, decl: m });
-                        }
-                        todo.push_back(c);
                     }
                 }
             }
+            // The first to look at goes last on the stack.
+            todo.extend(next.into_iter().rev());
         }
         None
     }

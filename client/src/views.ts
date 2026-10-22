@@ -237,9 +237,10 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     this.moreOccurrences = false;
   }
 
-  /** Forgets also the occurrence shown, and stops follows under way (new parameters). */
+  /** Forgets also the occurrence shown, and stops follows under way (new parameters, server). */
   reset(): void {
     this.forget();
+    this.latest = -1;
     this.cycle.reset();
     this.paramGen++;
   }
@@ -282,7 +283,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       this.incomplete = r.incomplete;
       this.matches = r.matches;
       this.error = undefined;
-      this.stale = false;
+      this.stale = r.revision < this.latest;
       this.setTree(r.roots);
     } catch (e) {
       if (gen !== this.gen) {
@@ -350,6 +351,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     this.filter = t;
     this.filterGen++;
     this.paramGen++;
+    this.syncNote = undefined;
     await this.refresh();
   }
 
@@ -496,8 +498,9 @@ function openCommand(conn: Conn, uri: string | null, line: number, character: nu
  */
 export function uriKey(u: vscode.Uri): string {
   const key = `${u.scheme}://${u.authority.toLowerCase()}${u.path}`;
-  // A Windows drive ignores case; a WSL folder (file://wsl.localhost/...) does not.
-  return u.scheme === 'file' && u.authority === '' && process.platform === 'win32' ? key.toLowerCase() : key;
+  // Windows paths ignore case (drives and network shares); a WSL folder's Linux path does not.
+  const wsl = /^wsl(\.localhost|\$)$/i.test(u.authority);
+  return u.scheme === 'file' && !wsl && process.platform === 'win32' ? key.toLowerCase() : key;
 }
 
 /** The key of an engine URI as VS Code shows it, to compare with documents. */
@@ -681,7 +684,7 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
 
   /** The test class names the root; components their instance names. */
   protected nameOf(n: VerifNode, root: boolean): string {
-    return root ? n.class : keyedName(n.name, n.dup);
+    return keyedName(root ? n.class : n.name, n.dup);
   }
 
   protected expandRoots(tree: PlacedTree<VerifNode>): boolean {
@@ -851,17 +854,26 @@ export class Views implements vscode.Disposable {
         if (text !== undefined) {
           await v.setFilter(text);
           this.save(v);
+          this.followAgain(v);
         }
       }),
       vscode.commands.registerCommand(id('clearFilter'), async () => {
         await v.setFilter(undefined);
         this.save(v);
+        this.followAgain(v);
       }),
       vscode.commands.registerCommand(id('syncOn'), () => this.setSync(v, true)),
       vscode.commands.registerCommand(id('syncOff'), () => this.setSync(v, false)),
       vscode.commands.registerCommand(id('nextOccurrence'), () => v.step(1)),
       vscode.commands.registerCommand(id('previousOccurrence'), () => v.step(-1)),
     );
+  }
+
+  /** After the tree of a view that follows the editor changed (filter, top, test). */
+  followAgain(v: TreeBase<TreeNode>): void {
+    if (v.sync) {
+      this.schedule(0);
+    }
   }
 
   private setSync(v: TreeBase<TreeNode>, on: boolean): void {

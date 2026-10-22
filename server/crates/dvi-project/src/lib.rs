@@ -394,7 +394,7 @@ impl Builder {
         if written != expanded {
             s.push_str(&format!("\n\n`{written}` expands to `{expanded}`"));
         }
-        if let Some(m) = map_path(&self.path_maps, expanded) {
+        if let Some(m) = map_path(&self.path_maps, expanded.trim_matches('"')) {
             s.push_str(&format!("\n\n`{expanded}` is read as `{m}` (`+dvicode_path_map+`)"));
         }
         s
@@ -402,7 +402,7 @@ impl Builder {
 
     /// A path as DVICode reads it: `+dvicode_path_map+` applied, then made absolute.
     fn abs(&self, p: &str, base: &Path) -> PathBuf {
-        match map_path(&self.path_maps, p) {
+        match map_path(&self.path_maps, p.trim_matches('"')) {
             Some(m) => absolutize(&m, base),
             None => absolutize(p, base),
         }
@@ -932,20 +932,23 @@ impl Builder {
     }
 
     fn apply_uvm_request(&mut self, req: UvmRequest) {
-        let home = req
-            .home
-            .or_else(|| self.env.get("UVM_HOME").cloned())
-            .or_else(|| std::env::var("UVM_HOME").ok())
-            .or_else(|| self.env.get("DVICODE_UVM_HOME").cloned())
-            .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
-            .filter(|h| !h.is_empty());
+        let from_env = || {
+            self.env
+                .get("UVM_HOME")
+                .cloned()
+                .or_else(|| std::env::var("UVM_HOME").ok())
+                .or_else(|| self.env.get("DVICODE_UVM_HOME").cloned())
+                .or_else(|| std::env::var("DVICODE_UVM_HOME").ok())
+                .map(|h| map_path(&self.path_maps, &h).unwrap_or(h))
+        };
+        let home = req.home.or_else(from_env).filter(|h| !h.is_empty());
         let Some(home) = home else {
             if !self.partial {
                 self.problem(&req.file, req.line, "-uvm: set UVM_HOME or DVICODE_UVM_HOME to the UVM library location".into());
             }
             return;
         };
-        let home = PathBuf::from(map_path(&self.path_maps, &home).unwrap_or(home));
+        let home = PathBuf::from(home);
         let src = if home.join("src").is_dir() { home.join("src") } else { home };
         let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| p.is_file());
         if !self.inspecting {
@@ -1888,6 +1891,24 @@ mod tests {
         // Hover says how a path is read.
         let ins = inspect(&dir, &file, &text, &env, None);
         assert!(ins.notes.iter().any(|(_, _, t)| t.contains("is read as") && t.contains("local/rtl/a.sv")), "{:?}", ins.notes);
+    }
+
+    #[test]
+    fn path_maps_with_quotes_and_the_uvm_location() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_pathmap2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("local/inc dir")).unwrap();
+        std::fs::create_dir_all(dir.join("local/local/uvm/src")).unwrap();
+        std::fs::write(dir.join("local/local/uvm/src/uvm_pkg.sv"), "").unwrap();
+        let local = dir.join("local").display().to_string().replace('\\', "/");
+        let mut env = FxHashMap::default();
+        env.insert("LOCAL".to_string(), local);
+        // FROM is a prefix of TO: mapped once, not twice.
+        let text = "+dvicode_path_map+/proj=$LOCAL\n+incdir+\"/proj/inc dir\"\n-uvmhome /proj/local/uvm\n";
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), text, &env);
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        assert!(cfg.invocations[0].incdirs.contains(&dir.join("local/inc dir")), "{:?}", cfg.invocations[0].incdirs);
+        assert!(cfg.invocations[0].files.contains(&dir.join("local/local/uvm/src/uvm_pkg.sv")), "{:?}", cfg.invocations[0].files);
     }
 
     #[test]

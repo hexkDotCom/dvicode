@@ -233,3 +233,15 @@ fn the_match_limit_holds_for_roots() {
     let (t, meta) = a.design_tree(None, &q);
     assert_eq!((t.len(), meta.matches, meta.incomplete), (2, 2, Some("matches")));
 }
+
+#[test]
+fn tests_of_one_name_and_empty_parameter_values() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = "package p;\n  import uvm_pkg::*;\n  class env_a extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class env_b extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class base #(type E = env_a, type F = env_b) extends uvm_test;\n    E env;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_phase(uvm_phase phase); env = new(\"env\", this); endfunction\n  endclass\n  class same_test extends base#(, env_b);\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\nendpackage\npackage q;\n  import uvm_pkg::*;\n  class same_test extends uvm_test; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let (a, _) = project("samenames", &[("uvm_pkg.sv", uvm), ("tb.sv", tb)]);
+    let (h, _) = a.verification_tree(Some("*"), &TreeQuery::new(100));
+    let roots: Vec<(String, Option<u32>)> = h.roots.iter().filter(|r| r.class == "same_test").map(|r| (r.class.clone(), r.dup)).collect();
+    assert_eq!(roots, [("same_test".to_string(), None), ("same_test".to_string(), Some(2))]);
+    // The empty value keeps the default.
+    assert_eq!(h.roots.iter().find(|r| r.class == "same_test" && r.dup.is_none()).unwrap().children[0].class, "env_a");
+}

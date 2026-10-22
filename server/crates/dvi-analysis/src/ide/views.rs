@@ -709,13 +709,16 @@ impl Analysis {
         };
         let mut w = Walk::new(q);
         let mut out = Vec::new();
+        let mut seen = FxHashMap::default();
         for t in roots {
-            if w.stopped() && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
+            let d = self.decl(t);
+            let dup = sibling(&mut seen, &d.name);
+            let key = keyed(&d.name, dup);
+            if w.stopped() && !q.reveal.first().is_some_and(|r| *r == key) {
                 break;
             }
-            let d = self.decl(t);
             let loc = self.decl_location(t);
-            let pin = pin_below(Some(q.reveal.as_slice()), &d.name);
+            let pin = pin_below(Some(q.reveal.as_slice()), &key);
             let matched = if q.target.is_some() { w.hit("uvm_test_top", "", "", &d.name) } else { w.matched(&[("uvm_test_top", '.'), (&d.name, '.')]) };
             let mut node = VerifNode {
                 name: "uvm_test_top".into(),
@@ -729,7 +732,7 @@ impl Analysis {
                 def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
                 children: Vec::new(),
                 truncated: false,
-                dup: None,
+                dup,
             };
             let mut stack = vec![self.decl_key(t)];
             if !w.stopped() {
@@ -936,6 +939,9 @@ impl Analysis {
                 args.get(index).copied()?
             }
         };
+        if value.is_empty() {
+            return None;
+        }
         // A macro (`base#(`ENV)`): what its expansion at that place resolves to, if anything.
         let by_macro = || value.first().filter(|x| x.kind == TokKind::Directive).and_then(|x| self.resolve_at_span(unit, x.span));
         Some(self.type_name_in(unit, value).or_else(by_macro))

@@ -325,7 +325,7 @@ async function selectDesignTop(): Promise<void> {
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Top of the design hierarchy (any module name works)' });
   if (pick) {
     views.design.top = pick.value;
-    void views.design.refresh();
+    void views.design.refresh().then(() => views.followAgain(views.design as never));
   }
 }
 
@@ -342,7 +342,7 @@ async function selectUvmTest(): Promise<void> {
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'UVM test of the verification hierarchy' });
   if (pick) {
     views.verification.test = pick.value;
-    void views.verification.refresh();
+    void views.verification.refresh().then(() => views.followAgain(views.verification as never));
   }
 }
 
