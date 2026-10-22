@@ -54,11 +54,14 @@ function readCfg(): Cfg {
     launchCommand: c.get('server.launchCommand', '${SERVER_CMD}'),
     tcpAddress: c.get('server.tcpAddress', '127.0.0.1:7777'),
     tcpToken: c.get('server.tcpToken', ''),
-    logLevel: c.get('server.logLevel', 'info'),
+    // Checked: the value reaches a command line, and settings are not validated against the enum.
+    logLevel: LOG_LEVELS.find((l) => l === c.get('server.logLevel')) ?? 'info',
     extraArgs: c.get('server.extraArgs', []),
     pathMappings: c.get('pathMappings', []),
   };
 }
+
+const LOG_LEVELS = ['error', 'warn', 'info', 'debug', 'trace'];
 
 /** The settings that decide where and how the server runs, to tell when they change. */
 export function serverSettingsKey(): string {
@@ -95,6 +98,8 @@ function run(cmd: string, args: string[], input?: Buffer, timeoutMs = 60000): Pr
     const t = setTimeout(() => p.kill(), timeoutMs);
     p.stdout.on('data', (d) => (stdout += d.toString()));
     p.stderr.on('data', (d) => (stderr += d.toString()));
+    // A command that exits before reading its input (EPIPE): its exit code tells what failed.
+    p.stdin.on('error', (e) => (stderr += `${String(e)}\n`));
     p.on('error', (e) => {
       clearTimeout(t);
       resolve({ code: -1, stdout, stderr: stderr + String(e) });

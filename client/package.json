@@ -35,7 +35,8 @@
         "dvicode.server.sshCommand",
         "dvicode.server.launchCommand",
         "dvicode.server.tcpAddress",
-        "dvicode.server.extraArgs"
+        "dvicode.server.extraArgs",
+        "dvicode.server.logLevel"
       ]
     }
   },
@@ -303,7 +304,8 @@
           "description": "UVM library location on the server (used by -uvm and auto-configuration when $UVM_HOME is not set)."
         },
         "dvicode.maxProblems": {
-          "type": "number",
+          "type": "integer",
+          "minimum": 0,
           "default": 1000,
           "description": "Maximum number of problems published after a full build. Open files are exempt from this limit; per-file limits (500 problems, of which 50 syntax errors) still apply. 0 means no limit."
         },

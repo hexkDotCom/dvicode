@@ -116,7 +116,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   const mapper = launch.mapper;
   output.appendLine(`Server: ${launch.target} (mode ${launch.mode}); path mapping: ${mapper.describe()}`);
   watcher?.dispose();
-  watcher = vscode.workspace.createFileSystemWatcher('**/*.{sv,svh,svi,svp,sva,v,vh,vp,build,f,F}');
+  watcher = vscode.workspace.createFileSystemWatcher('**/*.{sv,svh,svi,svp,sva,v,vh,vp,vlib,build,f,F}');
   const clientOptions: LanguageClientOptions = {
     documentSelector: SV_SELECTOR,
     outputChannel: output,

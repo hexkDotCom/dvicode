@@ -161,7 +161,9 @@ function DemoToSsh {
   $sshOpts = @('-p', "$SshPort", '-i', $SshKey, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
   Push-Location (Split-Path $Demo)
   try {
-    cmd /c "tar -cf - demo-project | ssh $($sshOpts -join ' ') $SshUser@127.0.0.1 ""rm -rf ~/demo && mkdir -p ~/demo && tar -C ~/demo --strip-components=1 -xf -"""
+    # Quoted for cmd: the key's path may hold spaces.
+    $cmdOpts = ($sshOpts | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+    cmd /c "tar -cf - demo-project | ssh $cmdOpts $SshUser@127.0.0.1 ""rm -rf ~/demo && mkdir -p ~/demo && tar -C ~/demo --strip-components=1 -xf -"""
     if ($LASTEXITCODE -ne 0) { throw "copying the demo to the SSH host failed (exit $LASTEXITCODE)" }
   } finally { Pop-Location }
 }

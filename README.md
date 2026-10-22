@@ -241,7 +241,7 @@ details.
 ## Status
 
 DVICode is young and moving fast. Not supported yet: VHDL, e and PSS; elaboration of
-parameter values and `generate` conditions; UVM factory overrides and config-db views;
+parameter values and `generate` conditions; a view of every config-db setting;
 diagrams; code formatting; lint rules.
 
 **Help us improve it:** try it on your project, and when something is wrong, run

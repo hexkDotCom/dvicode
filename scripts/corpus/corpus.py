@@ -87,11 +87,12 @@ def config_timeout(m, c):
 
 
 def cmd_configs(a):
-    """name, project, directory, build file, timeout, optional, --env arguments (tab-separated)."""
+    """name, project, directory, build file, timeout, optional, --env arguments (tab-separated,
+    the --env arguments too, so that their values may hold spaces)."""
     m = manifest(a.manifest)
     for c, p, d, b in configs(m, a.only):
         print("\t".join([c["name"], c["project"], d, b, str(config_timeout(m, c)),
-                         "1" if p.get("optional") else "0", " ".join(config_env(c))]))
+                         "1" if p.get("optional") else "0", *config_env(c)]))
 
 
 def cmd_projects(a):
@@ -416,7 +417,14 @@ class Sweep:
     def prepare(self, cfg):
         """Lists the configuration's files and writes its queries; returns the query lines."""
         work = cfg["work"]
-        self.engine(cfg["timeout"], cfg["args"] + ["-q", "--files", "-"], f"{work}/files.txt", f"{work}/files.err")
+        code, err, timed_out = self.engine(cfg["timeout"], cfg["args"] + ["-q", "--files", "-"], f"{work}/files.txt", f"{work}/files.err")
+        if code not in (0, 1) or timed_out:
+            # The engine crashed or hung listing the files: a failed sweep, not one of no queries.
+            st = new_state()
+            fold_part(st, "", err, code, timed_out)
+            cfg["prepare_failed"] = st
+            self.log(f"{cfg['name']}: listing the files failed")
+            return []
         nq, nf = write_queries(f"{work}/files.txt", f"{work}/all.q", self.a.every, self.a.cap, 3, self.skip)
         self.log(f"{cfg['name']}: {nq} queries for {nf} files")
         return open(f"{work}/all.q", encoding="utf-8").read().splitlines(keepends=True)
@@ -499,6 +507,10 @@ class Sweep:
                     cfg, k = tasks.pop(f)
                     if k is None:
                         queries = f.result()
+                        if cfg.get("prepare_failed"):
+                            cfg["states"], cfg["left"] = [[cfg["prepare_failed"]]], 0
+                            self.finish(cfg)
+                            continue
                         # Every chunk starts a process that builds the project again: chunks of
                         # at least --chunk queries, and no more of them than processes run at once.
                         n = max(1, len(queries))

@@ -26,7 +26,9 @@
   tooltip counts them.
 - Following the editor finds a component from the class it was built from or the one it was
   requested as, and says when the class is an object to show with the switch.
-- The hierarchy is faster on large testbenches: files are read once per request.
+- The hierarchy is faster on large testbenches: files are read once per request, and class
+  bases are resolved once per lookup (a large processor testbench went from minutes to
+  milliseconds).
 
 **Structure view**
 

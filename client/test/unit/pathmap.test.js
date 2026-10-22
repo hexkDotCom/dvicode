@@ -227,6 +227,9 @@ test.describe('dvicode:// folders', () => {
       const u = m.toClient('file:///home/me/p/a.sv');
       assert.equal(u.scheme, 'dvicode');
       assert.equal(u.authority, 'ssh+build01');
+      // Path mappings too: the replies name the documents of the workspace.
+      const mapped = pathmap.makeMapper({ remoteAuthority: 'ssh+build01', mappings: [{ local: env === win ? 'C:/shared' : '/shared', remote: '/proj' }] });
+      both(env, mapped, 'dvicode://ssh+build01/proj/a.sv', 'file:///proj/a.sv');
     });
     test.it(`a WSL folder keeps /mnt paths on dvicode:// (${os})`, () => {
       const m = pathmap.makeMapper({ wslDistro: 'Ubuntu', remoteAuthority: 'wsl+Ubuntu', mappings: [] });

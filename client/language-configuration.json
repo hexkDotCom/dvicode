@@ -33,15 +33,15 @@
     ["{", "}"],
     ["\"", "\""]
   ],
-  "wordPattern": "(\\\S+)|([a-zA-Z_][a-zA-Z0-9_$]*)",
+  "wordPattern": "(\\\\\\S+)|([a-zA-Z_][a-zA-Z0-9_$]*)",
   "indentationRules": {
-    "increaseIndentPattern": "^\s*(.*\bbegin\b(\s*:\s*\w+)?|.*\bfork\b|.*\b(case|casex|casez|randcase)\b.*|(virtual\s+|local\s+|protected\s+|static\s+|extern\s+|pure\s+)*(class|module|interface|program|package|function|task|covergroup|clocking|property|sequence|generate|checker|primitive|config)\b(?!.*;\s*$)(.*;)?)\s*(//.*)?$",
-    "decreaseIndentPattern": "^\s*(end|endcase|endclass|endmodule|endinterface|endprogram|endpackage|endfunction|endtask|endgroup|endclocking|endproperty|endsequence|endgenerate|endchecker|endprimitive|endconfig|join|join_any|join_none)\b"
+    "increaseIndentPattern": "^\\s*(.*\\bbegin\\b(\\s*:\\s*\\w+)?|.*\\bfork\\b|.*\\b(case|casex|casez|randcase)\\b.*|(?!(extern|pure|virtual\\s+interface)\\b)((virtual|local|protected|static|automatic)\\s+)*(class|module|macromodule|interface|program|package|function|task|covergroup|clocking|property|sequence|generate|checker|primitive|config)\\b(?!.*\\bend(class|module|interface|program|package|function|task|group|clocking|property|sequence|generate|checker|primitive|config)\\b).*)\\s*(//.*)?$",
+    "decreaseIndentPattern": "^\\s*(end|endcase|endclass|endmodule|endinterface|endprogram|endpackage|endfunction|endtask|endgroup|endclocking|endproperty|endsequence|endgenerate|endchecker|endprimitive|endconfig|join|join_any|join_none)\\b"
   },
   "folding": {
     "markers": {
-      "start": "^\s*//\s*#?region\b",
-      "end": "^\s*//\s*#?endregion\b"
+      "start": "^\\s*//\\s*#?region\\b",
+      "end": "^\\s*//\\s*#?endregion\\b"
     }
   }
 }

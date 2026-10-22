@@ -142,22 +142,22 @@ export function makeMapper(opts: MapperOptions): Mapper {
         return uri;
       }
       const p = uri.path;
+      // In a dvicode:// workspace every server file stays a dvicode:// file, so replies name
+      // the same documents the editor has open (path mappings included).
+      if (opts.remoteAuthority) {
+        return vscode.Uri.from({ scheme: 'dvicode', authority: opts.remoteAuthority, path: p });
+      }
       for (const m of reverse) {
         if (startsWithPath(p, m.remote, false)) {
           return vscode.Uri.file(joinPath(m.local, p.slice(m.remote.length)));
         }
       }
-      // In a dvicode:// workspace every server file stays a dvicode:// file, so replies name
-      // the same documents the editor has open.
-      if (opts.wslDistro !== undefined && !opts.remoteAuthority) {
+      if (opts.wslDistro !== undefined) {
         const d = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
         if (d && isWin) {
           return vscode.Uri.file(`${d[1]}:${d[2] || '/'}`);
         }
         return vscode.Uri.from({ scheme: 'file', authority: opts.wslHost || 'wsl.localhost', path: `/${opts.wslDistro}${p}` });
-      }
-      if (opts.remoteAuthority) {
-        return vscode.Uri.from({ scheme: 'dvicode', authority: opts.remoteAuthority, path: p });
       }
       if (opts.fallbackAuthority && !(opts.localRoots ?? []).some((r) => startsWithPath(p, norm(r)))) {
         return vscode.Uri.from({ scheme: 'dvicode', authority: opts.fallbackAuthority, path: p });

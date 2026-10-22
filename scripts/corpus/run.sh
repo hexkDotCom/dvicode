@@ -241,7 +241,9 @@ engine_args() {
     ARGS=("$dir")
     [ "$build" = project ] || ARGS+=(--build "$build")
     ARGS+=(--env "CORPUS=$CORPUS" --env "UVM_HOME=$UVM_HOME")
-    for e in $envs; do ARGS+=(--env "$e"); done
+    local list=()
+    [ -n "$envs" ] && IFS=$'	' read -r -a list <<<"$envs"
+    for e in "${list[@]}"; do ARGS+=(--env "$e"); done
 }
 
 # Runs FUNC NAME PROJECT DIR BUILD TIMEOUT OPTIONAL ENVS for each configuration, --jobs at a
@@ -305,8 +307,10 @@ stop_jobs() {
 check_one() {
     local name="$1" project="$2" dir="$3" build="$4" timeout="$5" optional="$6" envs="$7"
     if [ ! -d "$dir" ]; then
+        # No result rather than an older one; a configuration that is not optional fails.
+        rm -f "$OUT/$name.json" "$OUT/$name.sweep.json"
         [ "$optional" = 1 ] && { log "$name: $dir missing, skipped"; return 0; }
-        log "$name: $dir missing (run fetch)"; return 0
+        log "$name: $dir missing (run fetch)"; return 1
     fi
     engine_args "$dir" "$build" "$envs"
     rm -f "$OUT/$name.sweep.json"  # stale once the configuration is checked again

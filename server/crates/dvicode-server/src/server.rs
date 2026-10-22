@@ -29,13 +29,24 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// Build configuration file, relative to the workspace root or absolute.
+    #[serde(deserialize_with = "lenient")]
     pub build_file: Option<String>,
     /// Extra environment variables for build file expansion.
+    #[serde(deserialize_with = "lenient")]
     pub env: FxHashMap<String, String>,
     /// UVM library location used by `-uvm` and auto-configuration.
+    #[serde(deserialize_with = "lenient")]
     pub uvm_home: Option<String>,
     /// Maximum number of problems published after a full build (0 = no limit).
+    #[serde(deserialize_with = "lenient")]
     pub max_problems: Option<usize>,
+}
+
+/// A setting of the wrong type (`-1` for a count: VS Code does not check settings against
+/// their schema) keeps its default instead of failing, and so resetting, every setting.
+fn lenient<'de, D: serde::Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 /// For the log, which also goes into issue reports: variable names only, since `dvicode.env`
@@ -1283,7 +1294,7 @@ fn describe_config(setup: &ProjectSetup) -> String {
 fn is_sv_file(p: &std::path::Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "sv" | "svh" | "svi" | "svp" | "sva" | "v" | "vh" | "vp"))
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "sv" | "svh" | "svi" | "svp" | "sva" | "v" | "vh" | "vp" | "vlib"))
 }
 
 fn pos(a: &Analysis, uri: &Url, p: Position) -> Option<(FileId, u32)> {

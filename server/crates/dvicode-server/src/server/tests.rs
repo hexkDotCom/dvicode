@@ -683,3 +683,10 @@ fn a_new_build_file_setting_rebuilds() {
     assert!(st["build_file"].as_str().unwrap().ends_with("default.build"), "{st}");
     c.shutdown();
 }
+
+#[test]
+fn a_setting_of_the_wrong_type_keeps_the_others() {
+    let s: super::Settings = serde_json::from_value(json!({ "maxProblems": -1, "buildFile": "a.build", "uvmHome": 3, "env": { "A": "1" } })).unwrap();
+    assert_eq!((s.build_file.as_deref(), s.max_problems, s.uvm_home), (Some("a.build"), None, None));
+    assert_eq!(s.env.get("A").map(String::as_str), Some("1"));
+}
