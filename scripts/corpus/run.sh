@@ -20,6 +20,8 @@ SWEEP_UVM=0
 FUZZ_EDITS=60
 FUZZ_SEED=1
 RENAMES=40
+JOBS=""
+CHUNK=2000
 PY=python3
 
 usage() {
@@ -58,6 +60,10 @@ Options:
   --seed S           fuzz, writes: random seed (default 1)
   --renames N        writes: renames per configuration (default 40)
   --merge            baseline: keep configurations that have no result in OUT
+  --jobs N           check, sweep, fuzz, writes: run N engine processes at a time (default half
+                     the CPUs); with N > 1 each configuration's output is printed when it ends
+  --chunk N          sweep: at most N queries per engine process (default 2000; 0: one
+                     process per configuration)
 
 Environment: CORPUS (clones, default ~/.cache/dvicode-corpus), UVM_HOME (default
 ~/corpus/uvm-1.2), CARGO_TARGET_DIR (for build), DVICODE_CORPUS_MANIFEST (see --manifest),
@@ -83,6 +89,8 @@ while [ $# -gt 0 ]; do
         --seed) FUZZ_SEED="$2"; shift ;;
         --renames) RENAMES="$2"; shift ;;
         --merge) MERGE=--merge ;;
+        --jobs) JOBS="$2"; shift ;;
+        --chunk) CHUNK="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "run.sh: unknown option $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -90,6 +98,11 @@ while [ $# -gt 0 ]; do
 done
 
 log() { echo "[corpus] $*" >&2; }
+
+[ -n "$JOBS" ] || JOBS=$(( $(nproc) / 2 ))
+case "$JOBS" in ''|*[!0-9]*) echo "run.sh: --jobs needs a number" >&2; exit 2 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=1
+case "$CHUNK" in ''|*[!0-9]*) echo "run.sh: --chunk needs a number" >&2; exit 2 ;; esac
 
 # A path given on Windows (D:\work\x, D:/work/x, \\server\share) as a Linux path.
 linux_path() {
@@ -231,111 +244,160 @@ engine_args() {
     for e in $envs; do ARGS+=(--env "$e"); done
 }
 
+# Runs FUNC NAME PROJECT DIR BUILD TIMEOUT OPTIONAL ENVS for each configuration, --jobs at a
+# time; returns 1 when one of them did. In parallel, a configuration's output is held back and
+# printed when it ends, so that the lines of different configurations do not mix.
+each_config() {
+    local fn="$1" rc=0 logs n=0 f p pids=() alive
+    local name project dir build timeout optional envs
+    if [ "$JOBS" -le 1 ]; then
+        while IFS=$'\t' read -r name project dir build timeout optional envs; do
+            "$fn" "$name" "$project" "$dir" "$build" "$timeout" "$optional" "$envs" || rc=1
+        done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
+        return $rc
+    fi
+    logs="$(mktemp -d)"
+    # `timeout` puts the engines in process groups of their own: stop the whole trees.
+    trap 'stop_jobs; rm -rf "$logs"; exit 130' INT
+    trap 'stop_jobs; rm -rf "$logs"; exit 143' TERM
+    while IFS=$'\t' read -r name project dir build timeout optional envs; do
+        # `wait -n` also returns for the process substitution, so count the workers left.
+        while :; do
+            alive=()
+            for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && alive+=("$p"); done
+            pids=("${alive[@]}")
+            [ ${#pids[@]} -lt "$JOBS" ] && break
+            wait -n
+        done
+        n=$((n + 1))
+        (
+            # In a subshell of its own, so that a fatal error still records a status.
+            ("$fn" "$name" "$project" "$dir" "$build" "$timeout" "$optional" "$envs") >"$logs/$n.out" 2>"$logs/$n.err"
+            echo $? >"$logs/$n.rc"
+            { flock 9; cat "$logs/$n.err" >&2; cat "$logs/$n.out"; } 9>"$logs/lock"
+        ) &
+        pids+=($!)
+    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
+    wait
+    trap - INT TERM
+    for f in $(seq 1 $n); do
+        [ "$(cat "$logs/$f.rc" 2>/dev/null)" = 0 ] || rc=1
+    done
+    rm -rf "$logs"
+    return $rc
+}
+
+# Sends SIGTERM to a process and everything under it, stopping each first so that it starts
+# nothing new meanwhile.
+kill_tree() {
+    local c
+    kill -STOP "$1" 2>/dev/null || return 0
+    for c in $(pgrep -P "$1"); do kill_tree "$c"; done
+    kill -TERM "$1" 2>/dev/null
+    kill -CONT "$1" 2>/dev/null
+}
+
+stop_jobs() {
+    local p
+    for p in $(jobs -p); do kill_tree "$p"; done
+}
+
+check_one() {
+    local name="$1" project="$2" dir="$3" build="$4" timeout="$5" optional="$6" envs="$7"
+    if [ ! -d "$dir" ]; then
+        [ "$optional" = 1 ] && { log "$name: $dir missing, skipped"; return 0; }
+        log "$name: $dir missing (run fetch)"; return 0
+    fi
+    engine_args "$dir" "$build" "$envs"
+    rm -f "$OUT/$name.sweep.json"  # stale once the configuration is checked again
+    run_engine "$timeout" "$OUT/$name.problems.txt" "$OUT/$name.stderr.txt" "${ARGS[@]}" --max 1000000
+    $PY "$HERE/corpus.py" result --config "$name" --project "$project" --commit "$(commit_of "$dir")" \
+        --stdout "$OUT/$name.problems.txt" --stderr "$OUT/$name.stderr.txt" --exit $RC --wall "$WALL" \
+        $TIMED_OUT --output "$OUT/$name.json"
+}
+
 cmd_check() {
     need_bin
     mkdir -p "$OUT"
-    local name project dir build timeout optional envs
-    while IFS=$'\t' read -r name project dir build timeout optional envs; do
-        if [ ! -d "$dir" ]; then
-            [ "$optional" = 1 ] && { log "$name: $dir missing, skipped"; continue; }
-            log "$name: $dir missing (run fetch)"; continue
-        fi
-        engine_args "$dir" "$build" "$envs"
-        rm -f "$OUT/$name.sweep.json"  # stale once the configuration is checked again
-        run_engine "$timeout" "$OUT/$name.problems.txt" "$OUT/$name.stderr.txt" "${ARGS[@]}" --max 1000000
-        $PY "$HERE/corpus.py" result --config "$name" --project "$project" --commit "$(commit_of "$dir")" \
-            --stdout "$OUT/$name.problems.txt" --stderr "$OUT/$name.stderr.txt" --exit $RC --wall "$WALL" \
-            $TIMED_OUT --output "$OUT/$name.json"
-    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
+    local rc=0 slow only="$ONLY" jobs="$JOBS"
+    each_config check_one || rc=1
+    [ "$JOBS" -gt 1 ] || return $rc
+    # Builds side by side slow each other down (each engine uses every CPU): configurations
+    # whose build time compare would report are checked again one at a time.
+    slow=$($PY "$HERE/corpus.py" slow "$OUT" --baseline "$BASELINE" --only "$ONLY") || return 1
+    [ -n "$slow" ] || return $rc
+    log "checking again one at a time for their build times: $slow"
+    ONLY="$slow" JOBS=1
+    each_config check_one || rc=1
+    ONLY="$only" JOBS="$jobs"
+    return $rc
 }
 
 # --- sweep ---------------------------------------------------------------------------------
 
+# The queries of all configurations go to one pool of --jobs engine processes, in chunks of
+# --chunk queries (see Sweep in corpus.py).
 cmd_sweep() {
     need_bin
     mkdir -p "$OUT"
-    local name project dir build timeout optional envs work total done skip t0
-    while IFS=$'\t' read -r name project dir build timeout optional envs; do
-        [ -d "$dir" ] || { log "$name: $dir missing, skipped"; continue; }
-        engine_args "$dir" "$build" "$envs"
-        work="$OUT/$name.sweep"
-        rm -rf "$work" && mkdir -p "$work"
-        t0=$(date +%s)
-        run_engine "$timeout" "$work/files.txt" "$work/files.err" "${ARGS[@]}" -q --files -
-        skip=()
-        [ "$SWEEP_UVM" = 1 ] || skip=(--skip "$(cd "$UVM_HOME" 2>/dev/null && pwd -P)")
-        $PY "$HERE/corpus.py" queries --files "$work/files.txt" --output "$work/all.q" --every "$EVERY" --cap "$CAP" "${skip[@]}"
-        total=$(wc -l <"$work/all.q")
-        done=0
-        local part=0
-        while [ "$done" -lt "$total" ] && [ $part -lt 50 ]; do
-            part=$((part + 1))
-            tail -n +$((done + 1)) "$work/all.q" >"$work/part.q"
-            # The whole sweep of one configuration gets at most 4 hours.
-            run_engine 14400 "$work/out.txt" "$work/err.txt" "${ARGS[@]}" -q \
-                --queries "$work/part.q" --query-timeout "$QUERY_TIMEOUT"
-            cat "$work/err.txt" >>"$work/stderr.txt"
-            local before=$done
-            done=$($PY "$HERE/corpus.py" sweep-part --state "$work/state.json" --stdout "$work/out.txt" \
-                --stderr "$work/err.txt" --exit $RC $TIMED_OUT)
-            [ "$RC" -le 1 ] && [ -z "$TIMED_OUT" ] && break
-            grep -q '"build_failed"' "$work/state.json" && break
-            [ "$done" -gt "$before" ] || break
-            log "$name: restarting the sweep after query $done of $total"
-        done
-        $PY "$HERE/corpus.py" sweep-result --state "$work/state.json" --config "$name" --total "$total" \
-            --wall $(($(date +%s) - t0)) --output "$OUT/$name.sweep.json"
-    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
+    local uvm=()
+    [ "$SWEEP_UVM" = 1 ] && uvm=(--sweep-uvm)
+    $PY "$HERE/corpus.py" sweep "$MANIFEST" --only "$ONLY" --bin "$BIN" --out "$OUT" --jobs "$JOBS" \
+        --chunk "$CHUNK" --every "$EVERY" --cap "$CAP" --query-timeout "$QUERY_TIMEOUT" "${uvm[@]}"
 }
 
 # --- fuzz ----------------------------------------------------------------------------------
 
 # `check --fuzz-edits`: random edits as editor contents (the clones are never written), each
 # incremental update compared with a full build of the same texts.
+fuzz_one() {
+    local name="$1" project="$2" dir="$3" build="$4" timeout="$5" optional="$6" envs="$7" found=0 n line
+    [ -d "$dir" ] || { log "$name: $dir missing, skipped"; return 0; }
+    engine_args "$dir" "$build" "$envs"
+    # Each edit costs a full build, so the time limit grows with the number of edits.
+    run_engine $((timeout * (FUZZ_EDITS / 20 + 1))) "$OUT/$name.fuzz.txt" "$OUT/$name.fuzz.err" "${ARGS[@]}" \
+        --fuzz-edits "$FUZZ_EDITS" --seed "$FUZZ_SEED" --fuzz-findings 3
+    line=$(grep "dvicode check: fuzz seed" "$OUT/$name.fuzz.err" | sed 's/^dvicode check: //; s/ (.*//')
+    n=$(grep -c "^reproducer" "$OUT/$name.fuzz.txt")
+    if [ $RC -gt 1 ] || [ -n "$TIMED_OUT" ]; then
+        log "$name: engine failed (exit $RC${TIMED_OUT:+, timed out}), see $OUT/$name.fuzz.err"
+        found=1
+    else
+        log "$name: $line"
+    fi
+    [ "$n" -gt 0 ] && found=1
+    return $found
+}
+
 cmd_fuzz() {
     need_bin
     mkdir -p "$OUT"
-    local name project dir build timeout optional envs found=0 n line
-    while IFS=$'\t' read -r name project dir build timeout optional envs; do
-        [ -d "$dir" ] || { log "$name: $dir missing, skipped"; continue; }
-        engine_args "$dir" "$build" "$envs"
-        # Each edit costs a full build, so the time limit grows with the number of edits.
-        run_engine $((timeout * (FUZZ_EDITS / 20 + 1))) "$OUT/$name.fuzz.txt" "$OUT/$name.fuzz.err" "${ARGS[@]}" \
-            --fuzz-edits "$FUZZ_EDITS" --seed "$FUZZ_SEED" --fuzz-findings 3
-        line=$(grep "dvicode check: fuzz seed" "$OUT/$name.fuzz.err" | sed 's/^dvicode check: //; s/ (.*//')
-        n=$(grep -c "^reproducer" "$OUT/$name.fuzz.txt")
-        if [ $RC -gt 1 ] || [ -n "$TIMED_OUT" ]; then
-            log "$name: engine failed (exit $RC${TIMED_OUT:+, timed out}), see $OUT/$name.fuzz.err"
-            found=1
-        else
-            log "$name: $line"
-        fi
-        [ "$n" -gt 0 ] && found=1
-    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
-    return $found
+    each_config fuzz_one
 }
 
 # `check --write-check`: renames and quick fixes applied like the editor does (in memory: the
 # clones are never written), each result compiled again and checked.
+writes_one() {
+    local name="$1" project="$2" dir="$3" build="$4" timeout="$5" optional="$6" envs="$7" found=0 line
+    [ -d "$dir" ] || { log "$name: $dir missing, skipped"; return 0; }
+    engine_args "$dir" "$build" "$envs"
+    run_engine $((timeout * (RENAMES / 10 + 1))) "$OUT/$name.writes.txt" "$OUT/$name.writes.err" "${ARGS[@]}" \
+        --write-check "$RENAMES" --seed "$FUZZ_SEED"
+    line=$(grep "dvicode check: write check" "$OUT/$name.writes.err" | sed 's/^dvicode check: //')
+    if [ $RC -gt 1 ] || [ -n "$TIMED_OUT" ]; then
+        log "$name: engine failed (exit $RC${TIMED_OUT:+, timed out}), see $OUT/$name.writes.err"
+        found=1
+    else
+        log "$name: $line"
+    fi
+    grep -q "^finding:" "$OUT/$name.writes.txt" && found=1
+    return $found
+}
+
 cmd_writes() {
     need_bin
     mkdir -p "$OUT"
-    local name project dir build timeout optional envs found=0 line
-    while IFS=$'\t' read -r name project dir build timeout optional envs; do
-        [ -d "$dir" ] || { log "$name: $dir missing, skipped"; continue; }
-        engine_args "$dir" "$build" "$envs"
-        run_engine $((timeout * (RENAMES / 10 + 1))) "$OUT/$name.writes.txt" "$OUT/$name.writes.err" "${ARGS[@]}" \
-            --write-check "$RENAMES" --seed "$FUZZ_SEED"
-        line=$(grep "dvicode check: write check" "$OUT/$name.writes.err" | sed 's/^dvicode check: //')
-        if [ $RC -gt 1 ] || [ -n "$TIMED_OUT" ]; then
-            log "$name: engine failed (exit $RC${TIMED_OUT:+, timed out}), see $OUT/$name.writes.err"
-            found=1
-        else
-            log "$name: $line"
-        fi
-        grep -q "^finding:" "$OUT/$name.writes.txt" && found=1
-    done < <($PY "$HERE/corpus.py" configs "$MANIFEST" --only "$ONLY")
-    return $found
+    each_config writes_one
 }
 
 case "$CMD" in

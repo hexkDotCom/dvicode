@@ -3,7 +3,7 @@
   Runs every check before a DVICode release on a Windows machine with WSL.
 
 .DESCRIPTION
-  Steps, in order (skip any with -Skip):
+  Steps (skip any with -Skip):
     build       native Windows engine (cargo), static Linux engine (WSL, scripts/package.sh
                 --server) and the extension bundle
     test        server tests natively on Windows and in WSL
@@ -20,6 +20,10 @@
     e2e-editors the native, WSL, dvicode:// and SSH runs again in VSCodium, Cursor and Windsurf,
                 for those installed (VSCodium's portable zip may be unpacked into
                 %USERPROFILE%\.dvicode-test\vscodium); a SKIP when none is
+
+  The corpus steps run in WSL in the background while the end-to-end steps run (their output is
+  shown after them); -Sequential runs them before the end-to-end steps instead. The summary lists
+  the steps in the order above either way.
 
   Without -Vsix the end-to-end tests run the extension from client/ with the engines built here.
   With -Vsix they run a packaged extension (the universal package of a Release workflow run).
@@ -47,7 +51,9 @@ param(
   [int]$SshPort = 2222,
   # In the user profile, not AppData: Windows redirects what packaged apps (such as the Claude
   # desktop app) write under AppData, so a terminal outside them would not see the key there.
-  [string]$SshKey = "$env:USERPROFILE\.dvicode-test\e2e_key"
+  [string]$SshKey = "$env:USERPROFILE\.dvicode-test\e2e_key",
+  # Runs the corpus steps before the e2e steps instead of at the same time.
+  [switch]$Sequential
 )
 # Where earlier versions of this script kept it.
 if (-not (Test-Path $SshKey) -and (Test-Path "$env:LOCALAPPDATA\dvicode-test\e2e_key")) {
@@ -65,13 +71,15 @@ $Demo = Join-Path $Root 'examples\demo-project'
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 $results = New-Object System.Collections.ArrayList
 
-# Runs one step, records PASS / FAIL / SKIP with its time and a short detail, and carries on.
-function Step([string]$Name, [scriptblock]$Body) {
-  if ($Skip -contains $Name) {
-    [void]$results.Add([pscustomobject]@{ Step = $Name; Result = 'SKIP'; Seconds = 0; Detail = '' })
-    return
-  }
-  Write-Host "`n=== $Name" -ForegroundColor Cyan
+# A step's line in the summary, in the order the steps are listed.
+function NewRow([string]$Name) {
+  $row = [pscustomobject]@{ Step = $Name; Result = 'SKIP'; Seconds = 0; Detail = '' }
+  [void]$results.Add($row)
+  $row
+}
+
+# Runs a step's body and records PASS / FAIL / SKIP with its time and a short detail in its row.
+function Finish($Row, [scriptblock]$Body) {
   $t0 = Get-Date
   $detail = ''
   $ok = $true
@@ -84,11 +92,17 @@ function Step([string]$Name, [scriptblock]$Body) {
     Write-Host "FAILED: $detail" -ForegroundColor Red
   }
   # A step with nothing to run yet returns 'SKIP: why'.
-  $result = if (-not $ok) { 'FAIL' } elseif ("$detail" -like 'SKIP:*') { 'SKIP' } else { 'PASS' }
-  [void]$results.Add([pscustomobject]@{
-      Step = $Name; Result = $result
-      Seconds = [int]((Get-Date) - $t0).TotalSeconds; Detail = ("$detail" -replace '^SKIP:\s*', '')
-    })
+  $Row.Result = if (-not $ok) { 'FAIL' } elseif ("$detail" -like 'SKIP:*') { 'SKIP' } else { 'PASS' }
+  $Row.Seconds = [int]((Get-Date) - $t0).TotalSeconds
+  $Row.Detail = "$detail" -replace '^SKIP:\s*', ''
+}
+
+# Runs one step and carries on whatever happens.
+function Step([string]$Name, [scriptblock]$Body) {
+  $row = NewRow $Name
+  if ($Skip -contains $Name) { return }
+  Write-Host "`n=== $Name" -ForegroundColor Cyan
+  Finish $row $Body
 }
 
 # Runs a native command, echoing its output; throws when it fails.
@@ -188,142 +202,228 @@ Step 'unit' {
   'npm run unit'
 }
 
-Step 'corpus' {
-  $runner = Join-Path $Root 'scripts\corpus\run.sh'
-  if (-not (Test-Path $runner)) { return 'SKIP: no corpus harness yet' }
-  # Fetches the pinned projects, builds the engine, checks, sweeps the IDE queries, compares.
-  # The manifest is explicit so that a DVICODE_CORPUS_MANIFEST set in WSL does not replace it.
-  Run 'corpus regression' { wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh all --manifest scripts/corpus/manifest.json" }
-  'no regression against scripts/corpus/baseline.json'
-}
-
-Step 'corpus-private' {
-  if (-not $PrivateCorpus) { return 'SKIP: no private manifest (-PrivateCorpus or DVICODE_CORPUS_MANIFEST)' }
-  if (-not (Test-Path (Join-Path $Root 'scripts\corpus\run.sh'))) { return 'SKIP: no corpus harness yet' }
-  # A Windows path is converted; anything else is taken as a path in WSL.
-  $manifest = if (Test-Path -LiteralPath $PrivateCorpus) { WslPath (Resolve-Path -LiteralPath $PrivateCorpus).Path } else { $PrivateCorpus }
-  # The output names private projects and files: it goes to the console only, and the summary
-  # keeps the counts.
-  $out = wsl.exe -d $Distro -e bash -lc "cd '$RootWsl' && bash scripts/corpus/run.sh all --manifest '$manifest'" 2>&1 |
-    ForEach-Object { $s = "$_"; Write-Host $s; $s }
-  $code = $LASTEXITCODE
-  $cmp = $out | Where-Object { $_ -match '^compare: (\d+) results, (\d+) regressions' } | Select-Object -Last 1
-  if (-not $cmp) { throw "private corpus failed before compare (exit $code)" }
-  $null = $cmp -match '^compare: (\d+) results, (\d+) regressions'
-  $notes = @($out | Where-Object { $_ -like 'note: *' }).Count
-  $counts = "$($Matches[1]) configurations, $($Matches[2]) regressions, $notes notes"
-  if ($code -ne 0) { throw "private corpus: $counts" }
-  $counts
-}
-
-# The extension under test: the sources (default) or an unpacked VSIX.
-if ($Vsix) {
-  $unpacked = Join-Path $env:TEMP 'dvc-prerelease'
-  if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked -Confirm:$false }
-  New-Item -ItemType Directory $unpacked | Out-Null
-  Copy-Item $Vsix (Join-Path $unpacked 'p.zip') -ErrorAction Stop
-  Expand-Archive (Join-Path $unpacked 'p.zip') -DestinationPath $unpacked -ErrorAction Stop
-  $env:DVICODE_E2E_EXTENSION = Join-Path $unpacked 'extension'
-} else {
-  Remove-Item Env:DVICODE_E2E_EXTENSION -ErrorAction SilentlyContinue
-}
-
-Step 'e2e-native' {
-  E2e $Demo 'native'
-}
-
-Step 'e2e-wsl' {
-  $wslDemo = DemoToWsl
-  $a = E2e $Demo 'wsl-drive' @{ 'dvicode.server.mode' = 'wsl' }
-  $b = E2e "file://wsl.localhost/$Distro$wslDemo" 'wsl-unc'
-  $c = E2e "dvicode://wsl+$Distro$wslDemo" 'remote-fs'
-  "drive: $a; unc: $b; remote-fs: $c"
-}
-
-Step 'e2e-ssh' {
-  DemoToSsh
-  $key = $SshKey -replace '\\', '/'
-  E2e "dvicode://ssh+$SshUser%40127.0.0.1/home/$SshUser/demo" 'ssh' @{
-    'dvicode.server.sshArgs' = @('-p', "$SshPort", '-i', $key, '-o', 'StrictHostKeyChecking=accept-new')
-  }
-}
-
-# VS Code's own remote windows: the extension is installed on the remote side, runs in the remote
-# extension host and starts the Linux engine there (mode local). Each run also has a local user
-# setting meant for Windows, which VS Code must keep out of the remote window.
-Step 'e2e-remote-wsl' {
-  $wslDemo = DemoToWsl
-  E2e $wslDemo 'remote-wsl' @{ 'dvicode.server.mode' = 'wsl' } -Remote "wsl+$Distro"
-}
-
-Step 'e2e-remote-ssh' {
-  DemoToSsh
-  # Remote - SSH and the test runner reach the host through this alias.
-  $sshConfig = Join-Path $env:TEMP 'dvicode-e2e-ssh_config'
-  @(
-    'Host dvicode-e2e'
-    '  HostName 127.0.0.1'
-    "  Port $SshPort"
-    "  User $SshUser"
-    "  IdentityFile $($SshKey -replace '\\', '/')"
-    '  IdentitiesOnly yes'
-    '  StrictHostKeyChecking accept-new'
-  ) | Set-Content -Encoding ascii $sshConfig
-  E2e "/home/$SshUser/demo" 'remote-ssh' @{ 'dvicode.server.mode' = 'ssh'; 'dvicode.server.sshHost' = 'not-this-host.invalid' } -Remote 'ssh-remote+dvicode-e2e' -SshConfig $sshConfig
-}
-
-# Other editors built on VS Code (installed from Open VSX by their users): the setups that use
-# DVICode's own engine modes (this machine, WSL, its dvicode:// folders, SSH), not VS Code's
-# remote windows. Each editor found at its usual place (or in $env:DVICODE_E2E_EDITORS, a
-# ';'-separated list of executables) runs them; none found is a SKIP.
-Step 'e2e-editors' {
-  $candidates = @(
-    "$env:USERPROFILE\.dvicode-test\vscodium\VSCodium.exe",
-    "$env:LOCALAPPDATA\Programs\VSCodium\VSCodium.exe",
-    "$env:LOCALAPPDATA\Programs\cursor\Cursor.exe",
-    "$env:LOCALAPPDATA\Programs\Windsurf\Windsurf.exe"
-  )
-  if ($env:DVICODE_E2E_EDITORS) { $candidates = $env:DVICODE_E2E_EDITORS -split ';' }
-  $editors = @($candidates | Where-Object { $_ -and (Test-Path $_) })
-  if (-not $editors) { return 'SKIP: no VSCodium, Cursor or Windsurf installed' }
-  $wslDemo = DemoToWsl
-  DemoToSsh
-  $key = $SshKey -replace '\\', '/'
-  $out = @()
-  $failures = @()
-  try {
-    foreach ($exe in $editors) {
-      $name = [IO.Path]::GetFileNameWithoutExtension($exe).ToLower()
-      $version = (Get-Item $exe).VersionInfo.ProductVersion
-      $env:VSCODE_EXECUTABLE = $exe
-      # One profile per editor, kept: sign in to Cursor once in it and later runs stay signed in.
-      $env:DVICODE_E2E_USER_DATA = "$env:USERPROFILE\.dvicode-test\profile-$name"
-      # An editor still open on that profile (after signing in, say) would take the test window
-      # over and give no result: close it. Only processes on this test profile are stopped.
-      Get-CimInstance Win32_Process -Filter "Name='$([IO.Path]::GetFileName($exe))'" |
-        Where-Object { $_.CommandLine -like "*$env:DVICODE_E2E_USER_DATA*" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-      $runs = @()
-      foreach ($run in @(
-          @{ Target = $Demo; Label = "$name-native"; Settings = @{} },
-          @{ Target = $Demo; Label = "$name-wsl"; Settings = @{ 'dvicode.server.mode' = 'wsl' } },
-          @{ Target = "dvicode://wsl+$Distro$wslDemo"; Label = "$name-remote-fs"; Settings = @{} },
-          @{ Target = "dvicode://ssh+$SshUser%40127.0.0.1/home/$SshUser/demo"; Label = "$name-ssh"; Settings = @{ 'dvicode.server.sshArgs' = @('-p', "$SshPort", '-i', $key, '-o', 'StrictHostKeyChecking=accept-new') } }
-        )) {
-        try {
-          $runs += "$($run.Label): $(E2e $run.Target $run.Label $run.Settings)"
-        } catch {
-          $failures += $_.Exception.Message
-        }
-      }
-      $out += "$name $version ($($runs.Count)/4 setups)"
+# The corpus steps: `run.sh all` in WSL (fetch, build the engine, check, sweep the IDE queries,
+# compare), and a check of its output lines and exit code. They need WSL's CPUs and the e2e steps
+# need VS Code windows on Windows, so the corpus steps run one after the other in the background
+# while the e2e steps run (with -Sequential, here and before them).
+$runner = Join-Path $Root 'scripts\corpus\run.sh'
+# A Windows path is converted; anything else is taken as a path in WSL.
+$privateManifest = if (-not $PrivateCorpus) { '' } elseif (Test-Path -LiteralPath $PrivateCorpus) { WslPath (Resolve-Path -LiteralPath $PrivateCorpus).Path } else { $PrivateCorpus }
+$corpusSteps = @(
+  [pscustomobject]@{
+    Name = 'corpus'
+    Skip = $(if (-not (Test-Path $runner)) { 'no corpus harness yet' })
+    # The manifest is explicit so that a DVICODE_CORPUS_MANIFEST set in WSL does not replace it.
+    Command = "cd '$RootWsl' && bash scripts/corpus/run.sh all --manifest scripts/corpus/manifest.json"
+    Check = {
+      param($Out, $Code)
+      if ($Code -ne 0) { throw "corpus regression failed (exit $Code)" }
+      'no regression against scripts/corpus/baseline.json'
     }
-  } finally {
-    Remove-Item Env:VSCODE_EXECUTABLE -ErrorAction SilentlyContinue
-    Remove-Item Env:DVICODE_E2E_USER_DATA -ErrorAction SilentlyContinue
   }
-  if ($failures) { throw (($out + $failures) -join '; ') }
-  $out -join '; '
+  [pscustomobject]@{
+    Name = 'corpus-private'
+    Skip = $(if (-not $PrivateCorpus) { 'no private manifest (-PrivateCorpus or DVICODE_CORPUS_MANIFEST)' } elseif (-not (Test-Path $runner)) { 'no corpus harness yet' })
+    Command = "cd '$RootWsl' && bash scripts/corpus/run.sh all --manifest '$privateManifest'"
+    # The output names private projects and files: it goes to the console only, and the summary
+    # keeps the counts.
+    Check = {
+      param($Out, $Code)
+      $cmp = $Out | Where-Object { $_ -match '^compare: (\d+) results, (\d+) regressions' } | Select-Object -Last 1
+      if (-not $cmp) { throw "private corpus failed before compare (exit $Code)" }
+      $null = $cmp -match '^compare: (\d+) results, (\d+) regressions'
+      $notes = @($Out | Where-Object { $_ -like 'note: *' }).Count
+      $counts = "$($Matches[1]) configurations, $($Matches[2]) regressions, $notes notes"
+      if ($Code -ne 0) { throw "private corpus: $counts" }
+      $counts
+    }
+  }
+)
+$background = @()
+foreach ($s in $corpusSteps) {
+  if ($Sequential) {
+    Step $s.Name {
+      if ($s.Skip) { return "SKIP: $($s.Skip)" }
+      $out = wsl.exe -d $Distro -e bash -lc $s.Command 2>&1 | ForEach-Object { $line = "$_"; Write-Host $line; $line }
+      & $s.Check $out $LASTEXITCODE
+    }
+    continue
+  }
+  $row = NewRow $s.Name
+  if ($Skip -contains $s.Name) { continue }
+  if ($s.Skip) { $row.Detail = $s.Skip; continue }
+  $background += [pscustomobject]@{
+    Name = $s.Name; Command = $s.Command; Check = $s.Check; Row = $row
+    Log = Join-Path $env:TEMP "dvicode-prerelease-$PID-$($s.Name).log"
+    # The session of the step's processes in WSL, while it runs (see StopCorpus).
+    Sid = "/tmp/dvicode-prerelease-$PID-$($s.Name).sid"
+  }
+}
+$corpusJob = $null
+if ($background) {
+  Write-Host "`n=== $(($background | ForEach-Object Name) -join ', ') (in the background)" -ForegroundColor Cyan
+  $background | ForEach-Object { Write-Host "$($_.Name): output in $($_.Log), shown after the e2e steps" }
+  $corpusJob = Start-Job -ArgumentList $Distro, @($background | Select-Object Name, Command, Log, Sid) -ScriptBlock {
+    param($Distro, $Steps)
+    foreach ($s in $Steps) {
+      $t0 = Get-Date
+      wsl.exe -d $Distro -e setsid -w bash -lc "echo `$`$ >'$($s.Sid)'; $($s.Command) </dev/null; rc=`$?; rm -f '$($s.Sid)'; exit `$rc" 2>&1 |
+        ForEach-Object { "$_" } | Set-Content -Encoding utf8 $s.Log
+      [pscustomobject]@{ Name = $s.Name; Code = $LASTEXITCODE; Seconds = [int]((Get-Date) - $t0).TotalSeconds }
+    }
+  }
+}
+
+# Stops the background job and, in WSL, every process of the corpus step it runs (`timeout`
+# gives each engine a process group of its own, but they all stay in the step's session).
+function StopCorpus {
+  $running = $corpusJob.State -eq 'Running'
+  Stop-Job $corpusJob
+  Remove-Job $corpusJob -Force
+  if ($running) {
+    # The step that was running writes its file once its login shell has started: wait for it
+    # a little.
+    $files = ($background | ForEach-Object { "'$($_.Sid)'" }) -join ' '
+    wsl.exe -d $Distro -e sh -c "for i in 1 2 3 4 5 6 7 8 9 10; do ls $files 2>/dev/null | grep -q . && break; sleep 0.5; done; for f in $files; do [ -f `$f ] && pkill -TERM -s `$(cat `$f); rm -f `$f; done"
+  }
+  $background | ForEach-Object { Remove-Item $_.Log -ErrorAction SilentlyContinue }
+  Write-Host 'corpus steps stopped' -ForegroundColor Yellow
+}
+
+# Interrupted (Ctrl+C), the corpus steps stop too.
+try {
+  # The extension under test: the sources (default) or an unpacked VSIX.
+  if ($Vsix) {
+    $unpacked = Join-Path $env:TEMP 'dvc-prerelease'
+    if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked -Confirm:$false }
+    New-Item -ItemType Directory $unpacked | Out-Null
+    Copy-Item $Vsix (Join-Path $unpacked 'p.zip') -ErrorAction Stop
+    Expand-Archive (Join-Path $unpacked 'p.zip') -DestinationPath $unpacked -ErrorAction Stop
+    $env:DVICODE_E2E_EXTENSION = Join-Path $unpacked 'extension'
+  } else {
+    Remove-Item Env:DVICODE_E2E_EXTENSION -ErrorAction SilentlyContinue
+  }
+
+  Step 'e2e-native' {
+    E2e $Demo 'native'
+  }
+
+  Step 'e2e-wsl' {
+    $wslDemo = DemoToWsl
+    $a = E2e $Demo 'wsl-drive' @{ 'dvicode.server.mode' = 'wsl' }
+    $b = E2e "file://wsl.localhost/$Distro$wslDemo" 'wsl-unc'
+    $c = E2e "dvicode://wsl+$Distro$wslDemo" 'remote-fs'
+    "drive: $a; unc: $b; remote-fs: $c"
+  }
+
+  Step 'e2e-ssh' {
+    DemoToSsh
+    $key = $SshKey -replace '\\', '/'
+    E2e "dvicode://ssh+$SshUser%40127.0.0.1/home/$SshUser/demo" 'ssh' @{
+      'dvicode.server.sshArgs' = @('-p', "$SshPort", '-i', $key, '-o', 'StrictHostKeyChecking=accept-new')
+    }
+  }
+
+  # VS Code's own remote windows: the extension is installed on the remote side, runs in the remote
+  # extension host and starts the Linux engine there (mode local). Each run also has a local user
+  # setting meant for Windows, which VS Code must keep out of the remote window.
+  Step 'e2e-remote-wsl' {
+    $wslDemo = DemoToWsl
+    E2e $wslDemo 'remote-wsl' @{ 'dvicode.server.mode' = 'wsl' } -Remote "wsl+$Distro"
+  }
+
+  Step 'e2e-remote-ssh' {
+    DemoToSsh
+    # Remote - SSH and the test runner reach the host through this alias.
+    $sshConfig = Join-Path $env:TEMP 'dvicode-e2e-ssh_config'
+    @(
+      'Host dvicode-e2e'
+      '  HostName 127.0.0.1'
+      "  Port $SshPort"
+      "  User $SshUser"
+      "  IdentityFile $($SshKey -replace '\\', '/')"
+      '  IdentitiesOnly yes'
+      '  StrictHostKeyChecking accept-new'
+    ) | Set-Content -Encoding ascii $sshConfig
+    E2e "/home/$SshUser/demo" 'remote-ssh' @{ 'dvicode.server.mode' = 'ssh'; 'dvicode.server.sshHost' = 'not-this-host.invalid' } -Remote 'ssh-remote+dvicode-e2e' -SshConfig $sshConfig
+  }
+
+  # Other editors built on VS Code (installed from Open VSX by their users): the setups that use
+  # DVICode's own engine modes (this machine, WSL, its dvicode:// folders, SSH), not VS Code's
+  # remote windows. Each editor found at its usual place (or in $env:DVICODE_E2E_EDITORS, a
+  # ';'-separated list of executables) runs them; none found is a SKIP.
+  Step 'e2e-editors' {
+    $candidates = @(
+      "$env:USERPROFILE\.dvicode-test\vscodium\VSCodium.exe",
+      "$env:LOCALAPPDATA\Programs\VSCodium\VSCodium.exe",
+      "$env:LOCALAPPDATA\Programs\cursor\Cursor.exe",
+      "$env:LOCALAPPDATA\Programs\Windsurf\Windsurf.exe"
+    )
+    if ($env:DVICODE_E2E_EDITORS) { $candidates = $env:DVICODE_E2E_EDITORS -split ';' }
+    $editors = @($candidates | Where-Object { $_ -and (Test-Path $_) })
+    if (-not $editors) { return 'SKIP: no VSCodium, Cursor or Windsurf installed' }
+    $wslDemo = DemoToWsl
+    DemoToSsh
+    $key = $SshKey -replace '\\', '/'
+    $out = @()
+    $failures = @()
+    try {
+      foreach ($exe in $editors) {
+        $name = [IO.Path]::GetFileNameWithoutExtension($exe).ToLower()
+        $version = (Get-Item $exe).VersionInfo.ProductVersion
+        $env:VSCODE_EXECUTABLE = $exe
+        # One profile per editor, kept: sign in to Cursor once in it and later runs stay signed in.
+        $env:DVICODE_E2E_USER_DATA = "$env:USERPROFILE\.dvicode-test\profile-$name"
+        # An editor still open on that profile (after signing in, say) would take the test window
+        # over and give no result: close it. Only processes on this test profile are stopped.
+        Get-CimInstance Win32_Process -Filter "Name='$([IO.Path]::GetFileName($exe))'" |
+          Where-Object { $_.CommandLine -like "*$env:DVICODE_E2E_USER_DATA*" } |
+          ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        $runs = @()
+        foreach ($run in @(
+            @{ Target = $Demo; Label = "$name-native"; Settings = @{} },
+            @{ Target = $Demo; Label = "$name-wsl"; Settings = @{ 'dvicode.server.mode' = 'wsl' } },
+            @{ Target = "dvicode://wsl+$Distro$wslDemo"; Label = "$name-remote-fs"; Settings = @{} },
+            @{ Target = "dvicode://ssh+$SshUser%40127.0.0.1/home/$SshUser/demo"; Label = "$name-ssh"; Settings = @{ 'dvicode.server.sshArgs' = @('-p', "$SshPort", '-i', $key, '-o', 'StrictHostKeyChecking=accept-new') } }
+          )) {
+          try {
+            $runs += "$($run.Label): $(E2e $run.Target $run.Label $run.Settings)"
+          } catch {
+            $failures += $_.Exception.Message
+          }
+        }
+        $out += "$name $version ($($runs.Count)/4 setups)"
+      }
+    } finally {
+      Remove-Item Env:VSCODE_EXECUTABLE -ErrorAction SilentlyContinue
+      Remove-Item Env:DVICODE_E2E_USER_DATA -ErrorAction SilentlyContinue
+    }
+    if ($failures) { throw (($out + $failures) -join '; ') }
+    $out -join '; '
+  }
+
+  if ($corpusJob) {
+    Write-Host "`n=== waiting for $(($background | ForEach-Object Name) -join ', ')" -ForegroundColor Cyan
+    $ended = @(Receive-Job $corpusJob -Wait -AutoRemoveJob)
+    $corpusJob = $null
+    foreach ($s in $background) {
+      Write-Host "`n=== $($s.Name) (ran in the background)" -ForegroundColor Cyan
+      $out = @()
+      if (Test-Path $s.Log) {
+        $out = @(Get-Content -Encoding utf8 $s.Log)
+        Remove-Item $s.Log
+      }
+      $out | ForEach-Object { Write-Host $_ }
+      $end = $ended | Where-Object { $_.Name -eq $s.Name } | Select-Object -First 1
+      Finish $s.Row {
+        if (-not $end) { throw 'the background job did not run it' }
+        & $s.Check $out $end.Code
+      }
+      if ($end) { $s.Row.Seconds = $end.Seconds }
+    }
+  }
+} finally {
+  if ($corpusJob) { StopCorpus }
 }
 
 Write-Host "`n=== Summary" -ForegroundColor Cyan

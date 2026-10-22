@@ -3,7 +3,8 @@
 `run.sh` checks the engine against large open-source SystemVerilog projects: it clones them at
 pinned commits, runs `dvicode-server check` on each configuration (a project plus a build
 file), runs IDE queries on every file to find crashes, and compares the results with
-`baseline.json`. It runs in Linux or WSL (bash, git, python3, coreutils `timeout`).
+`baseline.json`. It runs in Linux or WSL (bash, git, python3, coreutils `timeout`, util-linux
+`flock`).
 
 Valid code that the projects' simulators accept should produce no problems, so a problem
 reported on a configuration with a real build file is a false positive in the engine, or a
@@ -35,6 +36,7 @@ From Windows: `wsl.exe -e bash -c 'cd /mnt/d/.../hexk-dvicode && scripts/corpus/
 
 Options: `--only REGEX` (configurations whose name matches), `--bin PATH` (an engine binary
 instead of building one with `scripts/wsl-cargo.sh`), `--out DIR` (results directory),
+`--jobs N` and `--chunk N` (see [Parallel runs](#parallel-runs)),
 `--every N`, `--cap N`, `--query-timeout S`, `--sweep-uvm` (see [Sweep](#sweep)), `--edits N`,
 `--seed S` (see [Fuzz](#fuzz)), `--renames N` (see [Writes](#writes)), `--manifest PATH` and
 `--baseline PATH` (see [Private projects](#private-projects)).
@@ -51,6 +53,30 @@ Environment:
 
 Keep `CORPUS` on the Linux file system: `/mnt/<drive>` is much slower. The clones are never
 part of this repository; only the manifest, the build files and the baseline are.
+
+## Parallel runs
+
+`check`, `sweep`, `fuzz` and `writes` run `--jobs N` engine processes at a time (default: half
+the CPUs, at least 1). Each configuration keeps its own result files, so the results and
+`compare` are the same whatever N is; only the times change. With `--jobs 1` everything runs
+one after the other with its output as it comes; with more, each configuration's lines are
+printed together when it ends (`sweep` prints the line counting a configuration's queries
+when it starts, and its summary when it ends).
+
+`sweep` puts the queries of all configurations in one queue: each configuration's queries are
+split into chunks, each run by its own engine process, so that one large configuration does not
+set the time of the whole sweep. A chunk has at least `--chunk N` queries (default 2000), and a
+configuration has no more chunks than `--jobs`, since every process builds the project again
+first; `--chunk 0` runs each configuration in one process, and so does `--jobs 1`. The time in
+`<configuration>.sweep.json` adds up the times of its processes.
+
+The engine uses every CPU for a build, so builds side by side slow each other down. After a
+parallel `check`, the configurations whose build time `compare` would report as more than
+twice the baseline's are checked again one at a time, and their results replaced: a real
+slowdown stays, the effect of the other builds does not.
+
+On a 24-thread WSL installation the public corpus takes about 6 s to check and 2 minutes to
+sweep with `--jobs 1`, and 2 s and 22 s with the default 12.
 
 ## Projects and configurations
 
@@ -117,12 +143,15 @@ gets `timeout` seconds (manifest, default 600).
 `run.sh sweep` asks for the outline of every file and, on every 20th line (`--every`), for
 hover, go to definition and completion at each identifier and references at every third one,
 at most 30 positions per file (`--cap`). The UVM library's own files are skipped unless
-`--sweep-uvm` is given. All queries of a configuration run in one engine process
-(`check --queries FILE`), which catches panics and reports them per query, and exits when one
-query takes longer than `--query-timeout` seconds (default 60). When the process crashes
-(a signal such as a stack overflow) or a query hangs, the query is recorded and the sweep
-continues after it in a new process. `<configuration>.sweep.json` lists the crashes, the time
-per query kind and the slowest queries; `<configuration>.sweep/` keeps the raw output.
+`--sweep-uvm` is given. The queries run in order in engine processes
+(`check --queries FILE`, one per chunk: see [Parallel runs](#parallel-runs)), which catch panics
+and report them per query, and exit when one query takes longer than `--query-timeout` seconds
+(default 60). When a process crashes (a signal such as a stack overflow) or a query hangs, the
+query is recorded and its chunk continues after it in a new process; when the project build
+itself crashes, the sweep of the configuration ends there. `<configuration>.sweep.json` lists
+the crashes in query order, the time per query kind and the slowest queries;
+`<configuration>.sweep/` keeps the raw output (`all.q`, the queries; `state.json`; `stderr.txt`;
+a folder per chunk).
 
 ## Fuzz
 
@@ -254,7 +283,7 @@ Keeping it private:
 | File | Purpose |
 |---|---|
 | `run.sh` | The runner |
-| `corpus.py` | Manifest reading, result JSON, sweep queries, compare and baseline (Python standard library) |
+| `corpus.py` | Manifest reading, result JSON, the sweep, compare and baseline (Python standard library) |
 | `manifest.json` | Projects, pinned commits, configurations |
 | `builds/` | Build files |
 | `baseline.json` | Expected results |

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Helpers for run.sh: reads the manifest, turns `dvicode-server check` output into JSON,
-generates sweep queries, and compares results with the baseline. Standard library only."""
+runs the sweep, and compares results with the baseline. Standard library only."""
 
 import argparse
+import concurrent.futures
 import glob
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -73,13 +78,20 @@ def configs(m, only):
         yield c, p, d, b
 
 
+def config_env(c):
+    return [f"{k}={expand(v)}" for k, v in sorted(c.get("env", {}).items())]
+
+
+def config_timeout(m, c):
+    return c.get("timeout", m.get("timeout", 600))
+
+
 def cmd_configs(a):
     """name, project, directory, build file, timeout, optional, --env arguments (tab-separated)."""
     m = manifest(a.manifest)
     for c, p, d, b in configs(m, a.only):
-        env = [f"{k}={expand(v)}" for k, v in sorted(c.get("env", {}).items())]
-        print("\t".join([c["name"], c["project"], d, b, str(c.get("timeout", m.get("timeout", 600))),
-                         "1" if p.get("optional") else "0", " ".join(env)]))
+        print("\t".join([c["name"], c["project"], d, b, str(config_timeout(m, c)),
+                         "1" if p.get("optional") else "0", " ".join(config_env(c))]))
 
 
 def cmd_projects(a):
@@ -203,11 +215,12 @@ def strip_line(line):
     return "".join(out)
 
 
-def cmd_queries(a):
-    files = [l.strip() for l in open(a.files, encoding="utf-8") if l.strip() and not l.startswith("==")]
-    skip = [s.rstrip("/") + "/" for s in a.skip if s]
+def write_queries(files_txt, output, every, cap, refs_every, skip):
+    """Writes the sweep queries for the files listed in files_txt; returns (queries, files)."""
+    files = [l.strip() for l in open(files_txt, encoding="utf-8") if l.strip() and not l.startswith("==")]
+    skip = [s.rstrip("/") + "/" for s in skip if s]
     nq = nf = 0
-    with open(a.output, "w", encoding="utf-8") as q:
+    with open(output, "w", encoding="utf-8") as q:
         for path in files:
             if any(path.startswith(s) for s in skip) or not os.path.isfile(path):
                 continue
@@ -233,20 +246,25 @@ def cmd_queries(a):
                     if "*/" not in code[k:]:
                         in_block = True
                     code = code[:k]
-                if ln % a.every or len(positions) >= a.cap:
+                if ln % every or len(positions) >= cap:
                     continue
                 for m in IDENT.finditer(code):
                     if m.group(0) in KEYWORDS or (m.start() > 0 and code[m.start() - 1] in "`$'"):
                         continue
                     positions.append((ln, m.start() + 1, m.end() + 1))
-                    if len(positions) >= a.cap:
+                    if len(positions) >= cap:
                         break
             for i, (ln, c0, c1) in enumerate(positions):
                 q.write(f"--hover {path}:{ln}:{c0}\n--goto {path}:{ln}:{c0}\n--complete {path}:{ln}:{c1}\n")
                 nq += 3
-                if i % a.refs_every == 0:
+                if i % refs_every == 0:
                     q.write(f"--refs {path}:{ln}:{c0}\n")
                     nq += 1
+    return nq, nf
+
+
+def cmd_queries(a):
+    nq, nf = write_queries(a.files, a.output, a.every, a.cap, a.refs_every, a.skip)
     print(f"{nq} queries for {nf} files", file=sys.stderr)
 
 
@@ -266,11 +284,12 @@ def parse_sweep(stdout):
     return res, cur
 
 
-def cmd_sweep_part(a):
-    """Folds one run into the sweep state; prints the number of queries done (for restarting)."""
-    st = json.load(open(a.state)) if os.path.exists(a.state) else {"done": 0, "crashes": [], "times": {}, "slowest": []}
-    out = open(a.stdout, encoding="utf-8", errors="replace").read()
-    err = open(a.stderr, encoding="utf-8", errors="replace").read()
+def new_state():
+    return {"done": 0, "crashes": [], "times": {}, "slowest": []}
+
+
+def fold_part(st, out, err, code, timed_out):
+    """Folds the output of one engine run into the sweep state (queries done, crashes, times)."""
     res, unfinished = parse_sweep(out)
     for q, ms, e in res:
         kind = q.split(" ", 1)[0]
@@ -283,24 +302,51 @@ def cmd_sweep_part(a):
             st["crashes"].append({"query": short_query(q), "kind": "panic", "message": e})
     st["slowest"] = sorted(st["slowest"], key=lambda x: -x[1])[:15]
     st["done"] += len(res)
-    if a.exit not in (0, 1) or a.timed_out:
-        sig, panic = crash_info(a.exit, err)
-        if "query timeout after" in err or a.timed_out:
+    if code not in (0, 1) or timed_out:
+        sig, panic = crash_info(code, err)
+        if "query timeout after" in err or timed_out:
             kind = "timeout"
         elif sig:
             kind = sig
         elif panic:
             kind = "panic"
         else:
-            kind = f"exit {a.exit}"
+            kind = f"exit {code}"
         other = [l for l in err.splitlines() if not STATUS.search(l) and not TOTALS.search(l)]
         msg = panic or next((l for l in other if "query timeout" in l), "") or "\n".join(other)[-300:]
         st["crashes"].append({"query": short_query(unfinished) if unfinished else "(project build)", "kind": kind, "message": msg})
         st["done"] += 1  # skip the query that crashed
+        st["ended"] = True
         if unfinished is None:
             st["build_failed"] = True
-    json.dump(st, open(a.state, "w"), indent=1)
-    print(st["done"])
+
+
+# A configuration's sweep stops after this many processes that crashed or hung.
+MAX_CRASHED = 50
+
+
+def merge_states(parts):
+    """A configuration's state from those of the engine runs of its chunks (one state each), in
+    query order. It ends where the sweep ended when it ran in one process: at a run whose
+    project build failed, or after MAX_CRASHED runs that crashed or hung."""
+    st, crashed = new_state(), 0
+    for s in parts:
+        st["done"] += s["done"]
+        st["crashes"] += s["crashes"]
+        for kind, t in s["times"].items():
+            m = st["times"].setdefault(kind, {"count": 0, "total_ms": 0, "max_ms": 0})
+            m["count"] += t["count"]
+            m["total_ms"] += t["total_ms"]
+            m["max_ms"] = max(m["max_ms"], t["max_ms"])
+        st["slowest"] += s["slowest"]
+        if s.get("build_failed"):
+            st["build_failed"] = True
+            break
+        crashed += 1 if s.get("ended") else 0
+        if crashed == MAX_CRASHED:
+            break
+    st["slowest"] = sorted(st["slowest"], key=lambda x: -x[1])[:15]
+    return st
 
 
 def short_query(q):
@@ -310,14 +356,181 @@ def short_query(q):
     return f"{k} {short(arg)}"
 
 
-def cmd_sweep_result(a):
-    st = json.load(open(a.state)) if os.path.exists(a.state) else {"done": 0, "crashes": [], "times": {}, "slowest": []}
-    r = {"config": a.config, "queries": a.total, "done": min(st["done"], a.total), "wall_s": round(a.wall, 1),
+def sweep_result(st, config, total, wall, output):
+    """Writes <configuration>.sweep.json; returns the summary to print."""
+    r = {"config": config, "queries": total, "done": min(st["done"], total), "wall_s": round(wall, 1),
          "crashes": st["crashes"], "times": st["times"], "slowest": st["slowest"]}
-    json.dump(r, open(a.output, "w"), indent=1)
-    print(f"{a.config:28} sweep {a.total} queries, {len(st['crashes'])} crashes, {a.wall:.0f} s")
-    for c in st["crashes"][:10]:
-        print(f"    {c['kind']}: {c['query']}: {c['message'][:160]}")
+    json.dump(r, open(output, "w"), indent=1)
+    lines = [f"{config:28} sweep {total} queries, {len(st['crashes'])} crashes, {wall:.0f} s"]
+    lines += [f"    {c['kind']}: {c['query']}: {c['message'][:160]}" for c in st["crashes"][:10]]
+    return "\n".join(lines)
+
+
+class Sweep:
+    """`run.sh sweep`: the queries of every configuration, split into chunks that run as separate
+    engine processes (`check --queries`) in one pool shared by all configurations. Within a chunk
+    the queries run in order; a crash or a hang ends the process, and a new one continues after
+    the query that failed."""
+
+    def __init__(self, a):
+        self.a = a
+        self.lock = threading.Lock()
+        self.procs = set()
+        self.stopping = False
+        uvm = os.environ.get("UVM_HOME", "")
+        self.skip = [] if a.sweep_uvm or not os.path.isdir(uvm) else [os.path.realpath(uvm)]
+
+    def log(self, msg):
+        with self.lock:
+            print(f"[corpus] {msg}", file=sys.stderr, flush=True)
+
+    def engine(self, timeout, args, stdout, stderr):
+        """Runs `BIN check ARGS` under coreutils timeout, like run.sh; returns the exit status as
+        the shell reports it, stderr, and whether the process (not a query) timed out."""
+        with open(stdout, "wb") as o, open(stderr, "wb") as e:
+            with self.lock:
+                if self.stopping:
+                    raise KeyboardInterrupt
+                p = subprocess.Popen(["timeout", "--kill-after=10", str(timeout), self.a.bin, "check", *args],
+                                     stdin=subprocess.DEVNULL, stdout=o, stderr=e)
+                self.procs.add(p)
+            code = p.wait()
+            with self.lock:
+                self.procs.discard(p)
+        if code < 0:
+            code = 128 - code  # killed by a signal
+        err = open(stderr, encoding="utf-8", errors="replace").read()
+        timed_out = code == 137 or (code == 124 and "query timeout after" not in err)
+        return code, err, timed_out
+
+    def timed(self, cfg, f, *args):
+        """f(cfg, *args), adding its time to the configuration's (the time its sweep would take
+        on its own, which the sweep JSON reports)."""
+        t0 = time.monotonic()
+        try:
+            return f(cfg, *args)
+        finally:
+            with self.lock:
+                cfg["wall"] += time.monotonic() - t0
+
+    def prepare(self, cfg):
+        """Lists the configuration's files and writes its queries; returns the query lines."""
+        work = cfg["work"]
+        self.engine(cfg["timeout"], cfg["args"] + ["-q", "--files", "-"], f"{work}/files.txt", f"{work}/files.err")
+        nq, nf = write_queries(f"{work}/files.txt", f"{work}/all.q", self.a.every, self.a.cap, 3, self.skip)
+        self.log(f"{cfg['name']}: {nq} queries for {nf} files")
+        return open(f"{work}/all.q", encoding="utf-8").read().splitlines(keepends=True)
+
+    def chunk(self, cfg, k, first, queries):
+        """Runs one chunk of a configuration's queries, the first being query number first + 1;
+        returns the states of its engine runs (merge_states decides where the sweep ends)."""
+        d = f"{cfg['work']}/{k:04d}"
+        os.makedirs(d)
+        parts, done = [], 0
+        while done < len(queries) and len(parts) < MAX_CRASHED:
+            with self.lock:
+                if cfg["build_failed"] is not None and cfg["build_failed"] < k:
+                    break  # the sweep ends at an earlier chunk whose build failed
+            with open(f"{d}/part.q", "w", encoding="utf-8") as f:
+                f.writelines(queries[done:])
+            # One engine process gets at most 4 hours.
+            code, err, timed_out = self.engine(
+                14400, cfg["args"] + ["-q", "--queries", f"{d}/part.q", "--query-timeout", self.a.query_timeout],
+                f"{d}/out.txt", f"{d}/err.txt")
+            with open(f"{d}/stderr.txt", "a", encoding="utf-8") as f:
+                f.write(err)
+            st = new_state()
+            fold_part(st, open(f"{d}/out.txt", encoding="utf-8", errors="replace").read(), err, code, timed_out)
+            parts.append(st)
+            done += st["done"]
+            if not st.get("ended"):
+                break
+            if st.get("build_failed"):
+                with self.lock:
+                    if cfg["build_failed"] is None or k < cfg["build_failed"]:
+                        cfg["build_failed"] = k
+                break
+            if st["done"] == 0:
+                break
+            self.log(f"{cfg['name']}: restarting the sweep after query {first + done} of {cfg['total']}")
+        return parts
+
+    def finish(self, cfg):
+        """Merges the chunks into state.json, stderr.txt and <configuration>.sweep.json."""
+        work = cfg["work"]
+        st = merge_states([p for parts in cfg["states"] for p in parts])
+        json.dump(st, open(f"{work}/state.json", "w"), indent=1)
+        with open(f"{work}/stderr.txt", "w", encoding="utf-8") as f:
+            for k in range(len(cfg["states"])):
+                if os.path.exists(f"{work}/{k:04d}/stderr.txt"):
+                    f.write(open(f"{work}/{k:04d}/stderr.txt", encoding="utf-8", errors="replace").read())
+        text = sweep_result(st, cfg["name"], cfg["total"], cfg["wall"],
+                            os.path.join(self.a.out, cfg["name"] + ".sweep.json"))
+        with self.lock:
+            print(text, flush=True)
+
+    def run(self):
+        a = self.a
+        m = manifest(a.manifest)
+        cfgs = []
+        for c, p, d, b in configs(m, a.only):
+            if not os.path.isdir(d):
+                self.log(f"{c['name']}: {d} missing, skipped")
+                continue
+            args = [d] + ([] if b == "project" else ["--build", b])
+            args += ["--env", f"CORPUS={os.environ['CORPUS']}", "--env", f"UVM_HOME={os.environ['UVM_HOME']}"]
+            for e in config_env(c):
+                args += ["--env", e]
+            work = os.path.join(a.out, c["name"] + ".sweep")
+            shutil.rmtree(work, ignore_errors=True)
+            os.makedirs(work)
+            cfgs.append({"name": c["name"], "args": args, "timeout": config_timeout(m, c), "work": work, "wall": 0,
+                         "total": 0, "states": [], "left": 0, "build_failed": None})
+        jobs = max(1, a.jobs)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+        tasks = {}
+        try:
+            # Each configuration first lists its files; its chunks join the queue when it has.
+            for cfg in cfgs:
+                tasks[pool.submit(self.timed, cfg, self.prepare)] = (cfg, None)
+            while tasks:
+                done, _ = concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
+                for f in done:
+                    cfg, k = tasks.pop(f)
+                    if k is None:
+                        queries = f.result()
+                        # Every chunk starts a process that builds the project again: chunks of
+                        # at least --chunk queries, and no more of them than processes run at once.
+                        n = max(1, len(queries))
+                        if a.chunk > 0:
+                            n = max(a.chunk, -(-len(queries) // jobs))
+                        cfg["total"] = len(queries)
+                        cfg["states"] = [None] * ((len(queries) + n - 1) // n)
+                        cfg["left"] = len(cfg["states"])
+                        for k, i in enumerate(range(0, len(queries), n)):
+                            tasks[pool.submit(self.timed, cfg, self.chunk, k, i, queries[i:i + n])] = (cfg, k)
+                    else:
+                        cfg["states"][k] = f.result()
+                        cfg["left"] -= 1
+                    if cfg["left"] == 0:
+                        self.finish(cfg)
+        except BaseException:
+            with self.lock:
+                self.stopping = True
+                for p in self.procs:
+                    p.terminate()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        pool.shutdown()
+
+
+def cmd_sweep(a):
+    # SIGTERM stops the engines too, as Ctrl+C does (they are not in this process group).
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    try:
+        Sweep(a).run()
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 # --- baseline and compare ------------------------------------------------------------------
@@ -394,9 +607,8 @@ def cmd_compare(a):
             bad.append(f"{n}: problems grew from {b.get('total')} to {r.get('total')} {diff_codes(b, r)}")
         elif (r.get("total") or 0) < (b.get("total") or 0):
             notes.append(f"{n}: problems fell from {b.get('total')} to {r.get('total')} {diff_codes(b, r)} (update the baseline)")
-        bt, rt = (b.get("build_ms") or 0) + (b.get("config_ms") or 0), (r.get("build_ms") or 0) + (r.get("config_ms") or 0)
-        if bt and rt > 2 * bt and rt - bt > a.slack_ms:
-            bad.append(f"{n}: build time {rt} ms is more than twice the baseline's {bt} ms")
+        if slow_build(b, r, a.slack_ms):
+            bad.append(f"{n}: build time {build_time(r)} ms is more than twice the baseline's {build_time(b)} ms")
     for n in sorted(set(base) - set(res)):
         notes.append(f"{n}: no result (not run)")
     for x in notes:
@@ -405,6 +617,28 @@ def cmd_compare(a):
         print("FAIL:", x)
     print(f"compare: {len(res)} results, {len(bad)} regressions")
     sys.exit(1 if bad else 0)
+
+
+def build_time(r):
+    return (r.get("build_ms") or 0) + (r.get("config_ms") or 0)
+
+
+def slow_build(b, r, slack_ms):
+    """Whether compare reports the build time of result r as a regression from baseline entry b."""
+    bt, rt = build_time(b), build_time(r)
+    return bool(bt) and rt > 2 * bt and rt - bt > slack_ms
+
+
+def cmd_slow(a):
+    """A regular expression for the configurations whose build time compare would report, for
+    `run.sh check` to measure them again on their own (empty when there are none)."""
+    if not os.path.exists(a.baseline):
+        return
+    base = json.load(open(a.baseline))["configurations"]
+    names = [n for n, r in sorted(load_results(a.results, a.only).items())
+             if n in base and not failed(r) and slow_build(base[n], r, a.slack_ms)]
+    if names:
+        print("^(" + "|".join(re.escape(n) for n in names) + ")$")
 
 
 def diff_codes(b, r):
@@ -441,18 +675,18 @@ def main():
     s.add_argument("--every", type=int, default=20); s.add_argument("--cap", type=int, default=30)
     s.add_argument("--refs-every", type=int, default=3); s.add_argument("--skip", action="append", default=[])
     s.set_defaults(f=cmd_queries)
-    s = sub.add_parser("sweep-part")
-    for k in ("state", "stdout", "stderr"):
-        s.add_argument("--" + k, required=True)
-    s.add_argument("--exit", type=int, default=0); s.add_argument("--timed-out", action="store_true"); s.set_defaults(f=cmd_sweep_part)
-    s = sub.add_parser("sweep-result")
-    for k in ("state", "config", "output"):
-        s.add_argument("--" + k, required=True)
-    s.add_argument("--total", type=int, default=0); s.add_argument("--wall", type=float, default=0); s.set_defaults(f=cmd_sweep_result)
+    s = sub.add_parser("sweep"); s.add_argument("manifest"); s.add_argument("--only", default="")
+    s.add_argument("--bin", required=True); s.add_argument("--out", required=True)
+    s.add_argument("--jobs", type=int, default=1); s.add_argument("--chunk", type=int, default=2000)
+    s.add_argument("--every", type=int, default=20); s.add_argument("--cap", type=int, default=30)
+    s.add_argument("--query-timeout", default="60"); s.add_argument("--sweep-uvm", action="store_true")
+    s.set_defaults(f=cmd_sweep)
     s = sub.add_parser("baseline"); s.add_argument("results"); s.add_argument("--output", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--only", default=""); s.set_defaults(f=cmd_baseline)
     s = sub.add_parser("compare"); s.add_argument("results"); s.add_argument("--baseline", required=True)
     s.add_argument("--slack-ms", type=int, default=500); s.add_argument("--only", default=""); s.set_defaults(f=cmd_compare)
+    s = sub.add_parser("slow"); s.add_argument("results"); s.add_argument("--baseline", required=True)
+    s.add_argument("--slack-ms", type=int, default=500); s.add_argument("--only", default=""); s.set_defaults(f=cmd_slow)
     s = sub.add_parser("table"); s.add_argument("results"); s.set_defaults(f=cmd_table)
     a = ap.parse_args()
     a.f(a)

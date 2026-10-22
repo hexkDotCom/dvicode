@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloa
 | `build` | Native Windows engine (`cargo`), static Linux engine (`scripts/package.sh --server` in WSL), extension bundle |
 | `test` | Server tests natively on Windows and in WSL |
 | `unit` | The extension's unit tests (`npm run unit`) |
-| `corpus` | The real-world corpus regression (`scripts/corpus`), compared with its baseline |
+| `corpus` | The real-world corpus regression (`scripts/corpus/run.sh all`, which runs half as many engine processes at a time as WSL has CPUs: `--jobs`, see [scripts/corpus/README.md](../scripts/corpus/README.md#parallel-runs)), compared with its baseline |
 | `corpus-private` | The same with a private set of projects outside the repository, when `-PrivateCorpus PATH` or `DVICODE_CORPUS_MANIFEST` names its manifest (see [scripts/corpus/README.md](../scripts/corpus/README.md#private-projects)); the summary shows only counts |
 | `e2e-native` | End-to-end tests with the engine on Windows |
 | `e2e-wsl` | End-to-end tests in WSL: a Windows-drive folder, a `\\wsl.localhost` folder and a WSL-only `dvicode://` folder |
@@ -154,6 +154,11 @@ powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloa
 | `e2e-remote-wsl` | End-to-end tests in a VS Code Remote - WSL window: extension and engine in WSL |
 | `e2e-remote-ssh` | End-to-end tests in a VS Code Remote - SSH window to the second WSL distribution |
 | `e2e-editors` | The native, WSL, WSL-only `dvicode://` and SSH runs again in VSCodium, Cursor and Windsurf, for those installed (VSCodium's portable zip may be unpacked into `%USERPROFILE%\.dvicode-test\vscodium`; `DVICODE_E2E_EDITORS` lists other executables). Each editor keeps one profile in `%USERPROFILE%\.dvicode-test\profile-<editor>`: sign in to Cursor once in it (`Cursor.exe --user-data-dir <that folder>`) and close it before running |
+
+The two corpus steps run in WSL, one after the other, in the background while the `e2e-*` steps
+drive VS Code windows on Windows; their output is shown after the last `e2e-*` step, and the
+summary keeps the order of the table. `-Sequential` runs them before the `e2e-*` steps instead,
+with their output as it comes (useful when the load in WSL makes an end-to-end test time out).
 
 Without `-Vsix` the end-to-end tests run the extension from the sources with the engines just
 built; with `-Vsix` they test a package, typically the universal `.vsix` of a Release workflow
