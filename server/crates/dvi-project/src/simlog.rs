@@ -1,7 +1,10 @@
-//! What a simulator compiled, read from its log (`+dvicode_init_from_simlog`): the VCS and
-//! vlogan messages `Parsing design file '...'`, `Parsing library file '...'` and
-//! `Parsing included file '...'`, and the defines and include directories of the command line
-//! the log shows (`Command: vcs ...`, `Command  = vlogan ...`, or a line starting with the tool).
+//! What a simulator compiled, read from its log (`+dvicode_init_from_simlog`):
+//!
+//! - VCS and vlogan: the messages `Parsing design file '...'`, `Parsing library file '...'` and
+//!   `Parsing included file '...'`, and the defines and include directories of the command line
+//!   the log shows (`Command: vcs ...`, `Command  = vlogan ...`, or a line starting with the tool).
+//! - Questa: the `vlog ...` command lines (`# vlog ...` in a GUI transcript), whose words are
+//!   read like an argument file (Questa does not list the files it parses).
 
 /// The compile of one log, as written there (paths not resolved).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -18,6 +21,24 @@ pub struct SimLog {
     pub incdirs: Vec<String>,
     /// A command line was found.
     pub command: bool,
+    /// The compiler of the command line (`vcs`, `vlogan`, `vlog`...), without a path or `.exe`.
+    pub tool: String,
+    /// The words of the command line after the tool.
+    pub words: Vec<String>,
+}
+
+impl SimLog {
+    /// A Questa compile: its files are the words of its command line, not `Parsing` messages.
+    pub fn from_command_line(&self) -> bool {
+        matches!(self.tool.as_str(), "vlog" | "qverilog")
+    }
+}
+
+/// The compiler a word names: `/tools/vcs/bin/vcs`, `C:\\questa\\win64\\vlog.exe`.
+fn tool_name(w: &str) -> Option<&'static str> {
+    let name = w.rsplit(['/', '\\']).next().unwrap_or(w);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    ["vcs", "vlogan", "vhdlan", "vlog", "qverilog"].into_iter().find(|t| *t == name)
 }
 
 /// The quoted path of a `Parsing <kind> file '<path>'` message.
@@ -92,10 +113,7 @@ fn split_plus(s: &str) -> Vec<String> {
 /// The command line of a log line, as words: `Command: vcs ...`, `Command  = vwi vlogan ...`,
 /// `Command arguments: ...`, or a line whose first word is the tool.
 fn command_words(line: &str) -> Option<Vec<String>> {
-    let tool = |w: &str| {
-        let name = w.rsplit('/').next().unwrap_or(w);
-        matches!(name, "vcs" | "vlogan" | "vhdlan")
-    };
+    let tool = |w: &str| tool_name(w).is_some();
     let words = shell_words(line);
     let start = if line.trim_start().starts_with("Command") {
         // Up to the separator, then the words of the command (possibly a wrapper first).
@@ -143,6 +161,19 @@ pub fn parse_runs(text: &str) -> Vec<SimLog> {
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         let line = line.trim();
+        // A Questa GUI transcript starts its lines with `# `.
+        let line = line.strip_prefix("# ").unwrap_or(line);
+        // The same command twice in a row (a Questa transcript echoes `vlog ...` as typed, then
+        // vlog prints it again with its options quoted) is one compile.
+        if run.command && run.files.v.is_empty() {
+            if let Some(words) = command_words(line) {
+                let plain = |ws: &[String]| ws.iter().map(|w| w.trim_matches('"').to_string()).collect::<Vec<_>>();
+                let at = words.iter().position(|w| tool_name(w).is_some()).map_or(0, |i| i + 1);
+                if plain(&words[at..]) == plain(&run.words) {
+                    continue;
+                }
+            }
+        }
         if command_words(line).is_some() && run.command {
             runs.push(std::mem::take(&mut run).finish());
         }
@@ -161,15 +192,17 @@ struct Run {
     defines: Ordered,
     incdirs: Ordered,
     command: bool,
+    tool: String,
+    words: Vec<String>,
 }
 
 impl Run {
     fn finish(self) -> SimLog {
-        SimLog { files: self.files.v, lib_files: self.lib_files.v, included: self.included.v, defines: self.defines.v, incdirs: self.incdirs.v, command: self.command }
+        SimLog { files: self.files.v, lib_files: self.lib_files.v, included: self.included.v, defines: self.defines.v, incdirs: self.incdirs.v, command: self.command, tool: self.tool, words: self.words }
     }
 
     fn line<'a>(&mut self, line: &str, lines: &mut impl Iterator<Item = &'a str>) {
-        let Run { files, lib_files, included, defines, incdirs, command } = self;
+        let Run { files, lib_files, included, defines, incdirs, command, tool, words: command_line } = self;
         if let Some(p) = parsed_file(line, "design") {
             files.push(p);
         } else if let Some(p) = parsed_file(line, "library") {
@@ -186,6 +219,10 @@ impl Run {
             }
             let words = command_words(&logical).unwrap_or_default();
             *command = true;
+            if let Some(at) = words.iter().position(|w| tool_name(w).is_some()) {
+                *tool = tool_name(&words[at]).unwrap_or_default().to_string();
+                *command_line = words[at + 1..].to_vec();
+            }
             let mut i = 0;
             while i < words.len() {
                 let w = words[i].as_str();

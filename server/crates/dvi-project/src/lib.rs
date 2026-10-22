@@ -1042,14 +1042,17 @@ impl Builder {
             Err(err) => return self.problem(file, line, format!("Cannot read simulation log {}: {err}", path.display())),
         };
         // One invocation per compile command with files (`vlogan` per library, say).
-        let runs: Vec<simlog::SimLog> = simlog::parse_runs(&text).into_iter().filter(|r| !r.files.is_empty() || !r.lib_files.is_empty()).collect();
+        let runs: Vec<simlog::SimLog> = simlog::parse_runs(&text)
+            .into_iter()
+            .filter(|r| !r.files.is_empty() || !r.lib_files.is_empty() || (r.from_command_line() && !r.words.is_empty()))
+            .collect();
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
         if runs.is_empty() {
             self.note(file, self.describe_path(log, &e, &path, "simulation log"));
             return self.problem(
                 file,
                 line,
-                format!("No compiled files in {}: not a VCS or vlogan compile log, or the compile stopped before parsing (look for 'Parsing design file')", path.display()),
+                format!("No compiled files in {}: not a VCS, vlogan or Questa vlog compile log, or the compile stopped before parsing (look for 'Parsing design file' or a 'vlog' command line)", path.display()),
             );
         }
         let mode = self.inv().mode.clone();
@@ -1059,6 +1062,32 @@ impl Builder {
         for (k, s) in runs.iter().enumerate() {
             if k > 0 {
                 self.start_invocation(&mode, false);
+            }
+            if s.from_command_line() {
+                // Questa: the vlog command line, read like an argument file from the log's folder
+                // (its files, -f files, +incdir+, +define+, -y/-v).
+                let (files_at, libs_at) = (self.inv().files.len(), self.inv().lib_files.len());
+                let defines_at = self.inv().defines.len();
+                let incdirs_at = self.inv().incdirs.len();
+                // vlog echoes its options quoted ("+incdir+inc"): a quoted word without spaces is
+                // the word itself.
+                let unquote = |w: &String| match w.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+                    Some(inner) if !inner.contains(char::is_whitespace) && !inner.contains('"') => inner.to_string(),
+                    _ => w.clone(),
+                };
+                let text = s.words.iter().map(unquote).collect::<Vec<_>>().join("\n");
+                let (span, word, focus_at) = (self.span, std::mem::take(&mut self.word), self.focus_at);
+                self.depth += 1;
+                self.parse_text(&path, &text, dir.clone());
+                self.depth -= 1;
+                (self.span, self.word, self.focus_at) = (span, word, focus_at);
+                let inv = self.inv();
+                let (files, libs): (Vec<PathBuf>, Vec<PathBuf>) = (inv.files[files_at..].to_vec(), inv.lib_files[libs_at..].to_vec());
+                let (nd, ni) = (inv.defines.len() - defines_at, inv.incdirs.len() - incdirs_at);
+                missing.extend(files.iter().chain(libs.iter()).filter(|f| !f.is_file()).cloned());
+                (n_files, n_lib_files, n_defines, n_incdirs) = (n_files + files.len(), n_lib_files + libs.len(), n_defines + nd, n_incdirs + ni);
+                command = true;
+                continue;
             }
             for d in &s.defines {
                 self.add_define(d);
@@ -1921,6 +1950,41 @@ mod tests {
         assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
         assert!(cfg.invocations[0].incdirs.contains(&dir.join("local/inc dir")), "{:?}", cfg.invocations[0].incdirs);
         assert!(cfg.invocations[0].files.contains(&dir.join("local/local/uvm/src/uvm_pkg.sv")), "{:?}", cfg.invocations[0].files);
+    }
+
+    #[test]
+    fn questa_compile_logs() {
+        // vlog prints its command line (quoting the plus options) and the units it compiles, not
+        // the files: the command line is read like an argument file. Written by hand.
+        let dir = std::env::temp_dir().join("dvicode_build_test_questa");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("rtl")).unwrap();
+        std::fs::create_dir_all(dir.join("inc")).unwrap();
+        for f in ["rtl/pkg.sv", "rtl/top.sv", "rtl/tb.sv"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        std::fs::write(dir.join("tb.f"), "rtl/tb.sv\n").unwrap();
+        let log = "QuestaSim-64 vlog 2024.1 Compiler 2024.02 Feb  1 2024\nStart time: 10:00:00 on Jan 1,2026\nvlog -sv -work work \"+incdir+inc\" \"+define+WIDTH=8\" rtl/pkg.sv rtl/top.sv \n-- Compiling package pkg\n-- Compiling module top\n\nTop level modules:\n\ttop\nEnd time: 10:00:01 on Jan 1,2026, Elapsed time: 0:00:01\nErrors: 0, Warnings: 0\n";
+        std::fs::write(dir.join("compile.log"), log).unwrap();
+        // A GUI transcript: lines start with "# "; a second vlog with an argument file.
+        // The do script echoes the vlog command as typed before vlog prints it quoted: one compile.
+        let transcript = format!(
+            "# vlib work\n# vlog -sv -work work +incdir+inc +define+WIDTH=8 rtl/pkg.sv rtl/top.sv\n{}# vlog -sv -f tb.f +define+SIM\n# -- Compiling module tb\n# vsim -c work.tb\n",
+            log.lines().map(|l| format!("# {l}\n")).collect::<String>()
+        );
+        std::fs::write(dir.join("transcript"), transcript).unwrap();
+        let file = dir.join(".dvicode/default.build");
+        let cfg = parse_build(&dir, &file, "+dvicode_init_from_simlog+compile.log\n", &FxHashMap::default());
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        let inv = &cfg.invocations[0];
+        assert_eq!(inv.files, vec![dir.join("rtl/pkg.sv"), dir.join("rtl/top.sv")]);
+        assert_eq!(inv.incdirs, vec![dir.join("inc")]);
+        assert_eq!(inv.defines, vec![("WIDTH".to_string(), Some("8".to_string()))]);
+        let cfg = parse_build(&dir, &file, "+dvicode_init_from_simlog+transcript\n", &FxHashMap::default());
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        let files: Vec<Vec<PathBuf>> = cfg.invocations.iter().map(|i| i.files.clone()).collect();
+        assert_eq!(files, vec![vec![dir.join("rtl/pkg.sv"), dir.join("rtl/top.sv")], vec![dir.join("rtl/tb.sv")]]);
+        assert_eq!(cfg.invocations[1].defines, vec![("SIM".to_string(), None)]);
     }
 
     #[test]

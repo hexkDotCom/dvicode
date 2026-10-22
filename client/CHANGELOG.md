@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `+dvicode_init_from_simlog` reads Questa compile logs and transcripts too: the `vlog`
+  command lines, with their files, `-f` files, include directories and defines (Questa does not
+  list the files it parses). Part of #9.
 - When no UVM test is found, the Verification Hierarchy says why if it can: classes extend
   `uvm_test` (or other UVM base classes) but `uvm_pkg` is not imported where they are declared, or
   the UVM library is not compiled. Without a build file it points to the skipped-code notices,
