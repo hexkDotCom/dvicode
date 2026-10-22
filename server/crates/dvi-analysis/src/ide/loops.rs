@@ -20,7 +20,8 @@ impl Analysis {
     /// parentheses, resolved in `unit`. `None` when they are not constants.
     pub(crate) fn loop_count(&self, kind: &str, header: &[Token], unit: UnitId, toks: Toks) -> Option<u64> {
         let n = match kind {
-            "repeat" => self.const_value(header, unit, 0, toks)?,
+            // A negative count repeats nothing.
+            "repeat" => self.const_value(header, unit, 0, toks)?.max(0),
             "for" => self.for_count(header, unit, toks)?,
             "foreach" => self.foreach_count(header, unit, toks)?,
             _ => return None,

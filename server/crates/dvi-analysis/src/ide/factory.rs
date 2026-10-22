@@ -106,8 +106,9 @@ impl Analysis {
             let by_name = !names.contains(&"original_type") && !matches!(recv, Receiver::Registry(_));
             let (replace, replace_unknown) = match arg("replace") {
                 None => (true, false),
+                // `replace` is a bit: the value's lowest bit.
                 Some([n]) if n.kind == TokKind::Number => match super::loops::literal(&n.text) {
-                    Some(v) => (v != 0, false),
+                    Some(v) => (v & 1 != 0, false),
                     None => (true, true),
                 },
                 Some(_) => (true, true),
@@ -183,7 +184,7 @@ impl Analysis {
     /// The class of a type handle argument, the whole argument being `X::get_type()`,
     /// `X::type_id::get()`, `pkg::X::get_type()` or `X#(8)::get_type()`; and whether it is written
     /// with parameter values.
-    fn type_handle(&self, body: DeclRef, a: &[Token]) -> Option<(DeclRef, bool)> {
+    pub(crate) fn type_handle(&self, body: DeclRef, a: &[Token]) -> Option<(DeclRef, bool)> {
         let n = a.len();
         let end = match a {
             [.., c, g, open, close] if c.is_punct("::") && g.text == "get_type" && open.is_punct("(") && close.is_punct(")") => n - 4,
@@ -255,7 +256,9 @@ impl Analysis {
         let Some(toks) = self.file_tokens(d.span.file) else { return false };
         let lo = toks.partition_point(|t| t.span.start < d.span.start);
         let hi = toks.partition_point(|t| t.span.start < d.span.end);
-        let t = &toks[lo..hi];
+        // Not in code `ifdef` leaves out.
+        let inactive = &self.unit(class.unit).inactive;
+        let t: Vec<&Token> = toks[lo..hi].iter().filter(|x| !inactive.iter().any(|s| s.file == x.span.file && s.start <= x.span.start && x.span.start < s.end)).collect();
         t.windows(4).any(|w| {
             w[0].kind == TokKind::Directive
                 && matches!(w[0].text.as_str(), "uvm_component_utils" | "uvm_object_utils" | "uvm_component_utils_begin" | "uvm_object_utils_begin")

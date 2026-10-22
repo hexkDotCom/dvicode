@@ -170,36 +170,39 @@ impl Analysis {
     }
 
     /// The object nodes of a component: the objects its build made (with the classes the factory
-    /// gave them then), the sequences its run-time phases start, and the default sequences it
-    /// sets. `factory`: the overrides of the whole build.
+    /// gave them then), the sequences it makes and starts, and the default sequences shown under
+    /// it. `factory`: the overrides of the whole build.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn object_nodes(&self, inst: &Inst, pin: Option<&[String]>, seen: &mut FxHashMap<String, u32>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, scan: &Scan, factory: &Factory) -> Vec<VerifNode> {
         let Some(built) = inst.built.as_deref() else { return Vec::new() };
         let mut out = Vec::new();
         // Configurations, register models and adapters; sequences made while building join the
-        // starts of the run-time phases.
+        // starts of the run-time phases, with the class the factory gave them then.
         let mut run: Vec<RunEv> = Vec::new();
         for o in &inst.objs {
             let m = &o.made;
             if o.kind == "sequence" {
-                run.push(RunEv { body: m.body, guards: m.alts[0].clone(), phase: "build_phase".into(), what: RunWhat::Alloc(m.cr.clone()) });
+                let made = MadeSeq { cr: m.cr.clone(), class: o.class, requested: o.requested, overrides: o.overrides.clone() };
+                for g in &o.alts {
+                    run.push(RunEv { body: m.body, guards: g.clone(), phase: m.stage.phase().into(), what: RunWhat::Made(Box::new(made.clone())) });
+                }
                 continue;
             }
             let name = m.cr.name.clone().unwrap_or_else(|| m.cr.lhs.trim_start_matches("this.").to_string());
             let var = self.resolve_at_span(m.body.unit, m.cr.lhs_head).map(|v| self.decl_key(v));
             let notes = self.config_notes(built, var, &inst.path);
-            let node = self.object_node(&name, &inst.path, o.class, o.requested, o.kind, m.cr.lhs_head, &m.alts, o.overrides.clone(), notes, scan);
-            if let Some(n) = self.admit(node, pin, seen, w, truncated, |_, _, _| Vec::new()) {
+            let (mut node, cls) = self.object_node(&name, &inst.path, o.class, o.requested, o.kind, m.cr.lhs_head, &o.alts, o.overrides.clone(), notes, scan);
+            node.alternatives = o.alternatives.clone();
+            if let Some(n) = self.admit((node, cls), pin, seen, w, truncated, |_, _, _| Vec::new()) {
                 out.push(n);
-            } else if w.stopped() {
+            } else if w.stopped() && pin.is_none() {
                 return out;
             }
         }
-        // Sequences the run-time phases start, then default sequences.
-        let ctx = SeqCtx { derived_first: &inst.chain, path: &inst.path, kids: &inst.children, parent_sqr: None };
         run.extend(built.run.iter().cloned());
+        let ctx = SeqCtx { derived_first: &inst.chain, path: &inst.path, kids: &inst.children, parent: Vec::new() };
         out.extend(self.sequence_nodes(&run, &ctx, pin, seen, w, stack, truncated, scan, factory));
-        out.extend(self.default_sequences(built, &inst.path, &inst.children, pin, seen, w, truncated, scan));
+        out.extend(self.default_nodes(inst, pin, seen, w, stack, truncated, scan, factory));
         out
     }
 
@@ -254,6 +257,7 @@ impl Analysis {
 
     /// Counts and keeps an object node as the component children are kept: within the limits,
     /// matching the filter or target, or with children that do (`children` makes them).
+    #[allow(clippy::too_many_arguments)]
     fn admit(&self, (mut node, cls): (VerifNode, Option<DeclRef>), pin: Option<&[String]>, seen: &mut FxHashMap<String, u32>, w: &mut Walk, truncated: &mut bool, children: impl FnOnce(&mut Walk, &mut VerifNode, Option<&[String]>) -> Vec<VerifNode>) -> Option<VerifNode> {
         node.dup = sibling(seen, &node.name);
         let child_pin = pin_below(pin, &keyed(&node.name, node.dup));
@@ -284,12 +288,13 @@ impl Analysis {
         }
     }
 
-    /// The sequences made or started by run-time events (`events`, of a component's phases or a
-    /// sequence's methods), one node per variable and class, with where each is started.
+    /// The sequences made or started by run-time events (`events`, of a component or a
+    /// sequence, in the order they run): one node per variable and class, with where each is
+    /// started. A start goes to what the variable last holds: the allocations since its last
+    /// unconditional one.
     #[allow(clippy::too_many_arguments)]
     fn sequence_nodes(&self, events: &[RunEv], ctx: &SeqCtx, pin: Option<&[String]>, seen: &mut FxHashMap<String, u32>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, scan: &Scan, factory: &Factory) -> Vec<VerifNode> {
         struct Seq {
-            var: Option<(u32, u32)>,
             class: Option<DeclRef>,
             requested: Option<DeclRef>,
             overrides: Vec<OverrideStep>,
@@ -299,11 +304,44 @@ impl Analysis {
             starts: Vec<StartInfo>,
             made_here: bool,
         }
+        // A node per variable, class and name.
+        type Key = (Option<(u32, u32)>, (u32, u32), String);
         let mut seqs: Vec<Seq> = Vec::new();
-        let var_of = |body: DeclRef, span: Span| self.resolve_at_span(body.unit, span);
-        let declared_class = |body: DeclRef, span: Span| var_of(body, span).and_then(|v| self.type_of(v)).and_then(|r| self.bind_type_param(r, ctx.derived_first, scan)).filter(|c| self.decl(*c).kind == DeclKind::Class);
+        let mut by_key: FxHashMap<Key, usize> = FxHashMap::default();
+        // What each variable may hold now, and the sequencer `uvm_create_on` gave it.
+        let mut current: FxHashMap<(u32, u32), Vec<usize>> = FxHashMap::default();
+        let mut stored: FxHashMap<(u32, u32), (DeclRef, Vec<Token>)> = FxHashMap::default();
+        let var_of = |body: DeclRef, span: Span| self.resolve_at_span(body.unit, span).map(|v| self.decl_key(v));
+        let declared_class = |body: DeclRef, span: Span| self.resolve_at_span(body.unit, span).and_then(|v| self.type_of(v)).and_then(|r| self.bind_type_param(r, ctx.derived_first, scan)).filter(|c| self.decl(*c).kind == DeclKind::Class);
+        let unconditional = |g: &[Guard]| conditions_text(std::slice::from_ref(&g.to_vec())).is_empty();
+        #[allow(clippy::too_many_arguments)]
+        fn alloc(seqs: &mut Vec<Seq>, by_key: &mut FxHashMap<Key, usize>, current: &mut FxHashMap<(u32, u32), Vec<usize>>, var: Option<(u32, u32)>, key: (u32, u32), name: String, new: impl FnOnce() -> Seq, guards: &[Guard], unconditional: bool) -> usize {
+            let i = *by_key.entry((var, key, name)).or_insert_with(|| {
+                seqs.push(new());
+                seqs.len() - 1
+            });
+            let s = &mut seqs[i];
+            let g = guards.to_vec();
+            if g.is_empty() {
+                s.ways = vec![Vec::new()];
+            } else if !s.ways.iter().any(|w| w.is_empty()) && s.ways.len() < MAX_WAYS && !s.ways.contains(&g) {
+                s.ways.push(g);
+            }
+            s.made_here = true;
+            if let Some(v) = var {
+                let cur = current.entry(v).or_default();
+                if unconditional {
+                    *cur = vec![i];
+                } else if !cur.contains(&i) {
+                    cur.push(i);
+                }
+            }
+            i
+        }
         for e in events {
-            match &e.what {
+            // Allocations: (class built, class requested, overrides, name, where).
+            let made: Option<(DeclRef, Option<DeclRef>, Vec<OverrideStep>, String, Span, Option<(u32, u32)>)> = match &e.what {
+                RunWhat::Made(ms) => ms.class.filter(|c| self.object_kind(*c) == Some("sequence")).map(|c| (c, ms.requested, ms.overrides.clone(), ms.cr.name.clone().unwrap_or_else(|| ms.cr.lhs.trim_start_matches("this.").to_string()), ms.cr.lhs_head, var_of(e.body, ms.cr.lhs_head))),
                 RunWhat::Alloc(cr) => {
                     let is_class = |c: &DeclRef| self.decl(*c).kind == DeclKind::Class;
                     let requested = cr
@@ -313,46 +351,53 @@ impl Analysis {
                         .and_then(|r| self.bind_type_param(r, ctx.derived_first, scan))
                         .filter(is_class)
                         .or_else(|| declared_class(e.body, cr.lhs_head));
-                    let Some(req) = requested.filter(|c| self.object_kind(*c) == Some("sequence")) else { continue };
-                    let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
-                    let (class, overrides) = if cr.factory { self.factory_resolve(factory, req, None, cr.params) } else { (req, Vec::new()) };
-                    let var = var_of(e.body, cr.lhs_head).map(|v| self.decl_key(v));
-                    let key = self.decl_key(class);
-                    match seqs.iter_mut().find(|s| s.var == var && var.is_some() && s.class.map(|c| self.decl_key(c)) == Some(key)) {
-                        Some(s) => {
-                            if s.ways.len() < MAX_WAYS && !s.ways.contains(&e.guards) {
-                                s.ways.push(e.guards.clone());
-                            }
-                        }
-                        None => seqs.push(Seq { var, class: Some(class), requested: Some(req), overrides, name, at: cr.lhs_head, ways: vec![e.guards.clone()], starts: Vec::new(), made_here: true }),
-                    }
+                    requested.filter(|c| self.object_kind(*c) == Some("sequence")).map(|req| {
+                        let (class, overrides) = if cr.factory { self.factory_resolve(factory, req, None, cr.params || self.parameterized(req)) } else { (req, Vec::new()) };
+                        (class, Some(req), overrides, cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string()), cr.lhs_head, var_of(e.body, cr.lhs_head))
+                    })
                 }
-                RunWhat::Start(st) => {
-                    let var = var_of(e.body, st.var).map(|v| self.decl_key(v));
-                    let on = match st.kind {
-                        StartKind::Create => None,
-                        _ => Some(self.sequencer_text(e.body, st, ctx)),
-                    };
-                    // `uvm_do` and `uvm_create` make the sequence: one of its declared class.
-                    let makes = matches!(st.kind, StartKind::Do | StartKind::Create);
-                    let found = seqs.iter().position(|s| s.var.is_some() && s.var == var);
-                    let i = match found {
-                        Some(i) => i,
-                        None => {
-                            let Some(class) = declared_class(e.body, st.var).filter(|c| self.object_kind(*c) == Some("sequence")) else { continue };
-                            let (built_class, overrides) = if makes { self.factory_resolve(factory, class, None, false) } else { (class, Vec::new()) };
-                            seqs.push(Seq { var, class: Some(built_class), requested: Some(class), overrides, name: st.var_text.clone(), at: st.var, ways: Vec::new(), starts: Vec::new(), made_here: makes });
-                            seqs.len() - 1
-                        }
-                    };
+                RunWhat::Start(st) if matches!(st.kind, StartKind::Do | StartKind::Create) => declared_class(e.body, st.var).filter(|c| self.object_kind(*c) == Some("sequence")).map(|req| {
+                    let (class, overrides) = self.factory_resolve(factory, req, None, self.parameterized(req));
+                    (class, Some(req), overrides, st.var_text.clone(), st.var, var_of(e.body, st.var))
+                }),
+                RunWhat::Start(_) => None,
+            };
+            if let Some((class, requested, overrides, name, at, var)) = made {
+                let key_name = name.clone();
+                let new = || Seq { class: Some(class), requested, overrides, name, at, ways: Vec::new(), starts: Vec::new(), made_here: true };
+                alloc(&mut seqs, &mut by_key, &mut current, var, self.decl_key(class), key_name, new, &e.guards, unconditional(&e.guards));
+            }
+            let RunWhat::Start(st) = &e.what else { continue };
+            let Some(var) = var_of(e.body, st.var) else { continue };
+            if st.kind == StartKind::Create {
+                if let Some(q) = &st.sqr {
+                    stored.insert(var, (e.body, q.clone()));
+                }
+                continue;
+            }
+            // Started without an allocation seen: a handle made elsewhere.
+            if current.get(&var).map_or(true, |v| v.is_empty()) {
+                let Some(class) = declared_class(e.body, st.var).filter(|c| self.object_kind(*c) == Some("sequence")) else { continue };
+                let i = *by_key.entry((Some(var), self.decl_key(class), st.var_text.clone())).or_insert_with(|| {
+                    seqs.push(Seq { class: Some(class), requested: Some(class), overrides: Vec::new(), name: st.var_text.clone(), at: st.var, ways: Vec::new(), starts: Vec::new(), made_here: false });
+                    seqs.len() - 1
+                });
+                current.insert(var, vec![i]);
+            }
+            // `uvm_send` uses the sequencer `uvm_create_on` gave.
+            let (body, sqr) = match (&st.sqr, st.kind) {
+                (None, StartKind::Send) => match stored.get(&var) {
+                    Some((b, q)) => (*b, Some(q.clone())),
+                    None => (e.body, None),
+                },
+                _ => (e.body, st.sqr.clone()),
+            };
+            let ons = self.sequencer_text(body, sqr.as_deref(), ctx);
+            for &i in current.get(&var).map(|v| v.as_slice()).unwrap_or(&[]) {
+                for (on, path) in &ons {
                     let s = &mut seqs[i];
-                    if makes && s.ways.len() < MAX_WAYS && !s.ways.contains(&e.guards) {
-                        s.ways.push(e.guards.clone());
-                    }
-                    if let Some((on, path)) = on {
-                        if s.starts.len() < MAX_WAYS {
-                            s.starts.push(StartInfo { on, path, phase: e.phase.clone(), conditions: conditions_text(std::slice::from_ref(&e.guards)) });
-                        }
+                    if s.starts.len() < MAX_WAYS && !s.starts.iter().any(|x| x.on == *on && x.phase == e.phase) {
+                        s.starts.push(StartInfo { on: on.clone(), path: *path, phase: e.phase.clone(), conditions: conditions_text(std::slice::from_ref(&e.guards)) });
                     }
                 }
             }
@@ -365,46 +410,56 @@ impl Analysis {
             if !s.made_here {
                 node.allocated = Some("elsewhere".into());
             }
-            let parent_sqr = node.starts.iter().find(|x| x.path).map(|x| x.on.clone());
+            let parent: Vec<(String, bool)> = node.starts.iter().map(|x| (x.on.clone(), x.path)).collect();
             let make_children = |w: &mut Walk, node: &mut VerifNode, child_pin: Option<&[String]>| -> Vec<VerifNode> {
-                let Some(c) = cls else { return Vec::new() };
-                let key = self.decl_key(c);
-                if stack.contains(&key) || stack.len() >= 64 {
-                    return Vec::new();
+                match cls {
+                    Some(c) => self.sequence_children(c, node, parent, child_pin, w, stack, scan, factory),
+                    None => Vec::new(),
                 }
-                stack.push(key);
-                let chain = self.class_chain(c);
-                let run = self.sequence_events(&chain, scan);
-                let mut kid_seen = FxHashMap::default();
-                let sub = SeqCtx { derived_first: &chain, path: &node.path, kids: &[], parent_sqr: parent_sqr.clone() };
-                let kids = self.sequence_nodes(&run, &sub, child_pin, &mut kid_seen, w, stack, &mut node.truncated, scan, factory);
-                stack.pop();
-                kids
             };
             if let Some(n) = self.admit((node, cls), pin, seen, w, truncated, make_children) {
                 out.push(n);
-            } else if w.stopped() {
+            } else if w.stopped() && pin.is_none() {
                 break;
             }
         }
         out
     }
 
-    /// Where a start runs: a tree path when the sequencer argument is a chain of member
-    /// handles that lead to a component of the tree (`env.agt.sqr`), else the argument's text.
-    /// Returns (text, is a path).
-    fn sequencer_text(&self, body: DeclRef, st: &SeqStart, ctx: &SeqCtx) -> (String, bool) {
-        let Some(sqr) = &st.sqr else {
+    /// The sequences a sequence of class `c` makes and starts (`parent`: the sequencers it is
+    /// started on, for `uvm_do` without one).
+    #[allow(clippy::too_many_arguments)]
+    fn sequence_children(&self, c: DeclRef, node: &mut VerifNode, parent: Vec<(String, bool)>, child_pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, scan: &Scan, factory: &Factory) -> Vec<VerifNode> {
+        let key = self.decl_key(c);
+        if stack.contains(&key) || stack.len() >= 64 {
+            return Vec::new();
+        }
+        stack.push(key);
+        let chain = self.class_chain(c);
+        let (run, cut) = self.sequence_events(&chain, scan);
+        if cut {
+            node.truncated = true;
+        }
+        let mut kid_seen = FxHashMap::default();
+        let path = node.path.clone();
+        let sub = SeqCtx { derived_first: &chain, path: &path, kids: &[], parent };
+        let kids = self.sequence_nodes(&run, &sub, child_pin, &mut kid_seen, w, stack, &mut node.truncated, scan, factory);
+        stack.pop();
+        kids
+    }
+
+    /// Where a start runs: tree paths when the sequencer argument is a chain of member handles
+    /// that lead to a component of the tree (`env.agt.sqr`), else the argument's text; without
+    /// an argument, the sequencers of the parent sequence. Each with whether it is a path.
+    fn sequencer_text(&self, body: DeclRef, sqr: Option<&[Token]>, ctx: &SeqCtx) -> Vec<(String, bool)> {
+        let Some(sqr) = sqr else {
             // `uvm_do(s)` / `uvm_send(s)` in a sequence: the parent sequence's sequencer.
-            return match &ctx.parent_sqr {
-                Some(p) => (p.clone(), true),
-                None => ("the parent sequence's sequencer".into(), false),
-            };
+            return if ctx.parent.is_empty() { vec![("the parent sequence's sequencer".into(), false)] } else { ctx.parent.clone() };
         };
         let text = tokens_text(sqr);
-        if let [n] = &sqr[..] {
+        if let [n] = sqr {
             if n.is_kw("null") {
-                return ("null (no sequencer)".into(), false);
+                return vec![("null (no sequencer)".into(), false)];
             }
         }
         // `a.b.c`, optionally after `this.`: each name the variable of a component below.
@@ -416,102 +471,98 @@ impl Analysis {
         for (k, x) in toks.iter().enumerate() {
             if k % 2 == 0 {
                 if !x.is_ident() {
-                    return (text, false);
+                    return vec![(text, false)];
                 }
                 names.push(x);
             } else if !x.is_punct(".") {
-                return (text, false);
+                return vec![(text, false)];
             }
         }
         if names.is_empty() || toks.len() % 2 == 0 {
-            return (text, false);
+            return vec![(text, false)];
         }
         let mut level: &[Inst] = ctx.kids;
         let mut found: Option<&Inst> = None;
         for n in names {
-            let Some(d) = self.resolve_at_span(body.unit, n.span) else { return (text, false) };
+            let Some(d) = self.resolve_at_span(body.unit, n.span) else { return vec![(text, false)] };
             let key = self.decl_key(d);
-            let Some(next) = level.iter().find(|c| c.var == Some(key)) else { return (text, false) };
+            // A handle made in more than one place: which one is not known.
+            let mut hits = level.iter().filter(|c| c.var == Some(key));
+            let (Some(next), None) = (hits.next(), hits.next()) else { return vec![(text, false)] };
             found = Some(next);
             level = &next.children;
         }
         match found {
-            Some(n) => (n.path.clone(), true),
-            None => (text, false),
+            Some(n) => vec![(n.path.clone(), true)],
+            None => vec![(text, false)],
         }
     }
 
-    /// Default sequences a component sets in `uvm_config_db`: under the sequencer when the path
-    /// names one of its components, else under the component.
+    /// The default sequences shown under a component: those set for it (a sequencer), or set by
+    /// it for a sequencer the tree does not have.
     #[allow(clippy::too_many_arguments)]
-    fn default_sequences(&self, built: &Built, path: &str, kids: &[Inst], pin: Option<&[String]>, seen: &mut FxHashMap<String, u32>, w: &mut Walk, truncated: &mut bool, scan: &Scan) -> Vec<VerifNode> {
+    fn default_nodes(&self, inst: &Inst, pin: Option<&[String]>, seen: &mut FxHashMap<String, u32>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, scan: &Scan, factory: &Factory) -> Vec<VerifNode> {
         let mut out = Vec::new();
-        for s in &built.sets {
-            if s.set.field.as_deref() != Some("default_sequence") {
+        for d in &inst.defaults {
+            let s = &d.set;
+            let setter = self.enclosing_class(s.body.unit, s.body.decl).map(|c| self.decl(c).name.to_string()).unwrap_or_default();
+            let at = s.set.value.first().map_or(s.set.ty.first().map(|t| t.span).unwrap_or_default(), |t| t.span);
+            let disabled = matches!(&s.set.value[..], [v] if v.is_kw("null"));
+            let note = match (disabled, d.placed) {
+                (true, _) => format!("default sequence disabled for {} ({}) by {setter}", d.target, d.phase),
+                (false, true) => format!("default sequence for {} (set in {setter})", d.phase),
+                (false, false) => format!("configured default sequence for {} ({})", d.target, d.phase),
+            };
+            if disabled {
+                let (node, _) = self.object_node("default_sequence", &inst.path, None, None, "sequence", at, std::slice::from_ref(&s.guards), Vec::new(), vec![note], scan);
+                if let Some(n) = self.admit((node, None), pin, seen, w, truncated, |_, _, _| Vec::new()) {
+                    out.push(n);
+                }
                 continue;
             }
+            // A wrapper (`S::type_id::get()`), made through the factory when the phase starts;
+            // or a sequence object.
             let wrapper = s.set.ty.iter().any(|x| x.text == "uvm_object_wrapper");
-            let class = if wrapper {
-                self.type_handle_class(s.body, &s.set.value)
+            let (requested, params) = if wrapper {
+                match self.type_handle(s.body, &s.set.value) {
+                    Some((c, p)) => (Some(c), p),
+                    None => (None, false),
+                }
             } else {
                 match &s.set.value[..] {
-                    [v] => self.resolve_at_span(s.body.unit, v.span).and_then(|d| self.type_of(d)),
-                    _ => None,
+                    [v] => (self.resolve_at_span(s.body.unit, v.span).and_then(|x| self.type_of(x)), false),
+                    _ => (None, false),
                 }
             };
-            let disabled = matches!(&s.set.value[..], [v] if v.is_kw("null"));
-            let Some(inst) = &s.set.inst else { continue };
-            // `env.agt.sqr.main_phase`: the sequencer and the phase.
-            let (target, phase) = match inst.rsplit_once('.') {
-                Some((t, p)) if p.ends_with("_phase") => (t.to_string(), p.to_string()),
-                _ => (inst.clone(), "run_phase".to_string()),
-            };
-            let full = match &s.set.ctx[..] {
-                [c] if c.is_kw("this") => format!("{path}.{target}"),
-                _ => target.clone(),
-            };
-            let what = if disabled { format!("default sequence disabled for {full} ({phase})") } else { format!("default sequence for {full} ({phase})") };
-            let Some(class) = class.filter(|c| self.object_kind(*c) == Some("sequence")) else {
-                if disabled {
-                    // Shown as a note on nothing: there is no class to show.
-                }
-                continue;
-            };
+            let Some(req) = requested.filter(|c| self.object_kind(*c) == Some("sequence")) else { continue };
+            let (class, overrides) = if wrapper { self.factory_resolve(factory, req, None, params || self.parameterized(req)) } else { (req, Vec::new()) };
             let name = self.decl(class).name.to_string();
-            let at = s.set.value.first().map_or(s.set.ty.first().map(|t| t.span).unwrap_or_default(), |t| t.span);
-            let (mut node, cls) = self.object_node(&name, path, Some(class), None, "sequence", at, std::slice::from_ref(&s.guards), Vec::new(), vec![what], scan);
-            let under = find_path(kids, &full).is_some_and(|k| k.kind == "sequencer");
-            node.starts = vec![StartInfo { on: full.clone(), path: under || !full.contains(['*', '?']), phase, conditions: Vec::new() }];
-            if let Some(n) = self.admit((node, cls), pin, seen, w, truncated, |_, _, _| Vec::new()) {
+            let (mut node, cls) = self.object_node(&name, &inst.path, Some(class), Some(req), "sequence", at, std::slice::from_ref(&s.guards), overrides, vec![note], scan);
+            node.starts = vec![StartInfo { on: d.target.clone(), path: d.placed, phase: d.phase.clone(), conditions: Vec::new() }];
+            let parent = vec![(d.target.clone(), d.placed)];
+            let make_children = |w: &mut Walk, node: &mut VerifNode, child_pin: Option<&[String]>| self.sequence_children(class, node, parent, child_pin, w, stack, scan, factory);
+            if let Some(n) = self.admit((node, cls), pin, seen, w, truncated, make_children) {
                 out.push(n);
             }
         }
         out
     }
 
-    /// The class of a type handle (`S::type_id::get()`, `S::get_type()`).
-    fn type_handle_class(&self, body: DeclRef, t: &[Token]) -> Option<DeclRef> {
-        let k = t.iter().position(|x| x.text == "type_id" || x.text == "get_type")?;
-        let x = t.get(k.checked_sub(2)?)?;
-        if !x.is_ident() {
-            return None;
-        }
-        self.resolve_at_span(body.unit, x.span).and_then(|r| self.follow_typedef(r)).filter(|r| self.decl(*r).kind == DeclKind::Class)
-    }
-
     /// The run-time events of a sequence class (`chain`: it and its base classes below the UVM
-    /// library): those of its `pre_start` ... `post_start` methods.
-    fn sequence_events(&self, chain: &[DeclRef], scan: &Scan) -> Vec<RunEv> {
+    /// library): those of its `pre_start` ... `post_start` methods; and whether some were not
+    /// followed.
+    fn sequence_events(&self, chain: &[DeclRef], scan: &Scan) -> (Vec<RunEv>, bool) {
         let mut built = Built::default();
         let mut stack = Vec::new();
         let none = FxHashMap::default();
         scan.component_events.set(0);
+        scan.cut.set(false);
         for m in SEQUENCE_METHODS {
             if let Some((body, at)) = self.call_target(m, 0, false, chain, scan) {
                 self.run_method(body, at, chain, &none, &[], 0, &mut stack, scan, &mut built, Mode::Run(*m));
             }
         }
-        built.run
+        (built.run, scan.cut.get())
     }
 
     /// A class and its base classes below the UVM library, most derived first.
@@ -535,18 +586,15 @@ struct SeqCtx<'a> {
     derived_first: &'a [DeclRef],
     path: &'a str,
     kids: &'a [Inst],
-    parent_sqr: Option<String>,
+    /// The sequencers of the sequence they run in (each a path or the text of an argument).
+    parent: Vec<(String, bool)>,
 }
 
-/// The component at `path` among `kids` and their descendants.
-fn find_path<'a>(kids: &'a [Inst], path: &str) -> Option<&'a Inst> {
-    for k in kids {
-        if k.path == path {
-            return Some(k);
-        }
-        if path.starts_with(&format!("{}.", k.path)) {
-            return find_path(&k.children, path);
-        }
-    }
-    None
+/// A sequence made while a component builds, with the class the factory gave it then.
+#[derive(Debug, Clone)]
+pub(super) struct MadeSeq {
+    pub cr: Creation,
+    pub class: Option<DeclRef>,
+    pub requested: Option<DeclRef>,
+    pub overrides: Vec<OverrideStep>,
 }

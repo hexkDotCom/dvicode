@@ -352,8 +352,11 @@ struct Creation {
     class: Option<DeclRef>,
     /// Made by the factory (`type_id::create`), which applies overrides; else by `new`.
     factory: bool,
-    /// The factory context (`create(name, parent, "contxt")`), when a literal.
+    /// The factory context (`create(name, parent, "contxt")`), when a literal (an empty one is the
+    /// parent's: no context).
     contxt: Option<String>,
+    /// The context is an expression: where the factory looks is not known.
+    contxt_unknown: bool,
     /// The class is written with parameter values (`T#(8)::type_id::create`).
     params: bool,
 }
@@ -421,12 +424,17 @@ struct Made {
     stage: Mode,
     /// Replaced by a later creation.
     dead: bool,
+    /// The creation or registration event of the component its last way is (see `Built::ev`).
+    last_ev: usize,
 }
 
 /// What building a component makes: its creations, and the overrides it registers, in order;
 /// with objects, also the `uvm_config_db` sets of its build and what its run-time phases start.
 #[derive(Default)]
 struct Built {
+    /// Creations and registrations so far: a creation reached again merges with an earlier way
+    /// only when nothing happened in between that could change the factory.
+    ev: usize,
     made: Vec<Made>,
     /// `made` by left-hand side.
     by_lhs: FxHashMap<String, Vec<usize>>,
@@ -458,6 +466,8 @@ struct RunEv {
 #[derive(Debug, Clone)]
 enum RunWhat {
     Alloc(Creation),
+    /// A sequence made while building, its class already resolved.
+    Made(Box<objects::MadeSeq>),
     Start(SeqStart),
 }
 
@@ -467,8 +477,20 @@ enum RunWhat {
 enum Mode {
     Construct,
     Build,
-    Late,
+    /// A phase after build (`connect_phase` ...): objects only.
+    Late(&'static str),
     Run(&'static str),
+}
+
+impl Mode {
+    /// The phase (or `new`) it stands for.
+    fn phase(self) -> &'static str {
+        match self {
+            Mode::Construct => "new",
+            Mode::Build => "build_phase",
+            Mode::Late(p) | Mode::Run(p) => p,
+        }
+    }
 }
 
 /// An override call reached while building a component.
@@ -607,6 +629,8 @@ struct Inst {
     seen: FxHashMap<String, u32>,
     /// Some creations were not followed.
     cut: bool,
+    /// Default sequences shown under it.
+    defaults: Vec<DefaultSeq>,
 }
 
 /// An object made while a component builds.
@@ -616,18 +640,34 @@ struct ObjInst {
     requested: Option<DeclRef>,
     overrides: Vec<OverrideStep>,
     kind: &'static str,
+    /// The ways it is made, and the other classes made instead.
+    alts: Vec<Vec<Guard>>,
+    alternatives: Vec<Alternative>,
 }
 
-/// Components modeled per test at most.
+/// A default sequence set in `uvm_config_db`, and the component it is shown under.
+struct DefaultSeq {
+    set: SetEv,
+    /// The full path of the sequencer it is for (a pattern when it has wildcards).
+    target: String,
+    phase: String,
+    /// Shown under the sequencer it names (else under the component that sets it).
+    placed: bool,
+}
+
+/// Components, objects and override registrations modeled per test at most.
 const MAX_MODEL: usize = 200_000;
 
 /// Adds a creation, merging it with those of the same variable and name: the same creation
 /// reached another way (with the factory as it was) adds that way; a later one at least as
 /// unconditional as every earlier way replaces them (a derived class re-creating it);
 /// otherwise it is another creation that can run instead.
-fn add_made(built: &mut Built, m: Made) {
+fn add_made(built: &mut Built, mut m: Made) {
+    built.ev += 1;
+    let ev = built.ev;
+    m.last_ev = ev;
     let g = m.alts[0].clone();
-    let same_site = |x: &Made| x.body == m.body && x.cr.lhs_head == m.cr.lhs_head && x.cr.name == m.cr.name && x.seq == m.seq && x.stage == m.stage;
+    let same_site = |x: &Made| x.body == m.body && x.cr.lhs_head == m.cr.lhs_head && x.cr.name == m.cr.name && x.seq == m.seq && x.stage == m.stage && x.last_ev + 1 == ev;
     let compatible = |x: &Made| !x.dead && x.stage == m.stage && (x.cr.name == m.cr.name || x.cr.name.is_none() || m.cr.name.is_none());
     let matching: Vec<usize> = built.by_lhs.get(&m.cr.lhs).map(|v| v.iter().copied().filter(|&i| compatible(&built.made[i])).collect()).unwrap_or_default();
     let Some(&first) = matching.first() else {
@@ -639,10 +679,12 @@ fn add_made(built: &mut Built, m: Made) {
         let x = &mut built.made[i];
         if same_site(x) {
             add_way(x, g);
+            x.last_ev = ev;
             return;
         }
         if let Some(y) = x.others.iter_mut().find(|y| same_site(y)) {
             add_way(y, g);
+            y.last_ev = ev;
             return;
         }
     }
@@ -712,11 +754,13 @@ fn short(s: &str) -> String {
 
 /// Methods UVM declares virtual that a testbench overrides: the common phases (and their old
 /// names) and a sequence's methods. The run-time phases are in `RUN_PHASES`.
-const UVM_VIRTUALS: &[&str] = &[
+const UVM_PHASES: &[&str] = &[
     "build_phase", "connect_phase", "end_of_elaboration_phase", "start_of_simulation_phase", "extract_phase", "check_phase", "report_phase", "final_phase",
     "build", "connect", "end_of_elaboration", "start_of_simulation", "run", "extract", "check", "report",
-    "body", "pre_body", "post_body", "pre_start", "post_start", "pre_do", "mid_do", "post_do",
 ];
+
+/// A sequence's virtual methods.
+const SEQUENCE_VIRTUALS: &[&str] = &["body", "pre_body", "post_body", "pre_start", "post_start", "pre_do", "mid_do", "post_do"];
 
 /// Whether the tokens start by changing the variable `name` (`name = ...`, `name++`,
 /// `name += ...`), or contain such a change.
@@ -1149,7 +1193,7 @@ impl Analysis {
     }
 
     /// Classes of the UVM library itself (`uvm_pkg`), whose internals are not shown.
-    fn in_uvm_library(&self, class: DeclRef) -> bool {
+    pub(crate) fn in_uvm_library(&self, class: DeclRef) -> bool {
         let u = self.unit(class.unit);
         let mut cur = u.parsed.decl(class.decl).parent;
         while let Some(p) = cur {
@@ -1324,7 +1368,80 @@ impl Analysis {
         let mut stack = vec![self.decl_key(test)];
         self.construct_inst(&mut root, &mut factory, &mut nodes, &mut stack, scan);
         self.build_inst(&mut root, &mut factory, &mut nodes, &mut stack, scan);
+        if scan.objects {
+            // The phases after build run once every component is built, bottom up.
+            for phase in LATE_PHASES {
+                self.late_inst(&mut root, Mode::Late(phase), &mut factory, &mut nodes, &mut stack, scan);
+            }
+            self.place_defaults(&mut root);
+        }
         (root, factory)
+    }
+
+    /// A phase after build for a component and its children (children first).
+    fn late_inst(&self, inst: &mut Inst, stage: Mode, factory: &mut Factory, nodes: &mut usize, stack: &mut Vec<(u32, u32)>, scan: &Scan) {
+        let mut order: Vec<usize> = (0..inst.children.len()).collect();
+        order.sort_by(|a, b| inst.children[*a].name.cmp(&inst.children[*b].name));
+        for i in order {
+            let child = &mut inst.children[i];
+            let Some(c) = child.class.filter(|_| child.kind != "port") else { continue };
+            let key = self.decl_key(c);
+            if stack.contains(&key) || stack.len() >= 64 {
+                continue;
+            }
+            stack.push(key);
+            self.late_inst(child, stage, factory, nodes, stack, scan);
+            stack.pop();
+        }
+        if let Some(built) = inst.built.clone() {
+            self.stage(inst, &built, stage, factory, nodes, stack, scan);
+        }
+    }
+
+    /// The default sequences the components set, each under the sequencer it names when that
+    /// is one component of the tree, else under the component that sets it.
+    fn place_defaults(&self, root: &mut Inst) {
+        fn collect(a: &Analysis, inst: &Inst, out: &mut Vec<(String, DefaultSeq)>) {
+            if let Some(built) = &inst.built {
+                for s in built.sets.iter().filter(|s| s.set.field.as_deref() == Some("default_sequence")) {
+                    let Some(i) = &s.set.inst else { continue };
+                    let (target, phase) = match i.rsplit_once('.') {
+                        Some((t, p)) if p.ends_with("_phase") => (t.to_string(), p.to_string()),
+                        _ => (i.clone(), "run_phase".to_string()),
+                    };
+                    let full = match &s.set.ctx[..] {
+                        [c] if c.is_kw("this") => if target.is_empty() { inst.path.clone() } else { format!("{}.{target}", inst.path) },
+                        _ => target,
+                    };
+                    out.push((inst.path.clone(), DefaultSeq { set: s.clone(), target: full, phase, placed: false }));
+                }
+            }
+            for c in &inst.children {
+                collect(a, c, out);
+            }
+        }
+        fn find<'a>(inst: &'a mut Inst, path: &str) -> Option<&'a mut Inst> {
+            if inst.path == path {
+                return Some(inst);
+            }
+            let child = inst.children.iter_mut().find(|c| path == c.path || path.starts_with(&format!("{}.", c.path)))?;
+            find(child, path)
+        }
+        let mut found = Vec::new();
+        collect(self, root, &mut found);
+        for (setter, mut d) in found {
+            let literal = !d.target.contains(['*', '?', '+']);
+            if literal {
+                if let Some(sqr) = find(root, &d.target).filter(|s| s.kind == "sequencer") {
+                    d.placed = true;
+                    sqr.defaults.push(d);
+                    continue;
+                }
+            }
+            if let Some(s) = find(root, &setter) {
+                s.defaults.push(d);
+            }
+        }
     }
 
     /// Runs a component's construction.
@@ -1342,9 +1459,6 @@ impl Analysis {
     fn build_inst(&self, inst: &mut Inst, factory: &mut Factory, nodes: &mut usize, stack: &mut Vec<(u32, u32)>, scan: &Scan) {
         let Some(built) = inst.built.clone() else { return };
         self.stage(inst, &built, Mode::Build, factory, nodes, stack, scan);
-        if scan.objects {
-            self.stage(inst, &built, Mode::Late, factory, nodes, stack, scan);
-        }
         let mut order: Vec<usize> = (0..inst.children.len()).collect();
         order.sort_by(|a, b| inst.children[*a].name.cmp(&inst.children[*b].name));
         for i in order {
@@ -1378,7 +1492,9 @@ impl Analysis {
             let r = &built.regs[*cursor];
             if r.stage == stage {
                 if let Some(e) = self.factory_entry(r, &inst.path, inst.certain, scan) {
-                    factory.push(e);
+                    if factory.entries.len() < MAX_MODEL {
+                        factory.push(e);
+                    }
                 }
             }
             *cursor += 1;
@@ -1409,7 +1525,7 @@ impl Analysis {
         let len = factory.entries.len();
         let mut k = cursor;
         self.register(built, m.stage, m.seq, &mut k, inst, factory, scan);
-        let (c, steps) = self.factory_resolve(factory, req, lookup, m.cr.params);
+        let (c, steps) = self.factory_resolve(factory, req, lookup, m.cr.params || self.parameterized(req));
         factory.truncate(len);
         (Some(c), requested, steps)
     }
@@ -1424,6 +1540,9 @@ impl Analysis {
         // object without a parent: its name alone).
         let lookup_of = |x: &Made| -> Option<String> {
             let n = x.cr.name.as_ref()?;
+            if x.cr.contxt_unknown {
+                return None;
+            }
             match (&x.cr.contxt, x.cr.parent.as_str()) {
                 (Some(c), _) => Some(format!("{c}.{n}")),
                 (None, "this") => path_known.then(|| path.clone()),
@@ -1432,14 +1551,12 @@ impl Analysis {
             }
         };
         let (cls, requested, overrides) = self.made_class(inst, built, m, cursor, lookup_of(m).as_deref(), factory, scan);
-        if let Some(kind) = cls.and_then(|c| self.object_kind(c)) {
-            if scan.objects {
-                inst.objs.push(ObjInst { made: m.clone(), class: cls, requested, overrides, kind });
-            }
+        let object = cls.and_then(|c| self.object_kind(c));
+        // Components are made in construction or build, with `this` as their parent.
+        if object.is_none() && (matches!(m.stage, Mode::Late(_)) || m.cr.parent != "this") {
             return;
         }
-        // Components are made in construction or build, with `this` as their parent.
-        if m.stage == Mode::Late || m.cr.parent != "this" {
+        if object.is_some() && !scan.objects {
             return;
         }
         // Other creations of the same class only add ways to make it.
@@ -1469,6 +1586,15 @@ impl Analysis {
                 conditions: conditions_text(&o.alts),
             });
         }
+        if let Some(kind) = object {
+            *nodes += 1;
+            if *nodes > MAX_MODEL {
+                inst.cut = true;
+                return;
+            }
+            inst.objs.push(ObjInst { made: m.clone(), class: cls, requested, overrides, kind, alts, alternatives });
+            return;
+        }
         let kind = match cls {
             Some(c) => match self.uvm_kind(c) {
                 Some(k) => k,
@@ -1484,7 +1610,8 @@ impl Analysis {
             return;
         }
         let dup = sibling(&mut inst.seen, &name);
-        let certain = inst.certain && alternatives.is_empty() && conditions_text(&alts).is_empty() && self.loops_sure(&alts[0], scan);
+        // Made for certain, and of that class for certain (no possible override).
+        let certain = inst.certain && alternatives.is_empty() && conditions_text(&alts).is_empty() && self.loops_sure(&alts[0], scan) && overrides.iter().all(|o| o.applied);
         let mut child = Inst {
             name,
             path,
@@ -1594,7 +1721,7 @@ impl Analysis {
             }
         }
         // Objects after the components, so turning them on renames no component.
-        if scan.objects && !w.stopped() {
+        if scan.objects && (!w.stopped() || pin.is_some()) {
             let mut seen = inst.seen.clone();
             out.extend(self.object_nodes(inst, pin, &mut seen, w, stack, truncated, scan, run_factory));
         }
@@ -1622,7 +1749,7 @@ impl Analysis {
             c.path.clone()
         };
         let conditions = conditions_text(std::slice::from_ref(&r.guards));
-        let certain = inst_certain && conditions.is_empty() && self.loops_sure(&r.guards, scan) && !c.replace_unknown && !c.params;
+        let certain = inst_certain && conditions.is_empty() && self.loops_sure(&r.guards, scan) && !c.replace_unknown && !c.params && !self.parameterized(c.from);
         let class = self.enclosing_class(r.body.unit, r.body.decl).map(|k| self.decl(k).name.to_string()).unwrap_or_default();
         let method = self.decl(r.body).name.to_string();
         Some(Entry {
@@ -1662,8 +1789,9 @@ impl Analysis {
         };
         let certain = |_: usize, e: &Entry| e.certain && !params;
         let Some((built, chain)) = self.factory_chain(factory, requested, path, &certain) else {
-            // A chain too long to follow: nothing is claimed.
-            return (requested, Vec::new());
+            // A chain too long to follow: nothing is claimed but that.
+            let name = self.decl(requested).name.to_string();
+            return (requested, vec![OverrideStep { from: name, to: "?".into(), instance: false, path: None, set_in: "(an override chain too long to follow)".into(), uri: None, line: 0, conditions: Vec::new(), applied: false }]);
         };
         let mut steps: Vec<OverrideStep> = chain.iter().map(|&i| step(&factory.entries[i], true)).collect();
         // The other overrides of the classes on the way, each listed when, set, it would change
@@ -1674,11 +1802,13 @@ impl Analysis {
         let mut candidates: Vec<usize> = seen_classes.iter().flat_map(|k| factory.by_from.get(k).into_iter().flatten().copied()).filter(|&i| !certain(i, &factory.entries[i])).collect();
         candidates.sort_unstable();
         candidates.dedup();
-        for i in candidates.into_iter().take(16) {
+        let mut listed = 0;
+        for i in candidates.into_iter().take(256) {
             let with = |j: usize, e: &Entry| certain(j, e) || j == i;
             let changes = self.factory_chain(factory, requested, path, &with).map_or(true, |(c, _)| self.decl_key(c) != built_key);
-            if changes {
+            if changes && listed < 16 {
                 steps.push(step(&factory.entries[i], false));
+                listed += 1;
             }
         }
         (built, steps)
@@ -1903,7 +2033,7 @@ impl Analysis {
         if scan.objects {
             for phase in LATE_PHASES {
                 if let Some((body, at)) = self.call_target(phase, 0, false, derived_first, scan) {
-                    self.run_method(body, at, derived_first, &none, &[], 0, &mut stack, scan, &mut made, Mode::Late);
+                    self.run_method(body, at, derived_first, &none, &[], 0, &mut stack, scan, &mut made, Mode::Late(phase));
                 }
             }
             for phase in RUN_PHASES {
@@ -1958,12 +2088,13 @@ impl Analysis {
                         Mode::Run(phase) => made.run.push(RunEv { body, guards, phase: phase.to_string(), what: RunWhat::Alloc(cr) }),
                         _ => {
                             let seq = made.regs.len();
-                            add_made(made, Made { body, cr, alts: vec![guards], others: Vec::new(), seq, stage: mode, dead: false });
+                            add_made(made, Made { body, cr, alts: vec![guards], others: Vec::new(), seq, stage: mode, dead: false, last_ev: 0 });
                         }
                     }
                 }
                 What::Override(call) => {
-                    if matches!(mode, Mode::Construct | Mode::Build) {
+                    if !matches!(mode, Mode::Run(_)) {
+                        made.ev += 1;
                         made.regs.push(Reg { call: call.clone(), body, guards, stage: mode });
                     }
                 }
@@ -2187,7 +2318,7 @@ impl Analysis {
             });
             out.push((
                 lhs_start,
-                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, parent: "this".into(), class, factory: cr.factory, contxt: None, params: cr.params },
+                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, parent: "this".into(), class, factory: cr.factory, contxt: None, contxt_unknown: false, params: cr.params },
             ));
         }
         out
@@ -2214,11 +2345,23 @@ impl Analysis {
         Some((self.implementation_of(m).unwrap_or(m), i))
     }
 
+    /// Whether a class has parameters: which specialization a type names may not be known.
+    pub(crate) fn parameterized(&self, class: DeclRef) -> bool {
+        let u = self.unit(class.unit);
+        u.parsed.decl(class.decl).children.iter().any(|c| matches!(u.parsed.decl(*c).kind, DeclKind::Parameter | DeclKind::TypeParam) && !u.parsed.decl(*c).has(dflags::FROM_MACRO))
+    }
+
     /// Whether the UVM library classes above `derived_first` declare `name` virtual (then every
     /// override is virtual too, written so or not). The phase methods (and their old names) are
     /// virtual in every UVM and OVM version, also without the library's source.
     fn virtual_in_library(&self, name: &str, derived_first: &[DeclRef]) -> bool {
-        if UVM_VIRTUALS.contains(&name) || RUN_PHASES.contains(&name) {
+        // Phase methods in components, sequence methods in sequences.
+        let first = derived_first.first().copied();
+        let family = |base: &str| first.is_some_and(|c| self.derives_from(c, base));
+        if (UVM_PHASES.contains(&name) || RUN_PHASES.contains(&name)) && family("uvm_component") {
+            return true;
+        }
+        if SEQUENCE_VIRTUALS.contains(&name) && family("uvm_sequence_base") {
             return true;
         }
         let mut cur = derived_first.last().and_then(|c| self.class_base(*c));
@@ -2364,11 +2507,15 @@ fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Opti
     let first = args.first().filter(|a| a.len() == 1);
     let name = first.filter(|a| a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
     let name_arg = first.filter(|a| a[0].is_ident()).map(|a| a[0].text.to_string());
-    let contxt = args.get(2).and_then(|a| match a {
-        [s] if s.kind == TokKind::String => Some(s.text.trim_matches('"').to_string()),
-        _ => None,
-    });
-    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, parent, class: None, factory, contxt, params })
+    let (contxt, contxt_unknown) = match args.get(2) {
+        None => (None, false),
+        Some([s]) if s.kind == TokKind::String => {
+            let c = s.text.trim_matches('"');
+            ((!c.is_empty()).then(|| c.to_string()), false)
+        }
+        Some(_) => (None, true),
+    };
+    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, parent, class: None, factory, contxt, contxt_unknown, params })
 }
 
 /// Calls of the object's own methods in a method body (`f(...)`, `this.f(...)`) and of its base
@@ -2508,7 +2655,7 @@ pub(crate) fn call_args(t: &[Token], open: usize) -> Vec<&[Token]> {
     out
 }
 
-fn tokens_text(t: &[Token]) -> String {
+pub(crate) fn tokens_text(t: &[Token]) -> String {
     let mut s = String::new();
     for (i, x) in t.iter().enumerate() {
         if i > 0 && x.ws_before() {

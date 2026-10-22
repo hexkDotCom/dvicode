@@ -1569,6 +1569,7 @@ endpackage
             "environment : env [env]",
             "  agt : agent [env]",
             "    sqr : sqr_c [sequencer]",
+            "      leaf_seq : leaf_seq [sequence] on uvm_test_top.environment.agt.sqr@main_phase (default sequence for main_phase (set in base_t))",
             "  model : regs [register model]",
             "  adapter : adapter_c [adapter]",
             "cfg : cfg_c [object] (set in config_db for uvm_test_top.env* as \"cfg\")",
@@ -1576,7 +1577,100 @@ endpackage
             "  a : leaf_seq [sequence] on uvm_test_top.environment.agt.sqr@body",
             "  b : leaf_seq [sequence] on ~p_sequencer.other@body",
             "other_seq : leaf_seq [sequence] on ~null (no sequencer)@main_phase elsewhere",
-            "leaf_seq : leaf_seq [sequence] on uvm_test_top.environment.agt.sqr@main_phase (default sequence for uvm_test_top.environment.agt.sqr (main_phase))",
+        ]
+    );
+}
+
+#[test]
+fn objects_review_cases() {
+    let uvm = r#"`define uvm_create_on(S, Q) begin S = new(); end
+`define uvm_send(S) begin S.start(null); end
+package uvm_pkg;
+  class uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_component extends uvm_object; function new(string name, uvm_component parent); endfunction endclass
+  class uvm_sequence_item extends uvm_object; function new(string name = ""); endfunction endclass
+  class uvm_sequence_base extends uvm_sequence_item; function new(string name = ""); endfunction endclass
+  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+endpackage
+"#;
+    let tb = r#"package tb_pkg;
+  import uvm_pkg::*;
+  class cfg_a extends uvm_object; function new(string name = ""); super.new(name); endfunction endclass
+  class cfg_b extends cfg_a; function new(string name = ""); super.new(name); endfunction endclass
+  class s1 extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class s2 extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class child_seq extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class parent_seq extends uvm_sequence_base;
+    child_seq c;
+    function new(string name = ""); super.new(name); endfunction
+    task body();
+      `uvm_create_on(c, p_sequencer.other)
+      `uvm_send(c)
+    endtask
+  endclass
+  class installer extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); set_type_override_by_type(cfg_a::get_type(), cfg_b::get_type()); endfunction
+  endclass
+  class t extends uvm_test;
+    installer inst;
+    cfg_a late_cfg, alt_cfg;
+    uvm_sequence_base s;
+    s1 early;
+    parent_seq p;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      inst = installer::type_id::create("inst", this);
+      if (mode) alt_cfg = cfg_a::type_id::create("alt_cfg");
+      else alt_cfg = cfg_b::type_id::create("alt_cfg");
+      early = s1::type_id::create("early");
+      s1::type_id::set_type_override(s2::get_type());
+    endfunction
+    function void connect_phase(uvm_phase phase);
+      late_cfg = cfg_a::type_id::create("late_cfg");
+    endfunction
+    task main_phase(uvm_phase phase);
+      s = s1::type_id::create("one");
+      s.start(q1);
+      s = s2::type_id::create("two");
+      s.start(q2);
+      early.start(q3);
+      p.start(q4);
+    endtask
+  endclass
+endpackage
+"#;
+    let (a, _) = project("objectsreview", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let mut q = dvi_analysis::ide::views::TreeQuery::new(1000);
+    q.objects = true;
+    let (h, _) = a.verification_tree(Some("t"), &q);
+    let mut out = Vec::new();
+    fn walk(n: &dvi_analysis::ide::views::VerifNode, d: usize, out: &mut Vec<String>) {
+        for c in &n.children {
+            let starts: Vec<String> = c.starts.iter().map(|s| s.on.clone()).collect();
+            let alts: Vec<String> = c.alternatives.iter().map(|x| x.class.clone()).collect();
+            out.push(format!("{}{} : {}{}{}", "  ".repeat(d), c.name, c.class, if starts.is_empty() { String::new() } else { format!(" on {}", starts.join(", ")) }, if alts.is_empty() { String::new() } else { format!(" | {}", alts.join(", ")) }));
+            walk(c, d + 1, out);
+        }
+    }
+    walk(&h.roots[0], 0, &mut out);
+    assert_eq!(
+        out,
+        [
+            "inst : installer",
+            // Alternatives of an object.
+            "alt_cfg : cfg_a | cfg_b",
+            // connect_phase runs after every build: the installer's override applies.
+            "late_cfg : cfg_b",
+            // Made before the override: still s1, started in main_phase.
+            "early : s1 on q3",
+            // Each start goes to what the variable holds then.
+            "one : s2 on q1",
+            "two : s2 on q2",
+            "p : parent_seq on q4",
+            // uvm_send sends on the sequencer uvm_create_on gave.
+            "  c : child_seq on p_sequencer.other",
         ]
     );
 }
