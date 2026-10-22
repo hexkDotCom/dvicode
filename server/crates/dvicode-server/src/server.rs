@@ -1183,6 +1183,10 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
     q.filter = p.filter.as_deref().and_then(Filter::new);
     q.reveal = p.reveal.unwrap_or_default();
     q.target = p.target;
+    if q.target.is_some() {
+        // Every occurrence counts ("1 of N").
+        q.max_matches = q.max_nodes;
+    }
     let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
     match p.view.as_str() {
         "design" => {

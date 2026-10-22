@@ -269,6 +269,12 @@ async function run() {
     await api.ready();
     const v = api.views();
     const sel = (view) => (view.view.selection[0] ? view.view.selection[0].placed.names.join('.') : '');
+    // On a timeout: what the view shows.
+    const state = (view) => `selection '${sel(view)}', description '${view.view.description}', message '${view.view.message}', visible ${view.view.visible}, editor ${vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.uri}`;
+    const until = (what, view, want) =>
+      waitFor(what, async () => sel(view) === want, 20000).catch((e) => {
+        throw new Error(`${e.message}: ${state(view)}`);
+      });
     const at = async (doc, needle, down) => {
       const ed = await vscode.window.showTextDocument(doc);
       const p = lineOf(doc, needle).translate(down, 0);
@@ -281,12 +287,12 @@ async function run() {
       // In fifo: its first instance; the editor keeps the focus.
       const fifo = await open('rtl/fifo.sv');
       await at(fifo, 'module fifo', 3);
-      await waitFor('design selection', async () => sel(v.design) === 'tb_top.dut.u_fifo', 20000);
+      await until('design selection', v.design, 'tb_top.dut.u_fifo');
       if (vscode.window.activeTextEditor.document !== fifo) throw new Error('the editor lost the focus');
       const first = v.design.view.description;
       if (first !== '1 of 2') throw new Error(`description: ${first}`);
       await vscode.commands.executeCommand('dvicode.design.nextOccurrence');
-      await waitFor('next occurrence', async () => sel(v.design) === 'tb_top.dut.g_mon.u_mon', 20000);
+      await until('next occurrence', v.design, 'tb_top.dut.g_mon.u_mon');
       // Moving inside fifo keeps the occurrence shown.
       await at(fifo, 'module fifo', 4);
       await sleep(1500);
@@ -294,13 +300,13 @@ async function run() {
       // On an instantiation line: that instance.
       const top = await open('rtl/top.sv');
       await at(top, 'u_fifo (', 0);
-      await waitFor('instance selection', async () => sel(v.design) === 'tb_top.dut.u_fifo', 20000);
+      await until('instance selection', v.design, 'tb_top.dut.u_fifo');
       // The verification hierarchy follows classes.
       await vscode.commands.executeCommand('dvicode.verificationHierarchy.focus');
       await vscode.commands.executeCommand('dvicode.verification.syncOn');
       const env = await open('tb/demo_env_pkg.sv');
       await at(env, 'class demo_monitor', 2);
-      await waitFor('verification selection', async () => sel(v.verification) === 'demo_full_test.env.agents[i].mon', 20000);
+      await until('verification selection', v.verification, 'demo_full_test.env.agents[i].mon');
       return `${first} -> ${sel(v.design)}; ${sel(v.verification)}`;
     } finally {
       await vscode.commands.executeCommand('dvicode.design.syncOff');

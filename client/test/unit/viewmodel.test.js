@@ -92,6 +92,7 @@ test.describe('view texts', () => {
     assert.equal(vm.viewDescription({ ...base, position: { index: 0, count: 1 } }), undefined);
     // The node limit is shown on the nodes (…), not in the description.
     assert.equal(vm.viewDescription({ ...base, incomplete: 'nodes' }), undefined);
+    assert.equal(vm.viewDescription({ ...base, scope: 'top tb', stale: true }), 'top tb · out of date: Refresh');
   });
   test.it('shows the first message that applies', () => {
     assert.equal(vm.viewMessage({ ...base, connected: false, error: 'x' }), 'The DVICode server is not running.');

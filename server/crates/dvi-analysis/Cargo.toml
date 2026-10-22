@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 
 [dependencies]
 dvi-syntax.workspace = true

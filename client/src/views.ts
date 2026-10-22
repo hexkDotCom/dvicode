@@ -301,6 +301,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       emptyText: this.emptyText(),
       position: this.sync && this.cycle.paths.length ? { index: this.cycle.index, count: this.cycle.paths.length } : undefined,
       syncNote: this.sync ? this.syncNote : undefined,
+      stale: this.stale && this.items.size > LARGE_TREE,
     };
     this.view.description = viewDescription(s);
     this.view.message = viewMessage(s);
@@ -424,7 +425,15 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   protected placed(): PlacedTree<N> | undefined {
     return this.tree;
   }
+
+  /** Nodes in the tree shown. */
+  get size(): number {
+    return this.items.size;
+  }
 }
+
+/** Trees larger than this are not fetched again after each edit (the view says it is out of date). */
+const LARGE_TREE = 5000;
 
 function openCommand(conn: Conn, uri: string | null, line: number, character: number): vscode.Command | undefined {
   const m = conn.mapper();
@@ -435,10 +444,19 @@ function openCommand(conn: Conn, uri: string | null, line: number, character: nu
   return { command: 'vscode.open', title: 'Open', arguments: [m.toClient(uri), { selection: new vscode.Range(pos, pos) }] };
 }
 
-/** Uri of the engine as VS Code shows it, to compare with documents. */
+/**
+ * A key to compare document URIs: VS Code may give the same document's authority in another case
+ * (`dvicode://wsl+ubuntu/...` for `wsl+Ubuntu`), and Windows paths ignore case.
+ */
+export function uriKey(u: vscode.Uri): string {
+  const key = `${u.scheme}://${u.authority.toLowerCase()}${u.path}`;
+  return u.scheme === 'file' && process.platform === 'win32' ? key.toLowerCase() : key;
+}
+
+/** The key of an engine URI as VS Code shows it, to compare with documents. */
 function clientUri(conn: Conn, uri: string | null): string | undefined {
   const m = conn.mapper();
-  return uri && m ? m.toClient(uri).toString() : undefined;
+  return uri && m ? uriKey(m.toClient(uri)) : undefined;
 }
 
 const DESIGN_ICONS: Record<string, string> = { generate: 'symbol-namespace', interface: 'symbol-interface', unresolved: 'warning' };
@@ -737,8 +755,10 @@ export class Views implements vscode.Disposable {
     clearTimeout(this.revisionTimer);
     this.revisionTimer = setTimeout(() => {
       for (const v of this.all) {
-        if (v.view?.visible) {
+        if (v.view?.visible && v.size <= LARGE_TREE) {
           void v.refresh();
+        } else {
+          v.present();
         }
       }
     }, 1500);
@@ -832,7 +852,7 @@ export class Views implements vscode.Disposable {
     if (!views.length || !ed || !m || !this.ours(ed.document.uri)) {
       return;
     }
-    const doc = ed.document.uri.toString();
+    const doc = uriKey(ed.document.uri);
     const needLocate = views.some((v) => v.name !== 'files');
     const located = needLocate ? await this.locate(ed, m) : undefined;
     for (const v of views) {
@@ -860,7 +880,7 @@ export class Views implements vscode.Disposable {
     }
     const m = this.conn.mapper();
     try {
-      return m !== undefined && m.toClient(m.toServer(uri)).authority === uri.authority;
+      return m !== undefined && m.toClient(m.toServer(uri)).authority.toLowerCase() === uri.authority.toLowerCase();
     } catch {
       return false;
     }

@@ -215,6 +215,8 @@ export interface ViewState {
   position?: { index: number; count: number };
   /** Why following the editor shows nothing. */
   syncNote?: string;
+  /** The tree is older than the code (a large tree is not fetched again after each edit). */
+  stale?: boolean;
 }
 
 /** The text after the view's title. */
@@ -230,6 +232,9 @@ export function viewDescription(s: ViewState): string | undefined {
   const inc = incompleteText(s.incomplete, s.matches ?? 0);
   if (inc && (s.filter || s.incomplete !== 'nodes')) {
     parts.push(inc);
+  }
+  if (s.stale) {
+    parts.push('out of date: Refresh');
   }
   if (s.position && s.position.count > 1) {
     parts.push(`${s.position.index + 1} of ${s.position.count}`);
