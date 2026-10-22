@@ -1198,7 +1198,7 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
             json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": h.roots, "test": h.test, "configured": h.configured, "tests": h.tests })
         }
         _ => {
-            let (roots, meta) = a.compiled_files_filtered(q.filter.as_ref());
+            let (roots, meta) = a.compiled_files_tree(&q);
             json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": roots })
         }
     }

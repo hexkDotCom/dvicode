@@ -212,7 +212,7 @@ export interface ViewState {
   /** Why the tree is empty without a filter. */
   emptyText?: string;
   /** "k of N" while following the editor. */
-  position?: { index: number; count: number };
+  position?: { index: number; count: number; more?: boolean };
   /** Why following the editor shows nothing. */
   syncNote?: string;
   /** The tree is older than the code (a large tree is not fetched again after each edit). */
@@ -237,7 +237,7 @@ export function viewDescription(s: ViewState): string | undefined {
     parts.push('out of date: Refresh');
   }
   if (s.position && s.position.count > 1) {
-    parts.push(`${s.position.index + 1} of ${s.position.count}`);
+    parts.push(`${s.position.index + 1} of ${s.position.count}${s.position.more ? '+' : ''}`);
   }
   return parts.length ? parts.join(' · ') : undefined;
 }

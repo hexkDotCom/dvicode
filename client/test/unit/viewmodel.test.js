@@ -89,6 +89,7 @@ test.describe('view texts', () => {
     assert.equal(vm.viewDescription({ ...base, filter: 'fifo', matches: 1 }), "filter 'fifo': 1 match");
     assert.equal(vm.viewDescription({ ...base, filter: 'f', matches: 5000, incomplete: 'matches' }), "filter 'f': 5,000 matches · first 5,000 matches");
     assert.equal(vm.viewDescription({ ...base, position: { index: 1, count: 3 } }), '2 of 3');
+    assert.equal(vm.viewDescription({ ...base, position: { index: 0, count: 5000, more: true } }), '1 of 5000+');
     assert.equal(vm.viewDescription({ ...base, position: { index: 0, count: 1 } }), undefined);
     // The node limit is shown on the nodes (…), not in the description.
     assert.equal(vm.viewDescription({ ...base, incomplete: 'nodes' }), undefined);

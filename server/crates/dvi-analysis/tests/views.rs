@@ -115,7 +115,7 @@ fn verification_and_file_filters() {
     assert_eq!((env.name.as_str(), env.children.len(), meta.matches), ("env", 2, 2));
     let (h, _) = a.verification_tree(Some("t1"), &query("env.a1"));
     assert_eq!(h.roots[0].children[0].children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["a1"]);
-    let (files, meta) = a.compiled_files_filtered(Filter::new("tb_*.sv").as_ref());
+    let (files, meta) = a.compiled_files_tree(&query("tb_*.sv"));
     assert_eq!((files.len(), meta.matches), (1, 1));
     assert!(files[0].path.ends_with("tb_pkg.sv"));
 }
@@ -193,11 +193,33 @@ fn large_trees_timing() {
         let (t, _) = a.design_tree(Some("top"), &q);
         format!("{} nodes, found {}", paths(&t).len(), paths(&t).contains(&"top.u_l1_29.u_l2_29.u_leaf_29".to_string()))
     });
-    time("files, all", &|| format!("{} roots", a.compiled_files_filtered(None).0.len()));
+    time("files, all", &|| format!("{} roots", a.compiled_files_tree(&TreeQuery::new(20_000)).0.len()));
     time("files, filter h5_9", &|| {
-        let (f, m) = a.compiled_files_filtered(Filter::new("h5_9").as_ref());
+        let (f, m) = a.compiled_files_tree(&query("h5_9"));
         format!("{} roots, {} matches", f.len(), m.matches)
     });
     let json = serde_json::to_string(&a.design_tree(Some("top"), &TreeQuery::new(20_000)).0).unwrap();
     println!("design JSON at 20,000 nodes: {} KB", json.len() / 1024);
+}
+
+#[test]
+fn siblings_with_one_name_are_numbered_and_limits_hold() {
+    // Both branches of an if-generate are named g (only one is elaborated, both are read).
+    let text = "module leaf; endmodule\nmodule top;\n  if (1) begin : g\n    leaf f();\n  end else begin : g\n    leaf f();\n  end\nendmodule\n";
+    let (a, _) = project("dupnames", &[("d.sv", text)]);
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
+    let g: Vec<(String, Option<u32>)> = t[0].children.iter().map(|c| (c.name.clone(), c.dup)).collect();
+    assert_eq!(g, [("g".to_string(), None), ("g".to_string(), Some(2))]);
+    // The second one can be revealed by its numbered name.
+    let mut q = TreeQuery::new(1);
+    q.reveal = vec!["top".into(), "g#2".into(), "f".into()];
+    let (t, _) = a.design_tree(Some("top"), &q);
+    assert!(t[0].children.iter().any(|c| c.dup == Some(2) && c.children.len() == 1), "{t:?}");
+    // Compiled files keep to the node limit.
+    let mut files = vec![("top.sv".to_string(), (0..50).map(|i| format!("`include \"h{i}.svh\"\n")).collect::<String>())];
+    files.extend((0..50).map(|i| (format!("h{i}.svh"), String::new())));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let (a, _) = project("filelimit", &refs);
+    let (f, meta) = a.compiled_files_tree(&TreeQuery::new(10));
+    assert_eq!((f[0].children.len(), meta.incomplete, f[0].truncated), (9, Some("nodes"), true));
 }

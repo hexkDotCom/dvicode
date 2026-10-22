@@ -29,6 +29,8 @@ export interface Conn {
 
 interface HierNode extends TreeNode {
   name: string;
+  /** Which of several siblings of this name (2, 3...). */
+  dup?: number;
   definition: string;
   kind: string;
   uri: string | null;
@@ -42,6 +44,7 @@ interface HierNode extends TreeNode {
 
 interface FileNode extends TreeNode {
   path: string;
+  truncated?: boolean;
   uri: string;
   kind: string;
   children: FileNode[];
@@ -49,6 +52,7 @@ interface FileNode extends TreeNode {
 
 interface VerifNode extends TreeNode {
   name: string;
+  dup?: number;
   path: string;
   class: string;
   kind: string;
@@ -106,6 +110,14 @@ export class Item<N extends TreeNode> extends vscode.TreeItem {
   }
 }
 
+/** Whether a follow started earlier is still the one to carry out. */
+export type StillWanted = () => boolean;
+
+/** A name in paths: `f`, or `f#2` for the second sibling called `f` (as the engine names it). */
+function keyedName(name: string, dup: number | undefined): string {
+  return dup ? `${name}#${dup}` : name;
+}
+
 /** What a view remembers per build configuration (workspaceState). */
 interface Remembered {
   filter?: string;
@@ -143,7 +155,9 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   lastPick = 0;
   revealing = false;
   /** Occurrences of the last target, for one revision of the tree. */
-  private found: { key: string; scope: string; revision: number; paths: string[][] } | undefined;
+  private found: { key: string; scope: string; revision: number; paths: string[][]; more: boolean } | undefined;
+  /** The engine stopped before finding every occurrence. */
+  private moreOccurrences = false;
 
   constructor(
     readonly name: ViewName,
@@ -201,7 +215,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
 
   /** Fetches the tree again (`reveal`: names of a node to include beyond the node limit). */
   refresh(reveal?: string[]): Promise<void> {
-    const p = this.load(reveal);
+    const p = this.load(reveal ?? (this.sync && !this.filter ? this.cycle.current() : undefined));
     this.loading = p;
     void p.finally(() => {
       if (this.loading === p) {
@@ -211,8 +225,16 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     return p;
   }
 
+  /** Forgets the occurrences found and the one shown (new parameters, a restarted server). */
+  forget(): void {
+    this.found = undefined;
+    this.moreOccurrences = false;
+    this.cycle.reset();
+  }
+
   /** Forgets the tree (its parameters changed): the next getChildren fetches it. */
   protected invalidate(): void {
+    this.forget();
     this.gen++;
     this.attempted = false;
     this.tree = undefined;
@@ -299,7 +321,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       incomplete: this.incomplete,
       empty: this.roots.length === 0,
       emptyText: this.emptyText(),
-      position: this.sync && this.cycle.paths.length ? { index: this.cycle.index, count: this.cycle.paths.length } : undefined,
+      position: this.sync && this.cycle.paths.length ? { index: this.cycle.index, count: this.cycle.paths.length, more: this.moreOccurrences } : undefined,
       syncNote: this.sync ? this.syncNote : undefined,
       stale: this.stale && this.items.size > LARGE_TREE,
     };
@@ -324,6 +346,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     const key = targetKey(t);
     const scope = JSON.stringify(this.params());
     if (this.found && this.found.key === key && this.found.scope === scope && this.found.revision === this.revision) {
+      this.moreOccurrences = this.found.more;
       return this.found.paths;
     }
     const c = this.conn.client();
@@ -334,7 +357,8 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     const r = await c.sendRequest<TreeResult<N>>('dvicode/tree', { view: this.name, ...this.params(), target, maxNodes: 100000 });
     const tree = placeTree(r.roots, (n, root) => this.nameOf(n, root));
     const paths = occurrences(tree, (p) => this.isTarget(p, t));
-    this.found = { key, scope, revision: r.revision, paths };
+    this.found = { key, scope, revision: r.revision, paths, more: r.incomplete !== null };
+    this.moreOccurrences = r.incomplete !== null;
     return paths;
   }
 
@@ -344,16 +368,15 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   protected abstract notFoundText(t: Target): string;
 
   /** Shows the node of the editor's position (`t`: undefined when there is none). */
-  async follow(t: Target | undefined): Promise<void> {
+  async follow(t: Target | undefined, wanted: StillWanted = () => true): Promise<void> {
     if (!t) {
       this.cycle.reset();
       this.syncNote = this.name === 'verification' ? 'The cursor is not in a class.' : this.name === 'design' ? 'The cursor is not in a module.' : undefined;
       this.present();
       return;
     }
-    const gen = this.gen;
     const paths = t.file ? this.fileOccurrences(t.file) : await this.occurrencesOf(t);
-    if (gen !== this.gen && !this.tree) {
+    if (!wanted()) {
       return;
     }
     if (!paths.length) {
@@ -364,7 +387,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     }
     const selected = this.view?.selection[0]?.placed.names;
     this.cycle.update(targetKey(t), paths, selected);
-    await this.showCurrent(t);
+    await this.showCurrent(t, wanted);
   }
 
   /** Files view: the nodes of a file (a client URI string). */
@@ -379,7 +402,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     }
   }
 
-  private async showCurrent(t: Target | undefined): Promise<void> {
+  private async showCurrent(t: Target | undefined, wanted: StillWanted = () => true): Promise<void> {
     const names = this.cycle.current();
     if (!names) {
       return;
@@ -393,6 +416,9 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       }
       // Beyond the node limit: fetch the tree with this node in it.
       await this.refresh(names);
+      if (!wanted()) {
+        return;
+      }
       item = this.itemByNames(names);
       if (!item) {
         this.syncNote = `${t ? describeTarget(t) : 'The node'} is not in the view.`;
@@ -402,7 +428,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     }
     this.syncNote = undefined;
     this.present();
-    if (!this.view || !this.view.visible) {
+    if (!this.view || !this.view.visible || !wanted()) {
       return;
     }
     this.revealing = true;
@@ -482,7 +508,7 @@ export class DesignHierarchy extends TreeBase<HierNode> {
   }
 
   protected nameOf(n: HierNode): string {
-    return n.name;
+    return keyedName(n.name, n.dup);
   }
 
   protected makeItem(p: Placed<HierNode>, parent: Item<HierNode> | undefined, expand: boolean): Item<HierNode> {
@@ -532,8 +558,11 @@ export class CompiledFiles extends TreeBase<FileNode> {
   protected makeItem(p: Placed<FileNode>, parent: Item<FileNode> | undefined, expand: boolean): Item<FileNode> {
     const n = p.node;
     const uri = this.conn.mapper()?.toClient(n.uri) ?? vscode.Uri.parse(n.uri);
-    const state = n.children.length ? (expand && parent !== undefined ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
+    const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
     const item = new Item(p, parent, uri, state);
+    if (n.truncated) {
+      item.description = `${item.description ?? ''} …`.trim();
+    }
     item.resourceUri = uri;
     item.description = n.kind === 'top' ? undefined : n.kind;
     item.tooltip = n.path;
@@ -578,7 +607,14 @@ export function hierarchyPath(item: unknown): string | undefined {
   if (typeof n.path === 'string' && typeof n.class === 'string') {
     return n.path;
   }
-  return 'definition' in item.node ? (item.placed.names as string[]).join('.') : undefined;
+  if (!('definition' in item.node)) {
+    return undefined;
+  }
+  const names: string[] = [];
+  for (let p: Placed<TreeNode> | undefined = item.placed; p; p = p.parent) {
+    names.unshift((p.node as unknown as HierNode).name);
+  }
+  return names.join('.');
 }
 
 const VERIF_ICONS: Record<string, string> = {
@@ -624,7 +660,7 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
 
   /** The test class names the root; components their instance names. */
   protected nameOf(n: VerifNode, root: boolean): string {
-    return root ? n.class : n.name;
+    return root ? n.class : keyedName(n.name, n.dup);
   }
 
   protected expandRoots(tree: PlacedTree<VerifNode>): boolean {
@@ -688,6 +724,8 @@ export class Views implements vscode.Disposable {
   private revisionTimer: NodeJS.Timeout | undefined;
   /** The last located position and what the engine said. */
   private located: { key: string; at: Promise<Located | undefined> } | undefined;
+  /** Changes with each editor move, sync switch and pick in a view: older follows stop. */
+  private followGen = 0;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -738,6 +776,7 @@ export class Views implements vscode.Disposable {
   refreshAll(): void {
     this.located = undefined;
     for (const v of this.all) {
+      v.forget();
       void v.refresh().then(() => {
         if (v.sync) {
           this.schedule(0);
@@ -756,7 +795,11 @@ export class Views implements vscode.Disposable {
     this.revisionTimer = setTimeout(() => {
       for (const v of this.all) {
         if (v.view?.visible && v.size <= LARGE_TREE) {
-          void v.refresh();
+          void v.refresh().then(() => {
+            if (v.sync) {
+              this.schedule(0);
+            }
+          });
         } else {
           v.present();
         }
@@ -767,6 +810,7 @@ export class Views implements vscode.Disposable {
   /** The server stopped or started. */
   presentAll(): void {
     for (const v of this.all) {
+      v.forget();
       v.present();
     }
   }
@@ -797,6 +841,7 @@ export class Views implements vscode.Disposable {
   }
 
   private setSync(v: TreeBase<TreeNode>, on: boolean): void {
+    this.followGen++;
     v.sync = on;
     v.syncNote = undefined;
     v.cycle.reset();
@@ -840,13 +885,18 @@ export class Views implements vscode.Disposable {
   }
 
   private schedule(ms: number): void {
+    this.followGen++;
     clearTimeout(this.timer);
     this.timer = setTimeout(() => void this.follow(), ms);
   }
 
   /** Each visible view that follows the editor shows the editor's position. */
   private async follow(): Promise<void> {
-    const views = this.all.filter((v) => v.sync && v.view?.visible && Date.now() - v.lastPick > 1000);
+    const token = this.followGen;
+    const started = Date.now();
+    const views = this.all.filter((v) => v.sync && v.view?.visible && started - v.lastPick > 1000);
+    // Still wanted: no newer follow, still following, and no pick in the view since.
+    const wanted = (v: TreeBase<TreeNode>): StillWanted => () => token === this.followGen && v.sync && v.lastPick < started;
     const ed = vscode.window.activeTextEditor;
     const m = this.conn.mapper();
     if (!views.length || !ed || !m || !this.ours(ed.document.uri)) {
@@ -857,12 +907,15 @@ export class Views implements vscode.Disposable {
     const located = needLocate ? await this.locate(ed, m) : undefined;
     for (const v of views) {
       try {
+        if (!wanted(v)()) {
+          continue;
+        }
         if (v.name === 'files') {
-          await v.follow({ file: doc });
+          await v.follow({ file: doc }, wanted(v));
         } else if (v.name === 'design') {
-          await v.follow(located?.design ? { definition: located.design.name, instance: located.instance ?? undefined } : undefined);
+          await v.follow(located?.design ? { definition: located.design.name, instance: located.instance ?? undefined } : undefined, wanted(v));
         } else {
-          await v.follow(located?.class ? { class: located.class.name } : undefined);
+          await v.follow(located?.class ? { class: located.class.name } : undefined, wanted(v));
         }
       } catch {
         // The server went away; the views say so when they refresh.

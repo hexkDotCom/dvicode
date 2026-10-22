@@ -15,6 +15,8 @@ pub struct FileNode {
     pub kind: String,
     pub children: Vec<FileNode>,
     pub problems: usize,
+    /// True when the children were cut by a limit.
+    pub truncated: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -33,6 +35,9 @@ pub struct HierNode {
     pub children: Vec<HierNode>,
     /// True when the children were cut by the depth/size limit.
     pub truncated: bool,
+    /// When siblings share the name: which one this is (2, 3...). The views name it `name#2`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dup: Option<u32>,
 }
 
 /// A component of the UVM verification hierarchy.
@@ -58,6 +63,9 @@ pub struct VerifNode {
     pub children: Vec<VerifNode>,
     /// True when the children were cut by the depth/size limit.
     pub truncated: bool,
+    /// When siblings share the name: which one this is (2, 3...). The views name it `name#2`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dup: Option<u32>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -290,17 +298,22 @@ impl Analysis {
 
     /// Compiled files in compile order, with their include trees.
     pub fn compiled_files(&self) -> Vec<FileNode> {
-        self.compiled_files_filtered(None).0
+        let mut q = TreeQuery::new(usize::MAX);
+        q.max_visits = usize::MAX;
+        self.compiled_files_tree(&q).0
     }
 
-    /// [`Analysis::compiled_files`] with only the files whose path matches `filter` and the files
-    /// that include them.
-    pub fn compiled_files_filtered(&self, filter: Option<&Filter>) -> (Vec<FileNode>, TreeMeta) {
+    /// [`Analysis::compiled_files`] as `q` asks: only the files whose path matches its filter and
+    /// the files that include them, within its limits.
+    pub fn compiled_files_tree(&self, q: &TreeQuery) -> (Vec<FileNode>, TreeMeta) {
         let mut out = Vec::new();
-        let mut meta = TreeMeta::default();
+        let mut w = Walk::new(q);
         for u in self.units.iter().flatten() {
             if u.kind == UnitKind::Builtin {
                 continue;
+            }
+            if w.stopped() || w.meta.incomplete == Some("nodes") {
+                break;
             }
             // Children per including file.
             let mut by_parent: FxHashMap<FileId, Vec<FileId>> = FxHashMap::default();
@@ -322,26 +335,44 @@ impl Analysis {
                 }
                 _ => "top",
             };
-            let node = self.file_node(u.root, kind, &by_parent, &mut visited);
-            match filter {
-                None => out.push(node),
-                Some(f) => out.extend(prune_files(node, f, &mut meta.matches)),
+            if let Some(n) = self.file_walk(u.root, kind, &by_parent, &mut visited, &mut w) {
+                out.push(n);
             }
         }
-        (out, meta)
+        (out, w.meta)
     }
 
-    fn file_node(&self, f: FileId, kind: &str, by_parent: &FxHashMap<FileId, Vec<FileId>>, visited: &mut FxHashSet<FileId>) -> FileNode {
+    /// A file and the files it includes, as the walk's query asks; `None` when it is left out.
+    fn file_walk(&self, f: FileId, kind: &str, by_parent: &FxHashMap<FileId, Vec<FileId>>, visited: &mut FxHashSet<FileId>, w: &mut Walk) -> Option<FileNode> {
+        if w.stopped() || !w.visit() {
+            return None;
+        }
+        let reserved = w.reserve(false)?;
         let path = self.vfs.path(f);
+        let shown = path.display().to_string();
+        let matched = w.matched(&[(&shown.replace('\\', "/"), '/')]);
         let mut children = Vec::new();
+        let mut truncated = false;
         if visited.insert(f) {
-            if let Some(cs) = by_parent.get(&f) {
-                for c in cs {
-                    children.push(self.file_node(*c, "include", by_parent, visited));
+            for c in by_parent.get(&f).into_iter().flatten() {
+                match self.file_walk(*c, "include", by_parent, visited, w) {
+                    Some(n) => children.push(n),
+                    None if w.meta.incomplete.is_some() => {
+                        truncated = true;
+                        break;
+                    }
+                    None => {}
                 }
             }
         }
-        FileNode { path: path.display().to_string(), uri: super::url_of(&path).to_string(), kind: kind.into(), children, problems: 0 }
+        if matched || !children.is_empty() {
+            Some(FileNode { path: shown, uri: super::url_of(&path).to_string(), kind: kind.into(), children, problems: 0, truncated })
+        } else {
+            if reserved {
+                w.nodes_left += 1;
+            }
+            None
+        }
     }
 
     /// Files that include `file`, with the line of the `` `include ``.
@@ -429,10 +460,11 @@ impl Analysis {
                 def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
                 children: Vec::new(),
                 truncated: false,
+                dup: None,
             };
             let mut stack = vec![self.decl_key(t)];
             if !w.stopped() {
-                node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated);
+                node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated, &mut FxHashMap::default());
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 roots.push(node);
@@ -442,7 +474,9 @@ impl Analysis {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<HierNode> {
+    /// `seen`: names of the siblings so far (unnamed blocks add to their parent's level).
+    #[allow(clippy::too_many_arguments)]
+    fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>) -> Vec<HierNode> {
         let mut out = Vec::new();
         let u = self.unit(scope.unit);
         let mut todo: Vec<DeclId> = u.parsed.decl(scope.decl).children.clone();
@@ -453,7 +487,8 @@ impl Analysis {
                 // A `bind` adds its instance to the target, not to the module it is written in.
                 DeclKind::Instance if d.has(dflags::BOUND) => {}
                 DeclKind::Instance => {
-                    let child_pin = pin_below(pin, &d.name);
+                    let dup = sibling(seen, &d.name);
+                    let child_pin = pin_below(pin, &keyed(&d.name, dup));
                     if w.stopped() && child_pin.is_none() {
                         *truncated = true;
                         if pin.is_some() {
@@ -489,6 +524,7 @@ impl Analysis {
                         def_line: def_loc.as_ref().map_or(0, |l| l.range.start.line),
                         children: Vec::new(),
                         truncated: false,
+                        dup,
                     };
                     let matched = if w.q.target.is_some() {
                         w.hit(&node.name, &node.definition, def_name, "")
@@ -500,7 +536,7 @@ impl Analysis {
                         if !stack.contains(&key) && stack.len() < 64 {
                             stack.push(key);
                             let m_name = self.decl(m).name.to_string();
-                            node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated);
+                            node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default());
                             stack.pop();
                         }
                     }
@@ -514,8 +550,11 @@ impl Analysis {
                     // Generate blocks: show named ones as scopes, flatten unnamed.
                     let gr = DeclRef { unit: scope.unit, decl: c };
                     let named = d.kind == DeclKind::Generate;
-                    let (gen_path, gen_pin) = if named { (format!("{path}.{}", d.name), pin_below(pin, &d.name)) } else { (path.to_string(), pin) };
-                    let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, truncated);
+                    let dup = if named { sibling(seen, &d.name) } else { None };
+                    let (gen_path, gen_pin) = if named { (format!("{path}.{}", d.name), pin_below(pin, &keyed(&d.name, dup))) } else { (path.to_string(), pin) };
+                    let mut own = FxHashMap::default();
+                    let level = if named { &mut own } else { &mut *seen };
+                    let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, truncated, level);
                     if kids.is_empty() {
                         continue;
                     }
@@ -532,6 +571,7 @@ impl Analysis {
                             def_line: 0,
                             children: kids,
                             truncated: false,
+                            dup,
                         });
                     } else {
                         out.extend(kids);
@@ -678,6 +718,7 @@ impl Analysis {
                 def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
                 children: Vec::new(),
                 truncated: false,
+                dup: None,
             };
             let mut stack = vec![self.decl_key(t)];
             if !w.stopped() {
@@ -724,6 +765,7 @@ impl Analysis {
             }
         }
         let mut out = Vec::new();
+        let mut seen = FxHashMap::default();
         for (body, cr) in made {
             // The created class: `T` of `T::type_id::create`, else the variable's type. A type
             // parameter of a base class (`T_ENV env`) is the type a derived class gives it.
@@ -746,7 +788,8 @@ impl Analysis {
                 None => "unresolved",
             };
             let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
-            let child_pin = pin_below(pin, &name);
+            let dup = sibling(&mut seen, &name);
+            let child_pin = pin_below(pin, &keyed(&name, dup));
             if (w.stopped() || !w.visit()) && child_pin.is_none() {
                 *truncated = true;
                 if pin.is_some() {
@@ -781,7 +824,10 @@ impl Analysis {
                 def_line: def_loc.as_ref().map_or(0, |l| l.range.start.line),
                 children: Vec::new(),
                 truncated: false,
+                dup,
             };
+            // Matched before the children, so the match limit counts in tree order.
+            let matched = if w.q.target.is_some() { w.hit(&node.name, "", "", &node.class) } else { w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]) };
             if let Some(c) = cls.filter(|_| kind != "port") {
                 let key = self.decl_key(c);
                 if !stack.contains(&key) && stack.len() < 64 {
@@ -790,7 +836,6 @@ impl Analysis {
                     stack.pop();
                 }
             }
-            let matched = if w.q.target.is_some() { w.hit(&node.name, "", "", &node.class) } else { w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]) };
             if matched || !node.children.is_empty() || child_pin.is_some() {
                 out.push(node);
             } else if reserved {
@@ -1189,14 +1234,19 @@ fn called_methods(t: &[Token], own: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// A file node with only the files whose path matches `f` and those that include them;
-/// `None` when none is left.
-fn prune_files(mut n: FileNode, f: &Filter, matches: &mut usize) -> Option<FileNode> {
-    let kids = std::mem::take(&mut n.children);
-    n.children = kids.into_iter().filter_map(|c| prune_files(c, f, matches)).collect();
-    let matched = f.matches(&n.path.replace('\\', "/"), '/');
-    *matches += usize::from(matched);
-    (matched || !n.children.is_empty()).then_some(n)
+/// Counts a sibling called `name`: `Some(k)` for the k-th (k > 1) of that name.
+fn sibling(seen: &mut FxHashMap<String, u32>, name: &str) -> Option<u32> {
+    let n = seen.entry(name.to_string()).or_insert(0);
+    *n += 1;
+    (*n > 1).then_some(*n)
+}
+
+/// A node's name in paths: `f`, or `f#2` for the second sibling called `f`.
+fn keyed(name: &str, dup: Option<u32>) -> String {
+    match dup {
+        Some(k) => format!("{name}#{k}"),
+        None => name.to_string(),
+    }
 }
 
 /// Start and variable-name token of the assignment target before `t[eq]` (`a.b[i]`).
