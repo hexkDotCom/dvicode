@@ -39,8 +39,10 @@ impl Analysis {
         let a = self.const_value(&init[eq + 1..], unit, 0, toks)?;
         // Step: +1 or -1.
         let up = match step {
-            [v, op] | [op, v] if v.text == var && op.is_punct("++") => true,
-            [v, op] | [op, v] if v.text == var && op.is_punct("--") => false,
+            [v, op] if v.text == var && op.is_punct("++") => true,
+            [op, v] if v.text == var && op.is_punct("++") => true,
+            [v, op] if v.text == var && op.is_punct("--") => false,
+            [op, v] if v.text == var && op.is_punct("--") => false,
             [v, op, one] if v.text == var && is_one(one) && op.is_punct("+=") => true,
             [v, op, one] if v.text == var && is_one(one) && op.is_punct("-=") => false,
             [v, eq2, v2, op, one] if v.text == var && v2.text == var && eq2.is_punct("=") && is_one(one) && op.is_punct("+") => true,

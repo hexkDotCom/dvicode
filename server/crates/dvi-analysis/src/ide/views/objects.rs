@@ -206,7 +206,7 @@ impl Analysis {
             }
         }
         run.extend(built.run.iter().cloned());
-        let ctx = SeqCtx { derived_first: &inst.chain, path: &inst.path, kids: &inst.children, parent: Vec::new() };
+        let ctx = SeqCtx { derived_first: &inst.chain, path: &inst.path, kids: &inst.children, parent: Vec::new(), component: true };
         out.extend(self.sequence_nodes(&run, &ctx, pin, seen, w, stack, truncated, scan, factory));
         out.extend(self.default_nodes(inst, pin, seen, w, stack, truncated, scan, factory));
         out
@@ -368,7 +368,15 @@ impl Analysis {
                         .filter(is_class)
                         .or_else(|| declared_class(e.body, cr.lhs_head));
                     requested.filter(|c| self.object_kind(*c) == Some("sequence")).map(|req| {
-                        let (class, overrides) = if cr.factory { self.factory_resolve(factory, req, None, cr.params || self.parameterized(req)) } else { (req, Vec::new()) };
+                        // The factory's lookup path, as for a creation while building: the context,
+                        // else the component's path (a sequence's own creations have none known).
+                        let lookup = cr.name.as_ref().filter(|_| !cr.contxt_unknown).and_then(|n| match (&cr.contxt, cr.parent.as_str()) {
+                            (Some(c), _) => Some(format!("{c}.{n}")),
+                            (None, "this") => ctx.component.then(|| format!("{}.{n}", ctx.path)),
+                            (None, "") => Some(n.clone()),
+                            _ => None,
+                        });
+                        let (class, overrides) = if cr.factory { self.factory_resolve(factory, req, lookup.as_deref(), cr.params || self.parameterized(req)) } else { (req, Vec::new()) };
                         (class, Some(req), overrides, cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string()), cr.lhs_head, var_of(e.body, cr.lhs_head))
                     })
                 }
@@ -468,7 +476,7 @@ impl Analysis {
         }
         let mut kid_seen = FxHashMap::default();
         let path = node.path.clone();
-        let sub = SeqCtx { derived_first: &chain, path: &path, kids: &[], parent };
+        let sub = SeqCtx { derived_first: &chain, path: &path, kids: &[], parent, component: false };
         let kids = self.sequence_nodes(&run, &sub, child_pin, &mut kid_seen, w, stack, &mut node.truncated, scan, factory);
         stack.pop();
         kids
@@ -620,6 +628,8 @@ struct SeqCtx<'a> {
     kids: &'a [Inst],
     /// The sequencers of the sequence they run in (each a path or the text of an argument).
     parent: Vec<(String, bool)>,
+    /// `path` is a component's (its own creations use it as the factory's context).
+    component: bool,
 }
 
 /// A sequence made while a component builds, with the class the factory gave it then.

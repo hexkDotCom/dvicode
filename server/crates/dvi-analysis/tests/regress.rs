@@ -2018,3 +2018,56 @@ fn class_bases_past_the_depth_limit_with_the_memo() {
     assert_eq!(a.class_base(class("Helper")), Some(class("Leaf")));
     assert_eq!(a.class_base(class("R")), None);
 }
+
+#[test]
+fn release_review_cases() {
+    let uvm = "package uvm_pkg;\n  class uvm_object; function new(string name = \"\"); endfunction endclass\n  class uvm_component extends uvm_object; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_sequence_item extends uvm_object; function new(string name = \"\"); endfunction endclass\n  class uvm_sequence_base extends uvm_sequence_item; function new(string name = \"\"); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    // 600 environments of 600 leaves each: past the model budget.
+    let fields: String = (0..600).map(|k| format!("    e e{k};\n")).collect();
+    let made: String = (0..600).map(|k| format!("      e{k} = e::type_id::create(\"e{k}\", this);\n")).collect();
+    let leaves: String = (0..600).map(|k| format!("    leaf l{k};\n")).collect();
+    let leaf_made: String = (0..600).map(|k| format!("      l{k} = leaf::type_id::create(\"l{k}\", this);\n")).collect();
+    let tb = format!(
+        r#"package tb_pkg;
+  import uvm_pkg::*;
+  class leaf extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class e extends uvm_env;
+{leaves}    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+{leaf_made}    endfunction
+  endclass
+  class big extends uvm_test;
+{fields}    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+{made}    endfunction
+  endclass
+  class s extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class d extends s; function new(string name = ""); super.new(name); endfunction endclass
+  class t extends uvm_test;
+    s seq;
+    leaf l[4];
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      set_inst_override_by_type("seq", s::get_type(), d::get_type());
+      for (int i = 0; i < 4; ++i) l[i] = leaf::type_id::create($sformatf("l%0d", i), this);
+    endfunction
+    task run_phase(uvm_phase phase);
+      seq = s::type_id::create("seq", this);
+      seq.start(null);
+    endtask
+  endclass
+endpackage
+"#
+    );
+    let (a, _) = project("releasereview", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let t0 = std::time::Instant::now();
+    let (h, meta) = a.verification_tree(Some("big"), &dvi_analysis::ide::views::TreeQuery::new(1));
+    assert!(t0.elapsed().as_secs() < 20, "took {:?}", t0.elapsed());
+    assert!(meta.incomplete.is_some() && h.roots[0].truncated);
+    let mut q = dvi_analysis::ide::views::TreeQuery::new(100);
+    q.objects = true;
+    let (h, _) = a.verification_tree(Some("t"), &q);
+    let kids: Vec<String> = h.roots[0].children.iter().map(|c| format!("{}:{}:{}", c.name, c.class, c.count.clone().unwrap_or_default())).collect();
+    // `++i` counts; an instance override at the component's path applies at run time.
+    assert_eq!(kids, ["l[i]:leaf:4", "seq:d:"]);
+}

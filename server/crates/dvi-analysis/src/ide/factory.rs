@@ -258,7 +258,19 @@ impl Analysis {
         let hi = toks.partition_point(|t| t.span.start < d.span.end);
         // Not in code `ifdef` leaves out.
         let inactive = &self.unit(class.unit).inactive;
-        let t: Vec<&Token> = toks[lo..hi].iter().filter(|x| !inactive.iter().any(|s| s.file == x.span.file && s.start <= x.span.start && x.span.start < s.end)).collect();
+        let mut off: Vec<Span> = inactive.iter().filter(|s| s.file == d.span.file && s.end > d.span.start && s.start < d.span.end).copied().collect();
+        off.sort_by_key(|s| s.start);
+        // Tokens and regions both in order: one pass.
+        let mut k = 0;
+        let t: Vec<&Token> = toks[lo..hi]
+            .iter()
+            .filter(|x| {
+                while k < off.len() && off[k].end <= x.span.start {
+                    k += 1;
+                }
+                !(k < off.len() && off[k].start <= x.span.start)
+            })
+            .collect();
         t.windows(4).any(|w| {
             w[0].kind == TokKind::Directive
                 && matches!(w[0].text.as_str(), "uvm_component_utils" | "uvm_object_utils" | "uvm_component_utils_begin" | "uvm_object_utils_begin")

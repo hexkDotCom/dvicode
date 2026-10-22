@@ -1478,6 +1478,10 @@ impl Analysis {
     /// children in name order.
     fn build_inst(&self, inst: &mut Inst, factory: &mut Factory, nodes: &mut usize, stack: &mut Vec<(u32, u32)>, scan: &Scan) {
         let Some(built) = inst.built.clone() else { return };
+        if *nodes >= MAX_MODEL {
+            inst.cut = true;
+            return;
+        }
         self.stage(inst, &built, Mode::Build, factory, nodes, stack, scan);
         let mut order: Vec<usize> = (0..inst.children.len()).collect();
         order.sort_by(|a, b| inst.children[*a].name.cmp(&inst.children[*b].name));
@@ -1499,6 +1503,11 @@ impl Analysis {
     fn stage(&self, inst: &mut Inst, built: &Built, stage: Mode, factory: &mut Factory, nodes: &mut usize, stack: &mut Vec<(u32, u32)>, scan: &Scan) {
         let mut cursor = 0;
         for m in built.made.iter().filter(|m| !m.dead && m.stage == stage) {
+            // Past the model budget nothing more is resolved: the tree says it is cut.
+            if *nodes >= MAX_MODEL {
+                inst.cut = true;
+                return;
+            }
             self.register(built, stage, m.seq, &mut cursor, inst, factory, scan);
             self.instantiate(inst, built, m, cursor, factory, nodes, stack, scan);
         }
