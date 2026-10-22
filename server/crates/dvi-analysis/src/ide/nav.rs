@@ -169,6 +169,34 @@ impl Analysis {
         out
     }
 
+    /// An instance whose `.*` connects `r`, which is a port of the module instantiated or a
+    /// signal that a port of the same name takes there: where the instance is. Its connections
+    /// name nothing, so rename would leave them behind.
+    fn dot_star_connection(&self, r: DeclRef) -> Option<Span> {
+        let d = self.decl(r);
+        if !matches!(d.kind, DeclKind::Port | DeclKind::Variable | DeclKind::Net) {
+            return None;
+        }
+        let owner = d.parent.map(|p| DeclRef { unit: r.unit, decl: p }).filter(|o| d.kind == DeclKind::Port && self.decl(*o).kind.is_definition());
+        let owner = owner.map(|o| self.decl_key(o));
+        for u in self.units.iter().flatten() {
+            for (i, x) in u.parsed.decls.iter().enumerate() {
+                if x.kind != DeclKind::Instance || !x.has(dflags::DOT_STAR) {
+                    continue;
+                }
+                let Some(m) = self.type_of(DeclRef { unit: u.id, decl: i as DeclId }) else { continue };
+                if owner.as_ref().is_some_and(|o| *o == self.decl_key(m)) {
+                    return Some(x.name_span);
+                }
+                let takes = || self.member_of(m, &d.name).is_some_and(|p| self.decl(p).kind == DeclKind::Port);
+                if x.parent.is_some_and(|p| self.lookup(u.id, p, &d.name) == Some(r)) && takes() {
+                    return Some(x.name_span);
+                }
+            }
+        }
+        None
+    }
+
     /// A use of `r` inside a macro body: the name of the macro and where it is expanded.
     /// Rename cannot change it there, and changing the macro could break its other uses.
     fn use_in_macro_body(&self, r: DeclRef) -> Option<(String, Span)> {
@@ -351,6 +379,9 @@ impl Analysis {
             Some(Target::Decl(r)) => {
                 if let Some((m, at)) = self.use_in_macro_body(r) {
                     return Err(format!("'{}' is also used inside the macro `{m} (expanded at {}), which rename cannot change", self.decl(r).name, line(at)));
+                }
+                if let Some(at) = self.dot_star_connection(r) {
+                    return Err(format!("'{}' is also connected by the `.*` of the instance at {}, which rename cannot change", self.decl(r).name, line(at)));
                 }
                 Some(self.decl_key(self.canonical(r)))
             }

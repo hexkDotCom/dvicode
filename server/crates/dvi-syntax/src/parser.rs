@@ -1805,6 +1805,7 @@ impl<'t> Parser<'t> {
         while self.pos < end {
             let before = self.pos;
             if self.at_p(".*") {
+                self.u.decls[inst as usize].flags |= dflags::DOT_STAR;
                 self.bump();
             } else if self.at_p(".") && matches!(self.nth(1).kind, TokKind::Ident | TokKind::Keyword) {
                 self.bump();

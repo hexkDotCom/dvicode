@@ -181,6 +181,19 @@ fn renames_that_would_break_code_are_refused() {
     let texts = apply(&a, a.rename(f, off, "V").unwrap());
     assert_eq!(texts.keys().collect::<Vec<_>>(), vec!["b.sv"]);
     assert_eq!(texts["b.sv"], "`undef W\n`define V 3\nmodule b;\n  int y = `V;\nendmodule\n");
+    // A port connected with `.*`, and the signal it takes: the connection names neither.
+    let t = "module sub(input logic a, input logic c);\nendmodule\nmodule top;\n  logic a, b, c;\n  sub u (.*);\n  sub v (.a(b), .c(b));\nendmodule\nmodule other;\n  logic a;\nendmodule\n";
+    let (a, root) = project("dotstar", &[("t.sv", t)]);
+    for (needle, k) in [("a, input", 0), ("a, b, c", 0)] {
+        let (f, off) = at(&a, &root, "t.sv", needle, k);
+        let e = a.rename(f, off, "a2").unwrap_err();
+        assert!(e.contains("`.*` of the instance at") && e.contains("t.sv:5"), "{e}");
+    }
+    // A signal no port takes, and one of the same name elsewhere, rename.
+    let (f, off) = at(&a, &root, "t.sv", "b, c", 0);
+    assert!(a.rename(f, off, "b2").is_ok());
+    let (f, off) = at(&a, &root, "t.sv", "a;\nendmodule\n", 0);
+    assert!(a.rename(f, off, "a2").is_ok());
 }
 
 #[test]

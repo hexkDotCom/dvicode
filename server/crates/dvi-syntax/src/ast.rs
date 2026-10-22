@@ -175,6 +175,8 @@ pub mod dflags {
     pub const BOUND: u32 = 1 << 21;
     /// Contains encrypted text (`` `pragma protect ``), which may declare names we cannot see.
     pub const ENCRYPTED: u32 = 1 << 22;
+    /// Instance connecting ports by name with `.*`: its connections name nothing in the source.
+    pub const DOT_STAR: u32 = 1 << 23;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
