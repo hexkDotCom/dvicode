@@ -222,6 +222,12 @@ struct Creation {
     ty_text: String,
     /// Literal instance name.
     name: Option<String>,
+    /// The instance name when it is a variable (an argument of a factory method).
+    name_arg: Option<String>,
+    /// The parent: `this`, or a variable.
+    parent: String,
+    /// The created class, when known already (a factory method's creation).
+    class: Option<DeclRef>,
 }
 
 /// Nearest UVM base class names and the kind they give a component.
@@ -724,10 +730,12 @@ impl Analysis {
             let is_class = |c: &DeclRef| matches!(self.decl(*c).kind, DeclKind::Class);
             let from_ty = cr.ty.and_then(|s| self.resolve_at_span(body.unit, s)).and_then(|r| self.follow_typedef(r));
             let from_var = || self.resolve_at_span(body.unit, cr.lhs_head).and_then(|v| self.type_of(v));
-            let cls = from_ty
-                .and_then(|r| self.bind_type_param(r, &derived_first))
-                .filter(is_class)
-                .or_else(|| from_var().and_then(|r| self.bind_type_param(r, &derived_first)).filter(is_class));
+            let cls = cr.class.filter(is_class).or_else(|| {
+                from_ty
+                    .and_then(|r| self.bind_type_param(r, &derived_first))
+                    .filter(is_class)
+                    .or_else(|| from_var().and_then(|r| self.bind_type_param(r, &derived_first)).filter(is_class))
+            });
             let kind = match cls {
                 Some(c) => match self.uvm_kind(c) {
                     Some(k) => k,
@@ -921,7 +929,9 @@ impl Analysis {
         }
         scanned.insert(body, depth);
         let toks = self.body_tokens(body);
-        let creations = scan_creations(&toks);
+        let mut creations: Vec<(usize, Creation)> = scan_creations(&toks).into_iter().filter(|(_, c)| c.parent == "this").collect();
+        creations.extend(self.factory_calls(body, &toks));
+        creations.sort_by_key(|(at, _)| *at);
         let calls = if depth < 8 { called_methods(&toks, self.decl(body).name.as_str()) } else { Vec::new() };
         let (mut ci, mut ki) = (creations.into_iter().peekable(), calls.into_iter().peekable());
         loop {
@@ -946,6 +956,78 @@ impl Analysis {
                 }
             }
         }
+    }
+
+    /// Components made by a factory: `lhs = obj.make(..., this, ...)` (or `make(...)`,
+    /// `pkg::make(...)`) where `make` creates exactly one component, with a parent it is given
+    /// (`T::type_id::create(name, parent)`, `parent` an argument of `make`), and the call gives
+    /// `this` for that argument, by position or by name (`.parent(this)`). The created class is
+    /// `T` (else the method's return type); the name is the one given, else the variable's.
+    /// Anything less certain (no creation, several, a parent that is not `this`) is left out.
+    fn factory_calls(&self, body: DeclRef, t: &[Token]) -> Vec<(usize, Creation)> {
+        let mut out = Vec::new();
+        for i in 1..t.len() {
+            if !t[i].is_punct("=") {
+                continue;
+            }
+            let Some((lhs_start, head)) = lhs_before(t, i) else { continue };
+            // `a.b.make(` / `pkg::make(` / `make(`.
+            let mut k = i + 1;
+            if t.get(k).is_some_and(|x| x.is_kw("this")) && t.get(k + 1).is_some_and(|x| x.is_punct(".")) {
+                k += 2;
+            }
+            let mut last = None;
+            while t.get(k).is_some_and(|x| x.is_ident()) {
+                last = Some(k);
+                if !t.get(k + 1).is_some_and(|x| x.is_punct(".") || x.is_punct("::")) {
+                    break;
+                }
+                k += 2;
+            }
+            let Some(m) = last else { continue };
+            if !t.get(m + 1).is_some_and(|x| x.is_punct("(")) || matches!(t[m].text.as_str(), "create" | "new") {
+                continue;
+            }
+            let Some(f) = self.resolve_at_span(body.unit, t[m].span).filter(|f| self.decl(*f).kind == DeclKind::Function) else { continue };
+            let fb = self.implementation_of(f).unwrap_or(f);
+            let formals: Vec<String> = {
+                let u = self.unit(fb.unit);
+                u.parsed.decl(fb.decl).children.iter().map(|c| u.parsed.decl(*c)).filter(|d| d.kind == DeclKind::Argument).map(|d| d.name.to_string()).collect()
+            };
+            let fb_toks = self.body_tokens(fb);
+            let made: Vec<Creation> = scan_creations(&fb_toks).into_iter().chain(scan_returned_creations(&fb_toks)).map(|(_, c)| c).filter(|c| formals.contains(&c.parent)).collect();
+            let [cr] = made.as_slice() else { continue };
+            // What the call gives an argument of `make`: by name, else by position.
+            let args = call_args(t, m + 1);
+            let actual = |formal: &str| -> Option<&[Token]> {
+                let named = args.iter().find_map(|a| match a {
+                    [dot, n, open, inner @ .., close] if dot.is_punct(".") && open.is_punct("(") && close.is_punct(")") => (n.text == formal).then_some(inner),
+                    _ => None,
+                });
+                if args.first().is_some_and(|a| a.first().is_some_and(|x| x.is_punct("."))) {
+                    return named;
+                }
+                formals.iter().position(|x| x == formal).and_then(|p| args.get(p).copied())
+            };
+            if !actual(&cr.parent).is_some_and(|a| a.len() == 1 && a[0].is_kw("this")) {
+                continue;
+            }
+            let class = cr
+                .ty
+                .and_then(|s| self.resolve_at_span(fb.unit, s))
+                .and_then(|r| self.follow_typedef(r))
+                .filter(|c| self.decl(*c).kind == DeclKind::Class)
+                .or_else(|| self.type_of(f).filter(|c| self.decl(*c).kind == DeclKind::Class));
+            let name = cr.name.clone().or_else(|| {
+                let a = actual(cr.name_arg.as_deref()?)?;
+                (a.len() == 1 && a[0].kind == TokKind::String).then(|| a[0].text.trim_matches('"').to_string())
+            });
+            out.push((
+                lhs_start,
+                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, parent: "this".into(), class },
+            ));
+        }
+        out
     }
 
     /// The method `name` a method of `derived_first[at]` calls on `this`: the one that class
@@ -1035,49 +1117,59 @@ fn scan_creations(t: &[Token]) -> Vec<(usize, Creation)> {
             continue;
         }
         let Some((lhs_start, head)) = lhs_before(t, i) else { continue };
-        // Right-hand side.
-        let mut k = i + 1;
-        let mut ty = None;
-        let mut ty_text = String::new();
-        if t.get(k).is_some_and(|x| x.is_kw("new")) {
-            k += 1;
-        } else {
-            let mut idents: Vec<usize> = Vec::new();
-            while k < t.len() {
-                if t[k].is_ident() && (idents.is_empty() || t[k - 1].is_punct("::")) {
-                    idents.push(k);
-                    k += 1;
-                } else if t[k].is_punct("::") {
-                    k += 1;
-                } else if t[k].is_punct("#") && t.get(k + 1).is_some_and(|x| x.is_punct("(")) {
-                    k = skip_group(t, k + 1);
-                } else {
-                    break;
-                }
-            }
-            let n = idents.len();
-            if n < 2 || t[idents[n - 1]].text != "create" || t[idents[n - 2]].text != "type_id" {
-                continue;
-            }
-            if n >= 3 {
-                let ti = idents[n - 3];
-                ty = Some(t[ti].span);
-                ty_text = t[ti].text.to_string();
-            }
+        if let Some(c) = creation_call(t, i + 1, tokens_text(&t[lhs_start..i]), t[head].span) {
+            out.push((lhs_start, c));
         }
-        if !t.get(k).is_some_and(|x| x.is_punct("(")) {
-            continue;
-        }
-        let args = call_args(t, k);
-        // Components get their parent as the second argument.
-        let parent_is_this = args.get(1).is_some_and(|a| a.len() == 1 && a[0].is_kw("this"));
-        if !parent_is_this {
-            continue;
-        }
-        let name = args.first().filter(|a| a.len() == 1 && a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
-        out.push((lhs_start, Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty, ty_text, name }));
     }
     out
+}
+
+/// Creations a method returns directly (`return T::type_id::create(name, parent);`).
+fn scan_returned_creations(t: &[Token]) -> Vec<(usize, Creation)> {
+    (0..t.len()).filter(|&i| t[i].is_kw("return")).filter_map(|i| creation_call(t, i + 1, String::new(), t[i].span).map(|c| (i, c))).collect()
+}
+
+/// A `T::type_id::create(name, parent)` or `new(name, parent)` call starting at `t[k]`.
+fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Option<Creation> {
+    let mut ty = None;
+    let mut ty_text = String::new();
+    if t.get(k).is_some_and(|x| x.is_kw("new")) {
+        k += 1;
+    } else {
+        let mut idents: Vec<usize> = Vec::new();
+        while k < t.len() {
+            if t[k].is_ident() && (idents.is_empty() || t[k - 1].is_punct("::")) {
+                idents.push(k);
+                k += 1;
+            } else if t[k].is_punct("::") {
+                k += 1;
+            } else if t[k].is_punct("#") && t.get(k + 1).is_some_and(|x| x.is_punct("(")) {
+                k = skip_group(t, k + 1);
+            } else {
+                break;
+            }
+        }
+        let n = idents.len();
+        if n < 2 || t[idents[n - 1]].text != "create" || t[idents[n - 2]].text != "type_id" {
+            return None;
+        }
+        if n >= 3 {
+            let ti = idents[n - 3];
+            ty = Some(t[ti].span);
+            ty_text = t[ti].text.to_string();
+        }
+    }
+    if !t.get(k).is_some_and(|x| x.is_punct("(")) {
+        return None;
+    }
+    let args = call_args(t, k);
+    // Components get their parent as the second argument: `this`, or a name (an argument of a
+    // factory method).
+    let parent = args.get(1).filter(|a| a.len() == 1 && (a[0].is_kw("this") || a[0].is_ident())).map(|a| a[0].text.to_string())?;
+    let first = args.first().filter(|a| a.len() == 1);
+    let name = first.filter(|a| a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
+    let name_arg = first.filter(|a| a[0].is_ident()).map(|a| a[0].text.to_string());
+    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, parent, class: None })
 }
 
 /// Methods called on the object itself in a method body (`f(...)`, `this.f(...)`; not

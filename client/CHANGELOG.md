@@ -19,6 +19,9 @@
 - UVM Verification Hierarchy: a base test that creates `T_ENV env` shows the environment class a
   derived test gives `T_ENV` in `extends base_test#(...)` (by name or position, through a
   typedef, or the default), with its whole tree, instead of `T_ENV [unresolved]`.
+- UVM Verification Hierarchy: components made by a factory object are shown
+  (`env = factory.get_env(._parent(this), ...)`), when the factory method creates one
+  component with the parent it is given; the name is the one given, else the variable's (#7).
 - `+dvicode_path_map+FROM=TO` in a build file reads paths written on another machine (a compute
   farm, a CI runner) from a folder on this one: in the build file, its `-f` files and compile
   logs.
