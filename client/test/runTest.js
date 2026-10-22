@@ -24,6 +24,11 @@ const { downloadAndUnzipVSCode, runTests, resolveCliArgsFromVSCodeExecutablePath
 const RESOLVERS = { wsl: 'ms-vscode-remote.remote-wsl', 'ssh-remote': 'ms-vscode-remote.remote-ssh' };
 
 function findCode() {
+  // DVICODE_E2E_VSCODE_VERSION: that version of VS Code, downloaded (e.g. the oldest one
+  // package.json supports).
+  if (process.env.DVICODE_E2E_VSCODE_VERSION) {
+    return undefined;
+  }
   if (process.env.VSCODE_EXECUTABLE) {
     return process.env.VSCODE_EXECUTABLE;
   }
@@ -126,7 +131,7 @@ async function main() {
   const remote = process.env.DVICODE_E2E_REMOTE;
   let code = findCode();
   if (!code) {
-    console.log(`[${label}] no VS Code installed (VSCODE_EXECUTABLE): downloading stable VS Code`);
+    console.log(`[${label}] downloading VS Code ${process.env.DVICODE_E2E_VSCODE_VERSION || 'stable'}`);
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dvicode-e2e-'));
   let result = path.join(tmp, 'result.json');
@@ -163,7 +168,7 @@ async function main() {
     remoteDir = await stageRemote(remote, extensionDevelopmentPath, tmp);
     extensionDevelopmentPath = `vscode-remote://${remote}${remoteDir}`;
     extensionTestsPath = `vscode-remote://${remote}${remoteDir}/test/suite.js`;
-    code = code || (await downloadAndUnzipVSCode());
+    code = code || (await downloadAndUnzipVSCode(process.env.DVICODE_E2E_VSCODE_VERSION || undefined));
     extensionsDir = resolverExtensions(code, remote);
     folderUri = `vscode-remote://${remote}${target}`;
     // The suite runs on the remote machine and writes its result next to itself.
@@ -178,7 +183,7 @@ async function main() {
     folderArgs = [ws];
   }
   // Downloaded here rather than by runTests, whose own path to the macOS program is outdated.
-  code = macBinary(code || (await downloadAndUnzipVSCode()));
+  code = macBinary(code || (await downloadAndUnzipVSCode(process.env.DVICODE_E2E_VSCODE_VERSION || undefined)));
   // VS Code failing (a crash on shutdown, say) fails the run even if the tests reported success.
   let runFailed = false;
   try {
