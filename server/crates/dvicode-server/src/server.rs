@@ -133,6 +133,8 @@ struct Server {
     changed_during_build: FxHashSet<FileId>,
     build_again: bool,
     build_generation: u64,
+    /// Revision of the current analysis (see `Server::install`).
+    revision: u64,
     rebuild_at: Option<Instant>,
     built_once: bool,
     published: Arc<Mutex<PubState>>,
@@ -202,6 +204,7 @@ pub fn run(conn: Connection) -> Res<()> {
         changed_during_build: FxHashSet::default(),
         build_again: false,
         build_generation: 0,
+        revision: 0,
         rebuild_at: None,
         built_once: false,
         published: Arc::new(Mutex::new(PubState::default())),
@@ -507,7 +510,7 @@ impl Server {
                 a = next;
             }
         }
-        self.analysis = Arc::new(a);
+        self.install(a);
         self.built_once = true;
         self.end_progress();
         let st = self.analysis.status();
@@ -582,7 +585,9 @@ impl Server {
             Some(next) => {
                 interface_changed = next.interface_changed(&a);
                 recompiled = next.recompiled_files(&a);
-                self.analysis = Arc::new(next);
+                self.install(next);
+                // The views refresh what they show.
+                self.notify("dvicode/revision", &json!({ "revision": self.revision }));
             }
             None => log::error!("kept the previous analysis of {:?}", files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
         }
@@ -790,7 +795,8 @@ impl Server {
                 if let Some(id) = self.vfs.lookup(&path) {
                     self.open.remove(&id);
                     if self.analysis.is_adhoc_root(id) {
-                        self.analysis = Arc::new(self.analysis.remove_adhoc(id));
+                        let next = self.analysis.remove_adhoc(id);
+                        self.install(next);
                         let uri = p.text_document.uri;
                         let mut st = self.published.lock().unwrap();
                         // Supersede any job still computing problems for this file.
@@ -860,6 +866,13 @@ impl Server {
     }
 
     // ------------------------------------------------------------------ requests
+
+    /// Makes `a` the analysis requests use, with the next revision.
+    fn install(&mut self, mut a: Analysis) {
+        self.revision += 1;
+        a.revision = self.revision;
+        self.analysis = Arc::new(a);
+    }
 
     fn spawn<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
@@ -1075,6 +1088,12 @@ impl Server {
                 let test = p.get("test").and_then(|t| t.as_str()).filter(|t| !t.is_empty()).map(|s| s.to_string());
                 Ok(a.verification_hierarchy(test.as_deref(), 20000))
             }),
+            // The views: one tree, filtered and limited (see TreeParams).
+            "dvicode/tree" => self.spawn(req, |a, p: TreeParams| Ok(view_tree(a, p))),
+            "dvicode/locate" => self.spawn(req, |a, p: LocateParams| {
+                let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
+                Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))
+            }),
             "dvicode/includingFiles" => self.spawn(req, |a, p: TextDocumentIdentifierParams| {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(Vec::new()) };
                 Ok(a.including_files(f))
@@ -1131,6 +1150,51 @@ impl Server {
 #[serde(rename_all = "camelCase")]
 struct TextDocumentIdentifierParams {
     text_document: TextDocumentIdentifier,
+}
+
+/// `dvicode/tree`: the tree of a view (`design`, `verification` or `files`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeParams {
+    view: String,
+    /// Design Hierarchy: the top (default: the candidate tops).
+    top: Option<String>,
+    /// Verification Hierarchy: the test class, `*` for all (default: +UVM_TESTNAME).
+    test: Option<String>,
+    filter: Option<String>,
+    /// Names from a root to a node returned even beyond the node limit.
+    reveal: Option<Vec<String>>,
+    max_nodes: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocateParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+}
+
+fn view_tree(a: &Analysis, p: TreeParams) -> Value {
+    use dvi_analysis::ide::filter::Filter;
+    use dvi_analysis::ide::views::TreeQuery;
+    let mut q = TreeQuery::new(p.max_nodes.unwrap_or(20_000).min(100_000));
+    q.filter = p.filter.as_deref().and_then(Filter::new);
+    q.reveal = p.reveal.unwrap_or_default();
+    let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
+    match p.view.as_str() {
+        "design" => {
+            let (roots, meta) = a.design_tree(nonempty(p.top).as_deref(), &q);
+            json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": roots })
+        }
+        "verification" => {
+            let (h, meta) = a.verification_tree(nonempty(p.test).as_deref(), &q);
+            json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": h.roots, "test": h.test, "configured": h.configured, "tests": h.tests })
+        }
+        _ => {
+            let (roots, meta) = a.compiled_files_filtered(q.filter.as_ref());
+            json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": roots })
+        }
+    }
 }
 
 #[derive(Deserialize)]

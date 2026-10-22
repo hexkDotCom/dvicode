@@ -1,5 +1,6 @@
 //! Data for the custom views: compiled files, design hierarchy, including files, status.
 
+use super::filter::Filter;
 use crate::world::{Analysis, DeclRef, UnitKind};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, RefKind};
 use dvi_syntax::{FileId, SourceProvider, Span, TokKind, Token};
@@ -68,6 +69,116 @@ pub struct VerifHierarchy {
     /// Every non-virtual class derived from `uvm_test`.
     pub tests: Vec<String>,
     pub roots: Vec<VerifNode>,
+}
+
+/// What a view asks for besides its root: a filter, a path to show, and limits.
+#[derive(Clone, Debug)]
+pub struct TreeQuery {
+    pub filter: Option<Filter>,
+    /// Names from a root to a node that is returned even beyond the node limit (with its
+    /// ancestors): for the Design Hierarchy the top's name, then instance names; for the
+    /// Verification Hierarchy the test class, then component names.
+    pub reveal: Vec<String>,
+    /// Nodes returned at most (not counting roots and the revealed path).
+    pub max_nodes: usize,
+    /// With a filter: matching nodes returned at most.
+    pub max_matches: usize,
+    /// Nodes looked at at most.
+    pub max_visits: usize,
+}
+
+impl TreeQuery {
+    pub fn new(max_nodes: usize) -> TreeQuery {
+        TreeQuery { filter: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000 }
+    }
+}
+
+/// How complete a tree is.
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeMeta {
+    /// Why nodes are missing: `nodes` (the node limit; nodes with `truncated` have more
+    /// children), `matches` (the match limit) or `visits` (the search stopped); `None` when
+    /// the tree is complete.
+    pub incomplete: Option<&'static str>,
+    /// With a filter: the matching nodes returned.
+    pub matches: usize,
+}
+
+/// The enclosing definitions of a position, for following the editor in the views.
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct Located {
+    /// The module, interface or program around the position.
+    pub design: Option<NamedDef>,
+    /// The instance whose instantiation the position is in (`fifo a(), b();` on `b`).
+    pub instance: Option<String>,
+    /// The class around the position.
+    pub class: Option<NamedDef>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct NamedDef {
+    pub name: String,
+    pub uri: Option<String>,
+}
+
+struct Walk<'q> {
+    q: &'q TreeQuery,
+    nodes_left: usize,
+    visits_left: usize,
+    meta: TreeMeta,
+}
+
+impl Walk<'_> {
+    fn new(q: &TreeQuery) -> Walk<'_> {
+        Walk { q, nodes_left: q.max_nodes, visits_left: q.max_visits, meta: TreeMeta::default() }
+    }
+
+    /// The match or visit limit was reached: nothing more is looked at.
+    fn stopped(&self) -> bool {
+        matches!(self.meta.incomplete, Some("matches" | "visits"))
+    }
+
+    /// Counts a node looked at; false at the visit limit.
+    fn visit(&mut self) -> bool {
+        if self.visits_left == 0 {
+            self.meta.incomplete = Some("visits");
+            return false;
+        }
+        self.visits_left -= 1;
+        true
+    }
+
+    /// Whether a node with these texts (and their path separator) matches the filter; always
+    /// true without one.
+    fn matched(&mut self, texts: &[(&str, char)]) -> bool {
+        let Some(f) = &self.q.filter else { return true };
+        let m = texts.iter().any(|(t, sep)| f.matches(t, *sep));
+        if m {
+            self.meta.matches += 1;
+            if self.meta.matches >= self.q.max_matches {
+                self.meta.incomplete = Some("matches");
+            }
+        }
+        m
+    }
+
+    /// Before a node is added: whether there is room for it. `pinned`: on the revealed path,
+    /// added anyway. `Some(true)` when a slot was taken (given back if the node is dropped).
+    fn reserve(&mut self, pinned: bool) -> Option<bool> {
+        if self.nodes_left > 0 {
+            self.nodes_left -= 1;
+            return Some(true);
+        }
+        if self.meta.incomplete.is_none() {
+            self.meta.incomplete = Some("nodes");
+        }
+        pinned.then_some(false)
+    }
+}
+
+/// The rest of a revealed path below a node called `name`, when the path goes through it.
+fn pin_below<'a>(pin: Option<&'a [String]>, name: &str) -> Option<&'a [String]> {
+    pin.and_then(|p| p.split_first()).filter(|(first, _)| first.as_str() == name).map(|(_, rest)| rest)
 }
 
 /// A `x = T::type_id::create("name", this)` or `x = new("name", this)` in a method body.
@@ -144,7 +255,14 @@ impl Analysis {
 
     /// Compiled files in compile order, with their include trees.
     pub fn compiled_files(&self) -> Vec<FileNode> {
+        self.compiled_files_filtered(None).0
+    }
+
+    /// [`Analysis::compiled_files`] with only the files whose path matches `filter` and the files
+    /// that include them.
+    pub fn compiled_files_filtered(&self, filter: Option<&Filter>) -> (Vec<FileNode>, TreeMeta) {
         let mut out = Vec::new();
+        let mut meta = TreeMeta::default();
         for u in self.units.iter().flatten() {
             if u.kind == UnitKind::Builtin {
                 continue;
@@ -169,9 +287,13 @@ impl Analysis {
                 }
                 _ => "top",
             };
-            out.push(self.file_node(u.root, kind, &by_parent, &mut visited));
+            let node = self.file_node(u.root, kind, &by_parent, &mut visited);
+            match filter {
+                None => out.push(node),
+                Some(f) => out.extend(prune_files(node, f, &mut meta.matches)),
+            }
         }
-        out
+        (out, meta)
     }
 
     fn file_node(&self, f: FileId, kind: &str, by_parent: &FxHashMap<FileId, Vec<FileId>>, visited: &mut FxHashSet<FileId>) -> FileNode {
@@ -244,35 +366,48 @@ impl Analysis {
     }
 
     pub fn design_hierarchy(&self, top: Option<&str>, max_nodes: usize) -> Vec<HierNode> {
+        self.design_tree(top, &TreeQuery::new(max_nodes)).0
+    }
+
+    /// The instance tree under `top` (or under each candidate top), as `q` asks.
+    pub fn design_tree(&self, top: Option<&str>, q: &TreeQuery) -> (Vec<HierNode>, TreeMeta) {
         let tops: Vec<DeclRef> = match top {
             Some(t) => self.global.definitions.get(t).and_then(|v| v.first().copied()).into_iter().collect(),
             None => self.design_tops(),
         };
-        let mut budget = max_nodes;
-        tops.into_iter()
-            .map(|t| {
-                let d = self.decl(t);
-                let loc = self.decl_location(t);
-                let mut node = HierNode {
-                    name: d.name.to_string(),
-                    definition: d.name.to_string(),
-                    kind: d.kind.label().into(),
-                    uri: loc.as_ref().map(|l| l.uri.to_string()),
-                    line: loc.as_ref().map_or(0, |l| l.range.start.line),
-                    character: loc.as_ref().map_or(0, |l| l.range.start.character),
-                    def_uri: loc.as_ref().map(|l| l.uri.to_string()),
-                    def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
-                    children: Vec::new(),
-                    truncated: false,
-                };
-                let mut stack = vec![self.decl_key(t)];
-                node.children = self.hier_children(t, &mut budget, &mut stack, &mut node.truncated);
-                node
-            })
-            .collect()
+        let mut w = Walk::new(q);
+        let mut roots = Vec::new();
+        for t in tops {
+            let d = self.decl(t);
+            let loc = self.decl_location(t);
+            let name = d.name.to_string();
+            let pin = pin_below(Some(q.reveal.as_slice()), &name);
+            let matched = w.matched(&[(&name, '.')]);
+            let mut node = HierNode {
+                name: name.clone(),
+                definition: name.clone(),
+                kind: d.kind.label().into(),
+                uri: loc.as_ref().map(|l| l.uri.to_string()),
+                line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                character: loc.as_ref().map_or(0, |l| l.range.start.character),
+                def_uri: loc.as_ref().map(|l| l.uri.to_string()),
+                def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                children: Vec::new(),
+                truncated: false,
+            };
+            let mut stack = vec![self.decl_key(t)];
+            if !w.stopped() {
+                node.children = self.hier_walk(t, &name, pin, &mut w, &mut stack, &mut node.truncated);
+            }
+            if matched || !node.children.is_empty() || pin.is_some() {
+                roots.push(node);
+            }
+        }
+        (roots, w.meta)
     }
 
-    fn hier_children(&self, scope: DeclRef, budget: &mut usize, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<HierNode> {
+    #[allow(clippy::too_many_arguments)]
+    fn hier_walk(&self, scope: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<HierNode> {
         let mut out = Vec::new();
         let u = self.unit(scope.unit);
         let mut todo: Vec<DeclId> = u.parsed.decl(scope.decl).children.clone();
@@ -283,16 +418,31 @@ impl Analysis {
                 // A `bind` adds its instance to the target, not to the module it is written in.
                 DeclKind::Instance if d.has(dflags::BOUND) => {}
                 DeclKind::Instance => {
-                    if *budget == 0 {
+                    let child_pin = pin_below(pin, &d.name);
+                    if w.stopped() && child_pin.is_none() {
+                        *truncated = true;
+                        if pin.is_some() {
+                            continue;
+                        }
+                        return out;
+                    }
+                    if !w.visit() && child_pin.is_none() {
                         *truncated = true;
                         return out;
                     }
-                    *budget -= 1;
+                    let Some(reserved) = w.reserve(child_pin.is_some()) else {
+                        *truncated = true;
+                        if pin.is_some() {
+                            continue;
+                        }
+                        return out;
+                    };
                     let cr = DeclRef { unit: scope.unit, decl: c };
                     let def = self.type_of(cr);
                     let loc = self.decl_location(cr);
                     let def_loc = def.and_then(|m| self.decl_location(m));
                     let def_name = d.ty.as_ref().map(|t| t.text.split(|ch: char| ch == ' ' || ch == '#').next().unwrap_or("").to_string()).unwrap_or_default();
+                    let child_path = format!("{path}.{}", d.name);
                     let mut node = HierNode {
                         name: d.name.to_string(),
                         definition: def.map(|m| self.decl(m).name.to_string()).unwrap_or(def_name),
@@ -305,24 +455,31 @@ impl Analysis {
                         children: Vec::new(),
                         truncated: false,
                     };
+                    let matched = w.matched(&[(&node.name, '.'), (&node.definition, '.'), (&child_path, '.')]);
                     if let Some(m) = def {
                         let key = self.decl_key(m);
                         if !stack.contains(&key) && stack.len() < 64 {
                             stack.push(key);
-                            node.children = self.hier_children(m, budget, stack, &mut node.truncated);
+                            node.children = self.hier_walk(m, &child_path, child_pin, w, stack, &mut node.truncated);
                             stack.pop();
                         }
                     }
-                    out.push(node);
+                    if matched || !node.children.is_empty() || child_pin.is_some() {
+                        out.push(node);
+                    } else if reserved {
+                        w.nodes_left += 1;
+                    }
                 }
                 DeclKind::Generate | DeclKind::Block => {
                     // Generate blocks: show named ones as scopes, flatten unnamed.
                     let gr = DeclRef { unit: scope.unit, decl: c };
-                    let kids = self.hier_children(gr, budget, stack, truncated);
+                    let named = d.kind == DeclKind::Generate;
+                    let (gen_path, gen_pin) = if named { (format!("{path}.{}", d.name), pin_below(pin, &d.name)) } else { (path.to_string(), pin) };
+                    let kids = self.hier_walk(gr, &gen_path, gen_pin, w, stack, truncated);
                     if kids.is_empty() {
                         continue;
                     }
-                    if d.kind == DeclKind::Generate {
+                    if named {
                         let loc = self.decl_location(gr);
                         out.push(HierNode {
                             name: d.name.to_string(),
@@ -343,6 +500,36 @@ impl Analysis {
                 _ => {}
             }
         }
+        out
+    }
+
+    /// The design element, instance and class around a position.
+    pub fn locate(&self, file: FileId, off: u32) -> Located {
+        let mut out = Located::default();
+        let Some(&unit) = self.units_for(file).first() else { return out };
+        let u = self.unit(unit);
+        let scope = self.scope_at(unit, file, off);
+        let named = |r: DeclRef| NamedDef { name: self.decl(r).name.to_string(), uri: self.decl_location(r).map(|l| l.uri.to_string()) };
+        let mut cur = Some(scope);
+        while let Some(s) = cur {
+            let d = u.parsed.decl(s);
+            if matches!(d.kind, DeclKind::Module | DeclKind::Interface | DeclKind::Program | DeclKind::Checker) {
+                out.design = Some(named(DeclRef { unit, decl: s }));
+                break;
+            }
+            cur = d.parent;
+        }
+        if out.design.is_some() {
+            // The innermost instantiation around the position.
+            out.instance = u
+                .parsed
+                .decls
+                .iter()
+                .filter(|d| d.kind == DeclKind::Instance && !d.has(dflags::BOUND) && d.span.file == file && d.span.start <= off && off <= d.span.end)
+                .min_by_key(|d| d.span.len())
+                .map(|d| d.name.to_string());
+        }
+        out.class = self.enclosing_class(unit, scope).map(named);
         out
     }
 
@@ -416,6 +603,11 @@ impl Analysis {
     /// constructors of each class and its base classes. `test`: a test class name, `*` for
     /// every test, or `None` for `+UVM_TESTNAME` (every test when it is not set).
     pub fn verification_hierarchy(&self, test: Option<&str>, max_nodes: usize) -> VerifHierarchy {
+        self.verification_tree(test, &TreeQuery::new(max_nodes)).0
+    }
+
+    /// [`Analysis::verification_hierarchy`] as `q` asks.
+    pub fn verification_tree(&self, test: Option<&str>, q: &TreeQuery) -> (VerifHierarchy, TreeMeta) {
         let configured = self.setup.config.uvm_testname();
         let tests = self.uvm_tests();
         let wanted = match test {
@@ -427,34 +619,40 @@ impl Analysis {
             Some(t) => tests.iter().copied().filter(|r| self.decl(*r).name == t.as_str()).take(1).collect(),
             None => tests.clone(),
         };
-        let mut budget = max_nodes;
-        let roots = roots
-            .into_iter()
-            .map(|t| {
-                let d = self.decl(t);
-                let loc = self.decl_location(t);
-                let mut node = VerifNode {
-                    name: "uvm_test_top".into(),
-                    path: "uvm_test_top".into(),
-                    class: d.name.to_string(),
-                    kind: "test".into(),
-                    uri: loc.as_ref().map(|l| l.uri.to_string()),
-                    line: loc.as_ref().map_or(0, |l| l.range.start.line),
-                    character: loc.as_ref().map_or(0, |l| l.range.start.character),
-                    def_uri: loc.as_ref().map(|l| l.uri.to_string()),
-                    def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
-                    children: Vec::new(),
-                    truncated: false,
-                };
-                let mut stack = vec![self.decl_key(t)];
-                node.children = self.component_children(t, "uvm_test_top", &mut budget, &mut stack, &mut node.truncated);
-                node
-            })
-            .collect();
-        VerifHierarchy { test: wanted, configured, tests: tests.iter().map(|r| self.decl(*r).name.to_string()).collect(), roots }
+        let mut w = Walk::new(q);
+        let mut out = Vec::new();
+        for t in roots {
+            let d = self.decl(t);
+            let loc = self.decl_location(t);
+            let pin = pin_below(Some(q.reveal.as_slice()), &d.name);
+            let matched = w.matched(&[("uvm_test_top", '.'), (&d.name, '.')]);
+            let mut node = VerifNode {
+                name: "uvm_test_top".into(),
+                path: "uvm_test_top".into(),
+                class: d.name.to_string(),
+                kind: "test".into(),
+                uri: loc.as_ref().map(|l| l.uri.to_string()),
+                line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                character: loc.as_ref().map_or(0, |l| l.range.start.character),
+                def_uri: loc.as_ref().map(|l| l.uri.to_string()),
+                def_line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                children: Vec::new(),
+                truncated: false,
+            };
+            let mut stack = vec![self.decl_key(t)];
+            if !w.stopped() {
+                node.children = self.component_children(t, "uvm_test_top", pin, &mut w, &mut stack, &mut node.truncated);
+            }
+            if matched || !node.children.is_empty() || pin.is_some() {
+                out.push(node);
+            }
+        }
+        let h = VerifHierarchy { test: wanted, configured, tests: tests.iter().map(|r| self.decl(*r).name.to_string()).collect(), roots: out };
+        (h, w.meta)
     }
 
-    fn component_children(&self, class: DeclRef, path: &str, budget: &mut usize, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<VerifNode> {
+    #[allow(clippy::too_many_arguments)]
+    fn component_children(&self, class: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool) -> Vec<VerifNode> {
         // Base classes first: `super.build_phase()` usually runs before the derived code.
         let mut chain = Vec::new();
         let mut cur = Some(class);
@@ -505,12 +703,22 @@ impl Analysis {
                 },
                 None => "unresolved",
             };
-            if *budget == 0 {
+            let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
+            let child_pin = pin_below(pin, &name);
+            if (w.stopped() || !w.visit()) && child_pin.is_none() {
                 *truncated = true;
+                if pin.is_some() {
+                    continue;
+                }
                 break;
             }
-            *budget -= 1;
-            let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
+            let Some(reserved) = w.reserve(child_pin.is_some()) else {
+                *truncated = true;
+                if pin.is_some() {
+                    continue;
+                }
+                break;
+            };
             let child_path = format!("{path}.{name}");
             let loc = self.to_location(cr.lhs_head);
             let def_loc = cls.and_then(|c| self.decl_location(c));
@@ -536,11 +744,16 @@ impl Analysis {
                 let key = self.decl_key(c);
                 if !stack.contains(&key) && stack.len() < 64 {
                     stack.push(key);
-                    node.children = self.component_children(c, &child_path, budget, stack, &mut node.truncated);
+                    node.children = self.component_children(c, &child_path, child_pin, w, stack, &mut node.truncated);
                     stack.pop();
                 }
             }
-            out.push(node);
+            let matched = w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]);
+            if matched || !node.children.is_empty() || child_pin.is_some() {
+                out.push(node);
+            } else if reserved {
+                w.nodes_left += 1;
+            }
         }
         out
     }
@@ -826,6 +1039,16 @@ fn called_methods(t: &[Token], own: &str) -> Vec<(usize, String)> {
         }
     }
     out
+}
+
+/// A file node with only the files whose path matches `f` and those that include them;
+/// `None` when none is left.
+fn prune_files(mut n: FileNode, f: &Filter, matches: &mut usize) -> Option<FileNode> {
+    let kids = std::mem::take(&mut n.children);
+    n.children = kids.into_iter().filter_map(|c| prune_files(c, f, matches)).collect();
+    let matched = f.matches(&n.path.replace('\\', "/"), '/');
+    *matches += usize::from(matched);
+    (matched || !n.children.is_empty()).then_some(n)
 }
 
 /// Start and variable-name token of the assignment target before `t[eq]` (`a.b[i]`).

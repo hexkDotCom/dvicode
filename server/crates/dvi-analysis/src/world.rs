@@ -154,6 +154,8 @@ pub struct Analysis {
     pub global: Arc<GlobalIndex>,
     pub file_units: Arc<FxHashMap<FileId, Vec<UnitId>>>,
     pub build_ms: u128,
+    /// Set by the server: a number that grows with each snapshot it uses.
+    pub revision: u64,
     /// Without a build file: uses not checked because code that may declare them is removed by
     /// `` `ifdef ``, by region (file, start). Counted for each snapshot when first needed
     /// (`Analysis::hidden_uses`).
@@ -363,6 +365,7 @@ impl Analysis {
             global: Arc::new(GlobalIndex::default()),
             file_units: Arc::new(FxHashMap::default()),
             build_ms: 0,
+            revision: 0,
             hidden_uses: Arc::default(),
             instance_defs: Arc::default(),
         };
