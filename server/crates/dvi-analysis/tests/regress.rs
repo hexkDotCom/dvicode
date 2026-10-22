@@ -1151,6 +1151,121 @@ endpackage
 }
 
 #[test]
+fn factory_overrides() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_factory; endclass\n  uvm_factory factory;\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = r#"package tb_pkg;
+  import uvm_pkg::*;
+  class leaf extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class err_leaf extends leaf; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class worse_leaf extends err_leaf; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class drv extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class err_drv extends drv; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class agent extends uvm_env;
+    drv d;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); d = drv::type_id::create("d", this); endfunction
+  endclass
+  class env_a extends uvm_env;
+    leaf l;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      l = leaf::type_id::create("l", this);
+      set_type_override_by_type(leaf::get_type(), err_leaf::get_type());
+    endfunction
+  endclass
+  class env_b extends uvm_env;
+    leaf l, by_new;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      l = leaf::type_id::create("l", this);
+      by_new = new("by_new", this);
+    endfunction
+  endclass
+  class base_t extends uvm_test;
+    env_a a; env_b b; agent agt1, agt2, agt3;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      a = env_a::type_id::create("a", this);
+      b = env_b::type_id::create("b", this);
+      agt1 = agent::type_id::create("agt1", this);
+      agt2 = agent::type_id::create("agt2", this);
+      agt3 = agent::type_id::create("agt3", this);
+    endfunction
+  endclass
+  class t_type extends base_t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      drv::type_id::set_type_override(err_drv::get_type());
+      super.build_phase(phase);
+    endfunction
+  endclass
+  class t_inst extends base_t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      set_inst_override_by_type("agt1.d", drv::get_type(), err_drv::get_type());
+      factory.set_inst_override_by_type(.original_type(drv::get_type()), .override_type(err_drv::get_type()), .full_inst_path("*.agt3.*"));
+      super.build_phase(phase);
+    endfunction
+  endclass
+  class t_cond extends base_t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (inject) set_type_override("drv", "err_drv");
+      set_type_override_by_type(leaf::get_type(), worse_leaf::get_type());
+      set_type_override_by_type(leaf::get_type(), leaf::get_type(), 0);
+      super.build_phase(phase);
+    endfunction
+  endclass
+  class t_chain extends base_t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      uvm_factory::get().set_type_override_by_type(drv::get_type(), err_drv::get_type());
+      set_type_override_by_type(err_drv::get_type(), drv::get_type());
+      super.build_phase(phase);
+    endfunction
+  endclass
+endpackage
+"#;
+    let (a, _) = project("overrides", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let tree = |test: &str| -> Vec<String> {
+        let h = a.verification_hierarchy(Some(test), 100);
+        let mut out = Vec::new();
+        fn walk(n: &dvi_analysis::ide::views::VerifNode, out: &mut Vec<String>) {
+            for c in &n.children {
+                let ov: Vec<String> = c.overrides.iter().map(|o| format!("{}{}>{}@{}{}", if o.applied { "" } else { "?" }, o.from, o.to, o.set_in, o.path.as_ref().map(|p| format!(" {p}")).unwrap_or_default())).collect();
+                out.push(format!("{}:{}{}", c.path.trim_start_matches("uvm_test_top."), c.class, if ov.is_empty() { String::new() } else { format!(" [{}]", ov.join("; ")) }));
+                walk(c, out);
+            }
+        }
+        walk(&h.roots[0], &mut out);
+        out
+    };
+    // env_a's override comes after its own leaf, and before env_b builds (name order).
+    let base = ["a:env_a", "a.l:leaf", "agt1:agent", "agt1.d:drv", "agt2:agent", "agt2.d:drv", "agt3:agent", "agt3.d:drv", "b:env_b", "b.l:err_leaf [leaf>err_leaf@env_a::build_phase]", "b.by_new:leaf"];
+    let sorted = |v: Vec<String>| {
+        let mut v = v;
+        v.sort();
+        v
+    };
+    let mut want: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    assert_eq!(sorted(tree("base_t")), want);
+    let t = tree("t_type");
+    assert!(t.contains(&"agt2.d:err_drv [drv>err_drv@t_type::build_phase]".to_string()), "{t:?}");
+    let t = tree("t_inst");
+    assert!(t.contains(&"agt1.d:err_drv [drv>err_drv@t_inst::build_phase uvm_test_top.agt1.d]".to_string()), "{t:?}");
+    assert!(t.contains(&"agt2.d:drv".to_string()), "{t:?}");
+    assert!(t.contains(&"agt3.d:err_drv [drv>err_drv@t_inst::build_phase *.agt3.*]".to_string()), "{t:?}");
+    let t = tree("t_cond");
+    // Set under a condition: listed, not applied. `replace = 0` keeps the earlier override.
+    assert!(t.contains(&"agt1.d:drv [?drv>err_drv@t_cond::build_phase]".to_string()), "{t:?}");
+    assert!(t.contains(&"a.l:worse_leaf [leaf>worse_leaf@t_cond::build_phase]".to_string()), "{t:?}");
+    // A loop builds the class where it closes, as UVM's factory does.
+    let t = tree("t_chain");
+    assert!(t.contains(&"agt1.d:drv [drv>err_drv@t_chain::build_phase; err_drv>drv@t_chain::build_phase]".to_string()), "{t:?}");
+}
+
+#[test]
 fn conditions_loops_alternatives_and_ports() {
     let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_port_base; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_analysis_port #(type T = int) extends uvm_port_base; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_driver extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
     let tb = r#"`define NUM 3

@@ -4,6 +4,7 @@ pub mod actions;
 pub mod calls;
 pub mod completion;
 pub mod diagnostics;
+pub mod factory;
 pub mod filter;
 pub mod hover;
 pub mod loops;

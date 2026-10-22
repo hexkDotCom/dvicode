@@ -1,5 +1,6 @@
 //! Data for the custom views: compiled files, design hierarchy, including files, status.
 
+use super::factory::{glob_match, OverrideCall};
 use super::filter::Filter;
 use super::stmt::{self, FrameKind};
 use crate::world::{Analysis, DeclRef, UnitKind};
@@ -90,6 +91,30 @@ pub struct VerifNode {
     /// TLM ports of the component left out (`TreeQuery::ports` off).
     #[serde(skip_serializing_if = "is_zero")]
     pub ports_hidden: u32,
+    /// Factory overrides: those that make `class` what it is (`applied`), in order, then those
+    /// set under conditions that would change it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<OverrideStep>,
+}
+
+/// One factory override of a node's class.
+#[derive(Serialize, Debug, Clone)]
+pub struct OverrideStep {
+    pub from: String,
+    pub to: String,
+    pub instance: bool,
+    /// Instance overrides: the path pattern, made full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The method that sets it: `err_test::build_phase`.
+    pub set_in: String,
+    pub uri: Option<String>,
+    pub line: u32,
+    /// As [`VerifNode::conditions`]: the override is set only when these hold.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Vec<String>>,
+    /// It makes the node's class; else it is set under conditions and would change it.
+    pub applied: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -284,6 +309,8 @@ struct Creation {
     parent: String,
     /// The created class, when known already (a factory method's creation).
     class: Option<DeclRef>,
+    /// Made by the factory (`type_id::create`), which applies overrides; else by `new`.
+    factory: bool,
 }
 
 /// A condition or loop around a creation, from the method it is in or a call leading to it.
@@ -313,6 +340,7 @@ struct Event {
 
 enum What {
     Create(Creation),
+    Override(OverrideCall),
     /// A call of a method of the object (`f()`, `this.f()`), or of the base class's (`super.f()`,
     /// `super.new()`): with the arguments given by name (`.n(v)`) or position.
     Call { name: String, sup: bool, args: Vec<(Option<String>, Arg)> },
@@ -338,6 +366,40 @@ struct Made {
     cr: Creation,
     alts: Vec<Vec<Guard>>,
     others: Vec<Made>,
+    /// The component's own overrides registered before it is made.
+    seq: usize,
+}
+
+/// What building a component makes: its creations, and the overrides it registers, in order.
+#[derive(Default)]
+struct Built {
+    made: Vec<Made>,
+    regs: Vec<Reg>,
+}
+
+/// An override call reached while building a component.
+#[derive(Debug, Clone)]
+struct Reg {
+    call: OverrideCall,
+    body: DeclRef,
+    guards: Vec<Guard>,
+}
+
+/// An override registered with the factory.
+#[derive(Debug, Clone)]
+struct Entry {
+    instance: bool,
+    from: (u32, u32),
+    from_class: DeclRef,
+    to: DeclRef,
+    /// Instance overrides: the full path pattern.
+    path: String,
+    replace: bool,
+    /// Set without conditions: it applies for certain.
+    certain: bool,
+    conditions: Vec<Vec<String>>,
+    set_in: String,
+    span: Span,
 }
 
 /// Work shared by one request: tokens of files, summaries of method bodies, and a budget of
@@ -1030,10 +1092,13 @@ impl Analysis {
                 loops: Vec::new(),
                 alternatives: Vec::new(),
                 ports_hidden: 0,
+                overrides: Vec::new(),
             };
             let mut stack = vec![self.decl_key(t)];
+            // The factory's overrides, in the order they are registered while the test builds.
+            let mut factory = Vec::new();
             if !w.stopped() {
-                node.children = self.component_children(t, "uvm_test_top", pin, &mut w, &mut stack, &mut node.truncated, &mut node.ports_hidden, &scan);
+                node.children = self.component_children(t, "uvm_test_top", pin, &mut w, &mut stack, &mut node.truncated, &mut node.ports_hidden, &scan, &mut factory);
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 out.push(node);
@@ -1044,8 +1109,11 @@ impl Analysis {
         (h, w.meta)
     }
 
+    /// The children of a component of class `class` at `path`. `factory`: the overrides
+    /// registered so far; the component's own are added, and its children are built after it, in
+    /// name order, as UVM's build phase does.
     #[allow(clippy::too_many_arguments)]
-    fn component_children(&self, class: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, ports_hidden: &mut u32, scan: &Scan) -> Vec<VerifNode> {
+    fn component_children(&self, class: DeclRef, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, ports_hidden: &mut u32, scan: &Scan, factory: &mut Vec<Entry>) -> Vec<VerifNode> {
         // The class and its base classes below the UVM library, most derived first.
         let mut derived_first = Vec::new();
         let mut cur = Some(class);
@@ -1056,7 +1124,7 @@ impl Analysis {
             derived_first.push(c);
             cur = self.class_base(c);
         }
-        let made = self.build_creations(&derived_first, scan);
+        let built = self.build_creations(&derived_first, scan);
         if scan.cut.get() {
             // Creations beyond a budget or the call depth are missing.
             *truncated = true;
@@ -1064,8 +1132,7 @@ impl Analysis {
                 w.meta.incomplete = Some("nodes");
             }
         }
-        let mut out = Vec::new();
-        let mut seen = FxHashMap::default();
+        let own: Vec<Entry> = built.regs.iter().filter_map(|r| self.factory_entry(r, path)).collect();
         // The created class: `T` of `T::type_id::create`, else the variable's type. A type
         // parameter of a base class (`T_ENV env`) is the type a derived class gives it.
         let class_of = |body: DeclRef, cr: &Creation| -> Option<DeclRef> {
@@ -1079,14 +1146,39 @@ impl Analysis {
                     .or_else(|| from_var().and_then(|r| self.bind_type_param(r, &derived_first, scan)).filter(is_class))
             })
         };
-        for Made { body, cr, mut alts, others } in made {
-            let cls = class_of(body, &cr);
+        // The class the factory builds for a creation, with the overrides registered before it.
+        let base_len = factory.len();
+        let build = |factory: &mut Vec<Entry>, m: &Made, full_path: Option<&str>| -> (Option<DeclRef>, Option<DeclRef>, Vec<OverrideStep>) {
+            let requested = class_of(m.body, &m.cr);
+            let Some(req) = requested.filter(|_| m.cr.factory) else { return (requested, requested, Vec::new()) };
+            factory.extend(own[..own.len().min(m.seq)].iter().cloned());
+            let (built, steps) = self.factory_resolve(factory, req, full_path);
+            factory.truncate(base_len);
+            (Some(built), requested, steps)
+        };
+        struct Pending {
+            node: VerifNode,
+            cls: Option<DeclRef>,
+            port: bool,
+            pin: Option<Vec<String>>,
+            reserved: bool,
+            matched: bool,
+        }
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut seen = FxHashMap::default();
+        for m in built.made {
+            let name = m.cr.name.clone().unwrap_or_else(|| m.cr.lhs.trim_start_matches("this.").to_string());
+            let child_path = format!("{path}.{name}");
+            // A computed name has no path the factory can match.
+            let full_path = m.cr.name.as_ref().map(|_| child_path.as_str());
+            let (cls, requested, overrides) = build(factory, &m, full_path);
             // Other creations of the same class only add ways to make it.
+            let mut alts = m.alts.clone();
             let mut alternatives: Vec<Alternative> = Vec::new();
-            for o in others {
-                let oc = class_of(o.body, &o.cr);
+            for o in &m.others {
+                let (oc, _, _) = build(factory, o, o.cr.name.as_ref().map(|_| child_path.as_str()));
                 if oc.map(|c| self.decl_key(c)) == cls.map(|c| self.decl_key(c)) {
-                    alts.extend(o.alts);
+                    alts.extend(o.alts.iter().cloned());
                     continue;
                 }
                 let loc = self.to_location(o.cr.lhs_head);
@@ -1110,7 +1202,6 @@ impl Analysis {
                 },
                 None => "unresolved",
             };
-            let name = cr.name.clone().unwrap_or_else(|| cr.lhs.trim_start_matches("this.").to_string());
             let dup = sibling(&mut seen, &name);
             // Hidden ports still count for `#2` numbering, so hiding them renames nothing.
             if kind == "port" && !w.q.ports {
@@ -1132,17 +1223,17 @@ impl Analysis {
                 }
                 break;
             };
-            let child_path = format!("{path}.{name}");
-            let loc = self.to_location(cr.lhs_head);
+            let loc = self.to_location(m.cr.lhs_head);
             let def_loc = cls.and_then(|c| self.decl_location(c));
             let class_name = match cls {
                 Some(c) => self.decl(c).name.to_string(),
-                None if !cr.ty_text.is_empty() => cr.ty_text.clone(),
-                None => self.resolve_at_span(body.unit, cr.lhs_head).and_then(|v| self.decl(v).ty.as_ref().map(|t| t.text.to_string())).unwrap_or_default(),
+                None if !m.cr.ty_text.is_empty() => m.cr.ty_text.clone(),
+                None => self.resolve_at_span(m.body.unit, m.cr.lhs_head).and_then(|v| self.decl(v).ty.as_ref().map(|t| t.text.to_string())).unwrap_or_default(),
             };
-            let mut node = VerifNode {
+            let declared = requested.filter(|r| Some(self.decl_key(*r)) != cls.map(|c| self.decl_key(c))).map(|r| self.decl(r).name.to_string());
+            let node = VerifNode {
                 name,
-                path: child_path.clone(),
+                path: child_path,
                 class: class_name,
                 kind: kind.into(),
                 uri: loc.as_ref().map(|l| l.uri.to_string()),
@@ -1158,24 +1249,127 @@ impl Analysis {
                 loops: alts[0].iter().filter_map(loop_text).collect(),
                 alternatives,
                 ports_hidden: 0,
+                overrides,
             };
-            // Matched before the children, so the match limit counts in tree order.
-            let matched = if w.q.target.is_some() { w.hit(&node.name, "", "", &node.class) } else { w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]) };
-            if let Some(c) = cls.filter(|_| kind != "port") {
-                let key = self.decl_key(c);
-                if !stack.contains(&key) && stack.len() < 64 {
-                    stack.push(key);
-                    node.children = self.component_children(c, &child_path, child_pin, w, stack, &mut node.truncated, &mut node.ports_hidden, scan);
-                    stack.pop();
+            // Matched before the children; an overridden component also by the class requested.
+            let declared = declared.as_deref().unwrap_or("");
+            let matched = match &w.q.target {
+                Some(t) => {
+                    let m = t.class.as_deref().is_some_and(|c| c == node.class || c == declared);
+                    w.count(m)
                 }
+                None => w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.'), (declared, '.')]),
+            };
+            pending.push(Pending { node, cls, port: kind == "port", pin: child_pin.map(|p| p.to_vec()), reserved, matched });
+        }
+        // The component's overrides are registered before its children build.
+        factory.extend(own);
+        let mut order: Vec<usize> = (0..pending.len()).collect();
+        order.sort_by(|a, b| pending[*a].node.name.cmp(&pending[*b].node.name));
+        for i in order {
+            let p = &mut pending[i];
+            let Some(c) = p.cls.filter(|_| !p.port) else { continue };
+            let key = self.decl_key(c);
+            if !stack.contains(&key) && stack.len() < 64 {
+                stack.push(key);
+                let child_path = p.node.path.clone();
+                p.node.children = self.component_children(c, &child_path, p.pin.as_deref(), w, stack, &mut p.node.truncated, &mut p.node.ports_hidden, scan, factory);
+                stack.pop();
             }
-            if matched || !node.children.is_empty() || child_pin.is_some() {
-                out.push(node);
-            } else if reserved {
+        }
+        let mut out = Vec::new();
+        for p in pending {
+            if p.matched || !p.node.children.is_empty() || p.pin.is_some() {
+                out.push(p.node);
+            } else if p.reserved {
                 w.nodes_left += 1;
             }
         }
         out
+    }
+
+    /// A registered override as a factory entry, its path made full from the component's path.
+    fn factory_entry(&self, r: &Reg, path: &str) -> Option<Entry> {
+        let c = &r.call;
+        let full = if !c.instance {
+            String::new()
+        } else if c.relative {
+            if c.path.is_empty() { path.to_string() } else { format!("{path}.{}", c.path) }
+        } else {
+            c.path.clone()
+        };
+        let conditions = conditions_text(std::slice::from_ref(&r.guards));
+        let class = self.enclosing_class(r.body.unit, r.body.decl).map(|k| self.decl(k).name.to_string()).unwrap_or_default();
+        let method = self.decl(r.body).name.to_string();
+        Some(Entry {
+            instance: c.instance,
+            from: self.decl_key(c.from),
+            from_class: c.from,
+            to: c.to,
+            path: full,
+            replace: c.replace,
+            certain: conditions.is_empty(),
+            conditions,
+            set_in: if class.is_empty() { method } else { format!("{class}::{method}") },
+            span: c.span,
+        })
+    }
+
+    /// The class the factory builds for `requested` at `path` (`None`: a name the factory cannot
+    /// match), as `uvm_default_factory` does: at each step a matching instance override (the
+    /// first registered) wins over the type override; repeated from the result. Only overrides
+    /// set without conditions are applied; those set under conditions that would change the
+    /// result are listed after them.
+    fn factory_resolve(&self, table: &[Entry], requested: DeclRef, path: Option<&str>) -> (DeclRef, Vec<OverrideStep>) {
+        let step = |e: &Entry, applied: bool| {
+            let loc = self.to_location(e.span);
+            OverrideStep {
+                from: self.decl(e.from_class).name.to_string(),
+                to: self.decl(e.to).name.to_string(),
+                instance: e.instance,
+                path: e.instance.then(|| e.path.clone()),
+                set_in: e.set_in.clone(),
+                uri: loc.as_ref().map(|l| l.uri.to_string()),
+                line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                conditions: e.conditions.clone(),
+                applied,
+            }
+        };
+        let inst_matches = |e: &Entry| e.instance && path.is_some_and(|p| glob_match(&e.path, p));
+        // The type override in effect for a class: a later one replaces an earlier one unless
+        // it says not to. One to the class itself (`A` to `A`) leaves the class as it is.
+        let type_override = |from: (u32, u32)| -> Option<&Entry> {
+            let mut cur: Option<&Entry> = None;
+            for e in table.iter().filter(|e| e.certain && !e.instance && e.from == from) {
+                if cur.is_none() || e.replace {
+                    cur = Some(e);
+                }
+            }
+            cur.filter(|e| self.decl_key(e.to) != from)
+        };
+        let mut cur = requested;
+        let mut chain = vec![self.decl_key(requested)];
+        let mut steps = Vec::new();
+        for _ in 0..16 {
+            let key = self.decl_key(cur);
+            let next = table.iter().find(|e| e.certain && e.from == key && inst_matches(e)).or_else(|| type_override(key));
+            let Some(e) = next else { break };
+            let to = self.decl_key(e.to);
+            if to == key {
+                break;
+            }
+            steps.push(step(e, true));
+            cur = e.to;
+            if chain.contains(&to) {
+                // A loop: UVM reports it and builds the class where it closes.
+                break;
+            }
+            chain.push(to);
+        }
+        for e in table.iter().filter(|e| !e.certain && chain.contains(&e.from) && (!e.instance || inst_matches(e))) {
+            steps.push(step(e, false));
+        }
+        (cur, steps)
     }
 
     /// The type a type parameter of a class in `derived_first` (a class and its bases, most
@@ -1326,8 +1520,8 @@ impl Analysis {
     /// derived `build_phase`, with `super.build_phase()` where it is called; the UVM library's
     /// calls the most derived `build()`). Methods of the class they call are followed: large
     /// testbenches build in helpers. `scan.cut` tells whether some were not followed.
-    fn build_creations(&self, derived_first: &[DeclRef], scan: &Scan) -> Vec<Made> {
-        let mut made = Vec::new();
+    fn build_creations(&self, derived_first: &[DeclRef], scan: &Scan) -> Built {
+        let mut made = Built::default();
         let mut stack = Vec::new();
         let none = FxHashMap::default();
         scan.component_events.set(0);
@@ -1345,7 +1539,7 @@ impl Analysis {
     /// `env`: string literals given for its arguments; `outer`: the guards of the call; `depth`:
     /// helper calls on the way (`super` calls do not count, so long class chains are followed).
     #[allow(clippy::too_many_arguments)]
-    fn run_method(&self, body: DeclRef, at: usize, derived_first: &[DeclRef], env: &FxHashMap<String, String>, outer: &[Guard], depth: usize, stack: &mut Vec<DeclRef>, scan: &Scan, made: &mut Vec<Made>) {
+    fn run_method(&self, body: DeclRef, at: usize, derived_first: &[DeclRef], env: &FxHashMap<String, String>, outer: &[Guard], depth: usize, stack: &mut Vec<DeclRef>, scan: &Scan, made: &mut Built) {
         // A spent budget stops everything; the call depth only this call.
         if stack.contains(&body) || scan.exhausted.get() || scan.component_events.get() > MAX_COMPONENT_EVENTS {
             return;
@@ -1375,8 +1569,10 @@ impl Analysis {
                     if cr.name.is_none() {
                         cr.name = cr.name_arg.as_ref().and_then(|a| env.get(a)).cloned();
                     }
-                    add_made(made, Made { body, cr, alts: vec![guards], others: Vec::new() });
+                    let seq = made.regs.len();
+                    add_made(&mut made.made, Made { body, cr, alts: vec![guards], others: Vec::new(), seq });
                 }
+                What::Override(call) => made.regs.push(Reg { call: call.clone(), body, guards }),
                 What::Call { name, sup, args } => {
                     let Some((callee, ci)) = self.call_target(name, at, *sup, derived_first, scan) else { continue };
                     let callee_env = self.literal_args(callee, args, env);
@@ -1472,6 +1668,9 @@ impl Analysis {
         for (k, name, sup, args) in method_calls(&toks) {
             events.push((k, Event { guards: guards_at(k), what: What::Call { name, sup, args } }));
         }
+        for (k, call) in self.override_calls(body, &toks) {
+            events.push((k, Event { guards: guards_at(k), what: What::Override(call) }));
+        }
         events.sort_by_key(|(k, _)| *k);
         let s = Rc::new(Summary { events: events.into_iter().map(|(_, e)| e).collect() });
         scan.summaries.borrow_mut().insert(body, s.clone());
@@ -1562,7 +1761,7 @@ impl Analysis {
             });
             out.push((
                 lhs_start,
-                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, parent: "this".into(), class },
+                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, parent: "this".into(), class, factory: cr.factory },
             ));
         }
         out
@@ -1693,7 +1892,8 @@ fn scan_returned_creations(t: &[Token]) -> Vec<(usize, Creation)> {
 fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Option<Creation> {
     let mut ty = None;
     let mut ty_text = String::new();
-    if t.get(k).is_some_and(|x| x.is_kw("new")) {
+    let factory = !t.get(k).is_some_and(|x| x.is_kw("new"));
+    if !factory {
         k += 1;
     } else {
         let mut idents: Vec<usize> = Vec::new();
@@ -1729,7 +1929,7 @@ fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Opti
     let first = args.first().filter(|a| a.len() == 1);
     let name = first.filter(|a| a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
     let name_arg = first.filter(|a| a[0].is_ident()).map(|a| a[0].text.to_string());
-    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, parent, class: None })
+    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, parent, class: None, factory })
 }
 
 /// Calls of the object's own methods in a method body (`f(...)`, `this.f(...)`) and of its base
