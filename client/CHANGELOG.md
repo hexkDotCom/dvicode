@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (preview)
 
 **Filter and follow the editor in the DVICode views** (#4, #5)
 
