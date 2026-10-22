@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Snippets for the UVM report macros (`uvm_info` with a choice of verbosity, `uvm_warning`,
+  `uvm_error`, `uvm_fatal`), `uvm_config_db` set and get (with the usual fatal when the get
+  fails), and analysis ports and imps (#11).
+- A build file with `-top+NAME` is told to write `-top NAME` (or `+xmtop+NAME`); NAME is still
+  the design top (#10).
+
 ## 0.2.0 (preview)
 
 **Filter and follow the editor in the DVICode views** (#4, #5)

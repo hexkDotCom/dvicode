@@ -283,5 +283,67 @@
     "prefix": "property",
     "body": ["property ${1:p_name};", "  @(posedge ${2:clk}) disable iff (!${3:rst_n})", "  ${4:req} |-> ##[1:${5:3}] ${6:ack};", "endproperty", "${7:a_name}: assert property ($1);"],
     "description": "Concurrent assertion"
+  },
+  "UVM info": {
+    "prefix": "uvm_info",
+    "body": [
+      "`uvm_info(${1:get_type_name()}, ${2:\\$sformatf(\"$3\")}, ${4|UVM_LOW,UVM_MEDIUM,UVM_HIGH,UVM_FULL,UVM_DEBUG,UVM_NONE|})$0"
+    ],
+    "description": "UVM info message with a verbosity"
+  },
+  "UVM warning": {
+    "prefix": "uvm_warning",
+    "body": [
+      "`uvm_warning(${1:get_type_name()}, ${2:\\$sformatf(\"$3\")})$0"
+    ],
+    "description": "UVM warning message"
+  },
+  "UVM error": {
+    "prefix": "uvm_error",
+    "body": [
+      "`uvm_error(${1:get_type_name()}, ${2:\\$sformatf(\"$3\")})$0"
+    ],
+    "description": "UVM error message"
+  },
+  "UVM fatal": {
+    "prefix": "uvm_fatal",
+    "body": [
+      "`uvm_fatal(${1:get_type_name()}, ${2:\\$sformatf(\"$3\")})$0"
+    ],
+    "description": "UVM fatal message"
+  },
+  "UVM config_db set": {
+    "prefix": "uvm_config_db_set",
+    "body": [
+      "uvm_config_db#(${1:int})::set(${2:this}, \"${3:*}\", \"${4:name}\", ${5:value});$0"
+    ],
+    "description": "Set a value in the UVM configuration database"
+  },
+  "UVM config_db get": {
+    "prefix": "uvm_config_db_get",
+    "body": [
+      "if (!uvm_config_db#(${1:int})::get(${2:this}, \"${3}\", \"${4:name}\", ${5:value}))",
+      "  `uvm_fatal(get_type_name(), \"${4} is not set in uvm_config_db\")$0"
+    ],
+    "description": "Get a value from the UVM configuration database, fatal when it is not set"
+  },
+  "UVM analysis port": {
+    "prefix": "uvm_analysis_port",
+    "body": [
+      "uvm_analysis_port #(${1:my_item}) ${2:ap};$0"
+    ],
+    "description": "UVM analysis port declaration (create it in build_phase: $2 = new(\"$2\", this);)"
+  },
+  "UVM analysis imp": {
+    "prefix": "uvm_analysis_imp",
+    "body": [
+      "`uvm_analysis_imp_decl(_${1:mon})",
+      "uvm_analysis_imp_$1 #(${2:my_item}, ${3:my_scoreboard}) ${4:$1_imp};",
+      "",
+      "virtual function void write_$1($2 t);",
+      "  $0",
+      "endfunction"
+    ],
+    "description": "UVM analysis imp with its write method (`uvm_analysis_imp_decl goes outside the class)"
   }
 }
