@@ -11,6 +11,10 @@ const MAX_DEPTH: usize = 32;
 thread_local! {
     /// How many `class_base` calls are on this thread's stack.
     static BASE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether a `class_base` call was refused for depth since the flag was last cleared.
+    static BASE_CUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The bases found during the outermost `class_base` call on this thread.
+    static BASE_MEMO: std::cell::RefCell<FxHashMap<DeclRef, Option<DeclRef>>> = std::cell::RefCell::default();
 }
 
 /// Limits nested `class_base` calls (a base resolved through the class itself).
@@ -20,6 +24,7 @@ impl BaseGuard {
     fn enter() -> Option<BaseGuard> {
         BASE_DEPTH.with(|d| {
             if d.get() >= MAX_DEPTH {
+                BASE_CUT.with(|c| c.set(true));
                 return None;
             }
             d.set(d.get() + 1);
@@ -30,7 +35,13 @@ impl BaseGuard {
 
 impl Drop for BaseGuard {
     fn drop(&mut self) {
-        BASE_DEPTH.with(|d| d.set(d.get() - 1));
+        BASE_DEPTH.with(|d| {
+            d.set(d.get() - 1);
+            if d.get() == 0 {
+                BASE_MEMO.with(|m| m.borrow_mut().clear());
+                BASE_CUT.with(|c| c.set(false));
+            }
+        });
     }
 }
 
@@ -367,10 +378,20 @@ impl Analysis {
         // `class C extends C::T` needs C's base to resolve its own base: give up instead of
         // recursing until the stack overflows.
         let _guard = BaseGuard::enter()?;
-        let d = self.decl(class);
-        let ext = d.extends.as_ref()?;
-        let b = self.resolve_typeref(class.unit, ext)?;
-        matches!(self.decl(b).kind, DeclKind::Class | DeclKind::InterfaceClass).then_some(b)
+        // Looking up a base walks the enclosing scopes, and an enclosing class's own base is
+        // looked up in turn: classes nested n deep (a macro whose `endclass` is not defined)
+        // took 2^n lookups. Each base is found once per outermost call; a result found while
+        // a call was refused for depth is not kept, as it may depend on the depth.
+        if let Some(b) = BASE_MEMO.with(|m| m.borrow().get(&class).copied()) {
+            return b;
+        }
+        let outer_cut = BASE_CUT.with(|c| c.replace(false));
+        let b = self.decl(class).extends.as_ref().and_then(|ext| self.resolve_typeref(class.unit, ext)).filter(|b| matches!(self.decl(*b).kind, DeclKind::Class | DeclKind::InterfaceClass));
+        let cut = BASE_CUT.with(|c| c.replace(outer_cut || c.get()));
+        if !cut {
+            BASE_MEMO.with(|m| m.borrow_mut().insert(class, b));
+        }
+        b
     }
 
     /// Classes and interface classes a class implements or (interface classes) extends.

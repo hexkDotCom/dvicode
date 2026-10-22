@@ -1990,3 +1990,18 @@ fn components_made_by_a_factory_object() {
     let kids: Vec<String> = h.roots[0].children.iter().map(|c| format!("{}:{}", c.name, c.class)).collect();
     assert_eq!(kids, ["direct_env:my_env", "cached:my_env"]);
 }
+
+#[test]
+fn classes_nested_by_a_macro_without_endclass() {
+    // The macro that would close each class is not defined, so each class nests in the one
+    // before it; finding a base walked every enclosing class's base again (2^depth lookups).
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let instrs: String = (0..40).map(|i| format!("  `DEFINE_INSTR(i{i})\n")).collect();
+    let tb = format!("`define DEFINE_INSTR(n) \\n  class n``_instr extends base_instr; \\n    `INSTR_BODY(n)\npackage tb_pkg;\n  import uvm_pkg::*;\n  class base_instr; endclass\n{instrs}  class t extends uvm_test;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\nendpackage\n");
+    let (a, _) = project("nestedbymacro", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let t0 = std::time::Instant::now();
+    let tests: Vec<String> = a.uvm_tests().iter().map(|t| a.decl(*t).name.to_string()).collect();
+    assert_eq!(tests, ["t"]);
+    let _ = problems(&a);
+    assert!(t0.elapsed().as_secs() < 5, "took {:?}", t0.elapsed());
+}
