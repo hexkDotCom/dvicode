@@ -527,29 +527,31 @@ impl Analysis {
     /// Names a package re-exports with `export other_pkg::name;`, `export other_pkg::*;` or
     /// `export *::*;`. `seen`: the packages searched so far (packages may export each other).
     fn exported_member(&self, pkg: DeclRef, name: &str, seen: &mut FxHashSet<(u32, u32)>) -> Option<DeclRef> {
-        let d = self.decl(pkg);
-        for e in &d.exports {
-            if e.item.as_ref().is_some_and(|i| i != name) {
-                continue;
-            }
-            let sources: Vec<&str> = if e.pkg == "*" {
-                // Everything imported into the package.
-                d.imports.iter().filter(|i| i.item.as_ref().map_or(true, |x| x == name)).map(|i| i.pkg.as_str()).collect()
-            } else {
-                vec![e.pkg.as_str()]
-            };
-            for s in sources {
-                let Some(all) = self.global.packages.get(s) else { continue };
-                for p in self.candidates(pkg.unit, all) {
-                    if seen.len() >= 64 || !seen.insert(self.decl_key(p)) {
-                        continue;
-                    }
-                    let u = self.unit(p.unit);
-                    if let Some(m) = pick(&u.parsed, u.parsed.lookup_member(p.decl, name)) {
-                        return Some(DeclRef { unit: p.unit, decl: m });
-                    }
-                    if let Some(m) = self.exported_member(p, name, seen) {
-                        return Some(m);
+        // Breadth first, each package once.
+        let mut todo = std::collections::VecDeque::from([pkg]);
+        while let Some(p) = todo.pop_front() {
+            let d = self.decl(p);
+            for e in &d.exports {
+                if e.item.as_ref().is_some_and(|i| i != name) {
+                    continue;
+                }
+                let sources: Vec<&str> = if e.pkg == "*" {
+                    // Everything imported into the package.
+                    d.imports.iter().filter(|i| i.item.as_ref().map_or(true, |x| x == name)).map(|i| i.pkg.as_str()).collect()
+                } else {
+                    vec![e.pkg.as_str()]
+                };
+                for s in sources {
+                    let Some(all) = self.global.packages.get(s) else { continue };
+                    for c in self.candidates(p.unit, all) {
+                        if !seen.insert(self.decl_key(c)) {
+                            continue;
+                        }
+                        let u = self.unit(c.unit);
+                        if let Some(m) = pick(&u.parsed, u.parsed.lookup_member(c.decl, name)) {
+                            return Some(DeclRef { unit: c.unit, decl: m });
+                        }
+                        todo.push_back(c);
                     }
                 }
             }

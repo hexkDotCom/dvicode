@@ -1096,3 +1096,67 @@ fn helper_calls_follow_dispatch_order_and_active_code() {
     // build_env is not virtual: the base's build_phase calls its own.
     assert_eq!(names("derived_test"), vec!["env", "first", "second", "deep"]);
 }
+
+#[test]
+fn include_operand_inside_a_quoted_macro_does_not_loop() {
+    let (a, _) = project("quoteinclude", &[("t.sv", "`define A `\"`B`\"\n`define B `include `A\nmodule m;\n  string s = `A;\nendmodule\n")]);
+    let _ = problems(&a);
+}
+
+#[test]
+fn exponential_macros_inside_a_quote_stop() {
+    let mut text = String::from("`define A0 x\n");
+    for k in 1..=30 {
+        text.push_str(&format!("`define A{k} `A{} `A{}\n", k - 1, k - 1));
+    }
+    text.push_str("`define Q `\"`A30`\"\nmodule m;\n  string s = `Q;\nendmodule\n");
+    let t0 = std::time::Instant::now();
+    let (a, _) = project("quoteexp", &[("t.sv", &text)]);
+    let _ = problems(&a);
+    assert!(t0.elapsed().as_secs() < 30, "took {:?}", t0.elapsed());
+}
+
+#[test]
+fn quoted_call_of_a_formal_macro_name() {
+    let (a, _) = project(
+        "quoteformal",
+        &[
+            ("dir/foo/a.svh", "int from_a;\n"),
+            ("t.sv", "`define ID(x) x\n`define Q(M,x) `\"dir/`M(x)/a.svh`\"\nmodule m;\n  `include `Q(ID,foo)\n  initial from_a = 1;\nendmodule\n"),
+        ],
+    );
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn export_of_many_packages_reaches_the_last() {
+    let mut files: Vec<(String, String)> = (1..=70).map(|k| (format!("p{k}.sv"), format!("package p{k};\n{}endpackage\n", if k == 70 { "  int x;\n" } else { "" }))).collect();
+    let imports: String = (1..=70).map(|k| format!("  import p{k}::*;\n")).collect();
+    files.push(("api.sv".into(), format!("package api;\n{imports}  export *::*;\nendpackage\n")));
+    files.push(("t.sv".into(), "module t;\n  int v = api::x;\nendmodule\n".into()));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let (a, _) = project("manyexports", &refs);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn type_parameter_defaults_and_macro_values() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = "`define ENV env_b\npackage tb_pkg;\n  import uvm_pkg::*;\n  class env_a extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class env_b extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class body_tc extends uvm_test;\n    parameter type A = env_a, B = env_b;\n    B env;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_phase(uvm_phase phase); env = new(\"env\", this); endfunction\n  endclass\n  class base #(type T_ENV = env_a) extends uvm_test;\n    T_ENV env;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_phase(uvm_phase phase); env = new(\"env\", this); endfunction\n  endclass\n  class macro_tc extends base#(`ENV);\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\nendpackage\n";
+    let (a, _) = project("typeparamdefaults", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let class_of = |test: &str| a.verification_hierarchy(Some(test), 100).roots[0].children[0].class.clone();
+    assert_eq!(class_of("body_tc"), "env_b");
+    // The macro's class, or nothing; never the default.
+    assert_ne!(class_of("macro_tc"), "env_a");
+}
+
+#[test]
+fn many_inactive_regions_in_a_build_phase() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let body = "`ifdef NEVER_DEFINED\n      helper();\n`endif\n      ;\n".repeat(10_000);
+    let tb = format!("package tb_pkg;\n  import uvm_pkg::*;\n  class t extends uvm_test;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void helper(); endfunction\n    function void build_phase(uvm_phase phase);\n{body}    endfunction\n  endclass\nendpackage\n");
+    let (a, _) = project("manyinactive", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let t0 = std::time::Instant::now();
+    let _ = a.verification_hierarchy(Some("t"), 100);
+    assert!(t0.elapsed().as_secs() < 5, "took {:?}", t0.elapsed());
+}

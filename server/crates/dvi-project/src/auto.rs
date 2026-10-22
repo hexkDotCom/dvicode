@@ -70,6 +70,8 @@ impl GitIgnore {
                 None => (false, l.strip_prefix('\\').filter(|r| r.starts_with('!') || r.starts_with('#')).unwrap_or(l)),
             };
             let (contents, l) = match l.strip_suffix("/**") {
+                // `/**`: everything in the project folder.
+                Some("") => (false, "**"),
                 Some(dir) => (true, dir),
                 None => (false, l),
             };
@@ -502,5 +504,8 @@ mod tests {
         assert!(ig("generated/x.sv", false) && ig("generated/sub", true));
         assert!(!ig("generated/keep.sv", false));
         assert!(!ig("rtl/generated", true));
+        let g = GitIgnore::parse("/**\n!top.sv\n");
+        let ig = |p: &str, dir: bool| g.ignores(Path::new(p), dir);
+        assert!(ig("x.sv", false) && ig("rtl", true) && !ig("top.sv", false));
     }
 }

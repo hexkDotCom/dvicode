@@ -818,7 +818,15 @@ impl<'a> Pp<'a> {
                     }
                 }
                 let file = self.current_file().unwrap_or(t.span.file);
-                let out = expand_snippet(self.src, self.cfg, file, call, self.macros.clone(), usize::MAX);
+                // Within the expansion around it: same macros being expanded, depth and budget.
+                let out = match self.nested(None) {
+                    Some(mut pp) => {
+                        pp.frames.push(Frame { toks: Arc::new(call), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
+                        pp.run();
+                        pp.res.tokens
+                    }
+                    None => Vec::new(),
+                };
                 let name = match out.iter().position(|x| x.kind == TokKind::String || x.is_punct("<")) {
                     Some(i) if out[i].kind == TokKind::String => Some(out[i].text.trim_matches('"').to_string()),
                     Some(i) => {
@@ -975,6 +983,15 @@ impl<'a> Pp<'a> {
             self.res.diags.push(Diag::error(site, "MACRO_RECURSION", format!("Macro `{} is recursive", def.name)));
             return;
         }
+        if self.outer_depth > 0 {
+            // Inside a nested preprocessor every expansion counts: `A30 = `A29 `A29 ... would
+            // otherwise double the work at each level.
+            if self.nested_runs.get() >= MAX_NESTED_RUNS {
+                self.res.diags.push(Diag::error(site, "MACRO_RECURSION", format!("Macro `{} expands too much", def.name)));
+                return;
+            }
+            self.nested_runs.set(self.nested_runs.get() + 1);
+        }
         let first_flags = tok.flags & (flags::NL_BEFORE | flags::WS_BEFORE);
         let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site, &def.name), &|a| self.expand_tokens(a, site, &def.name));
         self.frames.push(Frame {
@@ -1005,6 +1022,19 @@ impl<'a> Pp<'a> {
     /// the depth limit); `None` when that fails (an undefined macro, a recursive use, too much
     /// work). `current`: the macro whose body `actual` is in.
     fn expand_tokens(&self, actual: &[Token], site: Span, current: &SmolStr) -> Option<Vec<Token>> {
+        let mut pp = self.nested(Some(current))?;
+        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
+        pp.run();
+        if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
+            return None;
+        }
+        Some(std::mem::take(&mut pp.res.tokens))
+    }
+
+    /// A preprocessor for text inside the current expansion (an actual argument, a macro in a
+    /// `" string, an `include operand). It shares the macros being expanded (a use of one is
+    /// recursive), the depth and the work budget; `None` when they are used up.
+    fn nested(&self, current: Option<&SmolStr>) -> Option<Pp<'a>> {
         let depth = self.macro_depth() + 1;
         if depth >= self.depth_limit || self.nested_runs.get() >= MAX_NESTED_RUNS {
             return None;
@@ -1015,10 +1045,10 @@ impl<'a> Pp<'a> {
             FrameKind::Macro { name, .. } if !name.is_empty() => Some(name.clone()),
             _ => None,
         }));
-        if !current.is_empty() {
-            outer_names.push(current.clone());
+        if let Some(c) = current.filter(|c| !c.is_empty()) {
+            outer_names.push(c.clone());
         }
-        let mut pp = Pp {
+        Some(Pp {
             src: self.src,
             cfg: self.cfg,
             macros: self.macros.clone(),
@@ -1031,13 +1061,7 @@ impl<'a> Pp<'a> {
             outer_depth: depth,
             outer_names,
             nested_runs: self.nested_runs.clone(),
-        };
-        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
-        pp.run();
-        if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
-            return None;
-        }
-        Some(std::mem::take(&mut pp.res.tokens))
+        })
     }
 
     /// Collects macro actual arguments after the opening parenthesis. Returns the arguments
@@ -1164,6 +1188,10 @@ fn substitute(
                         // with their arguments (`"dir/`ID(vcs)/x`"), formals replaced.
                         TokKind::Directive => match (!COMPILER_DIRECTIVES.contains(&b.text.as_str())).then(|| {
                             let mut call = vec![b.clone()];
+                            // `"`M(x)`" with a formal M: the macro its actual names.
+                            if let Some(n) = param_index(&b.text).and_then(|k| called(&actual(k))) {
+                                call[0].text = n;
+                            }
                             if def.body.get(i + 1).is_some_and(|x| x.is_punct("(")) {
                                 let mut depth = 0i32;
                                 let mut j = i + 1;

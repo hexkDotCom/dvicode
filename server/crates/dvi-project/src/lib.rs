@@ -1053,15 +1053,15 @@ impl Builder {
             }
         }
         let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
+        let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).collect();
         // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
         let included: Vec<PathBuf> = s.included.iter().map(|f| self.abs(f, &dir)).collect();
-        let sources: Vec<PathBuf> = files.iter().chain(included.iter()).cloned().collect();
+        let sources: Vec<PathBuf> = files.iter().chain(lib_files.iter()).chain(included.iter()).cloned().collect();
         for d in auto::include_bases(&sources, &included) {
             if !incdirs.contains(&d) {
                 incdirs.push(d);
             }
         }
-        let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).collect();
         let missing: Vec<&PathBuf> = files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).collect();
         log::debug!(
             "build: simulation log {}: {} files, {} library files, {} defines, {} include directories ({} from included files){}",
@@ -1351,7 +1351,7 @@ fn split_defines(s: &str) -> Vec<String> {
 
 /// Whether the `'` at `b[i]` starts quoted text rather than a SystemVerilog number such as
 /// `8'hFF` or `'hFF`: not right after a letter or digit, and closed later on the same line.
-fn opens_quote(b: &[u8], i: usize) -> bool {
+pub(crate) fn opens_quote(b: &[u8], i: usize) -> bool {
     if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
         return false;
     }

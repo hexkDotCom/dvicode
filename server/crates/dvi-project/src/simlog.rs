@@ -29,21 +29,27 @@ fn parsed_file<'a>(line: &'a str, kind: &str) -> Option<&'a str> {
 }
 
 /// The words of a command line; quotes keep spaces in a word (`+incdir+"a b"`,
-/// `+define+MSG="hello world"`) and stay in it; a backslash keeps the next character.
+/// `+define+MSG="hello world"`) and stay in it; a backslash keeps the next character. An
+/// apostrophe in a number (`8'hff`) is not a quote.
 fn shell_words(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
+    let mut chars = line.char_indices();
+    while let Some((i, c)) = chars.next() {
         match (quote, c) {
             (_, '\\') => {
                 cur.push(c);
-                if let Some(n) = chars.next() {
+                if let Some((_, n)) = chars.next() {
                     cur.push(n);
                 }
             }
-            (None, '"' | '\'') => {
+            (None, '"') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (None, '\'') if crate::opens_quote(b, i) => {
                 quote = Some(c);
                 cur.push(c);
             }
@@ -62,6 +68,24 @@ fn shell_words(line: &str) -> Vec<String> {
     if !cur.is_empty() {
         out.push(cur);
     }
+    out
+}
+
+/// The parts of `a+"b+c"+d` (`a`, `b+c`, `d`): split at `+` outside quotes, quotes removed.
+fn split_plus(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            (None, '+') => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out.retain(|p| !p.is_empty());
     out
 }
 
@@ -107,7 +131,6 @@ impl Ordered {
 pub fn parse(text: &str) -> SimLog {
     let (mut files, mut lib_files, mut included, mut defines, mut incdirs) = (Ordered::default(), Ordered::default(), Ordered::default(), Ordered::default(), Ordered::default());
     let mut command = false;
-    let unquote = |w: &str| w.trim_matches(|c| c == '"' || c == '\'').to_string();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         let line = line.trim();
@@ -117,16 +140,15 @@ pub fn parse(text: &str) -> SimLog {
             lib_files.push(p);
         } else if let Some(p) = parsed_file(line, "included") {
             included.push(p);
-        } else if let Some(mut words) = command_words(line) {
-            // A command continued on the next lines (`\` at the end).
-            let mut last = line.to_string();
-            while last.ends_with('\\') {
-                words.retain(|w| w != "\\");
+        } else if command_words(line).is_some() {
+            // The whole command: a line ending in `\` goes on with the next one.
+            let mut logical = line.to_string();
+            while logical.ends_with('\\') {
+                logical.pop();
                 let Some(next) = lines.next() else { break };
-                last = next.trim().to_string();
-                words.extend(shell_words(&last));
+                logical.push_str(next.trim_end());
             }
-            words.retain(|w| w != "\\");
+            let words = command_words(&logical).unwrap_or_default();
             command = true;
             let mut i = 0;
             while i < words.len() {
@@ -136,7 +158,7 @@ pub fn parse(text: &str) -> SimLog {
                         defines.push(&d);
                     }
                 } else if let Some(rest) = w.strip_prefix("+incdir+") {
-                    for d in rest.split('+').map(unquote).filter(|d| !d.is_empty()) {
+                    for d in split_plus(rest) {
                         incdirs.push(&d);
                     }
                 } else if (w == "-define" || w == "-D") && i + 1 < words.len() {
@@ -144,7 +166,7 @@ pub fn parse(text: &str) -> SimLog {
                     defines.push(&words[i]);
                 } else if w == "-incdir" && i + 1 < words.len() {
                     i += 1;
-                    incdirs.push(&unquote(&words[i]));
+                    incdirs.push(&split_plus(&words[i]).concat());
                 }
                 i += 1;
             }
@@ -193,5 +215,9 @@ Top Level Modules:
         assert_eq!(s.incdirs, vec!["include dir", "other dir"]);
         assert_eq!(s.defines, vec!["MSG=\"hello world\"", "B"]);
         assert_eq!(s.files, vec!["a.sv"]);
+        // A word continued on the next line, a number with an apostrophe, a quoted + in a folder.
+        let s = parse("Command: vcs +incdir+inc\\\n/headers +define+WIDTH=8'hff +incdir+\"a+b\" +define+B\n");
+        assert_eq!(s.incdirs, vec!["inc/headers", "a+b"]);
+        assert_eq!(s.defines, vec!["WIDTH=8'hff", "B"]);
     }
 }

@@ -809,7 +809,11 @@ impl Analysis {
                 Some(i) if i > 0 => self.extends_param_value(derived_first[i - 1], owner, r),
                 _ => None,
             };
-            let next = given.or_else(|| self.type_param_default(r))?;
+            // A value that cannot be resolved (a macro) is not replaced by the default.
+            let next = match given {
+                Some(v) => v?,
+                None => self.type_param_default(r)?,
+            };
             r = self.follow_typedef(next)?;
         }
         None
@@ -818,7 +822,8 @@ impl Analysis {
     /// The type `derived` gives the type parameter `param` of its base `base` in
     /// `extends base#(...)`, or through a typedef (`typedef base#(...) base_t;`,
     /// `extends base_t`).
-    fn extends_param_value(&self, derived: DeclRef, base: DeclRef, param: DeclRef) -> Option<DeclRef> {
+    /// `Some(None)`: a value is given but not resolved.
+    fn extends_param_value(&self, derived: DeclRef, base: DeclRef, param: DeclRef) -> Option<Option<DeclRef>> {
         // The declaration whose header names the base type, and the keyword before that type.
         let (mut src, mut kw) = (derived, "extends");
         for _ in 0..8 {
@@ -851,7 +856,7 @@ impl Analysis {
     }
 
     /// The type a `#(...)` value list (`args`, resolved in `unit`) gives `param` of `base`.
-    fn param_value_in(&self, unit: crate::world::UnitId, args: Vec<&[Token]>, base: DeclRef, param: DeclRef) -> Option<DeclRef> {
+    fn param_value_in(&self, unit: crate::world::UnitId, args: Vec<&[Token]>, base: DeclRef, param: DeclRef) -> Option<Option<DeclRef>> {
         let name = self.decl(param).name.as_str();
         let value = args.iter().find_map(|a| match a {
             [dot, n, open, inner @ .., close] if dot.is_punct(".") && open.is_punct("(") && close.is_punct(")") => (n.text == name).then_some(inner),
@@ -867,7 +872,9 @@ impl Analysis {
                 args.get(index).copied()?
             }
         };
-        self.type_name_in(unit, value)
+        // A macro (`base#(`ENV)`): what its expansion at that place resolves to, if anything.
+        let by_macro = || value.first().filter(|x| x.kind == TokKind::Directive).and_then(|x| self.resolve_at_span(unit, x.span));
+        Some(self.type_name_in(unit, value).or_else(by_macro))
     }
 
     /// The default type of a type parameter (`type T = my_env`).
@@ -877,11 +884,14 @@ impl Analysis {
             return None;
         }
         let toks = self.file_tokens(d.span.file)?;
-        let lo = toks.partition_point(|t| t.span.start < d.span.start);
-        let hi = toks.partition_point(|t| t.span.start < d.span.end);
+        // After the parameter's own name: `parameter type A = a_t, B = b_t;`.
+        let lo = toks.partition_point(|t| t.span.start < d.name_span.end);
+        let hi = toks.partition_point(|t| t.span.start < d.span.end.max(d.name_span.end));
         let t = &toks[lo..hi];
-        let eq = t.iter().position(|x| x.is_punct("="))?;
-        self.type_name_in(param.unit, &t[eq + 1..])
+        if !t.first().is_some_and(|x| x.is_punct("=")) {
+            return None;
+        }
+        self.type_name_in(param.unit, &t[1..])
     }
 
     /// The type named by the tokens of a type expression (`my_env`, `pkg::my_env`,
@@ -969,8 +979,20 @@ impl Analysis {
         let Some(toks) = self.file_tokens(d.span.file) else { return Vec::new() };
         let lo = toks.partition_point(|t| t.span.start < d.span.start);
         let hi = toks.partition_point(|t| t.span.start < d.span.end);
-        let off: Vec<Span> = self.unit(body.unit).inactive.iter().filter(|s| s.file == d.span.file && s.end > d.span.start && s.start < d.span.end).copied().collect();
-        toks[lo..hi].iter().filter(|t| !off.iter().any(|s| s.start <= t.span.start && t.span.start < s.end)).cloned().collect()
+        let mut off: Vec<Span> = self.unit(body.unit).inactive.iter().filter(|s| s.file == d.span.file && s.end > d.span.start && s.start < d.span.end).copied().collect();
+        off.sort_by_key(|s| s.start);
+        // Tokens in order, regions in order: one pass.
+        let mut k = 0;
+        toks[lo..hi]
+            .iter()
+            .filter(|t| {
+                while k < off.len() && off[k].end <= t.span.start {
+                    k += 1;
+                }
+                !(k < off.len() && off[k].start <= t.span.start)
+            })
+            .cloned()
+            .collect()
     }
 
     /// The declaration a reference segment written exactly at `span` resolves to.
