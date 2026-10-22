@@ -87,6 +87,8 @@ pub struct ArgFile {
     pub comp_root: PathBuf,
     /// The `+dvicode_switches+` its Jinja conditions are evaluated with.
     pub switches: Vec<String>,
+    /// The `+dvicode_path_map+` mappings in effect.
+    pub path_maps: Vec<(String, String)>,
 }
 
 impl BuildConfig {
@@ -199,6 +201,7 @@ pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, Str
             b.comp_root = a.comp_root.clone();
             b.inv().mode = a.mode.clone();
             b.switches = a.switches.clone();
+            b.path_maps = a.path_maps.clone();
             a.base.clone()
         }
         None => root.to_path_buf(),
@@ -251,6 +254,8 @@ struct Builder {
     links: Vec<(PathBuf, u32, u32, PathBuf)>,
     /// `+dvicode_switches+`: what Jinja conditions in argument files test.
     switches: Vec<String>,
+    /// `+dvicode_path_map+FROM=TO`, longest FROM first: paths written on another machine.
+    path_maps: Vec<(String, String)>,
 }
 
 /// Argument files one build reads at most.
@@ -295,7 +300,7 @@ const DASH_OPTIONS: &[&str] = &["-f", "-F", "-file", "-incdir", "-define", "-y",
 const PLUS_OPTIONS: &[&str] = &["incdir", "define", "undefine", "libext", "xmtop", "nctop"];
 const DIRECTIVES: &[&str] = &[
     "init", "init_auto", "init_from_simlog", "setenv", "env", "setenv_no_override", "undefine", "skip_compile",
-    "compilation_root", "uvmhome_override", "uvm_home", "include_config", "test", "switches",
+    "compilation_root", "uvmhome_override", "uvm_home", "include_config", "test", "switches", "path_map",
 ];
 
 /// The known name `name` is probably a misspelling of, ignoring case: same first letter, and
@@ -348,6 +353,7 @@ impl Builder {
             notes: Vec::new(),
             links: Vec::new(),
             switches: Vec::new(),
+            path_maps: Vec::new(),
         };
         b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
         if let Some(p) = root.parent() {
@@ -382,13 +388,51 @@ impl Builder {
     }
 
     /// "`/abs/path` (exists)" with how a variable expanded, for notes.
-    fn describe_path(written: &str, expanded: &str, abs: &Path, kind: &str) -> String {
+    fn describe_path(&self, written: &str, expanded: &str, abs: &Path, kind: &str) -> String {
         let exists = if kind.ends_with("directory") { abs.is_dir() } else { abs.is_file() };
         let mut s = format!("**{kind}** `{}` — {}", abs.display(), if exists { "found" } else { "**not found**" });
         if written != expanded {
             s.push_str(&format!("\n\n`{written}` expands to `{expanded}`"));
         }
+        if let Some(m) = map_path(&self.path_maps, expanded) {
+            s.push_str(&format!("\n\n`{expanded}` is read as `{m}` (`+dvicode_path_map+`)"));
+        }
         s
+    }
+
+    /// A path as DVICode reads it: `+dvicode_path_map+` applied, then made absolute.
+    fn abs(&self, p: &str, base: &Path) -> PathBuf {
+        match map_path(&self.path_maps, p) {
+            Some(m) => absolutize(&m, base),
+            None => absolutize(p, base),
+        }
+    }
+
+    /// `+dvicode_path_map+FROM=TO`: from this line on, paths in the folder FROM (written on
+    /// another machine) are read from TO, a folder on the machine where DVICode runs.
+    fn add_path_map(&mut self, file: &Path, line: u32, kv: &str, base: &Path) {
+        let Some((from, to)) = kv.split_once('=') else { return };
+        let from = self.expand(from.trim_matches('"'), false).unwrap_or_else(|| from.to_string());
+        let to = self.expand(to.trim_matches('"'), false).unwrap_or_else(|| to.to_string());
+        let from = from.replace('\\', "/").trim_end_matches('/').to_string();
+        if from.is_empty() || to.is_empty() {
+            return self.problem(file, line, "+dvicode_path_map+ needs FROM=TO".into());
+        }
+        if !(from.starts_with('/') || from.as_bytes().get(1) == Some(&b':')) {
+            return self.problem(file, line, format!("+dvicode_path_map+: {from} is not an absolute path"));
+        }
+        let to_abs = absolutize(&to, base);
+        let to = to_abs.display().to_string();
+        self.note(file, format!("**path map** `{from}` is read as `{to}` — {}", if to_abs.is_dir() { "found" } else { "**not found**" }));
+        if !to_abs.is_dir() {
+            self.problem(file, line, format!("+dvicode_path_map+: folder not found: {to}"));
+        }
+        if !self.inspecting {
+            log::debug!("build: path map {from} -> {to}");
+        }
+        self.path_maps.retain(|(f, _)| *f != from);
+        let at = self.path_maps.partition_point(|(f, _)| f.len() >= from.len());
+        self.path_maps.insert(at, (from, to));
     }
 
     fn inv(&mut self) -> &mut Invocation {
@@ -564,7 +608,7 @@ impl Builder {
                         Some(w) => {
                             if let Some(p) = self.resolve(file, line, &w, &base) {
                                 let e = self.expand(&w, true).unwrap_or_default();
-                                self.note(file, Self::describe_path(&w, &e, &p, "library directory"));
+                                self.note(file, self.describe_path(&w, &e, &p, "library directory"));
                                 if !p.is_dir() {
                                     self.problem(file, line, format!("Library directory not found: {}", p.display()));
                                 }
@@ -577,7 +621,7 @@ impl Builder {
                         Some(w) => {
                             if let Some(p) = self.resolve(file, line, &w, &base) {
                                 let e = self.expand(&w, true).unwrap_or_default();
-                                self.note(file, Self::describe_path(&w, &e, &p, "library file"));
+                                self.note(file, self.describe_path(&w, &e, &p, "library file"));
                                 self.link(file, &p);
                                 if !p.is_file() {
                                     self.problem(file, line, format!("Library file not found: {}", p.display()));
@@ -726,6 +770,7 @@ impl Builder {
         let value = || raw.splitn(3, '+').nth(2).unwrap_or("").to_string();
         let needs = match d {
             "setenv" | "env" | "setenv_no_override" => Some("NAME=VALUE"),
+            "path_map" => Some("FROM=TO"),
             "undefine" => Some("a macro name"),
             "skip_compile" => Some("a file pattern"),
             "compilation_root" | "uvmhome_override" | "uvm_home" => Some("a directory"),
@@ -739,9 +784,9 @@ impl Builder {
                 self.problem(file, line, format!("+{prefix}_{d}+ needs {what}"));
                 return;
             }
-            if what == "NAME=VALUE" && !value().contains('=') {
+            if what.contains('=') && !value().contains('=') {
                 self.focus(&value());
-                self.problem(file, line, format!("+{prefix}_{d}+ needs NAME=VALUE"));
+                self.problem(file, line, format!("+{prefix}_{d}+ needs {what}"));
                 return;
             }
         }
@@ -790,7 +835,7 @@ impl Builder {
                     self.focus(a);
                     if let Some(p) = self.resolve(file, line, a, base) {
                         let e = self.expand(a, true).unwrap_or_default();
-                        self.note(file, Self::describe_path(a, &e, &p, "compilation root directory"));
+                        self.note(file, self.describe_path(a, &e, &p, "compilation root directory"));
                         if !p.is_dir() {
                             self.problem(file, line, format!("Compilation root directory not found: {}", p.display()));
                         }
@@ -816,6 +861,11 @@ impl Builder {
                     self.focus(&a);
                     self.add_file(file, line, &a, base);
                 }
+            }
+            "path_map" => {
+                let kv = value();
+                self.focus(&kv);
+                self.add_path_map(file, line, &kv, base);
             }
             "switches" => {
                 self.note(file, format!("**Jinja switches** `{}` for the conditions of argument files read after this", args.join(", ")));
@@ -861,7 +911,7 @@ impl Builder {
     fn request_uvm(&mut self, file: &Path, line: u32, home: Option<String>, base: &Path) {
         // Expanded now, with the variables set so far; a relative location is from `base`, like
         // other paths.
-        let home = home.and_then(|h| self.expand(&h, true)).map(|h| absolutize(&h, base).display().to_string());
+        let home = home.and_then(|h| self.expand(&h, true)).map(|h| self.abs(&h, base).display().to_string());
         let (files_at, incdirs_at) = {
             let inv = self.inv();
             (inv.files.len(), inv.incdirs.len())
@@ -895,7 +945,7 @@ impl Builder {
             }
             return;
         };
-        let home = PathBuf::from(home);
+        let home = PathBuf::from(map_path(&self.path_maps, &home).unwrap_or(home));
         let src = if home.join("src").is_dir() { home.join("src") } else { home };
         let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| p.is_file());
         if !self.inspecting {
@@ -930,7 +980,7 @@ impl Builder {
         if !self.inspecting {
             log::debug!("build: {}:{}: argument file {p}{} -> {}", file.display(), line + 1, if e != p { format!(" (= {e})") } else { String::new() }, path.display());
         }
-        self.note(file, Self::describe_path(p, &e, &path, "argument file"));
+        self.note(file, self.describe_path(p, &e, &path, "argument file"));
         self.link(file, &path);
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if self.reading.contains(&key) {
@@ -953,6 +1003,7 @@ impl Builder {
                 mode,
                 comp_root: self.comp_root.clone(),
                 switches: self.switches.clone(),
+                path_maps: self.path_maps.clone(),
             });
         }
         let (span, word, focus_at) = (self.span, std::mem::take(&mut self.word), self.focus_at);
@@ -975,7 +1026,7 @@ impl Builder {
         let text = match std::fs::read(&path) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(_) if !path.exists() => {
-                self.note(file, Self::describe_path(log, &e, &path, "simulation log"));
+                self.note(file, self.describe_path(log, &e, &path, "simulation log"));
                 return self.problem(file, line, format!("Simulation log not found: {}", path.display()));
             }
             Err(err) => return self.problem(file, line, format!("Cannot read simulation log {}: {err}", path.display())),
@@ -983,7 +1034,7 @@ impl Builder {
         let s = simlog::parse(&text);
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
         if s.files.is_empty() {
-            self.note(file, Self::describe_path(log, &e, &path, "simulation log"));
+            self.note(file, self.describe_path(log, &e, &path, "simulation log"));
             return self.problem(
                 file,
                 line,
@@ -993,24 +1044,24 @@ impl Builder {
         for d in &s.defines {
             self.add_define(d);
         }
-        let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| absolutize(d, &dir)).collect();
+        let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).collect();
         for f in &s.included {
-            if let Some(parent) = absolutize(f, &dir).parent() {
+            if let Some(parent) = self.abs(f, &dir).parent() {
                 if !incdirs.iter().any(|d| d == parent) {
                     incdirs.push(parent.to_path_buf());
                 }
             }
         }
-        let files: Vec<PathBuf> = s.files.iter().map(|f| absolutize(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
+        let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
         // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
-        let included: Vec<PathBuf> = s.included.iter().map(|f| absolutize(f, &dir)).collect();
+        let included: Vec<PathBuf> = s.included.iter().map(|f| self.abs(f, &dir)).collect();
         let sources: Vec<PathBuf> = files.iter().chain(included.iter()).cloned().collect();
         for d in auto::include_bases(&sources, &included) {
             if !incdirs.contains(&d) {
                 incdirs.push(d);
             }
         }
-        let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| absolutize(f, &dir)).collect();
+        let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).collect();
         let missing: Vec<&PathBuf> = files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).collect();
         log::debug!(
             "build: simulation log {}: {} files, {} library files, {} defines, {} include directories ({} from included files){}",
@@ -1053,7 +1104,7 @@ impl Builder {
 
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
-        let abs = absolutize(&e, base);
+        let abs = self.abs(&e, base);
         if glob::has_wildcard(&e) {
             let found: Vec<PathBuf> = glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect();
             if !self.inspecting {
@@ -1066,7 +1117,7 @@ impl Builder {
             self.inv().incdirs.extend(found);
             return;
         }
-        self.note(file, Self::describe_path(p, &e, &abs, "include directory"));
+        self.note(file, self.describe_path(p, &e, &abs, "include directory"));
         if !abs.is_dir() {
             self.problem(file, line, format!("Include directory not found: {}", abs.display()));
         }
@@ -1075,7 +1126,7 @@ impl Builder {
 
     fn add_file(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
-        let abs = absolutize(&e, base);
+        let abs = self.abs(&e, base);
         if glob::has_wildcard(&e) {
             let mut found = glob::expand(&abs);
             found.retain(|f| f.is_file());
@@ -1095,7 +1146,7 @@ impl Builder {
         if !self.inspecting && is_foreign_source(&abs) {
             log::debug!("build: {}:{}: {} is not SystemVerilog, skipped", file.display(), line + 1, abs.display());
         }
-        self.note(file, Self::describe_path(p, &e, &abs, kind));
+        self.note(file, self.describe_path(p, &e, &abs, kind));
         self.link(file, &abs);
         if !abs.is_file() {
             self.problem(file, line, format!("File not found: {}", abs.display()));
@@ -1131,7 +1182,7 @@ impl Builder {
 
     fn resolve(&mut self, file: &Path, line: u32, p: &str, base: &Path) -> Option<PathBuf> {
         match self.expand(p, true) {
-            Some(e) => Some(absolutize(&e, base)),
+            Some(e) => Some(self.abs(&e, base)),
             None => {
                 self.undefined(file, line, p);
                 None
@@ -1230,6 +1281,22 @@ fn undefined_var(s: &str, env: &FxHashMap<String, String>) -> Option<String> {
 fn is_foreign_source(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(e.to_ascii_lowercase().as_str(), "c" | "cc" | "cpp" | "cxx" | "c++" | "o" | "a" | "so" | "vhd" | "vhdl")
+    })
+}
+
+/// `p` with the first `+dvicode_path_map+` whose FROM is one of its leading folders replaced by
+/// TO (`maps`: longest FROM first). Whole path components only: `/nfs/proj` maps
+/// `/nfs/proj/a.sv`, not `/nfs/proj_old/a.sv`. Case-insensitive on Windows.
+fn map_path(maps: &[(String, String)], p: &str) -> Option<String> {
+    if maps.is_empty() {
+        return None;
+    }
+    let norm = p.replace('\\', "/");
+    maps.iter().find_map(|(from, to)| {
+        let head = norm.get(..from.len())?;
+        let same = if cfg!(windows) { head.eq_ignore_ascii_case(from) } else { head == from };
+        let rest = &norm[from.len()..];
+        (same && (rest.is_empty() || rest.starts_with('/'))).then(|| format!("{}{rest}", to.trim_end_matches(['/', '\\'])))
     })
 }
 
@@ -1771,6 +1838,41 @@ mod tests {
         assert!(cfg.invocations[0].files.is_empty(), "{:?}", cfg.invocations[0].files);
         let cfg = parse_build(&dir, &file, "+dvicode_init_auto\n", &FxHashMap::default());
         assert_eq!(cfg.invocations[0].files, vec![dir.join("a.sv")]);
+    }
+
+    #[test]
+    fn path_maps_read_paths_written_on_another_machine() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_pathmap");
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["local/rtl", "local/inc", "local/run"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        for f in ["local/rtl/a.sv", "local/rtl/c.sv", "local/rtl/d.sv"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        std::fs::write(dir.join("local/files.f"), "/nfs/proj/rtl/c.sv\n").unwrap();
+        std::fs::write(dir.join("local/run/compile.log"), "Command: vcs +incdir+/nfs/proj/inc\nParsing design file '/nfs/proj/rtl/d.sv'\n").unwrap();
+        let local = dir.join("local").display().to_string().replace('\\', "/");
+        let text = format!(
+            "/nfs/proj/rtl/a.sv\n+dvicode_path_map+/nfs/proj/=$LOCAL\n/nfs/proj/rtl/a.sv\n+incdir+/nfs/proj/inc\n/nfs/proj_old/b.sv\n-f /nfs/proj/files.f\n+dvicode_init_from_simlog+/nfs/proj/run/compile.log\n+dvicode_path_map+relative=x\n"
+        );
+        let mut env = FxHashMap::default();
+        env.insert("LOCAL".to_string(), local.clone());
+        let file = dir.join(".dvicode/default.build");
+        let cfg = parse_build(&dir, &file, &text, &env);
+        let inv = &cfg.invocations[0];
+        // Before the directive the path is read as written; after it, mapped.
+        assert_eq!(inv.files, vec![absolutize("/nfs/proj/rtl/a.sv", &dir), dir.join("local/rtl/a.sv"), absolutize("/nfs/proj_old/b.sv", &dir), dir.join("local/rtl/c.sv")]);
+        assert_eq!(inv.incdirs, vec![dir.join("local/inc")]);
+        assert_eq!(cfg.invocations[1].files, vec![dir.join("local/rtl/d.sv")]);
+        assert_eq!(cfg.invocations[1].incdirs[0], dir.join("local/inc"));
+        let m = messages(&cfg.problems);
+        // The first a.sv, the folder that only starts like FROM, and the relative FROM.
+        assert_eq!(m.len(), 3, "{m:?}");
+        assert!(m[1].contains("proj_old") && m[2].contains("not an absolute path"), "{m:?}");
+        // Hover says how a path is read.
+        let ins = inspect(&dir, &file, &text, &env, None);
+        assert!(ins.notes.iter().any(|(_, _, t)| t.contains("is read as") && t.contains("local/rtl/a.sv")), "{:?}", ins.notes);
     }
 
     #[test]

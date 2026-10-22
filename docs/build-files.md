@@ -86,6 +86,7 @@ value. Other `+options+` and `-options` are skipped.
 | `+dvicode_include_config+FILE` | Read another build file here (its relative paths resolve against its own directory). |
 | `+dvicode_test+FILE` | Compile `FILE` like a top file (kept for compatibility with test lists). |
 | `+dvicode_switches+NAME[+NAME...]` | The switches that [Jinja conditions](#jinja-templated-argument-files) in argument files read after it test (`{% if "NAME" in fl_switches %}`). Each use replaces the list. |
+| `+dvicode_path_map+FROM=TO` | From this line on, read paths in the folder `FROM` from the folder `TO` instead: for build files, argument files and compile logs written on another machine (a compute farm, a CI runner). See [Paths written on another machine](#paths-written-on-another-machine). |
 
 ## Paths, wildcards and environment variables
 
@@ -120,6 +121,32 @@ available. These are always set:
 An undefined `$NAME`, `${NAME}` or `$(NAME)` in a path is reported and the entry is skipped; an
 undefined `%NAME%` is kept as written. In a define value an undefined variable is kept as
 written.
+
+### Paths written on another machine
+
+Build files, `-f` files and compile logs made on a compute farm often hold absolute paths that do
+not exist where DVICode runs. `+dvicode_path_map+FROM=TO` reads every path in the folder `FROM`
+from the folder `TO`:
+
+```
++dvicode_path_map+/nfs/proj=/home/me/proj
+-f /nfs/proj/sim/files.f
++dvicode_init_from_simlog+/nfs/proj/sim/compile.log
+```
+
+- `TO` is a folder on the machine where the DVICode engine runs: a Linux path when it runs in WSL
+  or over SSH. Variables are expanded in both; a relative `TO` is from the base of the file the
+  line is in.
+- It applies to every path read after the line: source files, `+incdir+`, `-y`/`-v`, `-f`/`-F`
+  and the files in them, the UVM location, and the files, include directories and libraries of
+  `+dvicode_init_from_simlog`; after `$VAR` expansion.
+- Whole folders only: `/nfs/proj` maps `/nfs/proj/a.sv`, not `/nfs/proj_old/a.sv`. When several
+  maps match, the longest `FROM` wins. On Windows the comparison ignores case.
+- Hover over a mapped path to see how it is read.
+
+This is different from the `dvicode.pathMappings` setting, which maps the folders the editor
+shows to the ones the engine sees (a mapped drive and its Linux path); `+dvicode_path_map+` maps
+paths written in the build inputs.
 
 ## Jinja-templated argument files
 

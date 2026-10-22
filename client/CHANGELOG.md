@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- UVM Verification Hierarchy: a base test that creates `T_ENV env` shows the environment class a
+  derived test gives `T_ENV` in `extends base_test#(...)` (by name or position, through a
+  typedef, or the default), with its whole tree, instead of `T_ENV [unresolved]`.
+- `+dvicode_path_map+FROM=TO` in a build file reads paths written on another machine (a compute
+  farm, a CI runner) from a folder on this one: in the build file, its `-f` files and compile
+  logs.
+- Compile logs: quoted values (`+incdir+"a b"`), command lines continued with `\`, and the
+  include directory of `` `include "dir/file.svh" `` are read correctly.
+- Fixed: a crash (stack overflow) on two packages that `export` each other; a macro used inside
+  its own `` `" `` string took exponential time; `` `"dir/`ID(x)/f.svh`" `` lost the macro's
+  arguments; in auto mode, `M a(...), b(...);` could pick a copy of `M` that only fits `a`;
+  `foreach (a[i].b[j].c[k])` stopped member checks after `a[i]`; `.gitignore` lines ending in
+  `/**` hid exceptions inside the folder.
+- Verification Hierarchy: helper methods in `` `ifdef `` code that is off are not followed; a
+  non-virtual helper is the one its own class sees; creations are shown in the order they run.
+
 ## 0.1.5 (preview)
 
 - `+dvicode_init_from_simlog+MODE+LOG` in a build file compiles what a VCS or vlogan compile log
