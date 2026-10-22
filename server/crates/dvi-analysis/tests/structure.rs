@@ -173,6 +173,28 @@ fn structure_review_cases() {
 }
 
 #[test]
+fn extern_methods_and_their_implementations() {
+    // impl.sv declares an unrelated class: the implementation of C::f, whose class is shown in
+    // c.svh, is still listed. In one.sv the method keeps its implementation as its body.
+    let c = "class C;\n  extern function void f();\nendclass\n";
+    let imp = "`include \"c.svh\"\nclass Helper; endclass\nfunction void C::f();\n  $display(\"inside f\");\nendfunction\n";
+    let one = "package q;\n  class D;\n    extern function void g();\n  endclass\n  function void D::g();\n    $display(\"inside g\");\n  endfunction\nendpackage\n";
+    let (a, root) = project("extern", &[("c.svh", c), ("impl.sv", imp), ("one.sv", one)]);
+    let t = structure(&a, &root, "impl.sv", None);
+    assert!(t.contains(&"f [function] void".to_string()), "{t:?}");
+    assert!(t.iter().any(|l| l.starts_with("Helper [class]")), "{t:?}");
+    let f = a.vfs.lookup(&root.join("one.sv")).unwrap();
+    let tree = a.structure(f, None, 1000);
+    fn find<'a>(n: &'a [StructNode], name: &str) -> Option<&'a StructNode> {
+        n.iter().find_map(|x| if x.name == name { Some(x) } else { find(&x.children, name) })
+    }
+    let g = find(&tree.nodes, "g").expect("g");
+    let body = &g.body.as_ref().expect("the implementation").range;
+    assert_eq!((body.start.line, body.end.line), (4, 6));
+    assert_eq!(lines(&tree.nodes).iter().filter(|l| l.trim_start().starts_with("g [")).count(), 1);
+}
+
+#[test]
 fn many_processes_are_fast() {
     let body: String = (0..20_000).map(|k| format!("  assign x{k} = y;\n")).collect();
     let (a, root) = project("manyassign", &[("m.sv", &format!("module m;\n  logic y;\n{body}endmodule\n"))]);

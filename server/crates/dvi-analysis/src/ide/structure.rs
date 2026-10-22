@@ -27,6 +27,9 @@ pub struct StructNode {
     /// Where a click goes (the name; an implementation; an included file).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<Location>,
+    /// An extern method: where its body is (the view follows the cursor in it too).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<Location>,
     /// Inherited members: the class they are declared in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherited_from: Option<String>,
@@ -70,8 +73,6 @@ struct Build<'a> {
     incomplete: bool,
     /// Tokens of the files read, once.
     toks: FxHashMap<FileId, Option<Arc<Vec<Token>>>>,
-    /// The file declares a class: its out-of-block methods show with their prototypes.
-    has_classes: bool,
 }
 
 impl Analysis {
@@ -81,8 +82,7 @@ impl Analysis {
         let units = self.units_for(file);
         let Some(&unit) = units.first() else { return StructTree { status: "none", ..Default::default() } };
         let u = self.unit(unit);
-        let has_classes = u.parsed.decls.iter().any(|d| d.kind == DeclKind::Class && d.name_span.file == file);
-        let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false, toks: FxHashMap::default(), has_classes };
+                let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false, toks: FxHashMap::default() };
         let mut nodes = Vec::new();
         // Includes, defines and top-level declarations, in source order.
         let mut items: Vec<(u32, StructNode)> = Vec::new();
@@ -192,9 +192,9 @@ impl Build<'_> {
     /// out besides the UVM library's.
     fn decl_nodes(&mut self, id: DeclId, hidden_macros: &[&str]) -> Vec<StructNode> {
         let d = self.decl(id).clone();
-        // An out-of-block implementation is listed with its prototype (when the class is in this
-        // file; a file of implementations lists them).
-        if d.has(dflags::OUT_OF_BLOCK) && self.has_classes {
+        // An out-of-block implementation is listed with its prototype when its class is shown
+        // in this file; otherwise (a file of implementations) on its own.
+        if d.has(dflags::OUT_OF_BLOCK) && self.a.owner_class(DeclRef { unit: self.unit, decl: id }).is_some_and(|c| self.a.decl(c).name_span.file == self.file) {
             return Vec::new();
         }
         // Unnamed generate blocks are synthetic: their contents show in place.
@@ -248,13 +248,16 @@ impl Build<'_> {
         let sel = a.to_location(d.name_span);
         let full = if d.span.file == d.name_span.file { a.to_location(d.span) } else { None };
         // An extern method opens its implementation.
-        let target = if d.has(dflags::PROTOTYPE) { a.implementation_of(r).and_then(|i| a.to_location(a.decl(i).name_span)).or(sel.clone()) } else { sel.clone() };
+        let implementation = if d.has(dflags::PROTOTYPE) { a.implementation_of(r) } else { None };
+        let target = implementation.and_then(|i| a.to_location(a.decl(i).name_span)).or(sel.clone());
+        let body = implementation.and_then(|i| a.to_location(a.decl(i).span));
         StructNode {
             name: d.name.to_string(),
             kind,
             detail: detail_of(a, d, kind),
             extent: full.or(sel),
             target,
+            body,
             inherited_from,
             ..Default::default()
         }

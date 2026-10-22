@@ -167,4 +167,10 @@ test.describe('Structure', () => {
     assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///a.sv', 2, 3).map((x) => x.id), ['top']);
     assert.deepEqual(vm.innermostAt(tree, (u) => u === 'file:///a.sv', 30, 0).map((x) => x.id), ['c']);
   });
+  test.it('finds an extern method in its body, outside its class', () => {
+    const f = n('f', 'function', at(24, 2, 24, 30), [], { body: at(50, 0, 53, 11) });
+    const pkg = [n('p', 'package', at(21, 0, 60, 10), [n('Classes', 'group', undefined, [n('c', 'class', at(22, 0, 40, 8), [n('Methods', 'group', undefined, [f])])])])];
+    assert.deepEqual(vm.innermostAt(pkg, (u) => u === 'file:///a.sv', 51, 4).map((x) => x.id), ['p', 'Classes', 'c', 'Methods', 'f']);
+    assert.deepEqual(vm.innermostAt(pkg, (u) => u === 'file:///a.sv', 45, 0).map((x) => x.id), ['p']);
+  });
 });

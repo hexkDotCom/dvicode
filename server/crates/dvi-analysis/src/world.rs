@@ -163,6 +163,9 @@ pub struct Analysis {
     /// Without a build file: the copy of a design element defined more than once that each
     /// instance means (`Analysis::instance_definitions`).
     pub instance_defs: Arc<std::sync::OnceLock<FxHashMap<(UnitId, Span), DeclRef>>>,
+    /// Out-of-block method and constraint bodies (`function C::f()`) by name, for finding a
+    /// prototype's implementation (`Analysis::implementation_of`).
+    pub out_of_block: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -368,6 +371,7 @@ impl Analysis {
             revision: 0,
             hidden_uses: Arc::default(),
             instance_defs: Arc::default(),
+            out_of_block: Arc::default(),
         };
         a.reindex();
         a.update_library_units(Some(progress));
@@ -597,6 +601,7 @@ impl Analysis {
         self.global = Arc::new(g);
         self.file_units = Arc::new(fu);
         self.instance_defs = Arc::default();
+        self.out_of_block = Arc::default();
     }
 
     pub fn unit(&self, id: UnitId) -> &Arc<Unit> {
@@ -631,6 +636,7 @@ impl Analysis {
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
+        next.out_of_block = Arc::default();
         let rebuilt: Vec<Unit> = affected
             .par_iter()
             .map(|&uid| {
@@ -808,6 +814,7 @@ impl Analysis {
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
+        next.out_of_block = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
         let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
@@ -832,6 +839,7 @@ impl Analysis {
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
+        next.out_of_block = Arc::default();
         for id in ids {
             next.units[id as usize] = None;
         }

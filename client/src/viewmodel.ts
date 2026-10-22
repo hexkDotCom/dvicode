@@ -383,6 +383,8 @@ export interface StructNode {
   detail?: string;
   extent?: { uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } };
   target?: { uri: string; range: { start: { line: number; character: number } } };
+  /** An extern method's body, elsewhere in the file (or another). */
+  body?: { uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } };
   inherited_from?: string;
   mark?: string;
   inactive?: boolean;
@@ -395,8 +397,7 @@ export interface StructNode {
  * an engine URI) and contains the position; with the nodes from the top down to it.
  */
 export function innermostAt(nodes: StructNode[], inDoc: (uri: string) => boolean, line: number, character: number): StructNode[] {
-  const inside = (n: StructNode): boolean => {
-    const e = n.extent;
+  const within = (e: StructNode['extent']): boolean => {
     if (!e || !inDoc(e.uri)) {
       return false;
     }
@@ -405,6 +406,7 @@ export function innermostAt(nodes: StructNode[], inDoc: (uri: string) => boolean
     const beforeEnd = line < end.line || (line === end.line && character <= end.character);
     return afterStart && beforeEnd;
   };
+  const inside = (n: StructNode): boolean => within(n.extent) || within(n.body);
   for (const n of nodes) {
     // Groups have no extent: look inside them.
     if (n.kind === 'group') {
@@ -414,10 +416,17 @@ export function innermostAt(nodes: StructNode[], inDoc: (uri: string) => boolean
       }
       continue;
     }
-    if (n.inherited_from || !inside(n)) {
+    if (n.inherited_from) {
       continue;
     }
-    return [n, ...innermostAt(n.children, inDoc, line, character)];
+    if (inside(n)) {
+      return [n, ...innermostAt(n.children, inDoc, line, character)];
+    }
+    // An extern method's body lies outside its class.
+    const below = innermostAt(n.children, inDoc, line, character);
+    if (below.length) {
+      return [n, ...below];
+    }
   }
   return [];
 }

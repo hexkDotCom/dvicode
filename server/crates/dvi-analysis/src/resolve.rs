@@ -5,6 +5,7 @@ use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefId, RefKind, Sep, TypeRef};
 use dvi_syntax::Span;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smol_str::SmolStr;
 
 const MAX_DEPTH: usize = 32;
 
@@ -650,19 +651,19 @@ impl Analysis {
         }
         let class = d.parent.map(|p| DeclRef { unit: r.unit, decl: p })?;
         let key = self.decl_key(class);
-        for u in self.units.iter().flatten() {
-            for (i, x) in u.parsed.decls.iter().enumerate() {
-                if x.has(dflags::OUT_OF_BLOCK) && x.name == d.name && x.kind == d.kind {
-                    let xr = DeclRef { unit: u.id, decl: i as DeclId };
-                    if let Some(c) = self.owner_class(xr) {
-                        if self.decl_key(c) == key {
-                            return Some(xr);
-                        }
+        // The out-of-block bodies by name, indexed once per snapshot.
+        let index = self.out_of_block.get_or_init(|| {
+            let mut m: FxHashMap<SmolStr, Vec<DeclRef>> = FxHashMap::default();
+            for u in self.units.iter().flatten() {
+                for (i, x) in u.parsed.decls.iter().enumerate() {
+                    if x.has(dflags::OUT_OF_BLOCK) {
+                        m.entry(x.name.clone()).or_default().push(DeclRef { unit: u.id, decl: i as DeclId });
                     }
                 }
             }
-        }
-        None
+            m
+        });
+        index.get(&d.name)?.iter().copied().find(|xr| self.decl(*xr).kind == d.kind && self.owner_class(*xr).is_some_and(|c| self.decl_key(c) == key))
     }
 
     /// Qualified name such as `pkg::cls::method`.

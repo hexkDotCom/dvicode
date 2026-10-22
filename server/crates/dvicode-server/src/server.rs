@@ -1221,7 +1221,7 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
         }
         "verification" => {
             let (h, meta) = a.verification_tree(nonempty(p.test).as_deref(), &q);
-            json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": h.roots, "test": h.test, "configured": h.configured, "tests": h.tests })
+            json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": h.roots, "test": h.test, "configured": h.configured, "tests": h.tests, "hint": h.hint })
         }
         _ => {
             let (roots, meta) = a.compiled_files_tree(&q);

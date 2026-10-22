@@ -1076,27 +1076,35 @@ impl Builder {
                 let defines_at = self.inv().defines.len();
                 let incdirs_at = self.inv().incdirs.len();
                 let problems_at = self.cfg.problems.len();
-                // vlog echoes its options quoted ("+incdir+inc"): an option is the word inside
-                // the quotes. Defines are taken here (a value may hold spaces); DVICode's own
+                let (span, word, focus_at) = (self.span, std::mem::take(&mut self.word), self.focus_at);
+                // As vlog reads them: -f files' paths are from the compile folder, the log's.
+                let (mode, comp_root) = (std::mem::replace(&mut self.inv().mode, "questa".into()), std::mem::replace(&mut self.comp_root, dir.clone()));
+                self.depth += 1;
+                self.reading.push(key.clone());
+                // In order, so defines keep their place among -f files and -define. vlog echoes
+                // options quoted ("+incdir+inc"): an option is the word inside the quotes; a
+                // define (whose value may hold spaces) is taken as it is, after what comes before
+                // it; an include folder with spaces is quoted for the reader. DVICode's own
                 // directives are not taken from a log.
-                let mut lines = Vec::new();
+                let mut lines: Vec<String> = Vec::new();
                 for w in &s.words {
                     let inner = w.strip_prefix('"').and_then(|x| x.strip_suffix('"')).filter(|x| !x.contains('"'));
                     let opt = inner.filter(|x| x.starts_with('+') || !x.contains(char::is_whitespace)).unwrap_or(w);
                     if let Some(d) = opt.strip_prefix("+define+") {
+                        let text = std::mem::take(&mut lines).join("\n");
+                        self.parse_text(&path, &text, dir.clone());
                         for d in split_defines(d) {
                             self.add_define(&d);
+                        }
+                    } else if let Some(dirs) = opt.strip_prefix("+incdir+").filter(|d| d.contains(char::is_whitespace)) {
+                        for d in dirs.split('+').filter(|d| !d.is_empty()) {
+                            lines.push(format!("+incdir+\"{d}\""));
                         }
                     } else if !opt.starts_with("+dvicode_") {
                         lines.push(opt.to_string());
                     }
                 }
                 let text = lines.join("\n");
-                let (span, word, focus_at) = (self.span, std::mem::take(&mut self.word), self.focus_at);
-                // As vlog reads them: -f files' paths are from the compile folder, the log's.
-                let (mode, comp_root) = (std::mem::replace(&mut self.inv().mode, "questa".into()), std::mem::replace(&mut self.comp_root, dir.clone()));
-                self.depth += 1;
-                self.reading.push(key.clone());
                 self.parse_text(&path, &text, dir.clone());
                 self.reading.pop();
                 self.depth -= 1;
@@ -2037,6 +2045,25 @@ mod tests {
         assert!(cfg.problems.iter().all(|p| p.file == dir.join(".dvicode/default.build")), "{:?}", cfg.problems);
         assert!(m.iter().any(|x| x.contains("missing.sv") && x.contains("in the vlog command of")), "{m:?}");
         assert_eq!(at(text, &cfg.problems[0]), "compile.log");
+    }
+
+    #[test]
+    fn questa_command_lines_keep_order_and_quoted_folders() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_questa3");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("inc dir")).unwrap();
+        std::fs::write(dir.join("top.sv"), "").unwrap();
+        std::fs::write(dir.join("d.f"), "+define+FROM_F\n").unwrap();
+        // Defines in argument order, among -define and -f; a quoted folder with a space is one.
+        let log = "vlog -sv -define WIDTH=8 \"+define+WIDTH=16\" \"+incdir+inc dir\" -f d.f +define+LAST top.sv\n";
+        std::fs::write(dir.join("compile.log"), log).unwrap();
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), "+dvicode_init_from_simlog+compile.log\n", &FxHashMap::default());
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
+        let inv = &cfg.invocations[0];
+        let names: Vec<String> = inv.defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
+        assert_eq!(names, vec!["WIDTH=8", "WIDTH=16", "FROM_F=", "LAST="]);
+        assert_eq!(inv.incdirs, vec![dir.join("inc dir")]);
+        assert_eq!(inv.files, vec![dir.join("top.sv")]);
     }
 
     #[test]
