@@ -2157,6 +2157,9 @@ impl<'t> Parser<'t> {
                         self.bump();
                         self.scan_expr(STOP_NONE, RefKind::Expr);
                         self.eat_p("]");
+                        if let Some(l) = segs.last_mut() {
+                            l.selects = l.selects.saturating_add(1);
+                        }
                     }
                     self.bump(); // .
                     sep = Sep::Dot;

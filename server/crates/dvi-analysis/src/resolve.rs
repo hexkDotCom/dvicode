@@ -298,17 +298,23 @@ impl Analysis {
                         }
                     }
                 }
+                // Instances in one statement (`M a(.x(x)), b(.x(x), .y(y));`) share the name: the
+                // copy must fit all of them.
+                let mut by_name: FxHashMap<Span, (&str, Vec<&str>)> = FxHashMap::default();
                 for (inst, names) in named {
                     let Some(rid) = u.parsed.decl(inst).ty.as_ref().and_then(|t| t.ref_id) else { continue };
                     let Some(seg) = u.parsed.reference(rid).segs.first().filter(|s| !s.from_macro) else { continue };
-                    let Some(v) = self.global.definitions.get(&seg.name).filter(|v| v.len() > 1) else { continue };
+                    by_name.entry(seg.span).or_insert_with(|| (seg.name.as_str(), Vec::new())).1.extend(names);
+                }
+                for (span, (name, names)) in by_name {
+                    let Some(v) = self.global.definitions.get(name).filter(|v| v.len() > 1) else { continue };
                     // Own members only: following `bind`s would resolve instances again.
                     let fits = |c: &DeclRef| {
                         let p = &self.unit(c.unit).parsed;
                         names.iter().all(|n| !p.lookup_member(c.decl, n).is_empty())
                     };
                     if let Some(c) = self.candidates(u.id, v).into_iter().find(fits) {
-                        out.insert((u.id, seg.span), c);
+                        out.insert((u.id, span), c);
                     }
                 }
             }

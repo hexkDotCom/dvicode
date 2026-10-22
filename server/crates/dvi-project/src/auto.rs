@@ -39,8 +39,18 @@ fn is_regular_file(ft: &std::fs::FileType, p: &Path) -> bool {
 
 /// The patterns of the project's top-level `.gitignore`: build output, scratch files and
 /// downloaded tools usually live there. Negations (`!pattern`) are not supported and skipped.
-/// The project's top-level `.gitignore`: (pattern, directories only, `!` re-include), in order.
-struct GitIgnore(Vec<(String, bool, bool)>);
+/// The project's top-level `.gitignore`, in order.
+struct GitIgnore(Vec<IgnorePattern>);
+
+struct IgnorePattern {
+    pat: String,
+    /// Written with a trailing `/`.
+    dir_only: bool,
+    /// `!pattern`: re-includes.
+    negate: bool,
+    /// `dir/**`: what is inside `dir`, not `dir` itself (so `!dir/keep.sv` can re-include).
+    contents: bool,
+}
 
 impl GitIgnore {
     fn load(root: &Path) -> GitIgnore {
@@ -59,17 +69,21 @@ impl GitIgnore {
                 Some(rest) => (true, rest),
                 None => (false, l.strip_prefix('\\').filter(|r| r.starts_with('!') || r.starts_with('#')).unwrap_or(l)),
             };
+            let (contents, l) = match l.strip_suffix("/**") {
+                Some(dir) => (true, dir),
+                None => (false, l),
+            };
             let dir_only = l.ends_with('/');
             let l = l.trim_end_matches('/');
             if l.is_empty() {
                 continue;
             }
             // A slash other than a trailing one anchors the pattern at the project folder.
-            let pat = if l.contains('/') { format!("/{}", l.trim_start_matches('/')) } else { l.to_string() };
-            pats.push((pat, dir_only, negate));
+            let pat = if l.contains('/') || contents { format!("/{}", l.trim_start_matches('/')) } else { l.to_string() };
+            pats.push(IgnorePattern { pat, dir_only, negate, contents });
         }
         if !pats.is_empty() {
-            let shown: Vec<String> = pats.iter().map(|(p, d, n)| format!("{}{p}{}", if *n { "!" } else { "" }, if *d { "/" } else { "" })).collect();
+            let shown: Vec<String> = pats.iter().map(|p| format!("{}{}{}{}", if p.negate { "!" } else { "" }, p.pat, if p.dir_only { "/" } else { "" }, if p.contents { "/**" } else { "" })).collect();
             log::debug!("auto-configuration: skipping what {} patterns of .gitignore match: {}", pats.len(), shown.join(" "));
         }
         GitIgnore(pats)
@@ -81,8 +95,15 @@ impl GitIgnore {
         self.0
             .iter()
             .rev()
-            .find(|(p, dir_only, _)| (is_dir || !dir_only) && crate::glob::matches_path(p, rel))
-            .is_some_and(|(_, _, negate)| !negate)
+            .find(|p| {
+                if p.contents {
+                    // A folder above `rel` (not `rel` itself) matches.
+                    rel.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).any(|a| crate::glob::matches_path(&p.pat, a))
+                } else {
+                    (is_dir || !p.dir_only) && crate::glob::matches_path(&p.pat, rel)
+                }
+            })
+            .is_some_and(|p| !p.negate)
     }
 }
 
@@ -157,6 +178,38 @@ struct FileFacts {
     uses: FxHashSet<String>,
     defines: usize,
     items: usize,
+}
+
+/// The include directories that `` `include "dir/name.svh" `` operands in `sources` need, given
+/// where the files they include are (`included`, from a compile log): `/p/inc` for an operand
+/// `pkg/defs.svh` found at `/p/inc/pkg/defs.svh`.
+pub(crate) fn include_bases(sources: &[PathBuf], included: &[PathBuf]) -> Vec<PathBuf> {
+    let operands: FxHashSet<String> = sources
+        .par_iter()
+        .flat_map_iter(|p| {
+            let text = std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            scan(&text).include_paths
+        })
+        .collect();
+    let mut by_name: FxHashMap<&str, Vec<String>> = FxHashMap::default();
+    let names: Vec<String> = included.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+    for n in &names {
+        by_name.entry(n.rsplit('/').next().unwrap_or(n)).or_default().push(n.clone());
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for op in &operands {
+        let op = op.trim_start_matches("./");
+        let Some(paths) = by_name.get(op.rsplit('/').next().unwrap_or(op)) else { continue };
+        for p in paths {
+            if let Some(base) = p.strip_suffix(op).and_then(|b| b.strip_suffix('/')) {
+                let base = PathBuf::from(base);
+                if !out.contains(&base) {
+                    out.push(base);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn scan(text: &str) -> FileFacts {
@@ -442,5 +495,12 @@ mod tests {
         assert!(ig("!literal", false));
         // A file in an ignored folder is not re-included: the folder is skipped, as in Git.
         assert!(ig("tmp", true));
+        // `dir/**` ignores what is in the folder, not the folder: an exception inside works.
+        let g = GitIgnore::parse("generated/**\n!generated/keep.sv\n");
+        let ig = |p: &str, dir: bool| g.ignores(Path::new(p), dir);
+        assert!(!ig("generated", true));
+        assert!(ig("generated/x.sv", false) && ig("generated/sub", true));
+        assert!(!ig("generated/keep.sv", false));
+        assert!(!ig("rtl/generated", true));
     }
 }

@@ -1047,3 +1047,52 @@ fn macro_calls_with_arguments_inside_a_quote() {
     );
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
+
+#[test]
+fn instances_in_one_statement_choose_a_copy_that_fits_all() {
+    // Auto mode, two copies of `leaf`: the nearer one has no `y`.
+    let files = [
+        ("top/leaf.sv", "module leaf(input x);\nendmodule\n"),
+        ("lib/leaf.sv", "module leaf(input x, input y);\nendmodule\n"),
+        ("top/top.sv", "module top;\n  logic x, y;\n  leaf a(.x(x)), b(.x(x), .y(y));\nendmodule\n"),
+    ];
+    let (_, root) = project("autoshared", &files);
+    let _ = std::fs::remove_dir_all(root.join(".dvicode"));
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn foreach_over_a_path_through_arrays() {
+    // Member checks after `lines[i]` need the select counted.
+    let (a, _) = project(
+        "foreachsel",
+        &[(
+            "t.sv",
+            "class sub_c; int v; endclass\nclass tile_c; sub_c subs[4]; endclass\nclass line_c; tile_c tiles[2][3]; endclass\nclass frame_c;\n  line_c lines[8];\n  int i, j, k;\n  function void f();\n    foreach (lines[i].tiles[j][k].subs[l]) lines[i].tiles[j][k].subs[l].v = 0;\n    foreach (lines[i].tiles[j][k].nope[l]) ;\n  endfunction\nendclass\n",
+        )],
+    );
+    let p = problems(&a);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].contains("nope"), "{p:?}");
+}
+
+#[test]
+fn helper_calls_follow_dispatch_order_and_active_code() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let chain: String = (1..=7).map(|k| format!("    function void l{k}(); l{}(); endfunction\n", k + 1)).collect::<String>().replace("l8()", "h()");
+    let tb = format!(
+        "package tb_pkg;\n  import uvm_pkg::*;\n  class a_env extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class b_env extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class base_test extends uvm_test;\n    a_env env; b_env child; a_env deep; a_env off;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_env(); env = a_env::type_id::create(\"env\", this); endfunction\n    function void first(); child = b_env::type_id::create(\"first\", this); endfunction\n    function void build_off(); off = a_env::type_id::create(\"off\", this); endfunction\n{chain}    function void h(); mk(); endfunction\n    function void mk(); deep = a_env::type_id::create(\"deep\", this); endfunction\n    function void build_phase(uvm_phase phase);\n      build_env();\n      first();\n      child = b_env::type_id::create(\"second\", this);\n`ifdef ENABLE_OFF\n      build_off();\n`endif\n      l1();\n      h();\n    endfunction\n  endclass\n  class derived_test extends base_test;\n    b_env other;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_env(); other = b_env::type_id::create(\"other\", this); endfunction\n  endclass\nendpackage\n"
+    );
+    let (a, _) = project("helperorder", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let names = |test: &str| -> Vec<String> {
+        let h = a.verification_hierarchy(Some(test), 100);
+        h.roots.first().map(|r| r.children.iter().map(|c| c.name.clone()).collect()).unwrap_or_default()
+    };
+    // Source order; `first` and `second` are two components; `off` is not compiled; `deep` is
+    // reached through the direct call to h() although l7() reaches h() at the depth limit.
+    assert_eq!(names("base_test"), vec!["env", "first", "second", "deep"]);
+    // build_env is not virtual: the base's build_phase calls its own.
+    assert_eq!(names("derived_test"), vec!["env", "first", "second", "deep"]);
+}

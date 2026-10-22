@@ -28,17 +28,54 @@ fn parsed_file<'a>(line: &'a str, kind: &str) -> Option<&'a str> {
     Some(&rest[..end]).filter(|p| !p.is_empty())
 }
 
+/// The words of a command line; quotes keep spaces in a word (`+incdir+"a b"`,
+/// `+define+MSG="hello world"`) and stay in it; a backslash keeps the next character.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (_, '\\') => {
+                cur.push(c);
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (Some(q), _) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (None, _) if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// The command line of a log line, as words: `Command: vcs ...`, `Command  = vwi vlogan ...`,
 /// `Command arguments: ...`, or a line whose first word is the tool.
-fn command_words(line: &str) -> Option<Vec<&str>> {
+fn command_words(line: &str) -> Option<Vec<String>> {
     let tool = |w: &str| {
         let name = w.rsplit('/').next().unwrap_or(w);
         matches!(name, "vcs" | "vlogan" | "vhdlan")
     };
-    let words: Vec<&str> = line.split_whitespace().collect();
+    let words = shell_words(line);
     let start = if line.trim_start().starts_with("Command") {
         // Up to the separator, then the words of the command (possibly a wrapper first).
-        let sep = words.iter().position(|w| w.ends_with(':') || *w == "=" || w.ends_with('='))?;
+        let sep = words.iter().position(|w| w.ends_with(':') || w == "=" || w.ends_with('='))?;
         sep + 1
     } else if words.first().is_some_and(|w| tool(w)) {
         0
@@ -52,46 +89,68 @@ fn command_words(line: &str) -> Option<Vec<&str>> {
     (has_tool || has_opts).then(|| words.to_vec())
 }
 
-pub fn parse(text: &str) -> SimLog {
-    let mut s = SimLog::default();
-    let push = |v: &mut Vec<String>, x: &str| {
-        if !v.iter().any(|y| y == x) {
-            v.push(x.to_string());
+/// Values in order, each once.
+#[derive(Default)]
+struct Ordered {
+    v: Vec<String>,
+    seen: rustc_hash::FxHashSet<String>,
+}
+
+impl Ordered {
+    fn push(&mut self, x: &str) {
+        if self.seen.insert(x.to_string()) {
+            self.v.push(x.to_string());
         }
-    };
-    for line in text.lines() {
+    }
+}
+
+pub fn parse(text: &str) -> SimLog {
+    let (mut files, mut lib_files, mut included, mut defines, mut incdirs) = (Ordered::default(), Ordered::default(), Ordered::default(), Ordered::default(), Ordered::default());
+    let mut command = false;
+    let unquote = |w: &str| w.trim_matches(|c| c == '"' || c == '\'').to_string();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
         let line = line.trim();
         if let Some(p) = parsed_file(line, "design") {
-            push(&mut s.files, p);
+            files.push(p);
         } else if let Some(p) = parsed_file(line, "library") {
-            push(&mut s.lib_files, p);
+            lib_files.push(p);
         } else if let Some(p) = parsed_file(line, "included") {
-            push(&mut s.included, p);
-        } else if let Some(words) = command_words(line) {
-            s.command = true;
+            included.push(p);
+        } else if let Some(mut words) = command_words(line) {
+            // A command continued on the next lines (`\` at the end).
+            let mut last = line.to_string();
+            while last.ends_with('\\') {
+                words.retain(|w| w != "\\");
+                let Some(next) = lines.next() else { break };
+                last = next.trim().to_string();
+                words.extend(shell_words(&last));
+            }
+            words.retain(|w| w != "\\");
+            command = true;
             let mut i = 0;
             while i < words.len() {
-                let w = words[i];
+                let w = words[i].as_str();
                 if let Some(rest) = w.strip_prefix("+define+") {
                     for d in crate::split_defines(rest) {
-                        push(&mut s.defines, &d);
+                        defines.push(&d);
                     }
                 } else if let Some(rest) = w.strip_prefix("+incdir+") {
-                    for d in rest.split('+').filter(|d| !d.is_empty()) {
-                        push(&mut s.incdirs, d);
+                    for d in rest.split('+').map(unquote).filter(|d| !d.is_empty()) {
+                        incdirs.push(&d);
                     }
                 } else if (w == "-define" || w == "-D") && i + 1 < words.len() {
                     i += 1;
-                    push(&mut s.defines, words[i]);
+                    defines.push(&words[i]);
                 } else if w == "-incdir" && i + 1 < words.len() {
                     i += 1;
-                    push(&mut s.incdirs, words[i]);
+                    incdirs.push(&unquote(&words[i]));
                 }
                 i += 1;
             }
         }
     }
-    s
+    SimLog { files: files.v, lib_files: lib_files.v, included: included.v, defines: defines.v, incdirs: incdirs.v, command }
 }
 
 #[cfg(test)]
@@ -126,5 +185,13 @@ Top Level Modules:
         assert_eq!((s.defines, s.incdirs, s.files), (vec!["X".to_string()], vec!["a".to_string()], vec!["b.sv".to_string()]));
         // Prose that mentions the tool is not a command line.
         assert!(parse("Please rerun vcs with -debug\n").defines.is_empty());
+    }
+
+    #[test]
+    fn quoted_values_and_continued_command_lines() {
+        let s = parse("Command: vcs +incdir+\"include dir\" +define+MSG=\"hello world\" \\\n   -incdir 'other dir' +define+B\nParsing design file 'a.sv'\n");
+        assert_eq!(s.incdirs, vec!["include dir", "other dir"]);
+        assert_eq!(s.defines, vec!["MSG=\"hello world\"", "B"]);
+        assert_eq!(s.files, vec!["a.sv"]);
     }
 }

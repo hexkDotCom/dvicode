@@ -1002,6 +1002,14 @@ impl Builder {
             }
         }
         let files: Vec<PathBuf> = s.files.iter().map(|f| absolutize(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
+        // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
+        let included: Vec<PathBuf> = s.included.iter().map(|f| absolutize(f, &dir)).collect();
+        let sources: Vec<PathBuf> = files.iter().chain(included.iter()).cloned().collect();
+        for d in auto::include_bases(&sources, &included) {
+            if !incdirs.contains(&d) {
+                incdirs.push(d);
+            }
+        }
         let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| absolutize(f, &dir)).collect();
         let missing: Vec<&PathBuf> = files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).collect();
         log::debug!(
@@ -1763,6 +1771,19 @@ mod tests {
         assert!(cfg.invocations[0].files.is_empty(), "{:?}", cfg.invocations[0].files);
         let cfg = parse_build(&dir, &file, "+dvicode_init_auto\n", &FxHashMap::default());
         assert_eq!(cfg.invocations[0].files, vec![dir.join("a.sv")]);
+    }
+
+    #[test]
+    fn compile_log_include_operands_with_a_folder() {
+        // top.sv has `include "pkg/defs.svh"`; the log shows the file at inc/pkg/defs.svh.
+        let dir = std::env::temp_dir().join("dvicode_build_test_simlog_inc");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("inc/pkg")).unwrap();
+        std::fs::write(dir.join("top.sv"), "`include \"pkg/defs.svh\"\nmodule top; endmodule\n").unwrap();
+        std::fs::write(dir.join("inc/pkg/defs.svh"), "").unwrap();
+        std::fs::write(dir.join("compile.log"), "Parsing design file 'top.sv'\nParsing included file 'inc/pkg/defs.svh'.\n").unwrap();
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), "+dvicode_init_from_simlog+compile.log\n", &FxHashMap::default());
+        assert!(cfg.invocations[0].incdirs.contains(&dir.join("inc")), "{:?}", cfg.invocations[0].incdirs);
     }
 
     #[test]

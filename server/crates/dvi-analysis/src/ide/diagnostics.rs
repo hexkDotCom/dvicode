@@ -456,15 +456,20 @@ impl Analysis {
             false
         });
         let mut first: Vec<(Span, SmolStr, usize)> = Vec::new();
+        let mut index: FxHashMap<SmolStr, usize> = FxHashMap::default();
         for (name, span) in uses {
-            match first.iter_mut().find(|(_, n, _)| *n == name) {
-                Some(f) => {
+            match index.get(&name) {
+                Some(&i) => {
+                    let f = &mut first[i];
                     f.2 += 1;
                     if span.start < f.0.start {
                         f.0 = span;
                     }
                 }
-                None => first.push((span, name, 1)),
+                None => {
+                    index.insert(name.clone(), first.len());
+                    first.push((span, name, 1));
+                }
             }
         }
         first.sort_by_key(|(s, _, _)| s.start);

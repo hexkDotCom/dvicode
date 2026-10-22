@@ -470,8 +470,9 @@ impl Analysis {
         chain.reverse();
         // (body unit, creation); a derived class creating the same variable replaces it.
         let mut made: Vec<(DeclRef, Creation)> = Vec::new();
-        let mut scanned: FxHashSet<DeclRef> = FxHashSet::default();
-        for c in chain {
+        let mut scanned: FxHashMap<DeclRef, usize> = FxHashMap::default();
+        for (k, c) in chain.into_iter().enumerate() {
+            let at = derived_first.len() - 1 - k;
             for method in ["new", "build", "build_phase"] {
                 let u = self.unit(c.unit);
                 for &m in u.parsed.lookup_member(c.decl, method) {
@@ -480,7 +481,7 @@ impl Analysis {
                         continue;
                     }
                     let body = self.implementation_of(mr).unwrap_or(mr);
-                    self.scan_build_method(body, &derived_first, &mut scanned, &mut made, 0);
+                    self.scan_build_method(body, at, &derived_first, &mut scanned, &mut made, 0);
                 }
             }
         }
@@ -651,39 +652,69 @@ impl Analysis {
     }
 
     /// The component creations of a build method, and of the methods of the same class it
-    /// calls (`build_envs()`, `this.build_agents()`): large testbenches build in helpers.
-    fn scan_build_method(&self, body: DeclRef, derived_first: &[DeclRef], scanned: &mut FxHashSet<DeclRef>, made: &mut Vec<(DeclRef, Creation)>, depth: usize) {
-        if !scanned.insert(body) || scanned.len() > 256 {
-            return;
+    /// calls (`build_envs()`, `this.build_agents()`), in the order they run: large testbenches
+    /// build in helpers. `at`: the index in `derived_first` of the class the method is in;
+    /// `scanned`: the shallowest call depth each method was scanned at.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_build_method(&self, body: DeclRef, at: usize, derived_first: &[DeclRef], scanned: &mut FxHashMap<DeclRef, usize>, made: &mut Vec<(DeclRef, Creation)>, depth: usize) {
+        match scanned.get(&body) {
+            Some(&d) if d <= depth => return,
+            None if scanned.len() >= 256 => return,
+            _ => {}
         }
-        for cr in self.scan_creations(body) {
-            match made.iter_mut().find(|(_, x)| x.lhs == cr.lhs) {
-                Some(slot) => *slot = (body, cr),
-                None => made.push((body, cr)),
-            }
-        }
-        if depth >= 8 {
-            return;
-        }
-        for name in self.called_method_names(body) {
-            let found = derived_first.iter().find_map(|c| {
-                let u = self.unit(c.unit);
-                u.parsed
-                    .lookup_member(c.decl, &name)
-                    .iter()
-                    .map(|&m| DeclRef { unit: c.unit, decl: m })
-                    .find(|m| matches!(self.decl(*m).kind, DeclKind::Function | DeclKind::Task))
-            });
-            if let Some(m) = found {
-                let callee = self.implementation_of(m).unwrap_or(m);
-                self.scan_build_method(callee, derived_first, scanned, made, depth + 1);
+        scanned.insert(body, depth);
+        let toks = self.body_tokens(body);
+        let creations = scan_creations(&toks);
+        let calls = if depth < 8 { called_methods(&toks, self.decl(body).name.as_str()) } else { Vec::new() };
+        let (mut ci, mut ki) = (creations.into_iter().peekable(), calls.into_iter().peekable());
+        loop {
+            let creation_first = match (ci.peek(), ki.peek()) {
+                (Some((a, _)), Some((b, _))) => a < b,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if creation_first {
+                let Some((_, cr)) = ci.next() else { break };
+                // Creating the same variable again (a derived class, a later step) replaces the
+                // component, unless the two are given different names.
+                match made.iter_mut().find(|(_, x)| x.lhs == cr.lhs && (x.name == cr.name || x.name.is_none() || cr.name.is_none())) {
+                    Some(slot) => *slot = (body, cr),
+                    None => made.push((body, cr)),
+                }
+            } else {
+                let Some((_, name)) = ki.next() else { break };
+                if let Some((callee, callee_at)) = self.dispatch(&name, at, derived_first) {
+                    self.scan_build_method(callee, callee_at, derived_first, scanned, made, depth + 1);
+                }
             }
         }
     }
 
-    /// Names called as methods of the object itself in a method body: `f(...)` and
-    /// `this.f(...)` (not `obj.f(...)`, `super.f(...)` or `pkg::f(...)`).
-    fn called_method_names(&self, body: DeclRef) -> Vec<String> {
+    /// The method `name` a method of `derived_first[at]` calls on `this`: the one that class
+    /// sees (its own or inherited), or the most derived override when it is virtual (declared
+    /// `virtual` there or in a base class). With the index of its class.
+    fn dispatch(&self, name: &str, at: usize, derived_first: &[DeclRef]) -> Option<(DeclRef, usize)> {
+        let methods = |c: &DeclRef| {
+            let u = self.unit(c.unit);
+            u.parsed
+                .lookup_member(c.decl, name)
+                .iter()
+                .map(|&m| DeclRef { unit: c.unit, decl: m })
+                .filter(|m| matches!(self.decl(*m).kind, DeclKind::Function | DeclKind::Task))
+                .collect::<Vec<_>>()
+        };
+        let find = |from: usize| derived_first.iter().enumerate().skip(from).find_map(|(i, c)| methods(c).first().map(|m| (*m, i)));
+        let (mut m, mut i) = find(at)?;
+        if derived_first[i..].iter().any(|c| methods(c).iter().any(|m| self.decl(*m).has(dflags::VIRTUAL))) {
+            (m, i) = find(0)?;
+        }
+        Some((self.implementation_of(m).unwrap_or(m), i))
+    }
+
+    /// The tokens of a method body that are compiled (not those in `ifdef branches that are
+    /// off).
+    fn body_tokens(&self, body: DeclRef) -> Vec<Token> {
         let d = self.decl(body);
         if d.has(dflags::FROM_MACRO) || d.has(dflags::PROTOTYPE) {
             return Vec::new();
@@ -691,19 +722,8 @@ impl Analysis {
         let Some(toks) = self.file_tokens(d.span.file) else { return Vec::new() };
         let lo = toks.partition_point(|t| t.span.start < d.span.start);
         let hi = toks.partition_point(|t| t.span.start < d.span.end);
-        let t = &toks[lo..hi];
-        let mut out: Vec<String> = Vec::new();
-        for i in 1..t.len().saturating_sub(1) {
-            if !t[i].is_ident() || !t[i + 1].is_punct("(") {
-                continue;
-            }
-            let own = if t[i - 1].is_punct(".") { i >= 2 && t[i - 2].is_kw("this") } else { !t[i - 1].is_punct("::") };
-            let name = t[i].text.to_string();
-            if own && name != d.name.as_str() && !out.contains(&name) {
-                out.push(name);
-            }
-        }
-        out
+        let off: Vec<Span> = self.unit(body.unit).inactive.iter().filter(|s| s.file == d.span.file && s.end > d.span.start && s.start < d.span.end).copied().collect();
+        toks[lo..hi].iter().filter(|t| !off.iter().any(|s| s.start <= t.span.start && t.span.start < s.end)).cloned().collect()
     }
 
     /// The declaration a reference segment written exactly at `span` resolves to.
@@ -716,68 +736,6 @@ impl Analysis {
             return None;
         }
         self.resolve_ref(unit, *rid, *seg as usize)
-    }
-
-    /// Component creations (`lhs = T::type_id::create(name, this)`, `lhs = new(name, this)`)
-    /// in the source of a method body.
-    fn scan_creations(&self, body: DeclRef) -> Vec<Creation> {
-        let d = self.decl(body);
-        if d.has(dflags::FROM_MACRO) || d.has(dflags::PROTOTYPE) {
-            return Vec::new();
-        }
-        let Some(toks) = self.file_tokens(d.span.file) else { return Vec::new() };
-        let lo = toks.partition_point(|t| t.span.start < d.span.start);
-        let hi = toks.partition_point(|t| t.span.start < d.span.end);
-        let t = &toks[lo..hi];
-        let mut out = Vec::new();
-        for i in 1..t.len() {
-            if !t[i].is_punct("=") {
-                continue;
-            }
-            let Some((lhs_start, head)) = lhs_before(t, i) else { continue };
-            // Right-hand side.
-            let mut k = i + 1;
-            let mut ty = None;
-            let mut ty_text = String::new();
-            if t.get(k).is_some_and(|x| x.is_kw("new")) {
-                k += 1;
-            } else {
-                let mut idents: Vec<usize> = Vec::new();
-                while k < t.len() {
-                    if t[k].is_ident() && (idents.is_empty() || t[k - 1].is_punct("::")) {
-                        idents.push(k);
-                        k += 1;
-                    } else if t[k].is_punct("::") {
-                        k += 1;
-                    } else if t[k].is_punct("#") && t.get(k + 1).is_some_and(|x| x.is_punct("(")) {
-                        k = skip_group(t, k + 1);
-                    } else {
-                        break;
-                    }
-                }
-                let n = idents.len();
-                if n < 2 || t[idents[n - 1]].text != "create" || t[idents[n - 2]].text != "type_id" {
-                    continue;
-                }
-                if n >= 3 {
-                    let ti = idents[n - 3];
-                    ty = Some(t[ti].span);
-                    ty_text = t[ti].text.to_string();
-                }
-            }
-            if !t.get(k).is_some_and(|x| x.is_punct("(")) {
-                continue;
-            }
-            let args = call_args(t, k);
-            // Components get their parent as the second argument.
-            let parent_is_this = args.get(1).is_some_and(|a| a.len() == 1 && a[0].is_kw("this"));
-            if !parent_is_this {
-                continue;
-            }
-            let name = args.first().filter(|a| a.len() == 1 && a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
-            out.push(Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty, ty_text, name });
-        }
-        out
     }
 
     /// Text of a macro expansion at a position (`levels`: 1 or all).
@@ -797,6 +755,77 @@ impl Analysis {
     pub fn source_text(&self, file: FileId) -> Option<std::sync::Arc<str>> {
         self.file_text(file)
     }
+}
+
+/// Component creations (`lhs = T::type_id::create(name, this)`, `lhs = new(name, this)`)
+/// in the tokens of a method body, with the index where each starts.
+fn scan_creations(t: &[Token]) -> Vec<(usize, Creation)> {
+    let mut out = Vec::new();
+    for i in 1..t.len() {
+        if !t[i].is_punct("=") {
+            continue;
+        }
+        let Some((lhs_start, head)) = lhs_before(t, i) else { continue };
+        // Right-hand side.
+        let mut k = i + 1;
+        let mut ty = None;
+        let mut ty_text = String::new();
+        if t.get(k).is_some_and(|x| x.is_kw("new")) {
+            k += 1;
+        } else {
+            let mut idents: Vec<usize> = Vec::new();
+            while k < t.len() {
+                if t[k].is_ident() && (idents.is_empty() || t[k - 1].is_punct("::")) {
+                    idents.push(k);
+                    k += 1;
+                } else if t[k].is_punct("::") {
+                    k += 1;
+                } else if t[k].is_punct("#") && t.get(k + 1).is_some_and(|x| x.is_punct("(")) {
+                    k = skip_group(t, k + 1);
+                } else {
+                    break;
+                }
+            }
+            let n = idents.len();
+            if n < 2 || t[idents[n - 1]].text != "create" || t[idents[n - 2]].text != "type_id" {
+                continue;
+            }
+            if n >= 3 {
+                let ti = idents[n - 3];
+                ty = Some(t[ti].span);
+                ty_text = t[ti].text.to_string();
+            }
+        }
+        if !t.get(k).is_some_and(|x| x.is_punct("(")) {
+            continue;
+        }
+        let args = call_args(t, k);
+        // Components get their parent as the second argument.
+        let parent_is_this = args.get(1).is_some_and(|a| a.len() == 1 && a[0].is_kw("this"));
+        if !parent_is_this {
+            continue;
+        }
+        let name = args.first().filter(|a| a.len() == 1 && a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
+        out.push((lhs_start, Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty, ty_text, name }));
+    }
+    out
+}
+
+/// Methods called on the object itself in a method body (`f(...)`, `this.f(...)`; not
+/// `obj.f(...)`, `super.f(...)` or `pkg::f(...)`), each with the index of its first call.
+fn called_methods(t: &[Token], own: &str) -> Vec<(usize, String)> {
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
+    let mut out = Vec::new();
+    for i in 1..t.len().saturating_sub(1) {
+        if !t[i].is_ident() || !t[i + 1].is_punct("(") {
+            continue;
+        }
+        let this_call = if t[i - 1].is_punct(".") { i >= 2 && t[i - 2].is_kw("this") } else { !t[i - 1].is_punct("::") };
+        if this_call && t[i].text != own && seen.insert(t[i].text.as_str()) {
+            out.push((i, t[i].text.to_string()));
+        }
+    }
+    out
 }
 
 /// Start and variable-name token of the assignment target before `t[eq]` (`a.b[i]`).
