@@ -153,6 +153,7 @@ powershell -ExecutionPolicy Bypass -File scripts\prerelease.ps1 -Vsix C:\Downloa
 | `e2e-ssh` | End-to-end tests over SSH, with deployment of the engine, against a second WSL distribution |
 | `e2e-remote-wsl` | End-to-end tests in a VS Code Remote - WSL window: extension and engine in WSL |
 | `e2e-remote-ssh` | End-to-end tests in a VS Code Remote - SSH window to the second WSL distribution |
+| `e2e-editors` | The native, WSL, WSL-only `dvicode://` and SSH runs again in VSCodium, Cursor and Windsurf, for those installed (VSCodium's portable zip may be unpacked into `%USERPROFILE%\.dvicode-test\vscodium`; `DVICODE_E2E_EDITORS` lists other executables). Each editor keeps one profile in `%USERPROFILE%\.dvicode-test\profile-<editor>`: sign in to Cursor once in it (`Cursor.exe --user-data-dir <that folder>`) and close it before running |
 
 Without `-Vsix` the end-to-end tests run the extension from the sources with the engines just
 built; with `-Vsix` they test a package, typically the universal `.vsix` of a Release workflow

@@ -340,7 +340,8 @@ async function run() {
       const p = lineOf(doc, needle, 1);
       if (p.line !== line - 1) throw new Error(`'${needle}' is on line ${p.line + 1}`);
       const acts = await vscode.commands.executeCommand('vscode.executeCodeActionProvider', doc.uri, new vscode.Range(p, p.translate(0, needle.length)));
-      return acts.filter((a) => a.kind && a.kind.value === 'quickfix');
+      // Quick fixes with an edit: an editor may add its own (Cursor's "Fix in Agent" runs a command).
+      return acts.filter((a) => a.kind && a.kind.value === 'quickfix' && a.edit);
     };
     const typo = await fixesAt(7, 'stat_e');
     const imp = await fixesAt(25, 'req_t r;');

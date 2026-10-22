@@ -17,6 +17,9 @@
     e2e-ssh     end-to-end tests over SSH against a second WSL distribution
     e2e-remote-wsl  end-to-end tests in a VS Code Remote - WSL window (extension and engine in WSL)
     e2e-remote-ssh  end-to-end tests in a VS Code Remote - SSH window to the second distribution
+    e2e-editors the native, WSL, dvicode:// and SSH runs again in VSCodium, Cursor and Windsurf,
+                for those installed (VSCodium's portable zip may be unpacked into
+                %USERPROFILE%\.dvicode-test\vscodium); a SKIP when none is
 
   Without -Vsix the end-to-end tests run the extension from client/ with the engines built here.
   With -Vsix they run a packaged extension (the universal package of a Release workflow run).
@@ -267,6 +270,60 @@ Step 'e2e-remote-ssh' {
     '  StrictHostKeyChecking accept-new'
   ) | Set-Content -Encoding ascii $sshConfig
   E2e "/home/$SshUser/demo" 'remote-ssh' @{ 'dvicode.server.mode' = 'ssh'; 'dvicode.server.sshHost' = 'not-this-host.invalid' } -Remote 'ssh-remote+dvicode-e2e' -SshConfig $sshConfig
+}
+
+# Other editors built on VS Code (installed from Open VSX by their users): the setups that use
+# DVICode's own engine modes (this machine, WSL, its dvicode:// folders, SSH), not VS Code's
+# remote windows. Each editor found at its usual place (or in $env:DVICODE_E2E_EDITORS, a
+# ';'-separated list of executables) runs them; none found is a SKIP.
+Step 'e2e-editors' {
+  $candidates = @(
+    "$env:USERPROFILE\.dvicode-test\vscodium\VSCodium.exe",
+    "$env:LOCALAPPDATA\Programs\VSCodium\VSCodium.exe",
+    "$env:LOCALAPPDATA\Programs\cursor\Cursor.exe",
+    "$env:LOCALAPPDATA\Programs\Windsurf\Windsurf.exe"
+  )
+  if ($env:DVICODE_E2E_EDITORS) { $candidates = $env:DVICODE_E2E_EDITORS -split ';' }
+  $editors = @($candidates | Where-Object { $_ -and (Test-Path $_) })
+  if (-not $editors) { return 'SKIP: no VSCodium, Cursor or Windsurf installed' }
+  $wslDemo = DemoToWsl
+  DemoToSsh
+  $key = $SshKey -replace '\\', '/'
+  $out = @()
+  $failures = @()
+  try {
+    foreach ($exe in $editors) {
+      $name = [IO.Path]::GetFileNameWithoutExtension($exe).ToLower()
+      $version = (Get-Item $exe).VersionInfo.ProductVersion
+      $env:VSCODE_EXECUTABLE = $exe
+      # One profile per editor, kept: sign in to Cursor once in it and later runs stay signed in.
+      $env:DVICODE_E2E_USER_DATA = "$env:USERPROFILE\.dvicode-test\profile-$name"
+      # An editor still open on that profile (after signing in, say) would take the test window
+      # over and give no result: close it. Only processes on this test profile are stopped.
+      Get-CimInstance Win32_Process -Filter "Name='$([IO.Path]::GetFileName($exe))'" |
+        Where-Object { $_.CommandLine -like "*$env:DVICODE_E2E_USER_DATA*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      $runs = @()
+      foreach ($run in @(
+          @{ Target = $Demo; Label = "$name-native"; Settings = @{} },
+          @{ Target = $Demo; Label = "$name-wsl"; Settings = @{ 'dvicode.server.mode' = 'wsl' } },
+          @{ Target = "dvicode://wsl+$Distro$wslDemo"; Label = "$name-remote-fs"; Settings = @{} },
+          @{ Target = "dvicode://ssh+$SshUser%40127.0.0.1/home/$SshUser/demo"; Label = "$name-ssh"; Settings = @{ 'dvicode.server.sshArgs' = @('-p', "$SshPort", '-i', $key, '-o', 'StrictHostKeyChecking=accept-new') } }
+        )) {
+        try {
+          $runs += "$($run.Label): $(E2e $run.Target $run.Label $run.Settings)"
+        } catch {
+          $failures += $_.Exception.Message
+        }
+      }
+      $out += "$name $version ($($runs.Count)/4 setups)"
+    }
+  } finally {
+    Remove-Item Env:VSCODE_EXECUTABLE -ErrorAction SilentlyContinue
+    Remove-Item Env:DVICODE_E2E_USER_DATA -ErrorAction SilentlyContinue
+  }
+  if ($failures) { throw (($out + $failures) -join '; ') }
+  $out -join '; '
 }
 
 Write-Host "`n=== Summary" -ForegroundColor Cyan

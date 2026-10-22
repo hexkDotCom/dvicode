@@ -130,9 +130,12 @@ async function main() {
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dvicode-e2e-'));
   let result = path.join(tmp, 'result.json');
-  fs.mkdirSync(path.join(tmp, 'user', 'User'), { recursive: true });
+  // DVICODE_E2E_USER_DATA: a profile kept from run to run, so an editor that asks to sign in
+  // (Cursor) remembers it. Its settings are written again each run.
+  const userData = process.env.DVICODE_E2E_USER_DATA || path.join(tmp, 'user');
+  fs.mkdirSync(path.join(userData, 'User'), { recursive: true });
   fs.writeFileSync(
-    path.join(tmp, 'user', 'User', 'settings.json'),
+    path.join(userData, 'User', 'settings.json'),
     JSON.stringify({
       'security.allowedUNCHosts': ['wsl.localhost', 'wsl$'],
       'security.workspace.trust.enabled': false,
@@ -190,7 +193,7 @@ async function main() {
         '--disable-workspace-trust',
         '--skip-welcome',
         '--skip-release-notes',
-        '--user-data-dir', path.join(tmp, 'user'),
+        '--user-data-dir', userData,
         '--extensions-dir', extensionsDir,
       ],
       extensionTestsEnv: remote ? {} : { DVICODE_E2E_RESULT: result },

@@ -53,7 +53,10 @@ currently in preview.
 1. **Install** the extension: in VS Code, open the Extensions view (**Ctrl+Shift+X**),
    search for **DVICode** and choose **Install**, or run
    `code --install-extension hexk.dvicode`. VSCodium, Cursor, Windsurf and other VS Code
-   editors install it from [Open VSX](https://open-vsx.org/extension/hexk/dvicode).
+   editors install it from [Open VSX](https://open-vsx.org/extension/hexk/dvicode). The
+   test suite passes in **Cursor 3.26** and **VSCodium 1.140** too, with the engine on the
+   same machine, in WSL and over SSH (DVICode's own SSH mode; their own remote windows are
+   not tested).
    Without internet access, download the `.vsix` for your platform from the
    [releases page](https://github.com/hexkDotCom/dvicode/releases), then choose **...** >
    **Install from VSIX...** in the Extensions view.

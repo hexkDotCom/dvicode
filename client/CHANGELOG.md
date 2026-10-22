@@ -16,6 +16,11 @@
 - Views refresh after edits (when typing pauses), not only after a full build, and remember
   their filter and following per build configuration.
 
+**Other editors**
+
+- The end-to-end tests pass in Cursor 3.26 and VSCodium 1.140, with the engine on the same
+  machine, in WSL and over SSH.
+
 - UVM Verification Hierarchy: a base test that creates `T_ENV env` shows the environment class a
   derived test gives `T_ENV` in `extends base_test#(...)` (by name or position, through a
   typedef, or the default), with its whole tree, instead of `T_ENV [unresolved]`.
