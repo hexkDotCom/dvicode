@@ -95,6 +95,9 @@ fn capabilities() -> ServerCapabilities {
             range: None,
             work_done_progress_options: Default::default(),
         })),
+        // What the views can ask for, so a newer extension with an older engine shows only what
+        // it supports.
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1 } })),
         ..Default::default()
     }
 }

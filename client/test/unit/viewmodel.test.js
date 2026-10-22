@@ -104,3 +104,46 @@ test.describe('view texts', () => {
     assert.equal(vm.viewMessage(base), undefined);
   });
 });
+
+test.describe('Verification Hierarchy nodes', () => {
+  const base = { name: 'drv', path: 'uvm_test_top.env.agt.drv', class: 'err_driver', kind: 'driver' };
+  test.it('describes overrides, conditions, loops and alternatives', () => {
+    const n = {
+      ...base,
+      count: 'up to 4',
+      conditions: [['cfg.is_active']],
+      alternatives: [{ class: 'b_driver', conditions: [['!(cfg.is_active)']] }],
+      overrides: [
+        { from: 'my_driver', to: 'err_driver', instance: false, set_in: 'err_test::build_phase', applied: true },
+        { from: 'err_driver', to: 'worse_driver', instance: true, path: 'uvm_test_top.*', set_in: 'err_test::build_phase', conditions: [['inject']], applied: false },
+      ],
+    };
+    assert.equal(vm.verifDescription(n), 'err_driver ×≤4 (override) · may be overridden · conditional · or b_driver');
+    const tip = vm.verifTooltip(n).split('\n\n');
+    assert.deepEqual(tip, [
+      '**drv** : `err_driver` (driver)',
+      'uvm_test_top.env.agt.drv',
+      'Override: `my_driver` → `err_driver`: type override in `err_test::build_phase`',
+      'May be overridden: `err_driver` → `worse_driver`: instance override (uvm_test_top.*) in `err_test::build_phase`, when `inject`',
+      'Created only when `cfg.is_active`.',
+      'Or `b_driver` when `!(cfg.is_active)`.',
+      'Created in a loop of up to 4 iterations (it can stop early).',
+    ]);
+  });
+  test.it('describes sequences and where they start', () => {
+    const one = { name: 's', path: 'uvm_test_top.s', class: 'seq', kind: 'sequence', object: true, starts: [{ on: 'uvm_test_top.env.sqr', path: true, phase: 'main_phase' }] };
+    assert.equal(vm.verifDescription(one), 'seq · on env.sqr');
+    assert.equal(vm.verifTooltip(one), '**s** : `seq` (sequence)\n\nStarted on uvm_test_top.env.sqr in `main_phase`.');
+    const two = { ...one, starts: [...one.starts, { on: 'p_sequencer.x', path: false, phase: 'body' }] };
+    assert.equal(vm.verifDescription(two), 'seq · on 2 sequencers');
+    assert.equal(vm.verifDescription({ ...one, starts: [] }), 'seq · not started here');
+    assert.equal(vm.verifDescription({ ...base, ports_hidden: 3, truncated: true }), 'err_driver …');
+  });
+  test.it('finds a class by the class built, or the class an override replaced', () => {
+    const p = (node) => ({ node, parent: undefined, children: [], names: [], key: '' });
+    assert.ok(vm.isClassTarget(p({ class: 'a', def_uri: 'file:///a.sv' }), { class: 'a', classUri: 'file:///a.sv' }));
+    assert.ok(!vm.isClassTarget(p({ class: 'a', def_uri: 'file:///other.sv' }), { class: 'a', classUri: 'file:///a.sv' }));
+    assert.ok(vm.isClassTarget(p({ class: 'b', overrides: [{ from: 'a', to: 'b', applied: true }] }), { class: 'a' }));
+    assert.ok(!vm.isClassTarget(p({ class: 'a', overrides: [{ from: 'a', to: 'b', applied: false }] }), { class: 'b' }));
+  });
+});

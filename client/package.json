@@ -473,6 +473,26 @@
         "icon": "$(arrow-up)"
       },
       {
+        "command": "dvicode.verification.showObjects",
+        "title": "Show UVM Objects",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.verification.hideObjects",
+        "title": "Hide UVM Objects",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.verification.showPorts",
+        "title": "Show TLM Ports",
+        "category": "DVICode"
+      },
+      {
+        "command": "dvicode.verification.hidePorts",
+        "title": "Hide TLM Ports",
+        "category": "DVICode"
+      },
+      {
         "command": "dvicode.files.filter",
         "title": "Filter... (Compiled Files)",
         "category": "DVICode",
@@ -594,6 +614,26 @@
           "group": "filter@1"
         },
         {
+          "command": "dvicode.verification.showObjects",
+          "when": "view == dvicode.verificationHierarchy && !dvicode.verification.objects && dvicode.engine.objects",
+          "group": "options@1"
+        },
+        {
+          "command": "dvicode.verification.hideObjects",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.objects && dvicode.engine.objects",
+          "group": "options@1"
+        },
+        {
+          "command": "dvicode.verification.showPorts",
+          "when": "view == dvicode.verificationHierarchy && !dvicode.verification.ports && dvicode.engine.objects",
+          "group": "options@2"
+        },
+        {
+          "command": "dvicode.verification.hidePorts",
+          "when": "view == dvicode.verificationHierarchy && dvicode.verification.ports && dvicode.engine.objects",
+          "group": "options@2"
+        },
+        {
           "command": "dvicode.files.filter",
           "when": "view == dvicode.compiledFiles && !dvicode.files.filtered",
           "group": "navigation@1"
@@ -652,16 +692,16 @@
       "view/item/context": [
         {
           "command": "dvicode.copyHierarchyPath",
-          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy"
+          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy && viewItem =~ /^dvicode\\.verifNode/"
         },
         {
           "command": "dvicode.openComponentClass",
-          "when": "view == dvicode.verificationHierarchy && viewItem == dvicode.verifNode.class",
+          "when": "view == dvicode.verificationHierarchy && viewItem =~ /^dvicode\\.verif(Node|Object)\\.class$/",
           "group": "inline"
         },
         {
           "command": "dvicode.openComponentClass",
-          "when": "view == dvicode.verificationHierarchy && viewItem == dvicode.verifNode.class"
+          "when": "view == dvicode.verificationHierarchy && viewItem =~ /^dvicode\\.verif(Node|Object)\\.class$/"
         }
       ],
       "commandPalette": [
@@ -671,6 +711,22 @@
         },
         {
           "command": "dvicode.openComponentClass",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.verification.showObjects",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.verification.hideObjects",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.verification.showPorts",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.verification.hidePorts",
           "when": "false"
         }
       ]

@@ -76,6 +76,10 @@ export interface Target {
   instance?: string;
   /** Verification Hierarchy: components of this class. */
   class?: string;
+  /** The class's file (a server URI): another class of the same name elsewhere is not it. */
+  classUri?: string;
+  /** The class is a UVM object, not a component (shown only with objects on). */
+  objectClass?: boolean;
   /** Compiled Files: this file (a client URI string). */
   file?: string;
 }
@@ -122,9 +126,121 @@ export function isDesignTarget(p: Placed<DesignLike>, t: Target): boolean {
   return up?.node.definition === t.definition;
 }
 
-/** Whether a Verification Hierarchy node is a component of the target class. */
-export function isClassTarget(p: Placed<TreeNode & { class: string }>, t: Target): boolean {
-  return t.class !== undefined && p.node.class === t.class;
+/** Whether a Verification Hierarchy node is a component of the target class (the class built,
+ * or the one requested when an override built another), declared in the target's file. */
+export function isClassTarget(p: Placed<TreeNode & { class: string; def_uri?: string | null; overrides?: OverrideStep[] }>, t: Target): boolean {
+  if (t.class === undefined) {
+    return false;
+  }
+  const n = p.node;
+  if (n.class === t.class) {
+    return !t.classUri || !n.def_uri || n.def_uri === t.classUri;
+  }
+  return (n.overrides ?? []).some((o) => o.applied && o.from === t.class);
+}
+
+/** One factory override of a Verification Hierarchy node's class. */
+export interface OverrideStep {
+  from: string;
+  to: string;
+  instance: boolean;
+  path?: string;
+  set_in: string;
+  conditions?: string[][];
+  applied: boolean;
+}
+
+/** What a Verification Hierarchy node says beyond its name (see the engine's `VerifNode`). */
+export interface VerifInfo {
+  name: string;
+  path: string;
+  class: string;
+  kind: string;
+  truncated?: boolean;
+  conditions?: string[][];
+  count?: string;
+  loops?: string[];
+  alternatives?: { class: string; conditions: string[][] }[];
+  ports_hidden?: number;
+  overrides?: OverrideStep[];
+  object?: boolean;
+  starts?: { on: string; path: boolean; phase: string; conditions?: string[][] }[];
+  allocated?: string;
+  notes?: string[];
+}
+
+/** Conditions as text: the ways, each its conditions joined by `&&`, joined by `or`. */
+export function conditionsText(ways: string[][]): string {
+  return ways.map((w) => w.map((c) => `\`${c}\``).join(' && ')).join(' or ');
+}
+
+/** A loop count for the description: `×4`, `×≤4` (up to), `×?`. */
+function countText(count: string): string {
+  return count.startsWith('up to ') ? `×≤${count.slice(6)}` : `×${count}`;
+}
+
+/** The text after a Verification Hierarchy node's name. */
+export function verifDescription(n: VerifInfo): string {
+  const parts = [n.class + (n.count ? ` ${countText(n.count)}` : '')];
+  const overrides = n.overrides ?? [];
+  if (overrides.some((o) => o.applied)) {
+    parts[0] += ' (override)';
+  }
+  if (overrides.some((o) => !o.applied)) {
+    parts.push('may be overridden');
+  }
+  if (n.conditions?.length) {
+    parts.push('conditional');
+  }
+  if (n.alternatives?.length) {
+    parts.push(`or ${n.alternatives.map((a) => a.class).join(', ')}`);
+  }
+  const ons = [...new Set((n.starts ?? []).map((s) => s.on))];
+  if (ons.length === 1) {
+    parts.push(`on ${ons[0].replace(/^uvm_test_top\./, '')}`);
+  } else if (ons.length > 1) {
+    parts.push(`on ${ons.length} sequencers`);
+  } else if (n.kind === 'sequence') {
+    parts.push('not started here');
+  }
+  return parts.join(' · ') + (n.truncated ? ' …' : '');
+}
+
+/** A Verification Hierarchy node's tooltip (Markdown). */
+export function verifTooltip(n: VerifInfo): string {
+  const lines = [`**${n.name}** : \`${n.class}\` (${n.kind})`, n.object ? '' : n.path];
+  for (const o of n.overrides ?? []) {
+    const what = `\`${o.from}\` → \`${o.to}\`: ${o.instance ? `instance override (${o.path})` : 'type override'} in \`${o.set_in}\``;
+    lines.push(o.applied ? `Override: ${what}` : `May be overridden: ${what}${o.conditions?.length ? `, when ${conditionsText(o.conditions)}` : ''}`);
+  }
+  if (n.conditions?.length) {
+    lines.push(n.conditions.some((w) => w.includes('?')) ? 'Created under conditions that are not known.' : `Created only when ${conditionsText(n.conditions)}.`);
+  }
+  for (const a of n.alternatives ?? []) {
+    lines.push(`Or \`${a.class}\`${a.conditions.length ? ` when ${conditionsText(a.conditions)}` : ''}.`);
+  }
+  if (n.count) {
+    const loops = (n.loops ?? []).map((l) => `\`${l}\``).join(', ');
+    const times = n.count === '?' ? 'an unknown number of iterations' : n.count.startsWith('up to ') ? `${n.count} iterations (it can stop early)` : `${n.count} iterations`;
+    lines.push(`Created in a loop of ${times}${loops ? `: ${loops}` : ''}.`);
+  }
+  for (const s of n.starts ?? []) {
+    const on = s.path ? s.on : `\`${s.on}\``;
+    lines.push(`Started on ${on} in \`${s.phase}\`${s.conditions?.length ? `, when ${conditionsText(s.conditions)}` : ''}.`);
+  }
+  if (n.allocated === 'elsewhere') {
+    lines.push('Made elsewhere (a handle from the config DB, an argument or a base class).');
+  }
+  if (n.kind === 'sequence' && !(n.starts ?? []).length) {
+    lines.push('Not started in this class.');
+  }
+  for (const note of n.notes ?? []) {
+    lines.push(note.charAt(0).toUpperCase() + note.slice(1) + '.');
+  }
+  if (n.ports_hidden) {
+    lines.push(`${n.ports_hidden} TLM port${n.ports_hidden === 1 ? '' : 's'} hidden.`);
+  }
+  return lines.filter((l) => l !== '').join('\n\n');
 }
 
 /** The names of the nodes that are hits, in view order. */

@@ -250,6 +250,9 @@ pub struct Located {
 pub struct NamedDef {
     pub name: String,
     pub uri: Option<String>,
+    /// For a class: `component` or `object` (a UVM object the hierarchy shows only with objects).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
 }
 
 struct Walk<'q> {
@@ -1083,7 +1086,7 @@ impl Analysis {
         let Some(&unit) = self.units_for(file).first() else { return out };
         let u = self.unit(unit);
         let scope = self.scope_at(unit, file, off);
-        let named = |r: DeclRef| NamedDef { name: self.decl(r).name.to_string(), uri: self.decl_location(r).map(|l| l.uri.to_string()) };
+        let named = |r: DeclRef| NamedDef { name: self.decl(r).name.to_string(), uri: self.decl_location(r).map(|l| l.uri.to_string()), kind: None };
         let mut cur = Some(scope);
         while let Some(s) = cur {
             let d = u.parsed.decl(s);
@@ -1103,7 +1106,16 @@ impl Analysis {
                 .min_by_key(|d| d.span.len())
                 .map(|d| d.name.to_string());
         }
-        out.class = self.enclosing_class(unit, scope).map(named);
+        out.class = self.enclosing_class(unit, scope).map(|c| {
+            let kind = if self.derives_from(c, "uvm_component") {
+                Some("component")
+            } else if self.derives_from(c, "uvm_object") {
+                Some("object")
+            } else {
+                None
+            };
+            NamedDef { kind, ..named(c) }
+        });
         out
     }
 

@@ -141,6 +141,9 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   });
   c.onNotification('dvicode/internalError', (e: InternalError) => reporter.onInternalError(e));
   await c.start();
+  // What this engine's views support (an engine at a custom path or remote may be older).
+  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number } } | undefined;
+  void vscode.commands.executeCommand('setContext', 'dvicode.engine.objects', (experimental?.dvicode?.verificationObjects ?? 0) >= 1);
   c.onNotification('dvicode/status', (s: Status) => {
     lastStatus = s;
     if (s.build_error) {

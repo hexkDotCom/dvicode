@@ -10,6 +10,7 @@ import {
   PlacedTree,
   Target,
   TreeNode,
+  VerifInfo,
   ViewState,
   describeTarget,
   isClassTarget,
@@ -18,6 +19,8 @@ import {
   occurrences,
   placeTree,
   targetKey,
+  verifDescription,
+  verifTooltip,
   viewDescription,
   viewMessage,
 } from './viewmodel';
@@ -52,7 +55,7 @@ interface FileNode extends TreeNode {
   children: FileNode[];
 }
 
-interface VerifNode extends TreeNode {
+interface VerifNode extends TreeNode, VerifInfo {
   name: string;
   dup?: number;
   path: string;
@@ -93,7 +96,8 @@ export interface Located {
   revision: number;
   design: { name: string; uri: string | null } | null;
   instance: string | null;
-  class: { name: string; uri: string | null } | null;
+  /** `kind`: `component` or `object` (shown only with objects on). */
+  class: { name: string; uri: string | null; kind?: string } | null;
 }
 
 export type ViewName = 'design' | 'verification' | 'files';
@@ -232,6 +236,29 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       }
     });
     return p;
+  }
+
+  /** Selects the node at `names`, or its nearest ancestor that is shown, without focus. */
+  async select(names: string[]): Promise<void> {
+    const tree = this.tree;
+    if (!tree || !this.view) {
+      return;
+    }
+    for (let n = names.length; n > 0; n--) {
+      const p = tree.byNames.get(namesKey(names.slice(0, n)))?.[0];
+      const item = p && this.items.get(p.key);
+      if (item) {
+        this.revealing = true;
+        try {
+          await this.view.reveal(item, { select: true, focus: false });
+        } catch {
+          // The view went away.
+        } finally {
+          this.revealing = false;
+        }
+        return;
+      }
+    }
   }
 
   /** Forgets the occurrences found (a restarted server, a refresh): they are searched again. */
@@ -639,7 +666,8 @@ export function hierarchyPath(item: unknown): string | undefined {
   }
   const n = item.node as Partial<VerifNode>;
   if (typeof n.path === 'string' && typeof n.class === 'string') {
-    return n.path;
+    // Objects have no place in the component hierarchy.
+    return n.object ? undefined : n.path;
   }
   if (!('definition' in item.node)) {
     return undefined;
@@ -663,12 +691,20 @@ const VERIF_ICONS: Record<string, string> = {
   port: 'plug',
   component: 'symbol-class',
   unresolved: 'warning',
+  sequence: 'play',
+  'register model': 'database',
+  adapter: 'arrow-swap',
+  object: 'symbol-object',
 };
 
 /** UVM component tree of the selected test (`+UVM_TESTNAME` by default). */
 export class VerificationHierarchy extends TreeBase<VerifNode> {
   private testValue: string | undefined;
   last: VerifHierarchyResult | undefined;
+  /** UVM objects (configurations, register models, sequences) are shown. */
+  objects = false;
+  /** TLM ports are shown. */
+  ports = false;
 
   constructor(conn: Conn) {
     super('verification', 'dvicode.verificationHierarchy', conn);
@@ -685,7 +721,13 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
   }
 
   protected params(): Record<string, unknown> {
-    return { test: this.testValue ?? null };
+    return { test: this.testValue ?? null, objects: this.objects, ports: this.ports };
+  }
+
+  /** Shows or hides objects or ports; the tree is fetched again. */
+  setOption(option: 'objects' | 'ports', on: boolean): void {
+    this[option] = on;
+    this.invalidate();
   }
 
   protected onResult(r: TreeResult<VerifNode>): void {
@@ -705,10 +747,10 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
     const n = p.node;
     const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
     const item = new Item(p, parent, n.name, state);
-    item.description = n.class + (n.truncated ? ' …' : '');
-    item.contextValue = n.def_uri ? 'dvicode.verifNode.class' : 'dvicode.verifNode';
+    item.description = verifDescription(n);
+    item.contextValue = (n.object ? 'dvicode.verifObject' : 'dvicode.verifNode') + (n.def_uri ? '.class' : '');
     item.iconPath = new vscode.ThemeIcon(VERIF_ICONS[n.kind] ?? 'symbol-class');
-    item.tooltip = new vscode.MarkdownString(`**${n.name}** : \`${n.class}\` (${n.kind})\n\n${n.path}`);
+    item.tooltip = new vscode.MarkdownString(verifTooltip(n));
     item.command = openCommand(this.conn, n.uri, n.line, n.character);
     return item;
   }
@@ -718,7 +760,9 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
     if (!r) {
       return undefined;
     }
-    return r.test ?? (r.roots.length ? 'all tests' : undefined);
+    const scope = r.test ?? (r.roots.length ? 'all tests' : undefined);
+    const shown = [this.objects ? 'objects' : '', this.ports ? 'ports' : ''].filter((x) => x).join(', ');
+    return [scope, shown].filter((x) => x).join(' · ') || undefined;
   }
 
   protected emptyText(): string | undefined {
@@ -737,7 +781,11 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
   }
 
   protected notFoundText(t: Target): string {
-    return `${describeTarget(t)} is not a component of ${this.last?.test ? `test '${this.last.test}'` : 'the tests shown'}.`;
+    const where = this.last?.test ? `test '${this.last.test}'` : 'the tests shown';
+    if (t.objectClass) {
+      return this.objects ? `${describeTarget(t)} is not made or started in ${where}.` : `${describeTarget(t)} is an object: turn on Show UVM Objects (… menu) to find it.`;
+    }
+    return `${describeTarget(t)} is not a component of ${where}.`;
   }
 }
 
@@ -784,6 +832,13 @@ export class Views implements vscode.Disposable {
         }),
       );
       this.registerCommands(v);
+    }
+    for (const option of ['objects', 'ports'] as const) {
+      const title = option === 'objects' ? 'Objects' : 'Ports';
+      this.subs.push(
+        vscode.commands.registerCommand(`dvicode.verification.show${title}`, () => this.setOption(option, true)),
+        vscode.commands.registerCommand(`dvicode.verification.hide${title}`, () => this.setOption(option, false)),
+      );
     }
     this.restore();
     this.subs.push(
@@ -889,6 +944,22 @@ export class Views implements vscode.Disposable {
     }
   }
 
+  /** Shows or hides objects or ports in the Verification Hierarchy, keeping the selection (or
+   * its nearest ancestor still shown). */
+  private async setOption(option: 'objects' | 'ports', on: boolean): Promise<void> {
+    const v = this.verification;
+    const selected = v.view?.selection[0]?.placed.names;
+    this.followGen++;
+    v.setOption(option, on);
+    void this.ctx.workspaceState.update('dvicode.view.verification.options', { objects: v.objects, ports: v.ports });
+    this.setContext(v as unknown as TreeBase<TreeNode>);
+    await v.refresh();
+    if (selected) {
+      await v.select(selected);
+    }
+    this.followAgain(v as unknown as TreeBase<TreeNode>);
+  }
+
   private setSync(v: TreeBase<TreeNode>, on: boolean): void {
     this.followGen++;
     v.sync = on;
@@ -914,6 +985,14 @@ export class Views implements vscode.Disposable {
   }
 
   private restore(): void {
+    // Workspace-wide, not per build configuration: how the view is looked at.
+    const o = this.ctx.workspaceState.get<{ objects?: boolean; ports?: boolean }>('dvicode.view.verification.options') ?? {};
+    if (this.verification.objects !== (o.objects === true)) {
+      this.verification.setOption('objects', o.objects === true);
+    }
+    if (this.verification.ports !== (o.ports === true)) {
+      this.verification.setOption('ports', o.ports === true);
+    }
     for (const v of this.all) {
       const r = this.ctx.workspaceState.get<Remembered>(this.stateKey(v)) ?? {};
       const filter = r.filter || undefined;
@@ -931,6 +1010,10 @@ export class Views implements vscode.Disposable {
   private setContext(v: TreeBase<TreeNode>): void {
     void vscode.commands.executeCommand('setContext', `dvicode.${v.name}.filtered`, v.filter !== undefined);
     void vscode.commands.executeCommand('setContext', `dvicode.${v.name}.sync`, v.sync);
+    if (v.name === 'verification') {
+      void vscode.commands.executeCommand('setContext', 'dvicode.verification.objects', this.verification.objects);
+      void vscode.commands.executeCommand('setContext', 'dvicode.verification.ports', this.verification.ports);
+    }
   }
 
   private schedule(ms: number): void {
@@ -964,7 +1047,8 @@ export class Views implements vscode.Disposable {
         } else if (v.name === 'design') {
           await v.follow(located?.design ? { definition: located.design.name, instance: located.instance ?? undefined } : undefined, wanted(v));
         } else {
-          await v.follow(located?.class ? { class: located.class.name } : undefined, wanted(v));
+          const cls = located?.class;
+          await v.follow(cls ? { class: cls.name, classUri: cls.uri ?? undefined, objectClass: cls.kind === 'object' } : undefined, wanted(v));
         }
       } catch {
         // The server went away; the views say so when they refresh.
