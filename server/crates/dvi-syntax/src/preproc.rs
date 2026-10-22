@@ -221,6 +221,8 @@ pub fn preprocess(
         file_set: FxHashMap::default(),
         depth_limit: MAX_MACRO_DEPTH,
         outer_depth: 0,
+        outer_names: Vec::new(),
+        nested_runs: Default::default(),
     };
     pp.enter_file(root);
     pp.run();
@@ -255,6 +257,8 @@ pub fn expand_snippet(
         file_set: FxHashMap::default(),
         depth_limit: MAX_MACRO_DEPTH,
         outer_depth: 0,
+        outer_names: Vec::new(),
+        nested_runs: Default::default(),
     };
     pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
@@ -302,6 +306,8 @@ struct Cond {
 
 const MAX_INCLUDE_DEPTH: usize = 64;
 const MAX_MACRO_DEPTH: usize = 128;
+/// Nested preprocessors one file may run (see `Pp::nested_runs`).
+const MAX_NESTED_RUNS: u32 = 1_000_000;
 
 struct Pp<'a> {
     src: &'a dyn SourceProvider,
@@ -316,6 +322,11 @@ struct Pp<'a> {
     /// Macro levels already open around this preprocessor (when it expands an actual argument
     /// for [`Pp::called_name`]); they count against the depth limit.
     outer_depth: usize,
+    /// The macros being expanded around this preprocessor: a use of one of them is recursive.
+    outer_names: Vec<SmolStr>,
+    /// Nested preprocessors run for one file so far (shared with them): text like
+    /// `` `"`A`A`" `` doubles the work at each level, so the total is bounded.
+    nested_runs: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl<'a> Pp<'a> {
@@ -960,12 +971,12 @@ impl<'a> Pp<'a> {
             self.res.diags.push(Diag::error(site, "MACRO_RECURSION", format!("Macro `{} expands too deeply", def.name)));
             return;
         }
-        if self.frames.iter().any(|f| matches!(&f.kind, FrameKind::Macro { name, .. } if *name == def.name)) {
+        if self.outer_names.contains(&def.name) || self.frames.iter().any(|f| matches!(&f.kind, FrameKind::Macro { name, .. } if *name == def.name)) {
             self.res.diags.push(Diag::error(site, "MACRO_RECURSION", format!("Macro `{} is recursive", def.name)));
             return;
         }
         let first_flags = tok.flags & (flags::NL_BEFORE | flags::WS_BEFORE);
-        let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site), &|a| self.expand_tokens(a, site));
+        let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site, &def.name), &|a| self.expand_tokens(a, site, &def.name));
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
@@ -978,11 +989,11 @@ impl<'a> Pp<'a> {
     /// `` `NAME `` is expanded first (when it is a plain name, as in `` `define SELECT DECL ``).
     /// Expanded like any other text (`` `define SELECT `ID(DECL) `` names DECL), within the depth
     /// limit of the expansion it is part of. `None` when it is not one name.
-    fn called_name(&self, actual: &[Token], site: Span) -> Option<SmolStr> {
+    fn called_name(&self, actual: &[Token], site: Span, current: &SmolStr) -> Option<SmolStr> {
         let name = |t: &Token| matches!(t.kind, TokKind::Ident | TokKind::Keyword).then(|| t.text.clone());
         match actual {
             [t] if t.kind != TokKind::Directive => name(t),
-            [t, ..] if t.kind == TokKind::Directive => match self.expand_tokens(actual, site)?.as_slice() {
+            [t, ..] if t.kind == TokKind::Directive => match self.expand_tokens(actual, site, current)?.as_slice() {
                 [t] => name(t),
                 _ => None,
             },
@@ -991,11 +1002,21 @@ impl<'a> Pp<'a> {
     }
 
     /// `actual`, starting with a macro call, expanded with the macros defined so far (within
-    /// the depth limit); `None` when that fails (an undefined macro).
-    fn expand_tokens(&self, actual: &[Token], site: Span) -> Option<Vec<Token>> {
+    /// the depth limit); `None` when that fails (an undefined macro, a recursive use, too much
+    /// work). `current`: the macro whose body `actual` is in.
+    fn expand_tokens(&self, actual: &[Token], site: Span, current: &SmolStr) -> Option<Vec<Token>> {
         let depth = self.macro_depth() + 1;
-        if depth >= self.depth_limit {
+        if depth >= self.depth_limit || self.nested_runs.get() >= MAX_NESTED_RUNS {
             return None;
+        }
+        self.nested_runs.set(self.nested_runs.get() + 1);
+        let mut outer_names = self.outer_names.clone();
+        outer_names.extend(self.frames.iter().filter_map(|f| match &f.kind {
+            FrameKind::Macro { name, .. } if !name.is_empty() => Some(name.clone()),
+            _ => None,
+        }));
+        if !current.is_empty() {
+            outer_names.push(current.clone());
         }
         let mut pp = Pp {
             src: self.src,
@@ -1008,10 +1029,12 @@ impl<'a> Pp<'a> {
             file_set: FxHashMap::default(),
             depth_limit: self.depth_limit,
             outer_depth: depth,
+            outer_names,
+            nested_runs: self.nested_runs.clone(),
         };
         pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
         pp.run();
-        if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO") {
+        if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
             return None;
         }
         Some(std::mem::take(&mut pp.res.tokens))
@@ -1137,8 +1160,39 @@ fn substitute(
                         TokKind::Ident if param_index(&b.text).is_some() => {
                             s.push_str(&join_tokens(&actual(param_index(&b.text).unwrap())));
                         }
-                        // Macros inside `" are expanded (IEEE 1800 22.5.1): `"dir/`VENDOR/x`".
-                        TokKind::Directive => match (!COMPILER_DIRECTIVES.contains(&b.text.as_str())).then(|| expand(std::slice::from_ref(b))).flatten() {
+                        // Macros inside `" are expanded (IEEE 1800 22.5.1): `"dir/`VENDOR/x`",
+                        // with their arguments (`"dir/`ID(vcs)/x`"), formals replaced.
+                        TokKind::Directive => match (!COMPILER_DIRECTIVES.contains(&b.text.as_str())).then(|| {
+                            let mut call = vec![b.clone()];
+                            if def.body.get(i + 1).is_some_and(|x| x.is_punct("(")) {
+                                let mut depth = 0i32;
+                                let mut j = i + 1;
+                                while j < def.body.len() && def.body[j].kind != TokKind::MacroQuote {
+                                    let x = &def.body[j];
+                                    if x.is_punct("(") {
+                                        depth += 1;
+                                    } else if x.is_punct(")") {
+                                        depth -= 1;
+                                    }
+                                    match param_index(&x.text).filter(|_| matches!(x.kind, TokKind::Ident | TokKind::Keyword)) {
+                                        Some(k) => call.extend(actual(k)),
+                                        None => call.push(x.clone()),
+                                    }
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                    j += 1;
+                                }
+                                if depth != 0 {
+                                    call.truncate(1);
+                                } else {
+                                    let toks = expand(&call)?;
+                                    i = j;
+                                    return Some(toks);
+                                }
+                            }
+                            expand(&call)
+                        }).flatten() {
                             Some(toks) => {
                                 for (k, e) in toks.iter().enumerate() {
                                     if k > 0 && e.ws_before() {

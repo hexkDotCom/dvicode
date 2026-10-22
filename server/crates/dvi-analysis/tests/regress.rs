@@ -1013,3 +1013,37 @@ fn type_parameters_of_base_tests_are_bound() {
     assert_eq!(tree("mid_tc")[0], "uvm_test_top.env:rx_env:env");
     assert_eq!(tree("default_tc"), vec!["uvm_test_top.env:base_env:env", "uvm_test_top.env2:base_env:env"]);
 }
+
+#[test]
+fn packages_exporting_each_other_do_not_crash() {
+    let (a, _) = project(
+        "exportcycle",
+        &[
+            ("a.sv", "package a;\n  import b::*;\n  export b::*;\n  int x;\nendpackage\n"),
+            ("b.sv", "package b;\n  import a::*;\n  export a::*;\n  int y;\nendpackage\n"),
+            ("t.sv", "module t;\n  int v = a::missing;\n  int w = a::y;\nendmodule\n"),
+        ],
+    );
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("missing")), "{p:?}");
+    assert!(!p.iter().any(|m| m.contains("'y'")), "{p:?}");
+}
+
+#[test]
+fn recursive_macro_inside_a_quote_stops() {
+    // Each level would expand `R twice: without recursion detection the work doubles per level.
+    let (a, _) = project("quoterec", &[("t.sv", "`define R `\"`R`R`\"\nmodule m;\n  string s = `R;\nendmodule\n")]);
+    let _ = problems(&a);
+}
+
+#[test]
+fn macro_calls_with_arguments_inside_a_quote() {
+    let (a, _) = project(
+        "quotecall",
+        &[
+            ("dir/vcs/a.svh", "int from_a;\n"),
+            ("t.sv", "`define ID(x) x\n`define Q(t) `\"dir/`ID(t)/a.svh`\"\nmodule m;\n  `include `Q(vcs)\n  initial from_a = 1;\nendmodule\n"),
+        ],
+    );
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}

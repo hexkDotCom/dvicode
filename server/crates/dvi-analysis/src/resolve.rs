@@ -4,7 +4,7 @@
 use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefId, RefKind, Sep, TypeRef};
 use dvi_syntax::Span;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 const MAX_DEPTH: usize = 32;
 
@@ -464,10 +464,6 @@ impl Analysis {
 
     /// Looks up `name` inside a container (class, package, struct, module, block...).
     pub fn member_of(&self, container: DeclRef, name: &str) -> Option<DeclRef> {
-        self.member_of_depth(container, name, 0)
-    }
-
-    fn member_of_depth(&self, container: DeclRef, name: &str, depth: usize) -> Option<DeclRef> {
         let container = self.follow_typedef(container)?;
         let d = self.decl(container);
         match d.kind {
@@ -480,10 +476,12 @@ impl Analysis {
                         return Some(b);
                     }
                 }
-                if own.is_some() || d.kind != DeclKind::Package || depth > 8 {
+                if own.is_some() || d.kind != DeclKind::Package {
                     return own;
                 }
-                self.exported_member(container, name, depth)
+                let mut seen = FxHashSet::default();
+                seen.insert(self.decl_key(container));
+                self.exported_member(container, name, &mut seen)
             }
         }
     }
@@ -521,8 +519,8 @@ impl Analysis {
     }
 
     /// Names a package re-exports with `export other_pkg::name;`, `export other_pkg::*;` or
-    /// `export *::*;`.
-    fn exported_member(&self, pkg: DeclRef, name: &str, depth: usize) -> Option<DeclRef> {
+    /// `export *::*;`. `seen`: the packages searched so far (packages may export each other).
+    fn exported_member(&self, pkg: DeclRef, name: &str, seen: &mut FxHashSet<(u32, u32)>) -> Option<DeclRef> {
         let d = self.decl(pkg);
         for e in &d.exports {
             if e.item.as_ref().is_some_and(|i| i != name) {
@@ -535,8 +533,16 @@ impl Analysis {
                 vec![e.pkg.as_str()]
             };
             for s in sources {
-                if let Some(p) = self.package_with(pkg.unit, s, name) {
-                    if let Some(m) = self.member_of_depth(p, name, depth + 1) {
+                let Some(all) = self.global.packages.get(s) else { continue };
+                for p in self.candidates(pkg.unit, all) {
+                    if seen.len() >= 64 || !seen.insert(self.decl_key(p)) {
+                        continue;
+                    }
+                    let u = self.unit(p.unit);
+                    if let Some(m) = pick(&u.parsed, u.parsed.lookup_member(p.decl, name)) {
+                        return Some(DeclRef { unit: p.unit, decl: m });
+                    }
+                    if let Some(m) = self.exported_member(p, name, seen) {
                         return Some(m);
                     }
                 }
