@@ -495,7 +495,10 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     vscode.commands.registerCommand('dvicode.showIncludingFiles', showIncludingFiles),
     vscode.commands.registerCommand('dvicode.openRemoteFolder', openRemoteFolder),
     vscode.commands.registerCommand('dvicode.selectDesignTop', selectDesignTop),
-    vscode.commands.registerCommand('dvicode.refreshViews', () => views.refreshAll()),
+    vscode.commands.registerCommand('dvicode.refreshViews', () => {
+      views.refreshAll();
+      structure.reset();
+    }),
     vscode.commands.registerCommand('dvicode.showOutput', () => output.show()),
     vscode.commands.registerCommand('dvicode.reportIssue', () => reporter.reportIssue()),
     vscode.commands.registerCommand('dvicode.copyHierarchyPath', async (item: unknown) => {

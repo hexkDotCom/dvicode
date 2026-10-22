@@ -469,6 +469,8 @@ enum RunWhat {
     /// A sequence made while building, its class already resolved.
     Made(Box<objects::MadeSeq>),
     Start(SeqStart),
+    /// An override registered at run time: it applies to what is made after it.
+    Override(OverrideCall),
 }
 
 /// What a scan collects: creations and overrides while building, objects after it, sequences
@@ -504,10 +506,13 @@ struct Reg {
 }
 
 /// The overrides registered with the factory, in order, by original class.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Factory {
     entries: Vec<Entry>,
     by_from: FxHashMap<(u32, u32), Vec<usize>>,
+    /// Registrations replayed, and whether some were not (the model budget).
+    processed: usize,
+    dropped: bool,
 }
 
 impl Factory {
@@ -643,6 +648,9 @@ struct ObjInst {
     /// The ways it is made, and the other classes made instead.
     alts: Vec<Vec<Guard>>,
     alternatives: Vec<Alternative>,
+    /// The other creations made instead, with their classes (a sequence started later may be
+    /// one of them).
+    alt_made: Vec<(Made, Option<DeclRef>, Option<DeclRef>, Vec<OverrideStep>)>,
 }
 
 /// A default sequence set in `uvm_config_db`, and the component it is shown under.
@@ -653,6 +661,8 @@ struct DefaultSeq {
     phase: String,
     /// Shown under the sequencer it names (else under the component that sets it).
     placed: bool,
+    /// A sequence object set (not a wrapper): the class the setter made it as.
+    made_class: Option<DeclRef>,
 }
 
 /// Components, objects and override registrations modeled per test at most.
@@ -1153,7 +1163,7 @@ impl Analysis {
         out.class = self.enclosing_class(unit, scope).map(|c| {
             let kind = if self.derives_from(c, "uvm_component") {
                 Some("component")
-            } else if self.derives_from(c, "uvm_object") {
+            } else if self.object_kind(c).is_some() {
                 Some("object")
             } else {
                 None
@@ -1335,6 +1345,10 @@ impl Analysis {
             if !w.stopped() {
                 // The test as UVM builds it; run-time sequences see all the overrides of the build.
                 let (model, factory) = self.model(t, &scan);
+                if factory.dropped {
+                    node.truncated = true;
+                    w.meta.incomplete.get_or_insert("nodes");
+                }
                 let mut stack = vec![self.decl_key(t)];
                 node.children = self.emit(&model, pin, &mut w, &mut node.truncated, &mut node.ports_hidden, &mut stack, &scan, &factory);
             }
@@ -1413,7 +1427,13 @@ impl Analysis {
                         [c] if c.is_kw("this") => if target.is_empty() { inst.path.clone() } else { format!("{}.{target}", inst.path) },
                         _ => target,
                     };
-                    out.push((inst.path.clone(), DefaultSeq { set: s.clone(), target: full, phase, placed: false }));
+                    // A sequence object: the class the setter made it as.
+                    let var = match &s.set.value[..] {
+                        [v] => a.resolve_at_span(s.body.unit, v.span).map(|x| a.decl_key(x)),
+                        _ => None,
+                    };
+                    let made_class = var.and_then(|k| inst.objs.iter().find(|o| o.kind == "sequence" && a.resolve_at_span(o.made.body.unit, o.made.cr.lhs_head).map(|x| a.decl_key(x)) == Some(k))).and_then(|o| o.class);
+                    out.push((inst.path.clone(), DefaultSeq { set: s.clone(), target: full, phase, placed: false, made_class }));
                 }
             }
             for c in &inst.children {
@@ -1490,14 +1510,19 @@ impl Analysis {
     fn register(&self, built: &Built, stage: Mode, upto: usize, cursor: &mut usize, inst: &Inst, factory: &mut Factory, scan: &Scan) {
         while *cursor < upto.min(built.regs.len()) {
             let r = &built.regs[*cursor];
-            if r.stage == stage {
-                if let Some(e) = self.factory_entry(r, &inst.path, inst.certain, scan) {
-                    if factory.entries.len() < MAX_MODEL {
-                        factory.push(e);
-                    }
-                }
-            }
             *cursor += 1;
+            if r.stage != stage {
+                continue;
+            }
+            factory.processed += 1;
+            if factory.processed > MAX_MODEL || factory.entries.len() >= MAX_MODEL {
+                // Past the budget: what is built from here may miss overrides, and says so.
+                factory.dropped = true;
+                continue;
+            }
+            if let Some(e) = self.factory_entry(r, &inst.path, inst.certain, scan) {
+                factory.push(e);
+            }
         }
     }
 
@@ -1562,8 +1587,12 @@ impl Analysis {
         // Other creations of the same class only add ways to make it.
         let mut alts = m.alts.clone();
         let mut alternatives: Vec<Alternative> = Vec::new();
+        let mut alt_made: Vec<(Made, Option<DeclRef>, Option<DeclRef>, Vec<OverrideStep>)> = Vec::new();
         for o in &m.others {
-            let (oc, _, _) = self.made_class(inst, built, o, cursor, lookup_of(o).as_deref(), factory, scan);
+            let (oc, oreq, osteps) = self.made_class(inst, built, o, cursor, lookup_of(o).as_deref(), factory, scan);
+            if object.is_some() {
+                alt_made.push((o.clone(), oc, oreq, osteps));
+            }
             if oc.map(|c| self.decl_key(c)) == cls.map(|c| self.decl_key(c)) {
                 for g in &o.alts {
                     if g.is_empty() {
@@ -1592,7 +1621,7 @@ impl Analysis {
                 inst.cut = true;
                 return;
             }
-            inst.objs.push(ObjInst { made: m.clone(), class: cls, requested, overrides, kind, alts, alternatives });
+            inst.objs.push(ObjInst { made: m.clone(), class: cls, requested, overrides, kind, alts, alternatives, alt_made });
             return;
         }
         let kind = match cls {
@@ -1806,7 +1835,11 @@ impl Analysis {
         for i in candidates.into_iter().take(256) {
             let with = |j: usize, e: &Entry| certain(j, e) || j == i;
             let changes = self.factory_chain(factory, requested, path, &with).map_or(true, |(c, _)| self.decl_key(c) != built_key);
-            if changes && listed < 16 {
+            if changes {
+                if listed == 16 {
+                    steps.push(OverrideStep { from: self.decl(requested).name.to_string(), to: "?".into(), instance: false, path: None, set_in: "(more possible overrides not listed)".into(), uri: None, line: 0, conditions: Vec::new(), applied: false });
+                    break;
+                }
                 steps.push(step(&factory.entries[i], false));
                 listed += 1;
             }
@@ -2092,12 +2125,13 @@ impl Analysis {
                         }
                     }
                 }
-                What::Override(call) => {
-                    if !matches!(mode, Mode::Run(_)) {
+                What::Override(call) => match mode {
+                    Mode::Run(phase) => made.run.push(RunEv { body, guards, phase: phase.to_string(), what: RunWhat::Override(call.clone()) }),
+                    _ => {
                         made.ev += 1;
                         made.regs.push(Reg { call: call.clone(), body, guards, stage: mode });
                     }
-                }
+                },
                 What::Start(st) => {
                     if let Mode::Run(phase) = mode {
                         made.run.push(RunEv { body, guards, phase: phase.to_string(), what: RunWhat::Start(st.clone()) });

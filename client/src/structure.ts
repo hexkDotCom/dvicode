@@ -85,6 +85,7 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
   private sync = true;
   private timer: NodeJS.Timeout | undefined;
   private followTimer: NodeJS.Timeout | undefined;
+  private disposed = false;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -129,8 +130,11 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
   }
 
   dispose(): void {
+    this.gen++;
+    this.disposed = true;
     clearTimeout(this.timer);
     clearTimeout(this.followTimer);
+    this.emitter.dispose();
     for (const s of this.subs) {
       s.dispose();
     }
@@ -161,6 +165,8 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
   }
 
   private schedule(ms: number): void {
+    // An answer to a request made before this is no longer wanted.
+    this.gen++;
     clearTimeout(this.timer);
     this.timer = setTimeout(() => void this.load(), ms);
   }
@@ -196,8 +202,16 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
     if (!ed || !m || !['systemverilog', 'verilog'].includes(ed.document.languageId)) {
       return undefined;
     }
+    const u = ed.document.uri;
     try {
-      return { doc: ed.document, uri: m.toServer(ed.document.uri) };
+      // A dvicode:// document of another host is not this engine's.
+      if (u.scheme === 'dvicode' && m.toClient(m.toServer(u)).authority.toLowerCase() !== u.authority.toLowerCase()) {
+        return undefined;
+      }
+      if (u.scheme !== 'file' && u.scheme !== 'dvicode') {
+        return undefined;
+      }
+      return { doc: ed.document, uri: m.toServer(u) };
     } catch {
       return undefined;
     }
@@ -226,7 +240,8 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
     }
     try {
       const r = await c.sendRequest<StructureResult>('dvicode/structure', { textDocument: { uri: d.uri }, filter: this.filter ?? null });
-      if (gen !== this.gen) {
+      // Stale: a newer request, another editor, or the view went away.
+      if (gen !== this.gen || this.disposed || this.document()?.uri !== d.uri) {
         return;
       }
       // An answer for an older text of the document: another comes after the engine updates.
@@ -259,7 +274,7 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
       ns.map((n) => {
         const open = n.children.length === 0 ? vscode.TreeItemCollapsibleState.None : this.filter || (!n.collapsed && (n.kind === 'group' || depth === 0)) ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed;
         const item = new Item(n, parent, open);
-        item.id = `structure:${this.filter ? 'f:' : ''}${n.id}`;
+        item.id = `structure:${this.uri ?? ''}:${this.filter ? 'f:' : ''}${n.id}`;
         const extra = [n.detail, n.mark, n.inherited_from && n.kind !== 'group' ? `from ${n.inherited_from}` : undefined].filter((x) => x);
         item.description = extra.join(' · ') || undefined;
         item.iconPath = new vscode.ThemeIcon(ICONS[n.kind] ?? 'symbol-misc', n.inactive ? new vscode.ThemeColor('disabledForeground') : undefined);

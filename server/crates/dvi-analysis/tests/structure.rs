@@ -131,3 +131,43 @@ fn classes_show_what_they_inherit() {
     let f = structure(&a, &root, "p.sv", Some("mode"));
     assert_eq!(f, ["p [package]", "  Classes [group]", "    top_c [class] extends mid", "      Fields [group]", "        mode [field] rand bit [3:0]", "      Constraints [group]", "        c_mode [constraint]"]);
 }
+
+#[test]
+fn structure_review_cases() {
+    let m = "module m(input logic clk, output logic y);\n  logic x;\n  if (1) begin\n    logic z;\n    always_comb z = x;\n  end\n`ifdef NEVER_DEFINED\n  initial $finish;\n  assign y = x;\n`endif\n  initial begin\n    assert (x);\n  end\n  always_ff @(posedge clk) begin\n    x <= 1;\n  end\nendmodule\n";
+    let impl_only = "function void some_c::f();\nendfunction\n";
+    let defines: String = (0..50).map(|k| format!("`define D{k} {k}\n")).collect();
+    let (a, root) = project("review", &[("m.sv", m), ("defs.sv", &defines), ("impl.svh", impl_only), ("c.sv", "package p; class some_c; extern function void f(); endclass\n`include \"impl.svh\"\nendpackage\n")]);
+    let t = structure(&a, &root, "m.sv", None);
+    assert_eq!(
+        t,
+        [
+            "m [module]",
+            "  Ports [group]",
+            "    clk [port] input logic",
+            "    y [port] output logic",
+            "  Signals [group]",
+            "    x [signal] logic",
+            "    z [signal] logic",
+            "  Processes [group]",
+            "    always_comb [process]",
+            "    initial [process]",
+            "    always_ff @(posedge clk) [process]",
+            "Inactive code [group]",
+            "  lines 7–10 [inactive] `ifdef NEVER_DEFINED",
+        ]
+    );
+    // A process covers its body: the cursor in it finds it.
+    let f = a.vfs.lookup(&root.join("m.sv")).unwrap();
+    let tree = a.structure(f, None, 1000);
+    let procs = &tree.nodes[0].children.iter().find(|g| g.name == "Processes").unwrap().children;
+    let ff = procs.iter().find(|p| p.name.starts_with("always_ff")).unwrap();
+    let r = &ff.extent.as_ref().unwrap().range;
+    assert_eq!((r.start.line, r.end.line), (13, 15));
+    // The node limit holds.
+    let d = a.vfs.lookup(&root.join("defs.sv")).unwrap();
+    let cut = a.structure(d, None, 10);
+    assert!(cut.incomplete && cut.nodes.len() <= 10, "{}", cut.nodes.len());
+    // A file of out-of-block implementations lists them.
+    assert_eq!(structure(&a, &root, "impl.svh", None), ["f [function] void"]);
+}

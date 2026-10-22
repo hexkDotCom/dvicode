@@ -1676,6 +1676,57 @@ endpackage
 }
 
 #[test]
+fn sequence_review_cases() {
+    let uvm = "package uvm_pkg;\n  class uvm_object; function new(string name = \"\"); endfunction endclass\n  class uvm_component extends uvm_object; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_sequence_item extends uvm_object; function new(string name = \"\"); endfunction endclass\n  class uvm_sequence_base extends uvm_sequence_item; function new(string name = \"\"); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = r#"package tb_pkg;
+  import uvm_pkg::*;
+  class s1 extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class s2 extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class s3 extends uvm_sequence_base; function new(string name = ""); super.new(name); endfunction endclass
+  class t extends uvm_test;
+    uvm_sequence_base built, s, r;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (mode) built = s1::type_id::create("built");
+      else built = s2::type_id::create("built");
+    endfunction
+    task main_phase(uvm_phase phase);
+      built.start(q0);
+      if (mode) begin
+        s = s1::type_id::create("one");
+        s.start(q1);
+      end else begin
+        s = s2::type_id::create("two");
+        s.start(q2);
+      end
+      s1::type_id::set_type_override(s3::get_type());
+      r = s1::type_id::create("late");
+      r.start(q3);
+    endtask
+  endclass
+endpackage
+"#;
+    let (a, _) = project("seqreview", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let mut q = dvi_analysis::ide::views::TreeQuery::new(1000);
+    q.objects = true;
+    let (h, _) = a.verification_tree(Some("t"), &q);
+    let got: Vec<String> = h.roots[0].children.iter().map(|c| format!("{} : {} on {}", c.name, c.class, c.starts.iter().map(|s| s.on.clone()).collect::<Vec<_>>().join(", "))).collect();
+    assert_eq!(
+        got,
+        [
+            // Both classes a build-time branch can make, each started.
+            "built : s1 on q0",
+            "built : s2 on q0",
+            // A start in a branch goes to that branch's allocation only.
+            "one : s1 on q1",
+            "two : s2 on q2",
+            // An override registered at run time applies to what is made after it.
+            "late : s3 on q3",
+        ]
+    );
+}
+
+#[test]
 fn conditions_loops_alternatives_and_ports() {
     let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_port_base; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_analysis_port #(type T = int) extends uvm_port_base; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_driver extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
     let tb = r#"`define NUM 3

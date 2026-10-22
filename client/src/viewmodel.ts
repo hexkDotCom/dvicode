@@ -85,7 +85,7 @@ export interface Target {
 }
 
 export function targetKey(t: Target): string {
-  return JSON.stringify([t.definition ?? null, t.instance ?? null, t.class ?? null, t.file ?? null]);
+  return JSON.stringify([t.definition ?? null, t.instance ?? null, t.class ?? null, t.classUri ?? null, t.file ?? null]);
 }
 
 export function describeTarget(t: Target): string {

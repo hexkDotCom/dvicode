@@ -72,6 +72,13 @@ pub fn walk_method(t: &[Token]) -> Option<StmtMap> {
     }
 }
 
+/// The index after the statement that starts at `t[k]` (`begin ... end`, `if ... else ...`, an
+/// assignment...); `None` when it cannot be followed.
+pub fn statement_end(t: &[Token], k: usize) -> Option<usize> {
+    let mut w = Walker { t, frames: Vec::new(), at: vec![NONE; t.len()], steps: 0, depth: 0 };
+    w.stmt(k, NONE)
+}
+
 struct Walker<'a> {
     t: &'a [Token],
     frames: Vec<Frame>,

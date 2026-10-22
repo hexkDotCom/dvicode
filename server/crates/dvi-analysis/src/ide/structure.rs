@@ -6,8 +6,9 @@ use super::filter::Filter;
 use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind};
 use dvi_syntax::{FileId, SourceProvider, Span, Token};
+use std::sync::Arc;
 use lsp_types::Location;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 /// A node of the Structure view.
@@ -67,6 +68,10 @@ struct Build<'a> {
     file: FileId,
     left: usize,
     incomplete: bool,
+    /// Tokens of the files read, once.
+    toks: FxHashMap<FileId, Option<Arc<Vec<Token>>>>,
+    /// The file declares a class: its out-of-block methods show with their prototypes.
+    has_classes: bool,
 }
 
 impl Analysis {
@@ -76,17 +81,22 @@ impl Analysis {
         let units = self.units_for(file);
         let Some(&unit) = units.first() else { return StructTree { status: "none", ..Default::default() } };
         let u = self.unit(unit);
-        let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false };
+        let has_classes = u.parsed.decls.iter().any(|d| d.kind == DeclKind::Class && d.name_span.file == file);
+        let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false, toks: FxHashMap::default(), has_classes };
         let mut nodes = Vec::new();
         // Includes, defines and top-level declarations, in source order.
         let mut items: Vec<(u32, StructNode)> = Vec::new();
         for inc in u.includes.iter().filter(|i| i.span.file == file) {
             let target = inc.resolved.map(|f| Location::new(super::url_of(&self.vfs.path(f)), Default::default()));
-            items.push((inc.span.start, b.leaf(&format!("`include \"{}\"", inc.path_text), "include", None, inc.span, target)));
+            if let Some(n) = b.leaf(&format!("`include \"{}\"", inc.path_text), "include", None, inc.span, target) {
+                items.push((inc.span.start, n));
+            }
         }
         for m in u.macro_defs.iter().filter(|m| m.name_span.file == file) {
             let detail = m.params.as_ref().map(|ps| format!("({})", ps.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
-            items.push((m.name_span.start, b.leaf(&format!("`{}", m.name), "define", detail, m.name_span, None)));
+            if let Some(n) = b.leaf(&format!("`{}", m.name), "define", detail, m.name_span, None) {
+                items.push((m.name_span.start, n));
+            }
         }
         if let Some(tops) = u.parsed.file_tops.get(&file) {
             for &t in tops {
@@ -102,16 +112,14 @@ impl Analysis {
         let mut off: Vec<Span> = u.inactive.iter().filter(|s| s.file == file).copied().collect();
         off.sort_by_key(|s| s.start);
         if !off.is_empty() {
-            let lines = self.file_lines(file);
-            let toks = self.file_tokens(file);
+            let toks = b.tokens(file);
             let mut kids = Vec::new();
             for s in off {
-                let (Some(lines), Some(r)) = (lines.as_ref(), self.to_range(s)) else { continue };
-                let _ = lines;
+                let Some(r) = self.to_range(s) else { continue };
                 let name = if r.start.line == r.end.line { format!("line {}", r.start.line + 1) } else { format!("lines {}–{}", r.start.line + 1, r.end.line + 1) };
-                // The directive just before it (`ifdef USE_AXI), as written.
+                // The directive that opens it (`ifdef USE_AXI), as written.
                 let detail = toks.as_ref().and_then(|t| directive_before(t, s.start));
-                let mut n = b.leaf(&name, "inactive", detail, s, None);
+                let Some(mut n) = b.leaf(&name, "inactive", detail, s, None) else { break };
                 n.inactive = true;
                 kids.push(n);
             }
@@ -148,11 +156,35 @@ impl Build<'_> {
         true
     }
 
-    /// A node with no children.
-    fn leaf(&mut self, name: &str, kind: &'static str, detail: Option<String>, at: Span, target: Option<Location>) -> StructNode {
-        let _ = self.take();
+    /// A node with no children; `None` past the node limit.
+    fn leaf(&mut self, name: &str, kind: &'static str, detail: Option<String>, at: Span, target: Option<Location>) -> Option<StructNode> {
+        if !self.take() {
+            return None;
+        }
         let loc = self.a.to_location(at);
-        StructNode { name: name.to_string(), kind, detail, target: target.or_else(|| loc.clone()), extent: loc, ..Default::default() }
+        Some(StructNode { name: name.to_string(), kind, detail, target: target.or_else(|| loc.clone()), extent: loc, ..Default::default() })
+    }
+
+    /// The tokens of a file, read once.
+    fn tokens(&mut self, f: FileId) -> Option<Arc<Vec<Token>>> {
+        let a = self.a;
+        self.toks.entry(f).or_insert_with(|| a.file_tokens(f)).clone()
+    }
+
+    /// The children of a declaration, with those of the generate blocks the parser names
+    /// itself (`genblk1`) in their place: their contents belong to the declaration.
+    fn flat_children(&self, d: &Decl) -> Vec<DeclId> {
+        let mut out = Vec::new();
+        for &c in &d.children {
+            let cd = self.decl(c);
+            if synthetic_generate(cd) {
+                let cd = cd.clone();
+                out.extend(self.flat_children(&cd));
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     /// The nodes of a declaration: one node, or its contents for an anonymous container, or
@@ -160,16 +192,17 @@ impl Build<'_> {
     /// out besides the UVM library's.
     fn decl_nodes(&mut self, id: DeclId, hidden_macros: &[&str]) -> Vec<StructNode> {
         let d = self.decl(id).clone();
-        // An out-of-block implementation is listed with its prototype.
-        if d.has(dflags::OUT_OF_BLOCK) {
+        // An out-of-block implementation is listed with its prototype (when the class is in this
+        // file; a file of implementations lists them).
+        if d.has(dflags::OUT_OF_BLOCK) && self.has_classes {
             return Vec::new();
         }
+        // Unnamed generate blocks are synthetic: their contents show in place.
+        if synthetic_generate(&d) {
+            return d.children.iter().flat_map(|&c| self.decl_nodes(c, hidden_macros)).collect();
+        }
         if d.has(dflags::FROM_MACRO) {
-            // Unnamed generate blocks are synthetic: their contents show in place.
-            if d.kind == DeclKind::Generate && d.name.is_empty() {
-                return d.children.iter().flat_map(|&c| self.decl_nodes(c, hidden_macros)).collect();
-            }
-            match self.macro_at(d.span) {
+            match self.macro_at(self.unit, d.span) {
                 Some(m) if m.starts_with("uvm_") || hidden_macros.contains(&m.as_str()) => return Vec::new(),
                 None => return Vec::new(),
                 Some(_) => {}
@@ -199,7 +232,7 @@ impl Build<'_> {
         };
         // A user macro made it.
         if d.has(dflags::FROM_MACRO) {
-            if let Some(m) = self.macro_at(d.span) {
+            if let Some(m) = self.macro_at(self.unit, d.span) {
                 n.detail = Some(format!("from `{m}"));
             }
         }
@@ -233,10 +266,11 @@ impl Build<'_> {
         let mut g = Groups::default();
         for imp in &d.imports {
             let name = format!("{}::{}", imp.pkg, imp.item.as_deref().unwrap_or("*"));
-            let n = self.leaf(&name, "import", None, imp.pkg_span, None);
-            g.add("Imports", n);
+            if let Some(n) = self.leaf(&name, "import", None, imp.pkg_span, None) {
+                g.add("Imports", n);
+            }
         }
-        for &c in &d.children {
+        for c in self.flat_children(&d) {
             let cd = self.decl(c).clone();
             let key = match cd.kind {
                 DeclKind::Parameter | DeclKind::LocalParam | DeclKind::TypeParam => "Parameters",
@@ -262,15 +296,11 @@ impl Build<'_> {
         }
         // Processes and unlabelled assertions are statements, not declarations.
         for (at, name, kind) in self.statements(&d) {
-            if self.take() {
-                let mut n = self.leaf_nocount(&name, kind, at);
-                if kind == "assertion" {
-                    n.kind = "assertion";
-                    g.add("Assertions", n);
-                } else {
-                    g.add("Processes", n);
-                }
+            if !self.take() {
+                break;
             }
+            let n = self.leaf_nocount(&name, kind, at);
+            g.add(if kind == "assertion" { "Assertions" } else { "Processes" }, n);
         }
         g.into_nodes(&[
             "Imports",
@@ -302,8 +332,9 @@ impl Build<'_> {
         let mut g = Groups::default();
         for imp in &d.imports {
             let name = format!("{}::{}", imp.pkg, imp.item.as_deref().unwrap_or("*"));
-            let n = self.leaf(&name, "import", None, imp.pkg_span, None);
-            g.add("Imports", n);
+            if let Some(n) = self.leaf(&name, "import", None, imp.pkg_span, None) {
+                g.add("Imports", n);
+            }
         }
         for &c in &d.children {
             let key = match self.decl(c).kind {
@@ -364,19 +395,24 @@ impl Build<'_> {
             chain.push(c);
             cur = a.class_base(c);
         }
+        if chain.len() >= 32 {
+            self.incomplete = true;
+        }
         // Methods seen so far, most derived first: name -> (class, virtual).
         let mut below: Vec<(String, String)> = own_methods.iter().map(|(n, _)| (n.clone(), d.name.to_string())).collect();
         let mut base_groups = Vec::new();
+        let mut listed = 0;
         for (k, &base) in chain.iter().enumerate() {
             let bd = a.decl(base);
             let mut kids = Vec::new();
-            let mut listed = 0;
             for &m in &bd.children {
                 let mr = DeclRef { unit: base.unit, decl: m };
                 let md = a.decl(mr);
                 let method = matches!(md.kind, DeclKind::Function | DeclKind::Task);
                 let field = md.kind == DeclKind::Variable;
-                if !(method || field) || md.has(dflags::FROM_MACRO) || md.has(dflags::LOCAL) || md.has(dflags::OUT_OF_BLOCK) || md.name == "new" || md.name.is_empty() {
+                // Members a UVM macro makes are left out; a user macro's are inherited too.
+                let uvm_macro = md.has(dflags::FROM_MACRO) && self.macro_at(base.unit, md.span).is_none_or_uvm();
+                if !(method || field) || uvm_macro || md.has(dflags::LOCAL) || md.has(dflags::OUT_OF_BLOCK) || md.name == "new" || md.name.is_empty() {
                     continue;
                 }
                 if listed >= MAX_INHERITED || !self.take() {
@@ -452,66 +488,87 @@ impl Build<'_> {
     }
 
     /// A labelled assertion (`a1: assert property (...)`), which the parser keeps as a block.
-    fn is_assertion(&self, d: &Decl) -> bool {
-        let Some(toks) = self.a.file_tokens(d.span.file) else { return false };
+    fn is_assertion(&mut self, d: &Decl) -> bool {
+        let Some(toks) = self.tokens(d.span.file) else { return false };
         let k = toks.partition_point(|t| t.span.start < d.name_span.end);
         toks.get(k).is_some_and(|t| t.is_punct(":")) && toks.get(k + 1).is_some_and(|t| t.is_kw("assert") || t.is_kw("assume") || t.is_kw("cover") || t.is_kw("restrict"))
     }
 
     /// The processes (`always*`, `initial`, `final`, `assign`) and unlabelled assertions of a
-    /// design element, outside its nested declarations: (where, name, kind).
-    fn statements(&self, d: &Decl) -> Vec<(Span, String, &'static str)> {
-        let a = self.a;
-        let Some(toks) = a.file_tokens(d.span.file) else { return Vec::new() };
+    /// design element at its own level (not in its nested declarations, nor inside a process, nor
+    /// in code `ifdef` leaves out): (the whole statement, name, kind).
+    fn statements(&mut self, d: &Decl) -> Vec<(Span, String, &'static str)> {
+        let Some(toks) = self.tokens(d.span.file) else { return Vec::new() };
         let lo = toks.partition_point(|t| t.span.start < d.span.start);
         let hi = toks.partition_point(|t| t.span.start < d.span.end);
-        // Nested declarations whose contents are not this element's statements (unnamed
-        // generate blocks are this element's).
-        let u = a.unit(self.unit);
-        let mut skip: Vec<Span> = d
-            .children
-            .iter()
-            .map(|&c| u.parsed.decl(c))
-            .filter(|c| matches!(c.kind, DeclKind::Function | DeclKind::Task | DeclKind::Class | DeclKind::Covergroup | DeclKind::Property | DeclKind::Sequence | DeclKind::Checker | DeclKind::Module | DeclKind::Interface | DeclKind::Program) || (c.kind == DeclKind::Generate && !c.name.is_empty()) || (c.kind == DeclKind::Block && !c.name.is_empty()))
+        // Nested declarations whose contents are not this element's statements (generate blocks
+        // the parser names itself are this element's).
+        let u = self.a.unit(self.unit);
+        let mut skip: Vec<Span> = self
+            .flat_children(d)
+            .into_iter()
+            .map(|c| u.parsed.decl(c))
+            .filter(|c| matches!(c.kind, DeclKind::Function | DeclKind::Task | DeclKind::Class | DeclKind::Covergroup | DeclKind::Property | DeclKind::Sequence | DeclKind::Checker | DeclKind::Module | DeclKind::Interface | DeclKind::Program | DeclKind::Generate))
             .map(|c| c.span)
             .collect();
+        skip.extend(u.inactive.iter().filter(|s| s.file == d.span.file && s.end > d.span.start && s.start < d.span.end).copied());
         skip.sort_by_key(|s| s.start);
-        let t = &toks[lo..hi];
+        // The element's own tokens, in order (one pass over the sorted spans).
+        let mut si = 0;
+        let t: Vec<Token> = toks[lo..hi]
+            .iter()
+            .filter(|x| {
+                while si < skip.len() && skip[si].end <= x.span.start {
+                    si += 1;
+                }
+                !skip[si..].iter().take_while(|s| s.start <= x.span.start).any(|s| s.file == x.span.file && x.span.start < s.end)
+            })
+            .cloned()
+            .collect();
         let mut out = Vec::new();
         let mut k = 1; // after the element's keyword
         let mut depth = 0i32;
         while k < t.len() {
             let x = &t[k];
-            if skip.iter().any(|s| s.file == x.span.file && s.start <= x.span.start && x.span.start < s.end) {
-                k += 1;
-                continue;
-            }
             if x.is_punct("(") || x.is_punct("[") || x.is_punct("{") {
                 depth += 1;
             } else if x.is_punct(")") || x.is_punct("]") || x.is_punct("}") {
                 depth -= 1;
             }
-            let at_statement = depth == 0 && (k == 0 || t[k - 1].is_punct(";") || t[k - 1].is_kw("end") || t[k - 1].is_kw("begin") || t[k - 1].is_kw("generate") || t[k - 1].is_punct(")") || t[k - 1].is_punct(":") || t[k - 1].nl_before() || x.nl_before());
-            if depth == 0 && at_statement && x.kind == dvi_syntax::TokKind::Keyword {
-                match x.text.as_str() {
-                    "always" | "always_ff" | "always_comb" | "always_latch" | "initial" | "final" => {
-                        out.push((x.span, process_name(&t[k..]), "process"));
-                    }
-                    "assign" => out.push((x.span, assign_name(&t[k..]), "process")),
-                    "assert" | "assume" | "cover" | "restrict" if !t.get(k.wrapping_sub(1)).is_some_and(|p| p.is_punct(":")) => {
-                        out.push((x.span, header_text(&t[k..], 6), "assertion"));
-                    }
-                    _ => {}
-                }
-            }
-            k += 1;
+            let at_statement = depth == 0 && (t[k - 1].is_punct(";") || t[k - 1].is_kw("end") || t[k - 1].is_kw("begin") || t[k - 1].is_kw("generate") || t[k - 1].is_punct(")") || t[k - 1].nl_before() || x.nl_before());
+            let kind = match x.text.as_str() {
+                _ if !(at_statement && x.kind == dvi_syntax::TokKind::Keyword) => None,
+                "always" | "always_ff" | "always_comb" | "always_latch" | "initial" | "final" | "assign" => Some("process"),
+                "assert" | "assume" | "cover" | "restrict" if !t[k - 1].is_punct(":") => Some("assertion"),
+                _ => None,
+            };
+            let Some(kind) = kind else {
+                k += 1;
+                continue;
+            };
+            // The statement runs from the keyword to its end (a process's body, which is skipped:
+            // its `begin` blocks and assertions are not the element's).
+            let body = match x.text.as_str() {
+                "always" | "always_ff" | "always_comb" | "always_latch" => event_control_end(&t, k + 1),
+                "initial" | "final" => k + 1,
+                _ => k,
+            };
+            let end = super::stmt::statement_end(&t, body).unwrap_or(k + 1).max(k + 1);
+            let span = Span::new(x.span.file, x.span.start, t[end - 1].span.end.max(x.span.end));
+            let name = match x.text.as_str() {
+                "assign" => assign_name(&t[k..]),
+                "assert" | "assume" | "cover" | "restrict" => header_text(&t[k..], 6),
+                _ => process_name(&t[k..]),
+            };
+            out.push((span, name, kind));
+            k = end;
         }
         out
     }
 
-    /// The macro whose call made a declaration at `at`.
-    fn macro_at(&self, at: Span) -> Option<String> {
-        let u = self.a.unit(self.unit);
+    /// The macro whose call made a declaration at `at` (in `unit`).
+    fn macro_at(&self, unit: UnitId, at: Span) -> Option<String> {
+        let u = self.a.unit(unit);
         u.macro_uses.iter().filter(|m| m.call_span.file == at.file && m.call_span.start <= at.start && at.start <= m.call_span.end).min_by_key(|m| m.call_span.end - m.call_span.start).map(|m| m.name.to_string())
     }
 }
@@ -714,15 +771,49 @@ fn filtered(nodes: Vec<StructNode>, f: &Filter) -> Vec<StructNode> {
 /// Ids from the names: `parent/kind:name`, with `#2`... for repeats among siblings.
 fn assign_ids(nodes: &mut [StructNode], parent: &str) {
     let mut seen: FxHashMap<String, u32> = FxHashMap::default();
-    let mut used: FxHashSet<String> = FxHashSet::default();
     for n in nodes.iter_mut() {
-        let base = format!("{parent}/{}:{}", n.kind, n.name);
+        // U+001F cannot be in a name (not even an escaped identifier).
+        let base = format!("{parent}\u{1f}{}:{}", n.kind, n.name);
         let k = seen.entry(base.clone()).or_insert(0);
         *k += 1;
         let id = if *k > 1 { format!("{base}#{k}") } else { base };
-        used.insert(id.clone());
         n.id = id;
         let id = n.id.clone();
         assign_ids(&mut n.children, &id);
+    }
+}
+
+/// A generate block the parser named itself (`if (...) begin ... end` without a label).
+fn synthetic_generate(d: &Decl) -> bool {
+    d.kind == DeclKind::Generate && (d.name.is_empty() || (d.has(dflags::FROM_MACRO) && d.name.starts_with("genblk")))
+}
+
+/// After an event or delay control at `t[k]` (`@(posedge clk)`, `@*`, `#5`), if there is one.
+fn event_control_end(t: &[Token], k: usize) -> usize {
+    match t.get(k) {
+        Some(x) if x.is_punct("@*") => k + 1,
+        Some(x) if x.is_punct("@") => match t.get(k + 1) {
+            Some(y) if y.is_punct("(") => super::views::skip_group(t, k + 1),
+            Some(y) if y.is_punct("*") => k + 2,
+            Some(_) => k + 2,
+            None => k + 1,
+        },
+        Some(x) if x.is_punct("#") => match t.get(k + 1) {
+            Some(y) if y.is_punct("(") => super::views::skip_group(t, k + 1),
+            Some(_) => k + 2,
+            None => k + 1,
+        },
+        _ => k,
+    }
+}
+
+/// Whether a macro's name (if any) is UVM's.
+trait UvmMacro {
+    fn is_none_or_uvm(&self) -> bool;
+}
+
+impl UvmMacro for Option<String> {
+    fn is_none_or_uvm(&self) -> bool {
+        self.as_ref().is_none_or(|m| m.starts_with("uvm_"))
     }
 }

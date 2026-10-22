@@ -186,6 +186,12 @@ impl Analysis {
                 for g in &o.alts {
                     run.push(RunEv { body: m.body, guards: g.clone(), phase: m.stage.phase().into(), what: RunWhat::Made(Box::new(made.clone())) });
                 }
+                for (a, class, requested, overrides) in &o.alt_made {
+                    let made = MadeSeq { cr: a.cr.clone(), class: *class, requested: *requested, overrides: overrides.clone() };
+                    for g in &a.alts {
+                        run.push(RunEv { body: a.body, guards: g.clone(), phase: a.stage.phase().into(), what: RunWhat::Made(Box::new(made.clone())) });
+                    }
+                }
                 continue;
             }
             let name = m.cr.name.clone().unwrap_or_else(|| m.cr.lhs.trim_start_matches("this.").to_string());
@@ -309,13 +315,15 @@ impl Analysis {
         let mut seqs: Vec<Seq> = Vec::new();
         let mut by_key: FxHashMap<Key, usize> = FxHashMap::default();
         // What each variable may hold now, and the sequencer `uvm_create_on` gave it.
-        let mut current: FxHashMap<(u32, u32), Vec<usize>> = FxHashMap::default();
+        let mut current: FxHashMap<(u32, u32), Vec<(usize, Vec<Guard>)>> = FxHashMap::default();
+        // Overrides registered at run time, on top of the build's (copied when there are any).
+        let mut local: Option<Factory> = None;
         let mut stored: FxHashMap<(u32, u32), (DeclRef, Vec<Token>)> = FxHashMap::default();
         let var_of = |body: DeclRef, span: Span| self.resolve_at_span(body.unit, span).map(|v| self.decl_key(v));
         let declared_class = |body: DeclRef, span: Span| self.resolve_at_span(body.unit, span).and_then(|v| self.type_of(v)).and_then(|r| self.bind_type_param(r, ctx.derived_first, scan)).filter(|c| self.decl(*c).kind == DeclKind::Class);
         let unconditional = |g: &[Guard]| conditions_text(std::slice::from_ref(&g.to_vec())).is_empty();
         #[allow(clippy::too_many_arguments)]
-        fn alloc(seqs: &mut Vec<Seq>, by_key: &mut FxHashMap<Key, usize>, current: &mut FxHashMap<(u32, u32), Vec<usize>>, var: Option<(u32, u32)>, key: (u32, u32), name: String, new: impl FnOnce() -> Seq, guards: &[Guard], unconditional: bool) -> usize {
+        fn alloc(seqs: &mut Vec<Seq>, by_key: &mut FxHashMap<Key, usize>, current: &mut FxHashMap<(u32, u32), Vec<(usize, Vec<Guard>)>>, var: Option<(u32, u32)>, key: (u32, u32), name: String, new: impl FnOnce() -> Seq, guards: &[Guard], unconditional: bool) -> usize {
             let i = *by_key.entry((var, key, name)).or_insert_with(|| {
                 seqs.push(new());
                 seqs.len() - 1
@@ -331,14 +339,22 @@ impl Analysis {
             if let Some(v) = var {
                 let cur = current.entry(v).or_default();
                 if unconditional {
-                    *cur = vec![i];
-                } else if !cur.contains(&i) {
-                    cur.push(i);
+                    *cur = vec![(i, guards.to_vec())];
+                } else if !cur.iter().any(|(j, g)| *j == i && g == guards) {
+                    cur.push((i, guards.to_vec()));
                 }
             }
             i
         }
         for e in events {
+            if let RunWhat::Override(call) = &e.what {
+                let r = Reg { call: call.clone(), body: e.body, guards: e.guards.clone(), stage: Mode::Run("run") };
+                if let Some(entry) = self.factory_entry(&r, ctx.path, true, scan) {
+                    local.get_or_insert_with(|| factory.clone()).push(entry);
+                }
+                continue;
+            }
+            let factory = local.as_ref().unwrap_or(factory);
             // Allocations: (class built, class requested, overrides, name, where).
             let made: Option<(DeclRef, Option<DeclRef>, Vec<OverrideStep>, String, Span, Option<(u32, u32)>)> = match &e.what {
                 RunWhat::Made(ms) => ms.class.filter(|c| self.object_kind(*c) == Some("sequence")).map(|c| (c, ms.requested, ms.overrides.clone(), ms.cr.name.clone().unwrap_or_else(|| ms.cr.lhs.trim_start_matches("this.").to_string()), ms.cr.lhs_head, var_of(e.body, ms.cr.lhs_head))),
@@ -360,7 +376,7 @@ impl Analysis {
                     let (class, overrides) = self.factory_resolve(factory, req, None, self.parameterized(req));
                     (class, Some(req), overrides, st.var_text.clone(), st.var, var_of(e.body, st.var))
                 }),
-                RunWhat::Start(_) => None,
+                RunWhat::Start(_) | RunWhat::Override(_) => None,
             };
             if let Some((class, requested, overrides, name, at, var)) = made {
                 let key_name = name.clone();
@@ -370,9 +386,11 @@ impl Analysis {
             let RunWhat::Start(st) = &e.what else { continue };
             let Some(var) = var_of(e.body, st.var) else { continue };
             if st.kind == StartKind::Create {
-                if let Some(q) = &st.sqr {
-                    stored.insert(var, (e.body, q.clone()));
-                }
+                // A new sequence: the sequencer `uvm_create_on` gives, or none.
+                match &st.sqr {
+                    Some(q) => stored.insert(var, (e.body, q.clone())),
+                    None => stored.remove(&var),
+                };
                 continue;
             }
             // Started without an allocation seen: a handle made elsewhere.
@@ -382,7 +400,7 @@ impl Analysis {
                     seqs.push(Seq { class: Some(class), requested: Some(class), overrides: Vec::new(), name: st.var_text.clone(), at: st.var, ways: Vec::new(), starts: Vec::new(), made_here: false });
                     seqs.len() - 1
                 });
-                current.insert(var, vec![i]);
+                current.insert(var, vec![(i, Vec::new())]);
             }
             // `uvm_send` uses the sequencer `uvm_create_on` gave.
             let (body, sqr) = match (&st.sqr, st.kind) {
@@ -393,11 +411,16 @@ impl Analysis {
                 _ => (e.body, st.sqr.clone()),
             };
             let ons = self.sequencer_text(body, sqr.as_deref(), ctx);
-            for &i in current.get(&var).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let conditions = conditions_text(std::slice::from_ref(&e.guards));
+            // What the variable may hold where the start is: an allocation in another branch
+            // (neither's conditions within the other's) is not.
+            let holds = current.get(&var).cloned().unwrap_or_default();
+            for (i, g) in holds.iter().filter(|(_, g)| g.starts_with(&e.guards) || e.guards.starts_with(g)) {
+                let _ = g;
                 for (on, path) in &ons {
-                    let s = &mut seqs[i];
-                    if s.starts.len() < MAX_WAYS && !s.starts.iter().any(|x| x.on == *on && x.phase == e.phase) {
-                        s.starts.push(StartInfo { on: on.clone(), path: *path, phase: e.phase.clone(), conditions: conditions_text(std::slice::from_ref(&e.guards)) });
+                    let s = &mut seqs[*i];
+                    if s.starts.len() < MAX_WAYS && !s.starts.iter().any(|x| x.on == *on && x.phase == e.phase && x.conditions == conditions) {
+                        s.starts.push(StartInfo { on: on.clone(), path: *path, phase: e.phase.clone(), conditions: conditions.clone() });
                     }
                 }
             }
@@ -529,13 +552,19 @@ impl Analysis {
                     None => (None, false),
                 }
             } else {
+                // A sequence object: the class it was made as, else its variable's type.
                 match &s.set.value[..] {
-                    [v] => (self.resolve_at_span(s.body.unit, v.span).and_then(|x| self.type_of(x)), false),
+                    [v] => {
+                        let var = self.resolve_at_span(s.body.unit, v.span);
+                        (d.made_class.or_else(|| var.and_then(|x| self.type_of(x))), false)
+                    }
                     _ => (None, false),
                 }
             };
             let Some(req) = requested.filter(|c| self.object_kind(*c) == Some("sequence")) else { continue };
-            let (class, overrides) = if wrapper { self.factory_resolve(factory, req, None, params || self.parameterized(req)) } else { (req, Vec::new()) };
+            // The sequencer makes it, named after the type, in its own context.
+            let lookup = d.placed.then(|| format!("{}.{}", d.target, self.decl(req).name));
+            let (class, overrides) = if wrapper { self.factory_resolve(factory, req, lookup.as_deref(), params || self.parameterized(req)) } else { (req, Vec::new()) };
             let name = self.decl(class).name.to_string();
             let (mut node, cls) = self.object_node(&name, &inst.path, Some(class), Some(req), "sequence", at, std::slice::from_ref(&s.guards), overrides, vec![note], scan);
             node.starts = vec![StartInfo { on: d.target.clone(), path: d.placed, phase: d.phase.clone(), conditions: Vec::new() }];

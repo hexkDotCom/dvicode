@@ -729,7 +729,7 @@
         },
         {
           "command": "dvicode.refreshViews",
-          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy || view == dvicode.compiledFiles",
+          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy || view == dvicode.compiledFiles || view == dvicode.structure",
           "group": "navigation@9"
         },
         {
