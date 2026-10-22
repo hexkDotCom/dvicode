@@ -1032,7 +1032,7 @@ impl Builder {
             Err(err) => return self.problem(file, line, format!("Cannot read simulation log {}: {err}", path.display())),
         };
         // One invocation per compile command with files (`vlogan` per library, say).
-        let runs: Vec<simlog::SimLog> = simlog::parse_runs(&text).into_iter().filter(|r| !r.files.is_empty()).collect();
+        let runs: Vec<simlog::SimLog> = simlog::parse_runs(&text).into_iter().filter(|r| !r.files.is_empty() || !r.lib_files.is_empty()).collect();
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
         if runs.is_empty() {
             self.note(file, self.describe_path(log, &e, &path, "simulation log"));
@@ -1898,11 +1898,14 @@ mod tests {
         for f in ["a.sv", "b.sv"] {
             std::fs::write(dir.join(f), "").unwrap();
         }
-        std::fs::write(dir.join("compile.log"), "Command: vlogan +define+A a.sv\nParsing design file 'a.sv'\nCommand: vlogan +define+B b.sv\nParsing design file 'b.sv'\nCommand: vcs top\n").unwrap();
+        std::fs::write(dir.join("compile.log"), "Command: vlogan +define+A a.sv\nParsing design file 'a.sv'\nCommand: vlogan +define+B b.sv\nParsing design file 'b.sv'\nCommand: vcs top\nParsing library file 'c.v'\n").unwrap();
+        std::fs::write(dir.join("c.v"), "").unwrap();
         let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), "+dvicode_init_from_simlog+vcs+compile.log\n+define+LAST\n", &FxHashMap::default());
         let got: Vec<(String, Vec<PathBuf>, Vec<String>)> = cfg.invocations.iter().map(|i| (i.mode.clone(), i.files.clone(), i.defines.iter().map(|(n, _)| n.clone()).collect())).collect();
         // One invocation per command with files, in the same mode; lines after it go to the last.
-        assert_eq!(got, vec![("vcs".into(), vec![dir.join("a.sv")], vec!["A".into()]), ("vcs".into(), vec![dir.join("b.sv")], vec!["B".into(), "LAST".into()])]);
+        assert_eq!(got, vec![("vcs".into(), vec![dir.join("a.sv")], vec!["A".into()]), ("vcs".into(), vec![dir.join("b.sv")], vec!["B".into()]), ("vcs".into(), vec![], vec!["LAST".into()])]);
+        // A command that only parsed library files keeps them.
+        assert_eq!(cfg.invocations[2].lib_files, vec![dir.join("c.v")]);
         assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
     }
 

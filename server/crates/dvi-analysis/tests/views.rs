@@ -223,3 +223,13 @@ fn siblings_with_one_name_are_numbered_and_limits_hold() {
     let (f, meta) = a.compiled_files_tree(&TreeQuery::new(10));
     assert_eq!((f[0].children.len(), meta.incomplete, f[0].truncated), (9, Some("nodes"), true));
 }
+
+#[test]
+fn the_match_limit_holds_for_roots() {
+    // Three tops that all match.
+    let (a, _) = project("rootlimit", &[("d.sv", "module ta; endmodule\nmodule tb; endmodule\nmodule tc; endmodule\n")]);
+    let mut q = query("t");
+    q.max_matches = 2;
+    let (t, meta) = a.design_tree(None, &q);
+    assert_eq!((t.len(), meta.matches, meta.incomplete), (2, 2, Some("matches")));
+}

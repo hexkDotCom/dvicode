@@ -158,7 +158,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     }
     views.refreshAll();
   });
-  c.onNotification('dvicode/revision', () => views.onRevision());
+  c.onNotification('dvicode/revision', (r: { revision?: number }) => views.onRevision(r?.revision));
   client = c;
   statusItem.text = '$(sync~spin) DVICode';
   statusItem.tooltip = `Building the project on ${launch.target}`;

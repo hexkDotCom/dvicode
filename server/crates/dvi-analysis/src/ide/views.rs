@@ -17,6 +17,9 @@ pub struct FileNode {
     pub problems: usize,
     /// True when the children were cut by a limit.
     pub truncated: bool,
+    /// The same file at the top more than once (compiled in two invocations): which one (2, 3...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dup: Option<u32>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -308,6 +311,7 @@ impl Analysis {
     pub fn compiled_files_tree(&self, q: &TreeQuery) -> (Vec<FileNode>, TreeMeta) {
         let mut out = Vec::new();
         let mut w = Walk::new(q);
+        let mut seen = FxHashMap::default();
         for u in self.units.iter().flatten() {
             if u.kind == UnitKind::Builtin {
                 continue;
@@ -335,7 +339,8 @@ impl Analysis {
                 }
                 _ => "top",
             };
-            if let Some(n) = self.file_walk(u.root, kind, &by_parent, &mut visited, &mut w) {
+            if let Some(mut n) = self.file_walk(u.root, kind, &by_parent, &mut visited, &mut w) {
+                n.dup = sibling(&mut seen, &n.uri);
                 out.push(n);
             }
         }
@@ -366,7 +371,7 @@ impl Analysis {
             }
         }
         if matched || !children.is_empty() {
-            Some(FileNode { path: shown, uri: super::url_of(&path).to_string(), kind: kind.into(), children, problems: 0, truncated })
+            Some(FileNode { path: shown, uri: super::url_of(&path).to_string(), kind: kind.into(), children, problems: 0, truncated, dup: None })
         } else {
             if reserved {
                 w.nodes_left += 1;
@@ -444,6 +449,9 @@ impl Analysis {
         let mut w = Walk::new(q);
         let mut roots = Vec::new();
         for t in tops {
+            if w.stopped() && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
+                break;
+            }
             let d = self.decl(t);
             let loc = self.decl_location(t);
             let name = d.name.to_string();
@@ -702,6 +710,9 @@ impl Analysis {
         let mut w = Walk::new(q);
         let mut out = Vec::new();
         for t in roots {
+            if w.stopped() && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
+                break;
+            }
             let d = self.decl(t);
             let loc = self.decl_location(t);
             let pin = pin_below(Some(q.reveal.as_slice()), &d.name);
@@ -1042,6 +1053,10 @@ impl Analysis {
             let fb_toks = self.body_tokens(fb);
             let made: Vec<Creation> = scan_creations(&fb_toks).into_iter().chain(scan_returned_creations(&fb_toks)).map(|(_, c)| c).filter(|c| formals.contains(&c.parent)).collect();
             let [cr] = made.as_slice() else { continue };
+            // `parent = owner;` inside the factory: the argument is not what the caller gave.
+            if [Some(&cr.parent), cr.name_arg.as_ref()].into_iter().flatten().filter(|f| formals.contains(f)).any(|f| assigns(&fb_toks, f)) {
+                continue;
+            }
             // What the call gives an argument of `make`: by name, else by position.
             let args = call_args(t, m + 1);
             let actual = |formal: &str| -> Option<&[Token]> {
@@ -1232,6 +1247,11 @@ fn called_methods(t: &[Token], own: &str) -> Vec<(usize, String)> {
         }
     }
     out
+}
+
+/// Whether the tokens assign to the variable `name` (`name = ...`, not `name == ...`).
+fn assigns(t: &[Token], name: &str) -> bool {
+    t.windows(2).enumerate().any(|(i, w)| w[0].is_ident() && w[0].text == name && w[1].is_punct("=") && !(i > 0 && t[i - 1].is_punct(".")))
 }
 
 /// Counts a sibling called `name`: `Some(k)` for the k-th (k > 1) of that name.

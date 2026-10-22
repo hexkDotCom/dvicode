@@ -45,6 +45,8 @@ interface HierNode extends TreeNode {
 interface FileNode extends TreeNode {
   path: string;
   truncated?: boolean;
+  /** The same file at the top more than once: which one (2, 3...). */
+  dup?: number;
   uri: string;
   kind: string;
   children: FileNode[];
@@ -158,6 +160,10 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   private found: { key: string; scope: string; revision: number; paths: string[][]; more: boolean } | undefined;
   /** The engine stopped before finding every occurrence. */
   private moreOccurrences = false;
+  /** The newest analysis revision known (the tree shown may be older, see `stale`). */
+  latest = -1;
+  /** Changes when the top, test, filter or server changes: older follows stop. */
+  private paramGen = 0;
 
   constructor(
     readonly name: ViewName,
@@ -214,8 +220,8 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   }
 
   /** Fetches the tree again (`reveal`: names of a node to include beyond the node limit). */
-  refresh(reveal?: string[]): Promise<void> {
-    const p = this.load(reveal ?? (this.sync && !this.filter ? this.cycle.current() : undefined));
+  refresh(reveal?: string[], wanted?: StillWanted): Promise<void> {
+    const p = this.load(reveal ?? (this.sync && !this.filter ? this.cycle.current() : undefined), wanted);
     this.loading = p;
     void p.finally(() => {
       if (this.loading === p) {
@@ -225,16 +231,22 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     return p;
   }
 
-  /** Forgets the occurrences found and the one shown (new parameters, a restarted server). */
+  /** Forgets the occurrences found (a restarted server, a refresh): they are searched again. */
   forget(): void {
     this.found = undefined;
     this.moreOccurrences = false;
+  }
+
+  /** Forgets also the occurrence shown, and stops follows under way (new parameters). */
+  reset(): void {
+    this.forget();
     this.cycle.reset();
+    this.paramGen++;
   }
 
   /** Forgets the tree (its parameters changed): the next getChildren fetches it. */
   protected invalidate(): void {
-    this.forget();
+    this.reset();
     this.gen++;
     this.attempted = false;
     this.tree = undefined;
@@ -243,7 +255,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     this.items.clear();
   }
 
-  private async load(reveal?: string[]): Promise<void> {
+  private async load(reveal?: string[], wanted?: StillWanted): Promise<void> {
     const gen = ++this.gen;
     this.attempted = true;
     const c = this.conn.client();
@@ -261,11 +273,12 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
         filter: this.filter ?? null,
         reveal: reveal ?? null,
       });
-      if (gen !== this.gen) {
+      if (gen !== this.gen || (wanted && !wanted())) {
         return;
       }
       this.onResult(r);
       this.revision = r.revision;
+      this.latest = Math.max(this.latest, r.revision);
       this.incomplete = r.incomplete;
       this.matches = r.matches;
       this.error = undefined;
@@ -336,6 +349,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     }
     this.filter = t;
     this.filterGen++;
+    this.paramGen++;
     await this.refresh();
   }
 
@@ -345,7 +359,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   protected async occurrencesOf(t: Target): Promise<string[][]> {
     const key = targetKey(t);
     const scope = JSON.stringify(this.params());
-    if (this.found && this.found.key === key && this.found.scope === scope && this.found.revision === this.revision) {
+    if (this.found && this.found.key === key && this.found.scope === scope && this.found.revision === this.latest) {
       this.moreOccurrences = this.found.more;
       return this.found.paths;
     }
@@ -357,6 +371,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     const r = await c.sendRequest<TreeResult<N>>('dvicode/tree', { view: this.name, ...this.params(), target, maxNodes: 100000 });
     const tree = placeTree(r.roots, (n, root) => this.nameOf(n, root));
     const paths = occurrences(tree, (p) => this.isTarget(p, t));
+    this.latest = Math.max(this.latest, r.revision);
     this.found = { key, scope, revision: r.revision, paths, more: r.incomplete !== null };
     this.moreOccurrences = r.incomplete !== null;
     return paths;
@@ -368,7 +383,9 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   protected abstract notFoundText(t: Target): string;
 
   /** Shows the node of the editor's position (`t`: undefined when there is none). */
-  async follow(t: Target | undefined, wanted: StillWanted = () => true): Promise<void> {
+  async follow(t: Target | undefined, stillWanted: StillWanted = () => true): Promise<void> {
+    const pg = this.paramGen;
+    const wanted: StillWanted = () => stillWanted() && pg === this.paramGen;
     if (!t) {
       this.cycle.reset();
       this.syncNote = this.name === 'verification' ? 'The cursor is not in a class.' : this.name === 'design' ? 'The cursor is not in a module.' : undefined;
@@ -379,9 +396,12 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     if (!wanted()) {
       return;
     }
+    if (t.file) {
+      this.moreOccurrences = this.incomplete !== null;
+    }
     if (!paths.length) {
       this.cycle.reset();
-      this.syncNote = this.notFoundText(t);
+      this.syncNote = t.file && this.incomplete !== null ? `${describeTarget(t)} is not in the part of the tree shown (node limit).` : this.notFoundText(t);
       this.present();
       return;
     }
@@ -415,7 +435,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
         return;
       }
       // Beyond the node limit: fetch the tree with this node in it.
-      await this.refresh(names);
+      await this.refresh(names, wanted);
       if (!wanted()) {
         return;
       }
@@ -476,7 +496,8 @@ function openCommand(conn: Conn, uri: string | null, line: number, character: nu
  */
 export function uriKey(u: vscode.Uri): string {
   const key = `${u.scheme}://${u.authority.toLowerCase()}${u.path}`;
-  return u.scheme === 'file' && process.platform === 'win32' ? key.toLowerCase() : key;
+  // A Windows drive ignores case; a WSL folder (file://wsl.localhost/...) does not.
+  return u.scheme === 'file' && u.authority === '' && process.platform === 'win32' ? key.toLowerCase() : key;
 }
 
 /** The key of an engine URI as VS Code shows it, to compare with documents. */
@@ -552,7 +573,7 @@ export class CompiledFiles extends TreeBase<FileNode> {
   }
 
   protected nameOf(n: FileNode): string {
-    return n.uri;
+    return keyedName(n.uri, n.dup);
   }
 
   protected makeItem(p: Placed<FileNode>, parent: Item<FileNode> | undefined, expand: boolean): Item<FileNode> {
@@ -560,11 +581,11 @@ export class CompiledFiles extends TreeBase<FileNode> {
     const uri = this.conn.mapper()?.toClient(n.uri) ?? vscode.Uri.parse(n.uri);
     const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
     const item = new Item(p, parent, uri, state);
+    item.resourceUri = uri;
+    item.description = n.kind === 'top' ? undefined : n.kind;
     if (n.truncated) {
       item.description = `${item.description ?? ''} …`.trim();
     }
-    item.resourceUri = uri;
-    item.description = n.kind === 'top' ? undefined : n.kind;
     item.tooltip = n.path;
     item.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
     return item;
@@ -786,10 +807,13 @@ export class Views implements vscode.Disposable {
   }
 
   /** The analysis changed after edits: visible views refresh (once the typing pauses). */
-  onRevision(): void {
+  onRevision(revision?: number): void {
     this.located = undefined;
     for (const v of this.all) {
       v.stale = true;
+      if (revision !== undefined) {
+        v.latest = Math.max(v.latest, revision);
+      }
     }
     clearTimeout(this.revisionTimer);
     this.revisionTimer = setTimeout(() => {
@@ -810,7 +834,7 @@ export class Views implements vscode.Disposable {
   /** The server stopped or started. */
   presentAll(): void {
     for (const v of this.all) {
-      v.forget();
+      v.reset();
       v.present();
     }
   }
