@@ -128,12 +128,48 @@ impl Ordered {
     }
 }
 
+/// The first compile of a log (see [`parse_runs`]).
+#[cfg(test)]
 pub fn parse(text: &str) -> SimLog {
-    let (mut files, mut lib_files, mut included, mut defines, mut incdirs) = (Ordered::default(), Ordered::default(), Ordered::default(), Ordered::default(), Ordered::default());
-    let mut command = false;
+    parse_runs(text).into_iter().next().unwrap_or_default()
+}
+
+/// The compiles of a log, one per compile command (`vlogan` for each library, say), each with
+/// the files parsed after its command line and the defines and include directories of that
+/// command. Files parsed before any command line belong to the first.
+pub fn parse_runs(text: &str) -> Vec<SimLog> {
+    let mut runs = Vec::new();
+    let mut run = Run::default();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         let line = line.trim();
+        if command_words(line).is_some() && run.command {
+            runs.push(std::mem::take(&mut run).finish());
+        }
+        run.line(line, &mut lines);
+    }
+    runs.push(run.finish());
+    runs
+}
+
+/// One compile of a log, being read.
+#[derive(Default)]
+struct Run {
+    files: Ordered,
+    lib_files: Ordered,
+    included: Ordered,
+    defines: Ordered,
+    incdirs: Ordered,
+    command: bool,
+}
+
+impl Run {
+    fn finish(self) -> SimLog {
+        SimLog { files: self.files.v, lib_files: self.lib_files.v, included: self.included.v, defines: self.defines.v, incdirs: self.incdirs.v, command: self.command }
+    }
+
+    fn line<'a>(&mut self, line: &str, lines: &mut impl Iterator<Item = &'a str>) {
+        let Run { files, lib_files, included, defines, incdirs, command } = self;
         if let Some(p) = parsed_file(line, "design") {
             files.push(p);
         } else if let Some(p) = parsed_file(line, "library") {
@@ -149,7 +185,7 @@ pub fn parse(text: &str) -> SimLog {
                 logical.push_str(next.trim_end());
             }
             let words = command_words(&logical).unwrap_or_default();
-            command = true;
+            *command = true;
             let mut i = 0;
             while i < words.len() {
                 let w = words[i].as_str();
@@ -172,7 +208,6 @@ pub fn parse(text: &str) -> SimLog {
             }
         }
     }
-    SimLog { files: files.v, lib_files: lib_files.v, included: included.v, defines: defines.v, incdirs: incdirs.v, command }
 }
 
 #[cfg(test)]
@@ -207,6 +242,21 @@ Top Level Modules:
         assert_eq!((s.defines, s.incdirs, s.files), (vec!["X".to_string()], vec!["a".to_string()], vec!["b.sv".to_string()]));
         // Prose that mentions the tool is not a command line.
         assert!(parse("Please rerun vcs with -debug\n").defines.is_empty());
+    }
+
+    #[test]
+    fn one_compile_per_command() {
+        let log = "Parsing design file 'early.sv'\nCommand: vlogan +define+A lib_a.sv\nParsing design file 'lib_a.sv'\nCommand: vlogan +define+B lib_b.sv\nParsing design file 'lib_a.sv'\nParsing design file 'lib_b.sv'\nCommand: vcs top -o simv\n";
+        let runs = parse_runs(log);
+        let got: Vec<(Vec<String>, Vec<String>)> = runs.iter().map(|r| (r.files.clone(), r.defines.clone())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (vec!["early.sv".to_string(), "lib_a.sv".to_string()], vec!["A".to_string()]),
+                (vec!["lib_a.sv".to_string(), "lib_b.sv".to_string()], vec!["B".to_string()]),
+                (vec![], vec![]),
+            ]
+        );
     }
 
     #[test]

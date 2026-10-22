@@ -25,6 +25,8 @@
 - `+dvicode_path_map+FROM=TO` in a build file reads paths written on another machine (a compute
   farm, a CI runner) from a folder on this one: in the build file, its `-f` files and compile
   logs.
+- Compile logs with several compile commands (`vlogan` for each library, then `vcs`) give one
+  invocation per command with its own defines, instead of one merged compile (#9).
 - Compile logs: quoted values (`+incdir+"a b"`), command lines continued with `\`, and the
   include directory of `` `include "dir/file.svh" `` are read correctly.
 - Fixed: a crash (stack overflow) on two packages that `export` each other; a macro used inside

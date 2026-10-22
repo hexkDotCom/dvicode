@@ -1031,9 +1031,10 @@ impl Builder {
             }
             Err(err) => return self.problem(file, line, format!("Cannot read simulation log {}: {err}", path.display())),
         };
-        let s = simlog::parse(&text);
+        // One invocation per compile command with files (`vlogan` per library, say).
+        let runs: Vec<simlog::SimLog> = simlog::parse_runs(&text).into_iter().filter(|r| !r.files.is_empty()).collect();
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
-        if s.files.is_empty() {
+        if runs.is_empty() {
             self.note(file, self.describe_path(log, &e, &path, "simulation log"));
             return self.problem(
                 file,
@@ -1041,51 +1042,69 @@ impl Builder {
                 format!("No compiled files in {}: not a VCS or vlogan compile log, or the compile stopped before parsing (look for 'Parsing design file')", path.display()),
             );
         }
-        for d in &s.defines {
-            self.add_define(d);
-        }
-        let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).collect();
-        for f in &s.included {
-            if let Some(parent) = self.abs(f, &dir).parent() {
-                if !incdirs.iter().any(|d| d == parent) {
-                    incdirs.push(parent.to_path_buf());
+        let mode = self.inv().mode.clone();
+        let (mut n_files, mut n_lib_files, mut n_defines, mut n_incdirs) = (0, 0, 0, 0);
+        let mut missing: Vec<PathBuf> = Vec::new();
+        let mut command = false;
+        for (k, s) in runs.iter().enumerate() {
+            if k > 0 {
+                self.start_invocation(&mode, false);
+            }
+            for d in &s.defines {
+                self.add_define(d);
+            }
+            let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).collect();
+            for f in &s.included {
+                if let Some(parent) = self.abs(f, &dir).parent() {
+                    if !incdirs.iter().any(|d| d == parent) {
+                        incdirs.push(parent.to_path_buf());
+                    }
                 }
             }
-        }
-        let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
-        let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).collect();
-        // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
-        let included: Vec<PathBuf> = s.included.iter().map(|f| self.abs(f, &dir)).collect();
-        let sources: Vec<PathBuf> = files.iter().chain(lib_files.iter()).chain(included.iter()).cloned().collect();
-        for d in auto::include_bases(&sources, &included) {
-            if !incdirs.contains(&d) {
-                incdirs.push(d);
+            let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
+            let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).collect();
+            // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
+            let included: Vec<PathBuf> = s.included.iter().map(|f| self.abs(f, &dir)).collect();
+            let sources: Vec<PathBuf> = files.iter().chain(lib_files.iter()).chain(included.iter()).cloned().collect();
+            for d in auto::include_bases(&sources, &included) {
+                if !incdirs.contains(&d) {
+                    incdirs.push(d);
+                }
             }
+            missing.extend(files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).cloned());
+            (n_files, n_lib_files, n_defines, n_incdirs) = (n_files + files.len(), n_lib_files + lib_files.len(), n_defines + s.defines.len(), n_incdirs + incdirs.len());
+            command |= s.command;
+            let inv = self.inv();
+            inv.incdirs.extend(incdirs);
+            inv.files.extend(files);
+            inv.lib_files.extend(lib_files);
         }
-        let missing: Vec<&PathBuf> = files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).collect();
         log::debug!(
-            "build: simulation log {}: {} files, {} library files, {} defines, {} include directories ({} from included files){}",
+            "build: simulation log {}: {} compile command(s), {} files, {} library files, {} defines, {} include directories{}",
             path.display(),
-            files.len(),
-            lib_files.len(),
-            s.defines.len(),
-            incdirs.len(),
-            incdirs.len().saturating_sub(s.incdirs.len()),
-            if s.command { "" } else { "; no command line found" }
+            runs.len(),
+            n_files,
+            n_lib_files,
+            n_defines,
+            n_incdirs,
+            if command { "" } else { "; no command line found" }
         );
-        let mut note = format!(
-            "**simulation log** `{}`\n\n{} files, {} library files, {} defines, {} include directories",
-            path.display(),
-            files.len(),
-            lib_files.len(),
-            s.defines.len(),
-            incdirs.len()
-        );
-        if !s.command {
-            note.push_str("\n\nNo command line found in the log: no defines from it.");
+        let mut note = format!("**simulation log** `{}`
+
+", path.display());
+        if runs.len() > 1 {
+            note.push_str(&format!("{} compile commands (one invocation each): ", runs.len()));
+        }
+        note.push_str(&format!("{n_files} files, {n_lib_files} library files, {n_defines} defines, {n_incdirs} include directories"));
+        if !command {
+            note.push_str("
+
+No command line found in the log: no defines from it.");
         }
         if !missing.is_empty() {
-            note.push_str(&format!("\n\n{} of them are not on this machine", missing.len()));
+            note.push_str(&format!("
+
+{} of them are not on this machine", missing.len()));
         }
         self.note(file, note);
         if !missing.is_empty() {
@@ -1093,13 +1112,9 @@ impl Builder {
             self.problem(
                 file,
                 line,
-                format!("{} of the {} files in {} are not on this machine (first: {first}); the log may come from another machine", missing.len(), files.len() + lib_files.len(), path.display()),
+                format!("{} of the {} files in {} are not on this machine (first: {first}); the log may come from another machine", missing.len(), n_files + n_lib_files, path.display()),
             );
         }
-        let inv = self.inv();
-        inv.incdirs.extend(incdirs);
-        inv.files.extend(files);
-        inv.lib_files.extend(lib_files);
     }
 
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
@@ -1873,6 +1888,22 @@ mod tests {
         // Hover says how a path is read.
         let ins = inspect(&dir, &file, &text, &env, None);
         assert!(ins.notes.iter().any(|(_, _, t)| t.contains("is read as") && t.contains("local/rtl/a.sv")), "{:?}", ins.notes);
+    }
+
+    #[test]
+    fn compile_log_with_several_commands() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_simlog_runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["a.sv", "b.sv"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        std::fs::write(dir.join("compile.log"), "Command: vlogan +define+A a.sv\nParsing design file 'a.sv'\nCommand: vlogan +define+B b.sv\nParsing design file 'b.sv'\nCommand: vcs top\n").unwrap();
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), "+dvicode_init_from_simlog+vcs+compile.log\n+define+LAST\n", &FxHashMap::default());
+        let got: Vec<(String, Vec<PathBuf>, Vec<String>)> = cfg.invocations.iter().map(|i| (i.mode.clone(), i.files.clone(), i.defines.iter().map(|(n, _)| n.clone()).collect())).collect();
+        // One invocation per command with files, in the same mode; lines after it go to the last.
+        assert_eq!(got, vec![("vcs".into(), vec![dir.join("a.sv")], vec!["A".into()]), ("vcs".into(), vec![dir.join("b.sv")], vec!["B".into(), "LAST".into()])]);
+        assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
     }
 
     #[test]
