@@ -241,6 +241,8 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   reset(): void {
     this.forget();
     this.latest = -1;
+    // Answers to requests made before are dropped.
+    this.gen++;
     this.cycle.reset();
     this.paramGen++;
   }
@@ -370,7 +372,12 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       return [];
     }
     const target = { definition: t.definition ?? null, instance: t.instance ?? null, class: t.class ?? null };
+    const pg = this.paramGen;
     const r = await c.sendRequest<TreeResult<N>>('dvicode/tree', { view: this.name, ...this.params(), target, maxNodes: 100000 });
+    if (pg !== this.paramGen) {
+      // The top, test, filter or server changed meanwhile.
+      return [];
+    }
     const tree = placeTree(r.roots, (n, root) => this.nameOf(n, root));
     const paths = occurrences(tree, (p) => this.isTarget(p, t));
     this.latest = Math.max(this.latest, r.revision);

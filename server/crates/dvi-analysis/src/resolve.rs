@@ -531,6 +531,11 @@ impl Analysis {
         // before a farther copy.
         let mut todo = vec![pkg];
         while let Some(p) = todo.pop() {
+            // Marked when looked at (not when found), so a nearer branch searches its exports
+            // before a package another branch also reaches.
+            if p != pkg && !seen.insert(self.decl_key(p)) {
+                continue;
+            }
             if p != pkg {
                 let u = self.unit(p.unit);
                 if let Some(m) = pick(&u.parsed, u.parsed.lookup_member(p.decl, name)) {
@@ -552,7 +557,7 @@ impl Analysis {
                 for s in sources {
                     let Some(all) = self.global.packages.get(s) else { continue };
                     for c in self.candidates(p.unit, all) {
-                        if seen.insert(self.decl_key(c)) {
+                        if !seen.contains(&self.decl_key(c)) {
                             next.push(c);
                         }
                     }

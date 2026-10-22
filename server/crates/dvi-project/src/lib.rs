@@ -394,7 +394,7 @@ impl Builder {
         if written != expanded {
             s.push_str(&format!("\n\n`{written}` expands to `{expanded}`"));
         }
-        if let Some(m) = map_path(&self.path_maps, expanded.trim_matches('"')) {
+        if let Some(m) = map_path(&self.path_maps, expanded.trim_matches(['"', '\''])) {
             s.push_str(&format!("\n\n`{expanded}` is read as `{m}` (`+dvicode_path_map+`)"));
         }
         s
@@ -402,7 +402,7 @@ impl Builder {
 
     /// A path as DVICode reads it: `+dvicode_path_map+` applied, then made absolute.
     fn abs(&self, p: &str, base: &Path) -> PathBuf {
-        match map_path(&self.path_maps, p.trim_matches('"')) {
+        match map_path(&self.path_maps, p.trim_matches(['"', '\''])) {
             Some(m) => absolutize(&m, base),
             None => absolutize(p, base),
         }
@@ -1904,7 +1904,7 @@ mod tests {
         let mut env = FxHashMap::default();
         env.insert("LOCAL".to_string(), local);
         // FROM is a prefix of TO: mapped once, not twice.
-        let text = "+dvicode_path_map+/proj=$LOCAL\n+incdir+\"/proj/inc dir\"\n-uvmhome /proj/local/uvm\n";
+        let text = "+dvicode_path_map+/proj=$LOCAL\n+incdir+\"/proj/inc dir\"\n+incdir+'/proj/inc dir'\n-uvmhome /proj/local/uvm\n";
         let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), text, &env);
         assert!(cfg.problems.is_empty(), "{:?}", cfg.problems);
         assert!(cfg.invocations[0].incdirs.contains(&dir.join("local/inc dir")), "{:?}", cfg.invocations[0].incdirs);
