@@ -983,3 +983,33 @@ fn components_created_in_helpers_called_by_build_phase() {
     // The derived test's override of the helper is the one called.
     assert_eq!(names("other_test"), vec!["oenv:other_env", "agt:my_agent"]);
 }
+
+#[test]
+fn type_parameters_of_base_tests_are_bound() {
+    // A base test creates `T_ENV env`; derived tests give T_ENV by name, by position, through
+    // a typedef, or pass on their own parameter; without a value the default is used.
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_agent extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    let tb = "package tb_pkg;\n  import uvm_pkg::*;\n  class cfg_c; endclass\n  class my_agent extends uvm_agent; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class base_env extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class rx_env extends uvm_env;\n    my_agent agt;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_phase(uvm_phase phase); agt = my_agent::type_id::create(\"agt\", this); endfunction\n  endclass\n  class tx_env extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class base_tc #(type T_CFG = cfg_c, type T_ENV = base_env) extends uvm_test;\n    T_ENV env;\n    T_ENV env2;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    function void build_phase(uvm_phase phase);\n      env = T_ENV::type_id::create(\"env\", this);\n      env2 = new(\"env2\", this);\n    endfunction\n  endclass\n  class named_tc extends base_tc#(.T_CFG(cfg_c), .T_ENV(rx_env));\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\n  class positional_tc extends base_tc#(cfg_c, tx_env);\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\n  typedef base_tc#(.T_ENV(tb_pkg::tx_env)) tx_base_t;\n  class typedef_tc extends tx_base_t;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\n  class mid_tc #(type E = rx_env) extends base_tc#(.T_ENV(E));\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\n  class passed_on_tc extends mid_tc#(tx_env);\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\n  class default_tc extends base_tc;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n  endclass\nendpackage\n";
+    let (a, _) = project("typeparams", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", tb)]);
+    let tree = |test: &str| -> Vec<String> {
+        let h = a.verification_hierarchy(Some(test), 100);
+        let mut out = Vec::new();
+        fn walk(n: &dvi_analysis::ide::views::VerifNode, out: &mut Vec<String>) {
+            for c in &n.children {
+                out.push(format!("{}:{}:{}", c.path, c.class, c.kind));
+                walk(c, out);
+            }
+        }
+        if let Some(r) = h.roots.first() {
+            walk(r, &mut out);
+        }
+        out
+    };
+    assert_eq!(tree("named_tc"), vec!["uvm_test_top.env:rx_env:env", "uvm_test_top.env.agt:my_agent:agent", "uvm_test_top.env2:rx_env:env", "uvm_test_top.env2.agt:my_agent:agent"]);
+    assert_eq!(tree("positional_tc"), vec!["uvm_test_top.env:tx_env:env", "uvm_test_top.env2:tx_env:env"]);
+    assert_eq!(tree("typedef_tc"), vec!["uvm_test_top.env:tx_env:env", "uvm_test_top.env2:tx_env:env"]);
+    assert_eq!(tree("passed_on_tc"), vec!["uvm_test_top.env:tx_env:env", "uvm_test_top.env2:tx_env:env"]);
+    // mid_tc's own default (rx_env) when nothing below it gives E.
+    assert_eq!(tree("mid_tc")[0], "uvm_test_top.env:rx_env:env");
+    assert_eq!(tree("default_tc"), vec!["uvm_test_top.env:base_env:env", "uvm_test_top.env2:base_env:env"]);
+}

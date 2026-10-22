@@ -486,10 +486,15 @@ impl Analysis {
         }
         let mut out = Vec::new();
         for (body, cr) in made {
-            // The created class: `T` of `T::type_id::create`, else the variable's type.
+            // The created class: `T` of `T::type_id::create`, else the variable's type. A type
+            // parameter of a base class (`T_ENV env`) is the type a derived class gives it.
+            let is_class = |c: &DeclRef| matches!(self.decl(*c).kind, DeclKind::Class);
             let from_ty = cr.ty.and_then(|s| self.resolve_at_span(body.unit, s)).and_then(|r| self.follow_typedef(r));
             let from_var = || self.resolve_at_span(body.unit, cr.lhs_head).and_then(|v| self.type_of(v));
-            let cls = from_ty.or_else(from_var).filter(|c| matches!(self.decl(*c).kind, DeclKind::Class));
+            let cls = from_ty
+                .and_then(|r| self.bind_type_param(r, &derived_first))
+                .filter(is_class)
+                .or_else(|| from_var().and_then(|r| self.bind_type_param(r, &derived_first)).filter(is_class));
             let kind = match cls {
                 Some(c) => match self.uvm_kind(c) {
                     Some(k) => k,
@@ -537,6 +542,112 @@ impl Analysis {
             out.push(node);
         }
         out
+    }
+
+    /// The type a type parameter of a class in `derived_first` (a class and its bases, most
+    /// derived first) stands for: the value the class below it gives in `extends B#(...)`
+    /// (named or by position, possibly passing on its own parameter), else its default.
+    /// Other declarations are returned as they are.
+    fn bind_type_param(&self, mut r: DeclRef, derived_first: &[DeclRef]) -> Option<DeclRef> {
+        for _ in 0..16 {
+            let d = self.decl(r);
+            if d.kind != DeclKind::TypeParam {
+                return Some(r);
+            }
+            let owner = DeclRef { unit: r.unit, decl: d.parent? };
+            let key = self.decl_key(owner);
+            let at = derived_first.iter().position(|c| self.decl_key(*c) == key);
+            let given = match at {
+                Some(i) if i > 0 => self.extends_param_value(derived_first[i - 1], owner, r),
+                _ => None,
+            };
+            let next = given.or_else(|| self.type_param_default(r))?;
+            r = self.follow_typedef(next)?;
+        }
+        None
+    }
+
+    /// The type `derived` gives the type parameter `param` of its base `base` in
+    /// `extends base#(...)`, or through a typedef (`typedef base#(...) base_t;`,
+    /// `extends base_t`).
+    fn extends_param_value(&self, derived: DeclRef, base: DeclRef, param: DeclRef) -> Option<DeclRef> {
+        // The declaration whose header names the base type, and the keyword before that type.
+        let (mut src, mut kw) = (derived, "extends");
+        for _ in 0..8 {
+            let d = self.decl(src);
+            if d.has(dflags::FROM_MACRO) {
+                return None;
+            }
+            let toks = self.file_tokens(d.span.file)?;
+            let lo = toks.partition_point(|t| t.span.start < d.span.start);
+            let hi = toks.partition_point(|t| t.span.start < d.span.end);
+            let t = &toks[lo..hi];
+            // `class C #(...) extends B #(...);` or `typedef B #(...) C;`.
+            let header_end = t.iter().position(|x| x.is_punct(";")).unwrap_or(t.len());
+            let at = t[..header_end].iter().position(|x| x.is_kw(kw))? + 1;
+            let mut k = at;
+            while k < header_end && (t[k].is_ident() || t[k].is_punct("::")) {
+                k += 1;
+            }
+            if k + 1 < header_end && t[k].is_punct("#") && t[k + 1].is_punct("(") {
+                return self.param_value_in(src.unit, call_args(t, k + 1), base, param);
+            }
+            // No values here: the base may be a typedef that gives them.
+            let named = self.type_name_in(src.unit, &t[at..k])?;
+            if self.decl(named).kind != DeclKind::Typedef {
+                return None;
+            }
+            (src, kw) = (named, "typedef");
+        }
+        None
+    }
+
+    /// The type a `#(...)` value list (`args`, resolved in `unit`) gives `param` of `base`.
+    fn param_value_in(&self, unit: crate::world::UnitId, args: Vec<&[Token]>, base: DeclRef, param: DeclRef) -> Option<DeclRef> {
+        let name = self.decl(param).name.as_str();
+        let value = args.iter().find_map(|a| match a {
+            [dot, n, open, inner @ .., close] if dot.is_punct(".") && open.is_punct("(") && close.is_punct(")") => (n.text == name).then_some(inner),
+            _ => None,
+        });
+        let value = match value {
+            Some(v) => v,
+            None if args.first().is_some_and(|a| a.first().is_some_and(|x| x.is_punct("."))) => return None,
+            None => {
+                let u = self.unit(base.unit);
+                let header_params = u.parsed.decl(base.decl).children.iter().filter(|c| matches!(u.parsed.decl(**c).kind, DeclKind::Parameter | DeclKind::TypeParam));
+                let index = header_params.clone().position(|c| *c == param.decl)?;
+                args.get(index).copied()?
+            }
+        };
+        self.type_name_in(unit, value)
+    }
+
+    /// The default type of a type parameter (`type T = my_env`).
+    fn type_param_default(&self, param: DeclRef) -> Option<DeclRef> {
+        let d = self.decl(param);
+        if d.has(dflags::FROM_MACRO) {
+            return None;
+        }
+        let toks = self.file_tokens(d.span.file)?;
+        let lo = toks.partition_point(|t| t.span.start < d.span.start);
+        let hi = toks.partition_point(|t| t.span.start < d.span.end);
+        let t = &toks[lo..hi];
+        let eq = t.iter().position(|x| x.is_punct("="))?;
+        self.type_name_in(param.unit, &t[eq + 1..])
+    }
+
+    /// The type named by the tokens of a type expression (`my_env`, `pkg::my_env`,
+    /// `my_env#(8)`): the declaration its last name resolves to (typedefs not followed).
+    fn type_name_in(&self, unit: crate::world::UnitId, t: &[Token]) -> Option<DeclRef> {
+        let mut last = None;
+        for (k, x) in t.iter().enumerate() {
+            if x.is_ident() && (k == 0 || t[k - 1].is_punct("::")) {
+                last = Some(x.span);
+            } else if !x.is_punct("::") {
+                break;
+            }
+        }
+        self.resolve_at_span(unit, last?)
     }
 
     /// The component creations of a build method, and of the methods of the same class it
