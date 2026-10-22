@@ -36,6 +36,7 @@ impl SimLog {
 
 /// The compiler a word names: `/tools/vcs/bin/vcs`, `C:\\questa\\win64\\vlog.exe`.
 fn tool_name(w: &str) -> Option<&'static str> {
+    let w = w.trim_matches('"');
     let name = w.rsplit(['/', '\\']).next().unwrap_or(w);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     ["vcs", "vlogan", "vhdlan", "vlog", "qverilog"].into_iter().find(|t| *t == name)

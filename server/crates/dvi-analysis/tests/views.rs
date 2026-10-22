@@ -269,3 +269,15 @@ endclass
     let (h, _) = a.verification_tree(None, &TreeQuery::new(100));
     assert_eq!((h.tests.len(), h.hint), (1, None));
 }
+
+#[test]
+fn the_hint_names_only_what_it_checked() {
+    let uvm = "package uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    // A misspelled base class is another problem: no hint about imports.
+    let (a, _) = project("misspelledbase", &[("uvm_pkg.sv", uvm), ("t.sv", "import uvm_pkg::*;\nclass t extends uvm_tset;\nendclass\n")]);
+    assert_eq!(a.verification_tree(None, &TreeQuery::new(100)).0.hint, None);
+    // No UVM library in a build: the build file needs -uvm.
+    let (a, _) = project("nouvm", &[("t.sv", "class t extends uvm_test;\nendclass\n")]);
+    let hint = a.verification_tree(None, &TreeQuery::new(100)).0.hint.unwrap_or_default();
+    assert!(hint.contains("add -uvm to the build file"), "{hint}");
+}

@@ -672,6 +672,7 @@ impl Analysis {
     fn unresolved_uvm_bases(&self) -> Option<String> {
         let mut bases: Vec<(String, usize)> = Vec::new();
         let mut seen = FxHashSet::default();
+        let uvm = self.global.packages.get("uvm_pkg").and_then(|v| v.first().copied());
         for u in self.units.iter().flatten() {
             if u.kind == UnitKind::Builtin {
                 continue;
@@ -693,6 +694,10 @@ impl Analysis {
                 if !base.starts_with("uvm_") || self.class_base(c).is_some() {
                     continue;
                 }
+                // With UVM compiled, only names it declares (a misspelled one is another problem).
+                if uvm.is_some_and(|p| self.member_of(p, &base).is_none()) {
+                    continue;
+                }
                 match bases.iter_mut().find(|(b, _)| *b == base) {
                     Some((_, n)) => *n += 1,
                     None => bases.push((base, 1)),
@@ -705,10 +710,10 @@ impl Analysis {
         bases.sort_by(|a, b| b.1.cmp(&a.1));
         let total: usize = bases.iter().map(|(_, n)| n).sum();
         let names: Vec<String> = bases.iter().take(3).map(|(b, _)| b.clone()).collect();
-        let why = if self.global.packages.contains_key("uvm_pkg") {
-            "uvm_pkg is not imported where they are declared"
-        } else {
-            "the UVM library is not compiled (set dvicode.uvmHome or add -uvm to the build file)"
+        let why = match (uvm.is_some(), self.setup.config.build_file.is_some()) {
+            (true, _) => "uvm_pkg is not imported where they are declared",
+            (false, true) => "the UVM library is not compiled: add -uvm to the build file (with UVM_HOME or the dvicode.uvmHome setting naming its folder), or its uvm_pkg.sv",
+            (false, false) => "the UVM library is not compiled: set dvicode.uvmHome to its folder",
         };
         let classes = if total == 1 { "1 class extends".to_string() } else { format!("{total} classes extend") };
         let mut s = format!("No UVM test found: {classes} {} but {why}.", names.join(", "));

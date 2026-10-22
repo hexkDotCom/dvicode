@@ -290,6 +290,8 @@ const OPTS_WITH_ARG: &[&str] = &[
     "-defparam", "-libmap", "-makelib", "-pkgsearch", "-lib", "-sv_liblist", "-nclibdirname",
     "-xmlibdirpath", "-modelsimini", "-suppress", "-error", "-warning", "-note", "-msgmode",
     "-sverilog_ext", "-vlog_ext", "-uvmhome",
+    // Questa vlog.
+    "-Lf", "-dpiheader", "-cover", "-outf", "-writetoplevels", "-ccflags", "-ldflags", "-dpicpppath",
 ];
 
 /// Options DVICode reads that take the next word as their value.
@@ -1031,6 +1033,10 @@ impl Builder {
     /// the `+incdir+` of `-f` lists the log does not show).
     fn read_simlog(&mut self, file: &Path, line: u32, log: &str, base: &Path) {
         let Some(path) = self.resolve(file, line, log, base) else { return };
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if self.reading.contains(&key) || self.depth > 32 {
+            return self.problem(file, line, format!("Simulation log {} reads itself", path.display()));
+        }
         let e = self.expand(log, true).unwrap_or_default();
         self.link(file, &path);
         let text = match std::fs::read(&path) {
@@ -1069,18 +1075,39 @@ impl Builder {
                 let (files_at, libs_at) = (self.inv().files.len(), self.inv().lib_files.len());
                 let defines_at = self.inv().defines.len();
                 let incdirs_at = self.inv().incdirs.len();
-                // vlog echoes its options quoted ("+incdir+inc"): a quoted word without spaces is
-                // the word itself.
-                let unquote = |w: &String| match w.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
-                    Some(inner) if !inner.contains(char::is_whitespace) && !inner.contains('"') => inner.to_string(),
-                    _ => w.clone(),
-                };
-                let text = s.words.iter().map(unquote).collect::<Vec<_>>().join("\n");
+                let problems_at = self.cfg.problems.len();
+                // vlog echoes its options quoted ("+incdir+inc"): an option is the word inside
+                // the quotes. Defines are taken here (a value may hold spaces); DVICode's own
+                // directives are not taken from a log.
+                let mut lines = Vec::new();
+                for w in &s.words {
+                    let inner = w.strip_prefix('"').and_then(|x| x.strip_suffix('"')).filter(|x| !x.contains('"'));
+                    let opt = inner.filter(|x| x.starts_with('+') || !x.contains(char::is_whitespace)).unwrap_or(w);
+                    if let Some(d) = opt.strip_prefix("+define+") {
+                        for d in split_defines(d) {
+                            self.add_define(&d);
+                        }
+                    } else if !opt.starts_with("+dvicode_") {
+                        lines.push(opt.to_string());
+                    }
+                }
+                let text = lines.join("\n");
                 let (span, word, focus_at) = (self.span, std::mem::take(&mut self.word), self.focus_at);
+                // As vlog reads them: -f files' paths are from the compile folder, the log's.
+                let (mode, comp_root) = (std::mem::replace(&mut self.inv().mode, "questa".into()), std::mem::replace(&mut self.comp_root, dir.clone()));
                 self.depth += 1;
+                self.reading.push(key.clone());
                 self.parse_text(&path, &text, dir.clone());
+                self.reading.pop();
                 self.depth -= 1;
+                (self.inv().mode, self.comp_root) = (mode, comp_root);
                 (self.span, self.word, self.focus_at) = (span, word, focus_at);
+                // Problems found in the command line are shown on the directive (their places in
+                // the log are not known).
+                for p in &mut self.cfg.problems[problems_at..] {
+                    p.message = format!("{} (in the vlog command of {})", p.message, path.display());
+                    (p.file, p.line, p.range) = (file.to_path_buf(), line, Some(span).filter(|(s, e)| e > s));
+                }
                 let inv = self.inv();
                 let (files, libs): (Vec<PathBuf>, Vec<PathBuf>) = (inv.files[files_at..].to_vec(), inv.lib_files[libs_at..].to_vec());
                 let (nd, ni) = (inv.defines.len() - defines_at, inv.incdirs.len() - incdirs_at);
@@ -1985,6 +2012,31 @@ mod tests {
         let files: Vec<Vec<PathBuf>> = cfg.invocations.iter().map(|i| i.files.clone()).collect();
         assert_eq!(files, vec![vec![dir.join("rtl/pkg.sv"), dir.join("rtl/top.sv")], vec![dir.join("rtl/tb.sv")]]);
         assert_eq!(cfg.invocations[1].defines, vec![("SIM".to_string(), None)]);
+    }
+
+    #[test]
+    fn questa_command_lines_as_vlog_reads_them() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_questa2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("rtl")).unwrap();
+        std::fs::create_dir_all(dir.join("lists")).unwrap();
+        for f in ["rtl/tb.sv", "rtl/top.sv", "dpi.h"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        // Paths in an -f file are from the compile folder (the log's), as vlog reads them.
+        std::fs::write(dir.join("lists/tb.f"), "rtl/tb.sv\n").unwrap();
+        let log = "\"C:\\Program Files\\Questa\\win64\\vlog.exe\" -sv -Lf vendor_lib -dpiheader dpi.h \"+define+MSG=hello world\" +dvicode_init_from_simlog+compile.log -f lists/tb.f rtl/top.sv rtl/missing.sv\n";
+        std::fs::write(dir.join("compile.log"), log).unwrap();
+        let text = "+dvicode_init_from_simlog+compile.log\n";
+        let cfg = parse_build(&dir, &dir.join(".dvicode/default.build"), text, &FxHashMap::default());
+        let inv = &cfg.invocations[0];
+        assert_eq!(inv.files, vec![dir.join("rtl/tb.sv"), dir.join("rtl/top.sv"), dir.join("rtl/missing.sv")]);
+        assert_eq!(inv.defines, vec![("MSG".to_string(), Some("hello world".to_string()))]);
+        // The missing file is reported on the directive, not at a made-up place in the log.
+        let m = messages(&cfg.problems);
+        assert!(cfg.problems.iter().all(|p| p.file == dir.join(".dvicode/default.build")), "{:?}", cfg.problems);
+        assert!(m.iter().any(|x| x.contains("missing.sv") && x.contains("in the vlog command of")), "{m:?}");
+        assert_eq!(at(text, &cfg.problems[0]), "compile.log");
     }
 
     #[test]
