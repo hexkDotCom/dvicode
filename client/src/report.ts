@@ -125,13 +125,19 @@ export class Reporter {
     this.notify(e.feature, `DVICode: internal error in ${featureName(e.feature)}. Results may be incomplete.`);
   }
 
-  /** Restarts the engine after a crash, a few times, and offers to report it. */
-  errorHandler(): ErrorHandler {
+  /**
+   * Restarts the engine after a crash, a few times, and offers to report it; never the engine
+   * of a client that is `replaced`.
+   */
+  errorHandler(replaced: () => boolean = () => false): ErrorHandler {
     return {
       error: (_error, _message, count): ErrorHandlerResult => ({
-        action: (count ?? 0) <= 3 ? ErrorAction.Continue : ErrorAction.Shutdown,
+        action: !replaced() && (count ?? 0) <= 3 ? ErrorAction.Continue : ErrorAction.Shutdown,
       }),
       closed: (): CloseHandlerResult => {
+        if (replaced()) {
+          return { action: CloseAction.DoNotRestart, handled: true };
+        }
         const now = Date.now();
         this.crashes = this.crashes.filter((t) => now - t < CRASH_WINDOW_MS);
         this.crashes.push(now);

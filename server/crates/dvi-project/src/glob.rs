@@ -10,11 +10,16 @@ pub fn has_wildcard(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
+/// No file or folder name is longer (255 UTF-16 units or bytes on common file systems): a
+/// longer pattern component is matched as written, which keeps the work linear.
+const MAX_NAME: usize = 1024;
+
 /// A character class (`[ab]`) in some path component: a `[` closed later in the component.
+/// Only the first `[` needs a look: when it is not closed, no later one is.
 pub fn has_class(s: &str) -> bool {
     s.split(['/', '\\']).any(|c| {
         let p: Vec<char> = c.chars().collect();
-        (0..p.len()).any(|i| p[i] == '[' && class_at(&p, i, ' ').is_some())
+        p.len() <= MAX_NAME && p.iter().position(|&x| x == '[').is_some_and(|i| class_at(&p, i, ' ').is_some())
     })
 }
 
@@ -49,6 +54,9 @@ fn class_at(p: &[char], i: usize, c: char) -> Option<(bool, usize)> {
 
 /// Matches one path component against a pattern with `*`, `?` and `[...]`.
 pub fn match_component(pat: &str, s: &str) -> bool {
+    if pat.len() > MAX_NAME {
+        return pat == s;
+    }
     let p: Vec<char> = pat.chars().collect();
     let t: Vec<char> = s.chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
@@ -237,6 +245,16 @@ fn match_seq(pat: &[&str], comps: &[String]) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_patterns_stay_linear() {
+        let t = std::time::Instant::now();
+        let open = "[".repeat(1 << 20);
+        assert!(!has_class(&open));
+        assert!(!match_component(&format!("{open}*"), "a"));
+        assert!(has_class("a[]x[y]") && !has_class("a[]b") && has_class("x[!ab]"));
+        assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+    }
 
     #[test]
     fn repeated_double_stars_stay_cheap() {

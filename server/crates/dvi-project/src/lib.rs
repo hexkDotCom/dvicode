@@ -945,10 +945,11 @@ impl Builder {
         // An argument file read since the last change keeps the variables as they were: a
         // change now copies them all.
         let copy: usize = if Arc::strong_count(&self.env) > 1 { self.env.iter().map(|(k, v)| k.len() + v.len()).sum() } else { 0 };
-        if self.env_bytes + copy + v.len() > MAX_ENV_BYTES {
+        let new = copy + k.len() + v.len();
+        if self.env_bytes + new > MAX_ENV_BYTES {
             return self.problem(file, line, format!("The build's variables take more than {} MB; {k} is not set", MAX_ENV_BYTES >> 20));
         }
-        self.env_bytes += copy + v.len();
+        self.env_bytes += new;
         if !self.inspecting {
             // Not the value: it can come from a secret in the environment.
             log::debug!("build: environment {k} set");

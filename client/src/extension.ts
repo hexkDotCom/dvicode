@@ -129,7 +129,8 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     documentSelector: SV_SELECTOR,
     outputChannel: output,
     revealOutputChannelOn: RevealOutputChannelOn.Never,
-    errorHandler: reporter.errorHandler(),
+    // A client a restart has replaced does not restart itself when its connection goes.
+    errorHandler: reporter.errorHandler(() => generation !== startGeneration),
     initializationOptions: settingsForServer(),
     synchronize: {
       configurationSection: 'dvicode',
