@@ -1,12 +1,13 @@
 //! The server through its message loop, as an editor drives it: an in-memory connection, a
 //! small project on disk, and the notifications and replies in the order they arrive.
 
-use super::run;
+use super::{run_with, Hooks};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{PublishDiagnosticsParams, Url};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -66,11 +67,17 @@ struct Client {
     notes: Vec<Notification>,
     /// Every problem publication, in arrival order.
     published: Vec<PublishDiagnosticsParams>,
+    /// Replies not consumed yet.
+    replies: Vec<Response>,
 }
 
 impl Client {
     /// Starts a server on `root` and waits for its first build.
     fn start(root: &Path, options: Value) -> (Client, Value) {
+        Client::start_with(root, options, Hooks::default())
+    }
+
+    fn start_with(root: &Path, options: Value, hooks: Hooks) -> (Client, Value) {
         // The server's panic hook (internal error locations), and the test harness's after it.
         static HOOK: Once = Once::new();
         HOOK.call_once(|| {
@@ -83,8 +90,8 @@ impl Client {
             }));
         });
         let (server, conn) = Connection::memory();
-        let handle = std::thread::spawn(move || run(server).expect("server loop"));
-        let mut c = Client { conn, server: Some(handle), next_id: 0, notes: Vec::new(), published: Vec::new() };
+        let handle = std::thread::spawn(move || run_with(server, hooks).expect("server loop"));
+        let mut c = Client { conn, server: Some(handle), next_id: 0, notes: Vec::new(), published: Vec::new(), replies: Vec::new() };
         let root_uri = Url::from_file_path(root).unwrap();
         let init = c.request_ok(
             "initialize",
@@ -122,16 +129,31 @@ impl Client {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Response {
+        let id = self.send_request(method, params);
+        self.reply(&id, WAIT).unwrap_or_else(|| panic!("no reply to {method}"))
+    }
+
+    /// Sends a request without waiting for its reply.
+    fn send_request(&mut self, method: &str, params: Value) -> RequestId {
         self.next_id += 1;
         let id = RequestId::from(self.next_id);
         self.conn.sender.send(Message::Request(Request::new(id.clone(), method.into(), params))).unwrap();
-        let deadline = Instant::now() + WAIT;
+        id
+    }
+
+    /// The reply to request `id`, if it comes within `wait`.
+    fn reply(&mut self, id: &RequestId, wait: Duration) -> Option<Response> {
+        if let Some(i) = self.replies.iter().position(|r| &r.id == id) {
+            return Some(self.replies.remove(i));
+        }
+        let deadline = Instant::now() + wait;
         loop {
             match self.recv(deadline) {
-                Some(Message::Response(r)) if r.id == id => return r,
+                Some(Message::Response(r)) if &r.id == id => return Some(r),
+                Some(Message::Response(r)) => self.replies.push(r),
                 Some(Message::Notification(n)) => self.notes.push(n),
                 Some(_) => {}
-                None => panic!("no reply to {method}"),
+                None => return None,
             }
         }
     }
@@ -703,5 +725,141 @@ fn type_hierarchy_walks_bases_and_subclasses() {
     let sup = c.request_ok("typeHierarchy/supertypes", json!({ "item": items[0] }));
     let sub = c.request_ok("typeHierarchy/subtypes", json!({ "item": items[0] }));
     assert_eq!((sup[0]["name"].as_str(), sub[0]["name"].as_str()), (Some("base_c"), Some("leaf_c")), "{sup} {sub}");
+    c.shutdown();
+}
+
+/// Holds the server's update thread while it is closed, so that a test can talk to the server
+/// while an update runs (as a header that thousands of files include keeps it busy).
+#[derive(Default)]
+struct Gate {
+    closed: Mutex<bool>,
+    opened: Condvar,
+    /// Updates that reached the gate.
+    entered: AtomicUsize,
+}
+
+impl Gate {
+    fn hooks(self: &Arc<Self>) -> Hooks {
+        let g = self.clone();
+        Hooks { before_update: Some(Box::new(move || g.pass())) }
+    }
+
+    fn pass(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut closed = self.closed.lock().unwrap();
+        while *closed {
+            closed = self.opened.wait(closed).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        *self.closed.lock().unwrap() = true;
+    }
+
+    fn open(&self) {
+        *self.closed.lock().unwrap() = false;
+        self.opened.notify_all();
+    }
+
+    /// Waits until `n` updates in all have reached the gate.
+    fn wait_entered(&self, n: usize) {
+        let deadline = Instant::now() + WAIT;
+        while self.entered.load(Ordering::SeqCst) < n {
+            assert!(Instant::now() < deadline, "{} update(s) reached the gate, not {n}", self.entered.load(Ordering::SeqCst));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Opens the gate when a test ends, also when it fails, so that the update thread finishes.
+struct Opener(Arc<Gate>);
+
+impl Drop for Opener {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+const FRESH: &str = "module top;\n  import p::*;\n  int fresh;\n  state_e s;\n  initial fresh = 2;\nendmodule\n";
+
+/// The definition of `fresh` in top.sv, as `FRESH` declares it.
+fn fresh_definition(c: &mut Client, top: &Url, text: &str) -> RequestId {
+    c.send_request("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(text, "fresh = 2") }))
+}
+
+#[test]
+fn a_request_is_answered_while_a_slow_update_runs() {
+    let root = project("slowupdate", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (pkg, top) = (uri(&root, "pkg.sv"), uri(&root, "top.sv"));
+    c.open(&top, 1, TOP);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // The next update stops at the gate.
+    gate.close();
+    c.change(&top, 2, FRESH);
+    // Asked right after the edit: waits for the update that analyses it, which starts now.
+    let waiting = fresh_definition(&mut c, &top, FRESH);
+    gate.wait_entered(2);
+    // Meanwhile the server reads and answers requests about files the update leaves alone.
+    let h = c.request_ok("textDocument/hover", json!({ "textDocument": { "uri": pkg }, "position": at(PKG, "twice") }));
+    assert!(h["contents"]["value"].as_str().unwrap_or("").contains("twice"), "{h}");
+    assert_eq!(c.request_ok("dvicode/serverInfo", Value::Null)["pid"], std::process::id());
+    assert!(c.reply(&waiting, Duration::from_millis(300)).is_none(), "answered before its edit was analysed");
+    // Once the update is in, the waiting request sees the new declaration.
+    gate.open();
+    let r = c.reply(&waiting, WAIT).expect("a reply once the update is in");
+    let locs = r.result.unwrap_or(Value::Null);
+    assert_eq!(locs.as_array().map(|l| l.len()), Some(1), "{locs}");
+    assert_eq!(locs[0]["range"]["start"]["line"], 2);
+    c.shutdown();
+}
+
+#[test]
+fn a_newer_edit_replaces_the_update_in_progress() {
+    let root = project("supersede", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, TOP);
+    gate.wait_entered(1);
+    let first = c.wait_note("dvicode/revision", |_| true)["revision"].as_u64().unwrap();
+    gate.close();
+    // An edit whose update is held at the gate, then another of the same file.
+    c.change(&top, 2, &TOP.replace("initial s = IDLE;", "initial s = IDLE;\n  initial undeclared_a = 1;"));
+    c.request_ok("dvicode/serverInfo", Value::Null);
+    let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    gate.wait_entered(2);
+    let v3 = FRESH.replace("initial fresh = 2;", "initial fresh = 2;
+  initial undeclared_b = 1;");
+    c.change(&top, 3, &v3);
+    let waiting = fresh_definition(&mut c, &top, &v3);
+    // The held update stops as soon as it goes on; the one that replaces it comes next.
+    gate.open();
+    gate.wait_entered(3);
+    // One update, of the newest text, is installed: the replaced one is not.
+    let r = c.reply(&waiting, WAIT).expect("a reply once the update is in");
+    assert_eq!(r.result.unwrap_or(Value::Null)[0]["range"]["start"]["line"], 2);
+    assert!(c.reply(&symbols, WAIT).is_some_and(|r| r.error.is_none()));
+    let next = c.wait_note("dvicode/revision", |_| true)["revision"].as_u64().unwrap();
+    assert_eq!(next, first + 1);
+    let p = c.wait_problems(&top, |p| p.version == Some(3));
+    assert!(p.diagnostics.len() == 1 && p.diagnostics[0].message.contains("undeclared_b"), "{:?}", p.diagnostics);
+    assert!(c.versions(&top).iter().all(|v| *v != Some(2)), "{:?}", c.versions(&top));
+    c.shutdown();
+}
+
+#[test]
+fn shutdown_is_answered_while_an_update_runs() {
+    let root = project("shutdownbusy", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    gate.close();
+    c.open(&uri(&root, "top.sv"), 1, TOP);
+    gate.wait_entered(1);
     c.shutdown();
 }

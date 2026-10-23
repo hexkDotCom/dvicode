@@ -187,3 +187,18 @@ fn library_units_follow_the_instances_that_need_them() {
     assert!(e.is_adhoc_root(leaf));
     assert_eq!(names(&e), vec!["leaf.v", "top.sv"]);
 }
+
+#[test]
+fn a_cancelled_update_gives_no_snapshot() {
+    let (a, root) = project("cancelled", &[("defs.svh", DEFS), ("a.sv", A), ("b.sv", B)]);
+    let defs = edit(&a, &root, "defs.svh", "`define W 16\n");
+    let progress = dvi_project::Progress::new();
+    progress.cancel();
+    assert!(a.update_with(&[defs], &progress).is_none());
+    // One that goes on compiles the edit.
+    let fa = a.vfs.file_id(&root.join("a.sv"));
+    let unit = |x: &Analysis| x.unit(x.units_of_file(fa)[0]).clone();
+    let next = a.update_with(&[defs], &dvi_project::Progress::new()).expect("not cancelled");
+    assert!(!Arc::ptr_eq(&unit(&a).parsed, &unit(&next).parsed));
+    assert!(next.interface_changed(&a), "W changed");
+}

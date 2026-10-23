@@ -7,7 +7,7 @@ use build_docs::{BuildDoc, Inspected};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
-use dvi_analysis::{Analysis, ProjectSetup, Vfs};
+use dvi_analysis::{Analysis, ProjectSetup, UnitKind, Vfs};
 use dvi_project::Progress;
 use dvi_syntax::{FileId, SourceProvider};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -129,6 +129,46 @@ enum Event {
     Built(Option<Box<Analysis>>, u64, Option<String>),
     /// An open build or argument file checked: its URI and version, and what was found.
     Inspected(Url, u64, Inspected),
+    /// The update `UpdateJob::seq` finished; `None` when it failed.
+    Updated(u64, Option<Box<Updated>>),
+}
+
+/// Edits to apply to a snapshot, on the update thread (`update_thread`).
+#[derive(Clone)]
+struct UpdateJob {
+    seq: u64,
+    /// The snapshot in use when it started.
+    base: Arc<Analysis>,
+    /// The edited files, sorted.
+    files: Vec<FileId>,
+    /// The open documents, in a stable order.
+    open: Vec<FileId>,
+    /// Cancelled when a newer job replaces it.
+    progress: Arc<Progress>,
+}
+
+/// What an update made.
+struct Updated {
+    analysis: Analysis,
+    /// Declarations or macros other files use changed.
+    interface_changed: bool,
+    /// Files of the units compiled again, before and after.
+    recompiled: Vec<FileId>,
+}
+
+/// A request that waits for edits to be analysed (see `Server::spawn`).
+struct Deferred {
+    /// The file it is about; `None`: it waits until every edit is analysed.
+    file: Option<FileId>,
+    /// Answers it from a snapshot.
+    run: Box<dyn FnOnce(Arc<Analysis>) + Send>,
+}
+
+/// Lets tests hold the update thread.
+#[derive(Default)]
+pub(crate) struct Hooks {
+    /// Called on the update thread before each update.
+    pub before_update: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 struct Server {
@@ -166,6 +206,15 @@ struct Server {
     inspect_at: Option<Instant>,
     /// Numbers the checks of build documents (`BuildDoc::seq`).
     inspect_seq: u64,
+    /// The update thread's jobs, the one running (or queued), and the last job number.
+    update_tx: Sender<UpdateJob>,
+    update: Option<UpdateJob>,
+    update_seq: u64,
+    /// Requests waiting for the running update, in arrival order.
+    deferred: Vec<Deferred>,
+    /// A full build was installed and is announced (status, all problems) once the edits made
+    /// while it ran are applied too; the error message when it failed.
+    announce: Option<Option<String>>,
 }
 
 /// How long typing in a build file pauses before it is checked.
@@ -176,6 +225,10 @@ const REPORT_EVERY: Duration = Duration::from_millis(500);
 const LOG_EVERY: Duration = Duration::from_secs(5);
 
 pub fn run(conn: Connection) -> Res<()> {
+    run_with(conn, Hooks::default())
+}
+
+pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let (id, params) = conn.initialize_start()?;
     let params: InitializeParams = serde_json::from_value(params)?;
     let result = InitializeResult {
@@ -206,6 +259,15 @@ pub fn run(conn: Connection) -> Res<()> {
     let empty_setup = Arc::new(ProjectSetup::new(root.as_deref().unwrap_or(std::path::Path::new("/")), Default::default(), Default::default()));
     let analysis = Arc::new(Analysis::build(vfs.clone(), empty_setup));
     let (events_tx, events_rx) = unbounded();
+    let (update_tx, update_rx) = unbounded();
+    {
+        let (events, client, hooks) = (events_tx.clone(), conn.sender.clone(), Arc::new(hooks));
+        std::thread::Builder::new()
+            .name("dvicode-update".into())
+            .stack_size(64 << 20)
+            .spawn(move || update_thread(update_rx, events, client, hooks))
+            .expect("spawn update thread");
+    }
     let mut s = Server {
         sender: conn.sender.clone(),
         vfs,
@@ -234,6 +296,11 @@ pub fn run(conn: Connection) -> Res<()> {
         build_docs: FxHashMap::default(),
         inspect_at: None,
         inspect_seq: 0,
+        update_tx,
+        update: None,
+        update_seq: 0,
+        deferred: Vec::new(),
+        announce: None,
     };
     s.start_build();
     s.main_loop(&conn)
@@ -284,6 +351,7 @@ impl Server {
                     match ev {
                         Ok(Event::Built(a, generation, error)) => self.on_built(a.map(|a| *a), generation, error),
                         Ok(Event::Inspected(uri, seq, ins)) => self.on_inspected(uri, seq, ins),
+                        Ok(Event::Updated(seq, done)) => self.on_updated(seq, done.map(|u| *u)),
                         Err(_) => {}
                     }
                 }
@@ -510,26 +578,40 @@ impl Server {
             log::info!("{text}");
             self.notify("window/showMessage", ShowMessageParams { typ: MessageType::INFO, message: text });
         }
-        // Open files that are not part of the build are compiled ad hoc.
-        let open = self.open_files();
-        let mut a = a.sync_open_files(&open);
-        // Edits made while the build ran, including those already applied to the previous
-        // snapshot by the debounce: the build may have read older text.
-        let mut files: Vec<FileId> = self.changed_during_build.drain().collect();
-        files.extend(self.pending.drain());
-        files.sort_unstable();
-        files.dedup();
-        self.pending_since = None;
-        if !files.is_empty() {
-            let built = &a;
-            let replayed = crash::catch("update after an edit", Some(&self.sender), || built.update(&files).sync_open_files(&open));
-            if let Some(next) = replayed {
-                a = next;
+        // A running update started from the snapshot this replaces.
+        self.cancel_update();
+        // The update thread applies the edits made while the build ran, including those
+        // already applied to the previous snapshot by the debounce (the build may have read
+        // older text), and compiles open files that are not part of the build ad hoc.
+        self.pending.extend(self.changed_during_build.drain());
+        for f in self.open.keys() {
+            if a.units_of_file(*f).is_empty() {
+                self.pending.insert(*f);
             }
         }
         self.install(a);
         self.built_once = true;
         self.end_progress();
+        self.announce = Some(error);
+        if self.pending.is_empty() {
+            self.announce_build();
+        } else {
+            self.flush_pending();
+        }
+        // The build may read open argument files differently now.
+        if !self.build_docs.is_empty() {
+            self.inspect_at = Some(Instant::now());
+        }
+        if self.build_again {
+            self.build_again = false;
+            self.start_build();
+        }
+        self.run_deferred();
+    }
+
+    /// Tells the client about the full build installed last: its status, and all problems.
+    fn announce_build(&mut self) {
+        let Some(error) = self.announce.take() else { return };
         let st = self.analysis.status();
         log::info!(
             "project ready: {} top files, {} files, {} declarations; {} s since the build started",
@@ -545,14 +627,6 @@ impl Server {
         }
         self.notify("dvicode/status", &status);
         self.publish_all();
-        // The build may read open argument files differently now.
-        if !self.build_docs.is_empty() {
-            self.inspect_at = Some(Instant::now());
-        }
-        if self.build_again {
-            self.build_again = false;
-            self.start_build();
-        }
     }
 
     fn end_progress(&self) {
@@ -584,59 +658,105 @@ impl Server {
         }
     }
 
+    /// Hands the pending edits to the update thread. An update that is running already goes
+    /// on unless a file it compiles was edited again: then one update with the files of both
+    /// replaces it (it may have read text that is out of date). Other edits wait for it.
     fn flush_pending(&mut self) {
+        if let Some(job) = &self.update {
+            if !self.pending.iter().any(|f| job.files.binary_search(f).is_ok()) {
+                // Flushed when it is done (`on_updated`).
+                self.pending_since = None;
+                return;
+            }
+            self.cancel_update();
+        }
         self.pending_since = None;
         if self.pending.is_empty() {
             return;
         }
-        let files: Vec<FileId> = self.pending.drain().collect();
-        let t0 = Instant::now();
-        let a = self.analysis.clone();
-        let open = self.open_files();
-        // An open header may have lost its last includer, or an open file outside the build
-        // gained one.
-        let r = crash::catch("update after an edit", Some(&self.sender), || a.update(&files).sync_open_files(&open));
+        let mut files: Vec<FileId> = self.pending.drain().collect();
+        files.sort_unstable();
+        self.update_seq += 1;
+        let job = UpdateJob { seq: self.update_seq, base: self.analysis.clone(), files, open: self.open_files(), progress: Arc::new(Progress::new()) };
+        let _ = self.update_tx.send(job.clone());
+        self.update = Some(job);
+    }
+
+    /// Stops the running update (its snapshot is being replaced): its files are pending again.
+    fn cancel_update(&mut self) {
+        if let Some(job) = self.update.take() {
+            job.progress.cancel();
+            self.pending.extend(job.files);
+            self.pending_since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    fn on_updated(&mut self, seq: u64, done: Option<Updated>) {
+        if self.update.as_ref().map_or(true, |j| j.seq != seq) {
+            return; // replaced by a newer job
+        }
+        let Some(job) = self.update.take() else { return };
         let mut interface_changed = false;
         let mut recompiled = Vec::new();
-        match r {
-            Some(next) => {
-                interface_changed = next.interface_changed(&a);
-                recompiled = next.recompiled_files(&a);
-                self.install(next);
+        match done {
+            Some(_) if !Arc::ptr_eq(&job.base, &self.analysis) => {
+                // Started from a snapshot that was replaced since (replacing one cancels the
+                // update, so this is a safety net): again, from the one in use.
+                log::warn!("update of {} file(s) started from an older snapshot; updating again", job.files.len());
+                self.pending.extend(job.files);
+                self.flush_pending();
+                return;
+            }
+            Some(u) => {
+                interface_changed = u.interface_changed;
+                recompiled = u.recompiled;
+                self.install(u.analysis);
                 // The views refresh what they show.
                 self.notify("dvicode/revision", &json!({ "revision": self.revision }));
             }
-            None => log::error!("kept the previous analysis of {:?}", files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
+            None => log::error!("kept the previous analysis of {:?}", job.files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
         }
-        if interface_changed {
+        if self.announce.is_some() {
+            self.announce_build();
+        } else if interface_changed {
             // Declarations or macros other files use changed: their problems may have too.
             self.publish_all();
-            return;
+        } else {
+            // Problems of the changed files, of the other files compiled again with them, and
+            // of the open files.
+            let mut targets: FxHashSet<FileId> = job.files.iter().copied().collect();
+            targets.extend(recompiled);
+            for f in self.open.keys() {
+                targets.insert(*f);
+            }
+            // Their SKIPPED_CODE notices count uses in every file (no build file).
+            targets.extend(self.analysis.files_with_skipped_code());
+            self.publish(targets.into_iter().collect(), false);
         }
-        log::debug!("incremental update of {} file(s) in {} ms", files.len(), t0.elapsed().as_millis());
-        // Problems of the changed files, of the other files compiled again with them, and of
-        // the open files.
-        let mut targets: FxHashSet<FileId> = files.iter().copied().collect();
-        targets.extend(recompiled);
-        for f in self.open.keys() {
-            targets.insert(*f);
+        self.run_deferred();
+        // Edits that waited for this update, their pause in typing over.
+        if self.pending_since.is_none() {
+            self.flush_pending();
         }
-        // Their SKIPPED_CODE notices count uses in every file (no build file).
-        targets.extend(self.analysis.files_with_skipped_code());
-        self.publish(targets.into_iter().collect(), false);
     }
 
-    fn flush_if_pending(&mut self, params: &Value) {
-        if self.pending.is_empty() {
-            return;
+    /// Whether a request about `file` (`None`: about no file in particular) must wait: the
+    /// file's edits are not analysed yet (any edit, for `None`).
+    fn waits(&self, file: Option<FileId>) -> bool {
+        match file {
+            Some(f) => self.pending.contains(&f) || self.update.as_ref().is_some_and(|j| j.files.binary_search(&f).is_ok()),
+            None => !self.pending.is_empty() || self.update.is_some(),
         }
-        let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str());
-        let touches = match uri.and_then(|u| Url::parse(u).ok()).and_then(|u| self.analysis.file_of_url(&u)) {
-            Some(f) => self.pending.contains(&f),
-            None => true,
-        };
-        if touches {
-            self.flush_pending();
+    }
+
+    /// Answers the waiting requests whose edits are analysed now.
+    fn run_deferred(&mut self) {
+        for d in std::mem::take(&mut self.deferred) {
+            if self.waits(d.file) {
+                self.deferred.push(d);
+            } else {
+                (d.run)(self.analysis.clone());
+            }
         }
     }
 
@@ -813,6 +933,7 @@ impl Server {
                     self.open.remove(&id);
                     if self.analysis.is_adhoc_root(id) {
                         let next = self.analysis.remove_adhoc(id);
+                        self.cancel_update();
                         self.install(next);
                         let uri = p.text_document.uri;
                         let mut st = self.published.lock().unwrap();
@@ -891,12 +1012,33 @@ impl Server {
         self.analysis = Arc::new(a);
     }
 
+    /// Answers `req` with `f` on a worker thread. A request about a file whose edits are not
+    /// analysed yet (about any edit, when it names no file) waits for the update that
+    /// analyses them, so that it sees the text the editor sent before it.
     fn spawn<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
         R: Serialize,
     {
-        self.flush_if_pending(&req.params);
+        let file = self.file_of_request(&req.params);
+        self.spawn_with(req, Some(file), f);
+    }
+
+    /// [`Server::spawn`] for requests that do not depend on edits: answered at once.
+    fn spawn_now<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
+    where
+        P: DeserializeOwned + Send + 'static,
+        R: Serialize,
+    {
+        self.spawn_with(req, None, f);
+    }
+
+    /// `about`: the file the request is about, when it may have to wait for edits.
+    fn spawn_with<P, R>(&mut self, req: Request, about: Option<Option<FileId>>, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
+    where
+        P: DeserializeOwned + Send + 'static,
+        R: Serialize,
+    {
         let id = req.id.clone();
         let params: P = match serde_json::from_value(req.params) {
             Ok(p) => p,
@@ -905,22 +1047,37 @@ impl Server {
                 return;
             }
         };
-        let a = self.analysis.clone();
         let sender = self.sender.clone();
         let method = req.method.clone();
-        rayon::spawn(move || {
-            let t0 = Instant::now();
-            let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
-                Some(Ok(v)) => Response::new_ok(id, v),
-                Some(Err(msg)) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
-                None => Response::new_err(id, ErrorCode::InternalError as i32, format!("{method} failed")),
-            };
-            let ms = t0.elapsed().as_millis();
-            if ms > 200 {
-                log::info!("{method} took {ms} ms");
+        let run = move |a: Arc<Analysis>| {
+            rayon::spawn(move || {
+                let t0 = Instant::now();
+                let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
+                    Some(Ok(v)) => Response::new_ok(id, v),
+                    Some(Err(msg)) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
+                    None => Response::new_err(id, ErrorCode::InternalError as i32, format!("{method} failed")),
+                };
+                let ms = t0.elapsed().as_millis();
+                if ms > 200 {
+                    log::info!("{method} took {ms} ms");
+                }
+                let _ = sender.send(Message::Response(resp));
+            })
+        };
+        match about {
+            Some(file) if self.waits(file) => {
+                // Its edits are analysed now, not after the pause in typing.
+                self.flush_pending();
+                self.deferred.push(Deferred { file, run: Box::new(run) });
             }
-            let _ = sender.send(Message::Response(resp));
-        });
+            _ => run(self.analysis.clone()),
+        }
+    }
+
+    /// The document a request is about (`textDocument.uri`), when the server knows it.
+    fn file_of_request(&self, params: &Value) -> Option<FileId> {
+        let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str());
+        uri.and_then(|u| Url::parse(u).ok()).and_then(|u| self.analysis.file_of_url(&u))
     }
 
     /// Requests on an open build or argument file: hover and links; nothing else applies.
@@ -1083,7 +1240,7 @@ impl Server {
             }),
             // ---------------------------------------------------------- custom
             "dvicode/status" => self.spawn(req, |a, _: Value| Ok(a.status())),
-            "dvicode/serverInfo" => self.spawn(req, |_, _: Value| {
+            "dvicode/serverInfo" => self.spawn_now(req, |_, _: Value| {
                 Ok(json!({
                     "version": crate::VERSION,
                     "pid": std::process::id(),
@@ -1131,7 +1288,7 @@ impl Server {
             "dvicode/buildConfigs" => {
                 let root = self.root.clone();
                 let current = self.analysis.setup.config.build_file.clone();
-                self.spawn(req, move |_, _: Value| {
+                self.spawn_now(req, move |_, _: Value| {
                     let files = root.as_deref().map(dvi_project::list_build_files).unwrap_or_default();
                     Ok(json!({
                         "current": current.map(|p| p.display().to_string()),
@@ -1168,6 +1325,43 @@ impl Server {
                 self.send(Message::Response(Response::new_err(req.id, ErrorCode::MethodNotFound as i32, format!("unhandled method {}", req.method))));
             }
         }
+    }
+}
+
+/// Applies edits to snapshots, one job after another, away from the loop that reads the
+/// editor's messages: compiling a header again that thousands of files include takes long.
+fn update_thread(jobs: Receiver<UpdateJob>, events: Sender<Event>, client: Sender<Message>, hooks: Arc<Hooks>) {
+    for job in jobs {
+        if job.progress.is_cancelled() {
+            continue;
+        }
+        if let Some(h) = &hooks.before_update {
+            h();
+        }
+        let t0 = Instant::now();
+        let r = crash::catch("update after an edit", Some(&client), || {
+            // Files closed while an update that counted them as open ran keep no unit of
+            // their own (closing one replaces the update only when it had one already).
+            let mut base = (*job.base).clone();
+            let closed: Vec<FileId> = base.units.iter().flatten().filter(|u| u.kind == UnitKind::AdHoc && job.open.binary_search(&u.root).is_err()).map(|u| u.root).collect();
+            for f in closed {
+                base = base.remove_adhoc(f);
+            }
+            // An open header may have lost its last includer, or an open file outside the
+            // build gained one.
+            base.update_with(&job.files, &job.progress).map(|next| next.sync_open_files(&job.open))
+        });
+        let done = match r {
+            Some(None) => continue, // cancelled: a newer job replaces it
+            Some(Some(next)) => {
+                let interface_changed = next.interface_changed(&job.base);
+                let recompiled = next.recompiled_files(&job.base);
+                log::debug!("incremental update of {} file(s) in {} ms", job.files.len(), t0.elapsed().as_millis());
+                Some(Box::new(Updated { analysis: next, interface_changed, recompiled }))
+            }
+            None => None,
+        };
+        let _ = events.send(Event::Updated(job.seq, done));
     }
 }
 

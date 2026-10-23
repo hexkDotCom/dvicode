@@ -628,6 +628,12 @@ impl Analysis {
 
     /// Recompiles the units that contain any of `files`.
     pub fn update(&self, files: &[FileId]) -> Analysis {
+        self.update_with(files, &Progress::new()).expect("an update that nothing cancels finishes")
+    }
+
+    /// [`Analysis::update`], stopped when `progress` is cancelled (`None`): a header that
+    /// thousands of files include takes long to compile again, and a newer edit replaces it.
+    pub fn update_with(&self, files: &[FileId], progress: &Progress) -> Option<Analysis> {
         let mut affected: Vec<UnitId> = Vec::new();
         for f in files {
             for u in self.units_of_file(*f) {
@@ -637,28 +643,40 @@ impl Analysis {
             }
         }
         if affected.is_empty() {
-            return self.clone();
+            return Some(self.clone());
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
         next.factory_names = Arc::default();
-        let rebuilt: Vec<Unit> = affected
+        let rebuilt: Vec<Option<Unit>> = affected
             .par_iter()
             .map(|&uid| {
+                if progress.is_cancelled() {
+                    return None;
+                }
                 let old = self.unit(uid);
-                self.recompile(old, old.macros_before.clone())
+                Some(self.recompile(old, old.macros_before.clone()))
             })
             .collect();
-        for u in rebuilt {
+        if progress.is_cancelled() {
+            return None;
+        }
+        for u in rebuilt.into_iter().flatten() {
             let id = u.id as usize;
             next.units[id] = Some(Arc::new(u));
         }
-        next.propagate_macros(self, &affected);
+        next.propagate_macros(self, &affected, progress);
+        if progress.is_cancelled() {
+            return None;
+        }
         next.reindex();
-        next.update_library_units(None);
-        next
+        next.update_library_units(Some(progress));
+        if progress.is_cancelled() {
+            return None;
+        }
+        Some(next)
     }
 
     fn recompile(&self, old: &Unit, macros_before: MacroTable) -> Unit {
@@ -676,7 +694,9 @@ impl Analysis {
     /// Definitions that only moved (a line added above a `` `define ``) expand the same way,
     /// so the files after them are not compiled again; but their macro uses and macro tables
     /// are pointed at the new definitions, or they would lead to the old location.
-    fn propagate_macros(&mut self, before: &Analysis, changed: &[UnitId]) {
+    ///
+    /// Stops early, leaving a half-updated snapshot, when `progress` is cancelled.
+    fn propagate_macros(&mut self, before: &Analysis, changed: &[UnitId], progress: &Progress) {
         // Pending macro state per invocation, valid for the next unit of that invocation.
         let mut carry: FxHashMap<usize, MacroTable> = FxHashMap::default();
         // Moved definitions: identity of the old one -> the new one.
@@ -685,6 +705,9 @@ impl Analysis {
         let mut replaced: FxHashMap<usize, Option<MacroTable>> = FxHashMap::default();
         let ids: Vec<UnitId> = self.units.iter().flatten().map(|u| u.id).collect();
         for uid in ids {
+            if progress.is_cancelled() {
+                return;
+            }
             let u = self.unit(uid).clone();
             let old = before.try_unit(uid);
             let edited = changed.contains(&uid);
