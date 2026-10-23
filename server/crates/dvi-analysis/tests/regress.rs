@@ -2087,3 +2087,150 @@ fn auto_config_excludes_the_file_an_include_names_not_its_namesakes() {
     let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
+
+#[test]
+fn a_typedef_named_through_itself_ends() {
+    // `T::X` resolves through `T`, which is this typedef: the recursion overflowed the stack.
+    let files = [("a.sv", "typedef T::X T;\nmodule m;\n  T v;\n  initial v.a = 1;\nendmodule\npackage q;\n  typedef U::Y U;\n  U w;\nendpackage\n")];
+    let (a, root) = project("typedefself", &files);
+    let _ = problems(&a);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let off = files[0].1.find("T v").unwrap() as u32;
+    assert!(a.hover(f, off).is_some());
+}
+
+#[test]
+fn hover_cuts_a_long_header_on_a_character_boundary() {
+    // The header shown is cut at 1500 bytes: never inside a character.
+    for pad in 1480..1500 {
+        let text = format!("module m #(/*{}é*/parameter int P=0)(); endmodule\n", "a".repeat(pad));
+        let (a, root) = project(&format!("hoverutf{pad}"), &[("m.sv", text.as_str())]);
+        let f = a.vfs.lookup(&root.join("m.sv")).unwrap();
+        assert!(a.hover(f, 7).is_some(), "{pad}");
+    }
+}
+
+#[test]
+fn for_loops_declare_every_variable_of_their_type() {
+    // `j` is declared too; without a declaration first, `k = 0` stays an assignment.
+    let files = [("c.sv", "class C;\n  int k, n;\n  function void f();\n    for (int i = 0, j = 0; i < 2; i++, j++)\n      $display(i, j);\n    for (k = 0, n = 1; k < 2; k++) ;\n  endfunction\nendclass\n")];
+    let (a, root) = project("formulti", &files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let f = a.vfs.lookup(&root.join("c.sv")).unwrap();
+    let text = files[0].1;
+    let j = a.goto_definition(f, text.find("i, j)").unwrap() as u32 + 3);
+    assert_eq!(j.first().map(|l| l.range.start.line), Some(3));
+    let k = a.goto_definition(f, text.find("k = 0").unwrap() as u32);
+    assert_eq!(k.first().map(|l| l.range.start.line), Some(1));
+}
+
+#[test]
+fn line_macros_count_lines_once_per_file() {
+    // `__LINE__ is the line of its use, inside a macro too; 100,000 uses stay fast.
+    let dir = std::env::temp_dir().join(format!("dvicode-line-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut text = String::from("`define AT `__LINE__\nmodule m;\n  int a = `__LINE__;\n  int b = `AT;\n");
+    for k in 0..100_000 {
+        text.push_str(&format!("  int x{k} = `__LINE__;\n"));
+    }
+    text.push_str("endmodule\n");
+    let path = dir.join("m.sv");
+    std::fs::write(&path, &text).unwrap();
+    let vfs = Vfs::new();
+    let f = dvi_syntax::SourceProvider::file_id(&vfs, &path);
+    let t = std::time::Instant::now();
+    let r = dvi_syntax::preproc::preprocess(&vfs, &Default::default(), f, Default::default());
+    assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+    let numbers: Vec<&str> = r.tokens.iter().filter(|t| t.kind == dvi_syntax::TokKind::Number).map(|t| t.text.as_str()).collect();
+    assert_eq!(&numbers[..3], ["3", "4", "5"]);
+    assert_eq!(numbers.last(), Some(&"100004"));
+}
+
+#[test]
+fn non_ansi_ports_of_a_large_netlist_match_quickly() {
+    // Each body declaration completes its header port by name, not by a scan of the module.
+    let n = 50_000;
+    let header: Vec<String> = (0..n).map(|k| format!("p{k}")).collect();
+    let body: String = (0..n).map(|k| format!("  input p{k};\n")).collect();
+    let text = format!("module m({});\n{body}  assign p7 = p8;\nendmodule\n", header.join(", "));
+    let t = std::time::Instant::now();
+    let (a, root) = project("netlistports", &[("m.sv", text.as_str())]);
+    assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let f = a.vfs.lookup(&root.join("m.sv")).unwrap();
+    let d = a.goto_definition(f, text.find("p7 = p8").unwrap() as u32);
+    assert_eq!(d.first().map(|l| l.range.start.line), Some(8));
+}
+
+#[test]
+fn expansions_that_double_at_every_level_stop() {
+    // A20 expands to 2^20 copies of a 100-token body; h20.svh includes h0.svh 2^20 times.
+    // Both stay within the depth limits; the work budget stops them.
+    let body = "x ".repeat(100);
+    let mut m = format!("`define A0 {body}\n");
+    for k in 1..=20 {
+        m.push_str(&format!("`define A{k} `A{} `A{}\n", k - 1, k - 1));
+    }
+    m.push_str("module m;\n  initial begin `A20; end\nendmodule\n");
+    let mut files: Vec<(String, String)> = vec![("m.sv".into(), m), ("h0.svh".into(), format!("{body}\n"))];
+    for k in 1..=20 {
+        files.push((format!("h{k}.svh"), format!("`include \"h{}.svh\"\n`include \"h{}.svh\"\n", k - 1, k - 1)));
+    }
+    files.push(("n.sv".into(), "module n;\n  initial begin\n`include \"h20.svh\"\n  end\nendmodule\n".into()));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let t = std::time::Instant::now();
+    let (a, _) = project("doubling", &refs);
+    let p = problems(&a);
+    assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+    assert_eq!(p.iter().filter(|m| m.contains("Preprocessing stops here")).count(), 2, "{p:?}");
+}
+
+#[test]
+fn deeply_nested_conditions_and_generate_blocks_end() {
+    // On a stack the size of the engine's worker threads.
+    let run = || {
+        let n = 100_000;
+        let gen = format!("module g;\n{}  wire x;\n{}endmodule\n", "if (1) begin\n".repeat(n), "end\n".repeat(n));
+        let u = dvi_syntax::parser::parse(&dvi_syntax::lexer::lex(&gen, 0), 0);
+        let blocks = u.diags.iter().filter(|d| d.message.contains("nested too deeply")).count();
+        let dir = std::env::temp_dir().join(format!("dvicode-deepcond-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.sv");
+        std::fs::write(&path, format!("`ifdef {}X{}\n  wire hidden;\n`endif\nmodule c; endmodule\n", "(".repeat(n), ")".repeat(n))).unwrap();
+        let vfs = Vfs::new();
+        let f = dvi_syntax::SourceProvider::file_id(&vfs, &path);
+        let r = dvi_syntax::preproc::preprocess(&vfs, &Default::default(), f, Default::default());
+        (blocks, r.tokens.iter().any(|t| t.text == "hidden"))
+    };
+    let (blocks, hidden) = std::thread::Builder::new().stack_size(16 << 20).spawn(run).unwrap().join().expect("no stack overflow");
+    assert_eq!((blocks, hidden), (1, false));
+}
+
+#[test]
+fn library_hierarchies_deeper_than_eight_levels_are_found() {
+    // top -> L0 -> L1 -> ... -> L11, each in its own library file.
+    let root = std::env::temp_dir().join(format!("dvicode-regress-deeplib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    for k in 0..12 {
+        let body = if k < 11 { format!("  L{} u();\n", k + 1) } else { String::new() };
+        std::fs::write(root.join(format!("lib/L{k}.sv")), format!("module L{k};\n{body}endmodule\n")).unwrap();
+    }
+    std::fs::write(root.join("top.sv"), "module top;\n  L0 u();\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-y lib\n+libext+.sv\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let p = problems(&a);
+    assert!(p.is_empty(), "{p:?}");
+    assert!(a.workspace_symbols("L11", 10).iter().any(|s| s.name == "L11"));
+}
+
+#[test]
+fn named_connections_name_ports_and_parameters_only() {
+    let files = [("t.sv", "module M #(parameter int W = 1) (input logic a);\n  localparam int L = 2;\n  int internal_signal;\nendmodule\nmodule top;\n  M #(.W(2), .L(3)) u(.a(1'b0), .internal_signal(1));\nendmodule\n")];
+    let (a, _) = project("namedconn", &files);
+    let p = problems(&a);
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(p.iter().any(|m| m.contains("Parameter 'L'")) && p.iter().any(|m| m.contains("Port 'internal_signal'")), "{p:?}");
+}

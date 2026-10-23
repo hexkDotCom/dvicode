@@ -6,7 +6,7 @@
 //! macro call site and carry [`flags::FROM_MACRO`].
 
 use crate::diag::Diag;
-use crate::span::{FileId, Span};
+use crate::span::{FileId, LineIndex, Span};
 use crate::token::{flags, TokKind, Token};
 use crate::SourceProvider;
 use rustc_hash::FxHashMap;
@@ -223,6 +223,8 @@ pub fn preprocess(
         outer_depth: 0,
         outer_names: Vec::new(),
         nested_runs: Default::default(),
+        line_index: Default::default(),
+        work: Default::default(),
     };
     pp.enter_file(root);
     pp.run();
@@ -259,6 +261,8 @@ pub fn expand_snippet(
         outer_depth: 0,
         outer_names: Vec::new(),
         nested_runs: Default::default(),
+        line_index: Default::default(),
+        work: Default::default(),
     };
     pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
@@ -306,6 +310,11 @@ struct Cond {
 
 const MAX_INCLUDE_DEPTH: usize = 64;
 const MAX_MACRO_DEPTH: usize = 128;
+/// Tokens of macro expansions and repeated includes one file's preprocessing reads (see
+/// `Pp::work`): far more than real code expands to, few enough to keep in memory.
+const MAX_WORK: u64 = 5_000_000;
+/// Parentheses and `!` nested in an `` `ifdef `` expression.
+const MAX_COND_DEPTH: usize = 256;
 /// Nested preprocessors one file may run (see `Pp::nested_runs`).
 const MAX_NESTED_RUNS: u32 = 1_000_000;
 
@@ -327,6 +336,14 @@ struct Pp<'a> {
     /// Nested preprocessors run for one file so far (shared with them): text like
     /// `` `"`A`A`" `` doubles the work at each level, so the total is bounded.
     nested_runs: std::rc::Rc<std::cell::Cell<u32>>,
+    /// Line starts of the files `` `__LINE__ `` was used in (counting from the start of the
+    /// file at each use made a file of UVM report macros quadratic).
+    line_index: FxHashMap<FileId, LineIndex>,
+    /// Tokens read from macro expansions and repeated includes so far for one file, shared
+    /// with the nested preprocessors: macros that each call the previous one twice, or headers
+    /// that include the previous one twice, double the work at every level within the depth
+    /// limits.
+    work: std::rc::Rc<std::cell::Cell<u64>>,
 }
 
 impl<'a> Pp<'a> {
@@ -349,6 +366,8 @@ impl<'a> Pp<'a> {
         };
         if first {
             self.res.sources.push((id, text));
+        } else if !self.charge(toks.len() as u64, Span::new(id, 0, 0)) {
+            return;
         }
         let depth = self.conds.len();
         self.frames.push(Frame { toks, pos: 0, kind: FrameKind::File(id), cond_depth: depth });
@@ -389,6 +408,9 @@ impl<'a> Pp<'a> {
             if f.pos < f.toks.len() {
                 let t = f.toks[f.pos].clone();
                 f.pos += 1;
+                if matches!(f.kind, FrameKind::Macro { .. }) && !self.charge(1, self.real_span(&t)) {
+                    return None;
+                }
                 return Some(t);
             }
             let f = self.frames.pop().unwrap();
@@ -399,6 +421,22 @@ impl<'a> Pp<'a> {
                 }
             }
         }
+    }
+
+    /// Counts `n` tokens of expansion work; past the budget, reports it once and ends the
+    /// preprocessing (false).
+    fn charge(&mut self, n: u64, at: Span) -> bool {
+        let work = self.work.get() + n;
+        self.work.set(work);
+        if work <= MAX_WORK {
+            return true;
+        }
+        if work - n <= MAX_WORK {
+            let msg = format!("Preprocessing stops here: macro expansions and repeated includes produced over {MAX_WORK} tokens");
+            self.res.diags.push(Diag::error(at, "EXPANSION_LIMIT", msg));
+        }
+        self.frames.clear();
+        false
     }
 
     /// Next token without consuming, looking through exhausted frames.
@@ -575,10 +613,10 @@ impl<'a> Pp<'a> {
             }
             "__LINE__" => {
                 let span = self.real_span(&tok);
-                let line = self
-                    .read_text(span.file)
-                    .map(|t| t[..(span.start as usize).min(t.len())].bytes().filter(|b| *b == b'\n').count() + 1)
-                    .unwrap_or(0);
+                let line = match self.read_text(span.file) {
+                    Some(t) => self.line_index.entry(span.file).or_insert_with(|| LineIndex::new(&t)).line_of(span.start) as usize + 1,
+                    None => 0,
+                };
                 self.emit_generated(&tok, TokKind::Number, SmolStr::new(line.to_string()));
             }
             _ => self.macro_call(tok),
@@ -649,7 +687,7 @@ impl<'a> Pp<'a> {
                 self.note_macro_name(t);
             }
             let mut pos = 0;
-            return self.cond_expr(&toks, &mut pos);
+            return self.cond_expr(&toks, &mut pos, 0);
         }
         self.note_macro_name(&t);
         self.defined(&t.text)
@@ -662,24 +700,24 @@ impl<'a> Pp<'a> {
         }
     }
 
-    fn cond_expr(&self, toks: &[Token], pos: &mut usize) -> bool {
-        let mut v = self.cond_and(toks, pos);
+    fn cond_expr(&self, toks: &[Token], pos: &mut usize, depth: usize) -> bool {
+        let mut v = self.cond_and(toks, pos, depth);
         while *pos < toks.len() {
             let op = toks[*pos].text.clone();
             match op.as_str() {
                 "||" => {
                     *pos += 1;
-                    let r = self.cond_and(toks, pos);
+                    let r = self.cond_and(toks, pos, depth);
                     v = v || r;
                 }
                 "->" => {
                     *pos += 1;
-                    let r = self.cond_and(toks, pos);
+                    let r = self.cond_and(toks, pos, depth);
                     v = !v || r;
                 }
                 "<->" => {
                     *pos += 1;
-                    let r = self.cond_and(toks, pos);
+                    let r = self.cond_and(toks, pos, depth);
                     v = v == r;
                 }
                 _ => break,
@@ -688,24 +726,30 @@ impl<'a> Pp<'a> {
         v
     }
 
-    fn cond_and(&self, toks: &[Token], pos: &mut usize) -> bool {
-        let mut v = self.cond_unary(toks, pos);
+    fn cond_and(&self, toks: &[Token], pos: &mut usize, depth: usize) -> bool {
+        let mut v = self.cond_unary(toks, pos, depth);
         while *pos < toks.len() && toks[*pos].is_punct("&&") {
             *pos += 1;
-            let r = self.cond_unary(toks, pos);
+            let r = self.cond_unary(toks, pos, depth);
             v = v && r;
         }
         v
     }
 
-    fn cond_unary(&self, toks: &[Token], pos: &mut usize) -> bool {
+    fn cond_unary(&self, toks: &[Token], pos: &mut usize, depth: usize) -> bool {
+        // Parentheses and `!` nest by recursion: a generated condition nested deeper than any
+        // real one is false rather than the end of the stack.
+        if depth > MAX_COND_DEPTH {
+            *pos = toks.len();
+            return false;
+        }
         let Some(t) = toks.get(*pos) else { return false };
         *pos += 1;
         if t.is_punct("!") {
-            return !self.cond_unary(toks, pos);
+            return !self.cond_unary(toks, pos, depth + 1);
         }
         if t.is_punct("(") {
-            let v = self.cond_expr(toks, pos);
+            let v = self.cond_expr(toks, pos, depth + 1);
             if toks.get(*pos).is_some_and(|t| t.is_punct(")")) {
                 *pos += 1;
             }
@@ -819,14 +863,16 @@ impl<'a> Pp<'a> {
                 }
                 let file = self.current_file().unwrap_or(t.span.file);
                 // Within the expansion around it: same macros being expanded, depth and budget.
-                let out = match self.nested(None) {
+                let (out, uses) = match self.nested(None) {
                     Some(mut pp) => {
                         pp.frames.push(Frame { toks: Arc::new(call), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
                         pp.run();
-                        pp.res.tokens
+                        (pp.res.tokens, pp.res.macro_uses)
                     }
-                    None => Vec::new(),
+                    None => (Vec::new(), Vec::new()),
                 };
+                // The macros named in the operand are used here too (references, rename).
+                self.res.macro_uses.extend(uses);
                 let name = match out.iter().position(|x| x.kind == TokKind::String || x.is_punct("<")) {
                     Some(i) if out[i].kind == TokKind::String => Some(out[i].text.trim_matches('"').to_string()),
                     Some(i) => {
@@ -1061,6 +1107,8 @@ impl<'a> Pp<'a> {
             outer_depth: depth,
             outer_names,
             nested_runs: self.nested_runs.clone(),
+            line_index: Default::default(),
+            work: self.work.clone(),
         })
     }
 

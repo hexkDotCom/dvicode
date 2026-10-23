@@ -234,3 +234,21 @@ fn quick_fixes_where_a_type_stands_in_a_value_position() {
     // A misspelled package before `::`.
     assert_eq!(fixes(&a, &root, "t.sv", "item_pkg::"), vec!["Did you mean 'items_pkg'?".to_string()]);
 }
+
+#[test]
+fn renaming_an_argument_renames_its_named_bindings() {
+    let t = "module m;\n  function int f(input int value, input int other);\n    return value + other;\n  endfunction\n  int value_too;\n  initial $display(f(.value(1), .other(f(.value(2), .other(value_too)))));\nendmodule\n";
+    let (a, root) = project("namedarg", &[("t.sv", t)]);
+    let (f, off) = at(&a, &root, "t.sv", "value,", 0);
+    let texts = apply(&a, a.rename(f, off, "data").unwrap());
+    assert_eq!(texts["t.sv"], t.replace("int value,", "int data,").replace("return value", "return data").replace(".value(", ".data("));
+}
+
+#[test]
+fn renaming_a_macro_renames_its_use_in_an_include() {
+    let t = "`define HEADER \"defs.svh\"\n`include `HEADER\nmodule m;\n  int x = W;\nendmodule\n";
+    let (a, root) = project("incmacro", &[("t.sv", t), ("defs.svh", "localparam int W = 1;\n")]);
+    let (f, off) = at(&a, &root, "t.sv", "HEADER", 0);
+    let texts = apply(&a, a.rename(f, off, "DEFS").unwrap());
+    assert_eq!(texts["t.sv"], t.replace("HEADER", "DEFS"));
+}

@@ -15,6 +15,30 @@ thread_local! {
     /// The bases found during the outermost `class_base` call on this thread, by class and
     /// by the depth of the call that found each.
     static BASE_MEMO: std::cell::RefCell<FxHashMap<(DeclRef, usize), Option<DeclRef>>> = std::cell::RefCell::default();
+    /// How many `follow_typedef` calls are on this thread's stack.
+    static TYPEDEF_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Limits nested `follow_typedef` calls: `typedef T::X T;` resolves `T::X` through `T` itself,
+/// and its own loop's limit cannot stop a recursion that happens inside the loop.
+struct TypedefGuard;
+
+impl TypedefGuard {
+    fn enter() -> Option<TypedefGuard> {
+        TYPEDEF_DEPTH.with(|d| {
+            if d.get() >= MAX_DEPTH {
+                return None;
+            }
+            d.set(d.get() + 1);
+            Some(TypedefGuard)
+        })
+    }
+}
+
+impl Drop for TypedefGuard {
+    fn drop(&mut self) {
+        TYPEDEF_DEPTH.with(|d| d.set(d.get() - 1));
+    }
 }
 
 /// Limits nested `class_base` calls (a base resolved through the class itself).
@@ -109,7 +133,13 @@ impl Analysis {
         match chain.kind {
             RefKind::Port { inst } | RefKind::Param { inst } => {
                 let module = self.type_of(DeclRef { unit, decl: inst })?;
-                return self.member_of(module, name);
+                // A port connects a port, an override sets a parameter: not any member named so.
+                let port = matches!(chain.kind, RefKind::Port { .. });
+                return self.member_of(module, name).filter(|m| match self.decl(*m).kind {
+                    DeclKind::Port => port,
+                    DeclKind::Parameter | DeclKind::TypeParam => !port,
+                    _ => false,
+                });
             }
             RefKind::Package => return self.package_next(unit, chain, idx),
             RefKind::ImportItem if idx == 0 => return self.package_next(unit, chain, idx),
@@ -425,6 +455,7 @@ impl Analysis {
 
     /// Follows typedefs (and forward typedefs) to the defining declaration.
     pub fn follow_typedef(&self, mut r: DeclRef) -> Option<DeclRef> {
+        let _guard = TypedefGuard::enter()?;
         for _ in 0..MAX_DEPTH {
             let d = self.decl(r);
             if d.kind != DeclKind::Typedef {

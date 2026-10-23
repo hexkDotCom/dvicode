@@ -4,9 +4,10 @@ use dvi_syntax::SourceProvider;
 use super::{Hit, Target};
 use crate::world::{Analysis, DeclRef, UnitKind};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, RefKind};
-use dvi_syntax::{FileId, Span, TokKind};
+use dvi_syntax::{FileId, Span, TokKind, Token};
 use lsp_types::{Location, SymbolKind, TypeHierarchyItem, WorkspaceEdit};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::Arc;
 
 impl Analysis {
     pub fn goto_definition(&self, file: FileId, off: u32) -> Vec<Location> {
@@ -220,7 +221,7 @@ impl Analysis {
     /// connection stands for both the port and the local signal of that name, so it becomes
     /// an explicit connection: `.new(name)` when the port is renamed, `.name(new)` when the
     /// signal is.
-    fn rename_text(&self, span: Span, target: Option<(u32, u32)>, new_name: &str) -> String {
+    fn rename_text(&self, span: Span, target: Option<(u32, u32)>, new_name: &str, tokens: &mut FxHashMap<FileId, Option<Arc<Vec<Token>>>>) -> String {
         let Some(key) = target else { return new_name.to_string() };
         // The port references written at this place, and whether one of them is the target.
         let mut port = None;
@@ -236,8 +237,8 @@ impl Analysis {
             }
         }
         let Some(port_side) = port else { return new_name.to_string() };
-        // `.name(...)` is explicit already.
-        let Some(toks) = self.file_tokens(span.file) else { return new_name.to_string() };
+        // `.name(...)` is explicit already. The file is lexed once for all its connections.
+        let Some(toks) = tokens.entry(span.file).or_insert_with(|| self.file_tokens(span.file)).clone() else { return new_name.to_string() };
         let i = toks.partition_point(|t| t.span.start < span.start);
         if toks.get(i).is_some_and(|t| t.span != span) || toks.get(i + 1).is_some_and(|t| t.is_punct("(")) {
             return new_name.to_string();
@@ -297,6 +298,21 @@ impl Analysis {
                 }
             }
             *visited_files.entry(u.root).or_default() += 1;
+        }
+        // `f(.value(1))` names the argument `value` of `f`; the parser keeps no reference to it.
+        if self.decl(canon).kind == DeclKind::Argument {
+            let sub = self.decl(canon).parent.map(|p| DeclRef { unit: canon.unit, decl: p });
+            if let Some(sub) = sub.filter(|s| matches!(self.decl(*s).kind, DeclKind::Function | DeclKind::Task)) {
+                let mut tokens: FxHashMap<FileId, Option<Arc<Vec<Token>>>> = FxHashMap::default();
+                for call in self.decl_references(sub, false) {
+                    let Some(toks) = tokens.entry(call.file).or_insert_with(|| self.file_tokens(call.file)).clone() else { continue };
+                    for s in named_arguments(&toks, call, &name) {
+                        if seen.insert(s) {
+                            out.push(s);
+                        }
+                    }
+                }
+            }
         }
         out
     }
@@ -405,7 +421,8 @@ impl Analysis {
             return Err(format!("Renaming would change {}, which is outside the workspace", self.vfs.path(s.file).display()));
         }
         let mut seen = FxHashSet::default();
-        let edits: Vec<(Span, String)> = spans.into_iter().filter(|s| seen.insert(*s)).map(|s| (s, self.rename_text(s, target, new_name))).collect();
+        let mut tokens = FxHashMap::default();
+        let edits: Vec<(Span, String)> = spans.into_iter().filter(|s| seen.insert(*s)).map(|s| (s, self.rename_text(s, target, new_name, &mut tokens))).collect();
         self.versioned_edit(edits).ok_or_else(|| "The files to edit are not available".to_string())
     }
 
@@ -463,6 +480,30 @@ impl Analysis {
 
 fn serde_json_value(r: DeclRef) -> lsp_types::LSPAny {
     lsp_types::LSPAny::Array(vec![lsp_types::LSPAny::from(r.unit), lsp_types::LSPAny::from(r.decl)])
+}
+
+/// The spans of `.name` bindings in the argument list of the call whose name is at `call`.
+fn named_arguments(toks: &[Token], call: Span, name: &str) -> Vec<Span> {
+    let i = toks.partition_point(|t| t.span.start < call.start);
+    if !toks.get(i).is_some_and(|t| t.span == call) || !toks.get(i + 1).is_some_and(|t| t.is_punct("(")) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    for k in i + 1..toks.len() {
+        let t = &toks[k];
+        if t.is_punct("(") || t.is_punct("[") || t.is_punct("{") {
+            depth += 1;
+        } else if t.is_punct(")") || t.is_punct("]") || t.is_punct("}") {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        } else if depth == 1 && t.is_punct(".") && toks.get(k + 1).is_some_and(|n| n.text == name && toks.get(k + 2).is_some_and(|p| p.is_punct("("))) {
+            out.push(toks[k + 1].span);
+        }
+    }
+    out
 }
 
 /// The name part of a macro use span, which starts with the backtick: `` `NAME `` -> `NAME`.

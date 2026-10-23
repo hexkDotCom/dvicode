@@ -417,7 +417,9 @@ impl Analysis {
         // Library units in the order a full build adds them.
         let mut kept: Vec<UnitId> = Vec::new();
         let mut changed = false;
-        for _round in 0..8 {
+        // One round per level of the hierarchy found in libraries; it ends when a round adds
+        // nothing (the bound only guards against a loop).
+        for _round in 0..256 {
             if progress.is_some_and(|p| p.is_cancelled()) {
                 return;
             }

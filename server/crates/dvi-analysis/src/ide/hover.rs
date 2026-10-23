@@ -153,7 +153,11 @@ impl Analysis {
         let start = d.span.start as usize;
         let rest = text.get(start..)?;
         let mut depth = 0i32;
+        // At most 1500 bytes, on a character boundary.
         let mut end = rest.len().min(1500);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
         for (i, c) in rest.char_indices() {
             if i >= 1500 {
                 break;
@@ -339,13 +343,18 @@ pub fn format_expansion(s: &str) -> String {
     let flush = |line: &mut String, out: &mut String, indent: usize| {
         let t = line.trim();
         if !t.is_empty() {
-            out.push_str(&"  ".repeat(indent));
+            // Bounded: deeply nested expansions would otherwise be mostly indentation.
+            out.push_str(&"  ".repeat(indent.min(20)));
             out.push_str(t);
             out.push('\n');
         }
         line.clear();
     };
     for t in toks {
+        // Hover shows far less than this.
+        if out.len() > 100_000 {
+            break;
+        }
         match t {
             "begin" | "fork" => {
                 line.push_str(t);

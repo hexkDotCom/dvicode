@@ -25,6 +25,7 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         stmt_depth: 0,
         expr_depth: 0,
         too_deep: false,
+        port_index: None,
     };
     p.u.decls.push(Decl {
         kind: DeclKind::Unit,
@@ -87,6 +88,9 @@ struct Parser<'t> {
     expr_depth: u32,
     /// "Nested too deeply" was reported.
     too_deep: bool,
+    /// The ports (or arguments) of the scope whose body declarations are being matched to
+    /// its header, by name: looked up once per declaration, not by a scan of the scope.
+    port_index: Option<(DeclId, DeclKind, rustc_hash::FxHashMap<SmolStr, DeclId>)>,
 }
 
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
@@ -435,7 +439,23 @@ impl<'t> Parser<'t> {
         }
     }
 
+    /// One item, guarded like statements: generate blocks nest items in items.
     fn item(&mut self) {
+        if self.stmt_depth >= MAX_STMT_DEPTH {
+            if !self.too_deep {
+                self.too_deep = true;
+                let span = self.tok().span;
+                self.error(span, "Blocks are nested too deeply; the rest of this block is skipped");
+            }
+            self.bump();
+            return;
+        }
+        self.stmt_depth += 1;
+        self.item_inner();
+        self.stmt_depth -= 1;
+    }
+
+    fn item_inner(&mut self) {
         self.skip_attributes();
         let t = self.tok().clone();
         match t.kind {
@@ -1128,16 +1148,17 @@ impl<'t> Parser<'t> {
             self.bump();
             // Complete a port already named in the header, if any.
             let scope = self.scope();
-            let existing = self
-                .u
-                .decls[scope as usize]
-                .children
-                .iter()
-                .copied()
-                .find(|c| {
+            if !self.port_index.as_ref().is_some_and(|(s, k, _)| *s == scope && *k == kind) {
+                let mut m = rustc_hash::FxHashMap::default();
+                for c in &self.u.decls[scope as usize].children {
                     let d = &self.u.decls[*c as usize];
-                    d.kind == kind && d.name == n.text
-                });
+                    if d.kind == kind {
+                        m.entry(d.name.clone()).or_insert(*c);
+                    }
+                }
+                self.port_index = Some((scope, kind, m));
+            }
+            let existing = self.port_index.as_ref().and_then(|(_, _, m)| m.get(&n.text).copied());
             let id = match existing {
                 Some(id) => {
                     // The name in the header becomes a reference to the port declared here, so
@@ -1155,7 +1176,13 @@ impl<'t> Parser<'t> {
                     d.span = start.cover(n.span);
                     id
                 }
-                None => self.new_decl(kind, Some(&n), start),
+                None => {
+                    let id = self.new_decl(kind, Some(&n), start);
+                    if let Some((_, _, m)) = self.port_index.as_mut() {
+                        m.entry(n.text.clone()).or_insert(id);
+                    }
+                    id
+                }
             };
             self.u.decls[id as usize].dir = dir;
             if ty.is_some() {
@@ -1316,7 +1343,12 @@ impl<'t> Parser<'t> {
             // Re-parent an inline struct/enum body under the typedef for a tidy outline.
             if let Some(inline) = ty.as_ref().and_then(|t| t.inline) {
                 let old_parent = self.u.decls[inline as usize].parent.unwrap();
-                self.u.decls[old_parent as usize].children.retain(|c| *c != inline);
+                // Declared just before the typedef: found from the end, not by a scan of every
+                // member of a large package.
+                let siblings = &mut self.u.decls[old_parent as usize].children;
+                if let Some(k) = siblings.iter().rposition(|c| *c == inline) {
+                    siblings.remove(k);
+                }
                 self.u.decls[inline as usize].parent = Some(id);
                 self.u.decls[id as usize].children.push(inline);
             }
@@ -3033,17 +3065,25 @@ impl<'t> Parser<'t> {
         let blk = self.new_decl(DeclKind::Block, None, start);
         self.push_scope(blk);
         if self.eat_p("(") {
-            // Initialization: declarations or assignments.
+            // Initialization: declarations or assignments. After a declaration, `j = 0` declares
+            // another variable of its type (`for (int i = 0, j = 0; ...)`).
+            let mut decl_ty: Option<Option<TypeRef>> = None;
             loop {
                 let is_decl = (self.tok().kind == TokKind::Keyword && (is_builtin_type_kw(&self.tok().text) || self.at_kw("var") || self.at_kw("automatic")))
                     || (self.at_ident() && self.nth(1).kind == TokKind::Ident);
-                if is_decl {
-                    self.eat_kw("var");
-                    self.eat_kw("automatic");
-                    let ty = self.parse_type(false, RefKind::Type).map(|ti| {
-                        self.scan_params(ti.params);
-                        ti.tref
-                    });
+                let same_type = decl_ty.is_some() && self.at_ident() && self.nth(1).is_punct("=");
+                if is_decl || same_type {
+                    let ty = if same_type {
+                        decl_ty.clone().flatten()
+                    } else {
+                        self.eat_kw("var");
+                        self.eat_kw("automatic");
+                        self.parse_type(false, RefKind::Type).map(|ti| {
+                            self.scan_params(ti.params);
+                            ti.tref
+                        })
+                    };
+                    decl_ty = Some(ty.clone());
                     if self.at_ident() {
                         let n = self.tok().clone();
                         self.bump();

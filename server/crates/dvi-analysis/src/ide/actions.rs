@@ -139,6 +139,8 @@ impl Analysis {
             0..=2 => return Vec::new(),
             3..=5 => 1,
             6..=9 => 2,
+            // The distance takes a table of both lengths: none for generated names this long.
+            257.. => return Vec::new(),
             _ => 3,
         };
         let mut seen: FxHashSet<SmolStr> = FxHashSet::default();
@@ -146,6 +148,10 @@ impl Analysis {
         for r in self.visible_decls(unit, scope) {
             let d = self.decl(r);
             if d.name.is_empty() || d.name == name || d.has(dflags::OUT_OF_BLOCK) || !want.accepts(d.kind) || !seen.insert(d.name.clone()) {
+                continue;
+            }
+            // The distance is at least the difference in length.
+            if d.name.len().abs_diff(name.len()) > max {
                 continue;
             }
             let dist = edit_distance(&name.to_ascii_lowercase(), &d.name.to_ascii_lowercase());
