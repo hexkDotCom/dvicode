@@ -229,8 +229,15 @@ struct Server {
     /// The client watches files the server names (dynamic registration of
     /// `workspace/didChangeWatchedFiles`).
     watch_inputs: bool,
+    /// It takes patterns relative to a folder (else absolute ones are sent).
+    relative_patterns: bool,
     /// The build inputs it is watching for the server.
     watched: Vec<PathBuf>,
+    /// The registration request awaiting its answer.
+    watch_request: Option<RequestId>,
+    /// Files changed while a build ran: one the new build turns out to read makes it out of
+    /// date (it may have read the old text, and no watcher saw the change).
+    changed_while_building: Vec<PathBuf>,
     /// Progress of the running build, and the switch that cancels it.
     build_progress: Option<Arc<Progress>>,
     build_started: Instant,
@@ -309,7 +316,9 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let progress = params.capabilities.window.as_ref().and_then(|w| w.work_done_progress).unwrap_or(false);
-    let watch_inputs = params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files.as_ref()).and_then(|d| d.dynamic_registration).unwrap_or(false);
+    let watched_files = params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files.as_ref());
+    let watch_inputs = watched_files.and_then(|d| d.dynamic_registration).unwrap_or(false);
+    let relative_patterns = watched_files.and_then(|d| d.relative_pattern_support).unwrap_or(false);
     log::info!("workspace root: {:?}; settings: {:?}", root, settings);
     let vfs = Arc::new(Vfs::new());
     let empty_setup = Arc::new(ProjectSetup::new(root.as_deref().unwrap_or(std::path::Path::new("/")), Default::default(), Default::default()));
@@ -347,7 +356,10 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         next_id: 1,
         progress,
         watch_inputs,
+        relative_patterns,
         watched: Vec::new(),
+        watch_request: None,
+        changed_while_building: Vec::new(),
         build_progress: None,
         build_started: Instant::now(),
         reported: (String::new(), 0),
@@ -418,7 +430,13 @@ impl Server {
                             let tx = self.sender.clone();
                             crash::catch(&method, Some(&tx), || self.on_notification(n));
                         }
-                        Message::Response(_) => {}
+                        Message::Response(r) => {
+                            if r.error.is_some() && self.watch_request.as_ref() == Some(&r.id) {
+                                log::warn!("the editor did not take the watchers of the build's files: {:?}", r.error);
+                                self.watch_inputs = false;
+                                self.watched.clear();
+                            }
+                        }
                     }
                 }
                 recv(self.events_rx) -> ev => {
@@ -553,10 +571,11 @@ impl Server {
         self.send(Message::Notification(Notification::new(method.into(), params)));
     }
 
-    fn request_client(&mut self, method: &str, params: impl Serialize) {
+    fn request_client(&mut self, method: &str, params: impl Serialize) -> RequestId {
         let id = RequestId::from(format!("dvicode-{}", self.next_id));
         self.next_id += 1;
-        self.send(Message::Request(Request::new(id, method.into(), params)));
+        self.send(Message::Request(Request::new(id.clone(), method.into(), params)));
+        id
     }
 
     // ------------------------------------------------------------------ builds
@@ -654,6 +673,11 @@ impl Server {
             }
             return;
         };
+        // A file it reads changed while it ran (before anything watched it): build again.
+        let changed = std::mem::take(&mut self.changed_while_building);
+        if changed.iter().any(|c| a.setup.config.inputs.iter().any(|p| build_docs::same_file(p, c))) {
+            self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
+        }
         // A running update started from the snapshot this replaces (or from an older build).
         self.cancel_update();
         // Files opened while it ran are looked for again in it once it is in.
@@ -1151,6 +1175,9 @@ impl Server {
             "textDocument/didSave" => {
                 let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
+                if self.building {
+                    self.changed_while_building.push(path.clone());
+                }
                 // Macro changes reach later files through incremental updates; only a changed
                 // build configuration needs a full build.
                 if self.is_build_input(&path) {
@@ -1209,6 +1236,9 @@ impl Server {
                 }
                 for c in p.changes {
                     let Some(path) = path_of(&c.uri) else { continue };
+                    if self.building {
+                        self.changed_while_building.push(path.clone());
+                    }
                     if self.is_build_input(&path) {
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
                         continue;
@@ -1267,7 +1297,9 @@ impl Server {
     /// own watcher covers sources, `.build` and `.f` files, not `-f sources.list` or a compile
     /// log. Registered again when they change.
     fn watch_build_inputs(&mut self) {
-        let inputs = self.analysis.setup.config.inputs.clone();
+        // Not the server's own log, which the build would then rewrite at every build.
+        let log = crate::logger::file();
+        let inputs: Vec<PathBuf> = self.analysis.setup.config.inputs.iter().filter(|p| !log.is_some_and(|l| build_docs::same_file(p, l))).cloned().collect();
         if !self.watch_inputs || inputs == self.watched {
             return;
         }
@@ -1275,15 +1307,23 @@ impl Server {
         if !self.watched.is_empty() {
             self.request_client("client/unregisterCapability", json!({ "unregisterations": [{ "id": ID, "method": "workspace/didChangeWatchedFiles" }] }));
         }
+        // A name is a pattern: its glob characters each stand for one character (`?`), which
+        // matches the name itself (and at most a few look-alikes, which are not inputs).
+        let literal = |s: &str| s.chars().map(|c| if "*?[]{}".contains(c) { '?' } else { c }).collect::<String>();
         let watchers: Vec<Value> = inputs
             .iter()
             .filter_map(|p| {
                 let (dir, name) = (p.parent()?, p.file_name()?.to_str()?);
-                Some(json!({ "globPattern": { "baseUri": url_of(dir), "pattern": name } }))
+                Some(if self.relative_patterns {
+                    json!({ "globPattern": { "baseUri": url_of(dir), "pattern": literal(name) } })
+                } else {
+                    json!({ "globPattern": literal(&p.to_string_lossy().replace('\\', "/")) })
+                })
             })
             .collect();
         if !watchers.is_empty() {
-            self.request_client("client/registerCapability", json!({ "registrations": [{ "id": ID, "method": "workspace/didChangeWatchedFiles", "registerOptions": { "watchers": watchers } }] }));
+            let id = self.request_client("client/registerCapability", json!({ "registrations": [{ "id": ID, "method": "workspace/didChangeWatchedFiles", "registerOptions": { "watchers": watchers } }] }));
+            self.watch_request = Some(id);
         }
         self.watched = inputs;
     }
@@ -1291,7 +1331,7 @@ impl Server {
     /// A file whose change means building again: a build or argument file by its name, or any
     /// file the current build read.
     fn is_build_input(&self, path: &std::path::Path) -> bool {
-        path.extension().is_some_and(|e| e == "build" || e == "f" || e == "F") || self.analysis.setup.config.inputs.iter().any(|p| p == path)
+        path.extension().is_some_and(|e| e == "build" || e == "f" || e == "F") || self.analysis.setup.config.inputs.iter().any(|p| build_docs::same_file(p, path))
     }
 
     /// Answers `req` with `f` on a worker thread. A request about a file waits for the edits

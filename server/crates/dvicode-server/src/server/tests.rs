@@ -1648,21 +1648,31 @@ fn argument_files_of_any_name_are_watched_and_rebuild() {
     // `-f sources.list`: the client is asked to watch it, and a change to it builds again.
     let root = project("arglist", &[("a.sv", "module a_only; endmodule\n"), ("b.sv", "module b_only; endmodule\n")]);
     std::fs::write(root.join("sources.list"), "a.sv\n").unwrap();
-    std::fs::write(root.join(".dvicode/default.build"), "-f sources.list\n").unwrap();
-    let caps = json!({ "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } } });
+    std::fs::write(root.join("more[1].list"), "").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-f sources.list\n-f more[1].list\n").unwrap();
+    let caps = json!({ "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true, "relativePatternSupport": true } } });
     let (mut c, _) = Client::start_full(&root, Value::Null, Hooks::default(), caps);
     c.sync();
-    let reg = c.requests.iter().find(|r| r.method == "client/registerCapability").expect("a watcher registration");
-    let watchers = reg.params["registrations"][0]["registerOptions"]["watchers"].as_array().cloned().unwrap_or_default();
-    assert!(watchers.iter().any(|w| w["globPattern"]["pattern"] == "sources.list"), "{watchers:?}");
+    let registrations = |c: &Client| c.requests.iter().filter(|r| r.method == "client/registerCapability").cloned().collect::<Vec<_>>();
+    let regs = registrations(&c);
+    assert_eq!(regs.len(), 1);
+    let watchers = regs[0].params["registrations"][0]["registerOptions"]["watchers"].as_array().cloned().unwrap_or_default();
+    let patterns: Vec<&str> = watchers.iter().filter_map(|w| w["globPattern"]["pattern"].as_str()).collect();
+    // Glob characters of a name match only one character each: the file, not `more1.list`.
+    assert!(patterns.contains(&"sources.list") && patterns.contains(&"more?1?.list"), "{patterns:?}");
     let found = |c: &mut Client, q: &str| c.request_ok("workspace/symbol", json!({ "query": q })).as_array().map_or(0, |a| a.len());
     assert_eq!((found(&mut c, "a_only"), found(&mut c, "b_only")), (1, 0));
+    // Changed, under another spelling where case does not matter.
     std::fs::write(root.join("sources.list"), "b.sv\n").unwrap();
-    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "sources.list"), "type": 2 }] }));
+    let name = if cfg!(windows) { "Sources.LIST" } else { "sources.list" };
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, name), "type": 2 }] }));
     let deadline = Instant::now() + WAIT;
     while found(&mut c, "b_only") == 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!((found(&mut c, "a_only"), found(&mut c, "b_only")), (0, 1));
+    // The same inputs: no new registration.
+    c.sync();
+    assert_eq!(registrations(&c).len(), 1);
     c.shutdown();
 }

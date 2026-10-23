@@ -95,7 +95,7 @@ fn same_name(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
+pub fn same_file(a: &Path, b: &Path) -> bool {
     a == b || (same_name(a, b) && std::fs::canonicalize(a).ok().is_some_and(|c| std::fs::canonicalize(b).ok() == Some(c)))
 }
 

@@ -152,7 +152,9 @@ pub fn load_auto(root: &Path, env: &FxHashMap<String, String>) -> BuildConfig {
 
 /// [`load_auto`], reporting on (and cancelled through) `progress`.
 pub fn load_auto_with(root: &Path, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
-    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config_with(root, env, progress)], ..Default::default() }
+    // What .gitignore leaves out decides the files: a change to it (or a new one) builds again.
+    let inputs = vec![root.join(".gitignore")];
+    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config_with(root, env, progress)], inputs, ..Default::default() }
 }
 
 pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>) -> BuildConfig {
@@ -496,6 +498,9 @@ impl Builder {
         let inspecting = self.inspecting;
         for inv in &mut self.cfg.invocations {
             if inv.auto && !inspecting && !progress.is_cancelled() {
+                if !self.cfg.inputs.contains(&root.join(".gitignore")) {
+                    self.cfg.inputs.push(root.join(".gitignore"));
+                }
                 let a = auto_config_with(&root, &env, progress);
                 let mut files = a.files;
                 files.extend(std::mem::take(&mut inv.files));
@@ -1762,6 +1767,10 @@ mod tests {
         for f in ["a.sv", "build/uvm/x.sv", "sub/scratch/y.sv", "sub/z_gen.sv", "sub/keep.sv", "sub/deep/build/w.sv"] {
             std::fs::write(dir.join(f), "module m; endmodule\n").unwrap();
         }
+        // Both ways of configuring automatically read it: a change to it builds again.
+        assert_eq!(load_auto(&dir, &FxHashMap::default()).inputs, vec![dir.join(".gitignore")]);
+        let cfg = parse_build(&dir, &dir.join("x.build"), "+dvicode_init_auto\n", &FxHashMap::default());
+        assert!(cfg.inputs.contains(&dir.join(".gitignore")), "{:?}", cfg.inputs);
         let files = auto::collect_sources_with(&dir, &Progress::new());
         // `/build/` is anchored: only the top-level one is ignored.
         assert_eq!(files, vec![dir.join("a.sv"), dir.join("sub/deep/build/w.sv"), dir.join("sub/keep.sv")]);

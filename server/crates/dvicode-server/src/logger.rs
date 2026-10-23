@@ -37,7 +37,17 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+/// The file the log goes to, if not stderr.
+static FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn file() -> Option<&'static std::path::Path> {
+    FILE.get().map(|p| p.as_path())
+}
+
 pub fn init(level: log::LevelFilter, file: Option<&str>) {
+    if let Some(f) = file {
+        let _ = FILE.set(std::fs::canonicalize(f).unwrap_or_else(|_| f.into()));
+    }
     let out: Box<dyn Write + Send> = match file.and_then(|f| std::fs::OpenOptions::new().create(true).append(true).open(f).ok()) {
         Some(f) => Box::new(f),
         None => Box::new(std::io::stderr()),
