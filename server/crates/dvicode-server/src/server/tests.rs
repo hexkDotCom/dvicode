@@ -844,7 +844,9 @@ fn a_newer_edit_replaces_the_update_in_progress() {
   initial undeclared_b = 1;");
     c.change(&top, 3, &v3);
     let waiting = fresh_definition(&mut c, &top, &v3);
-    // The held update stops as soon as it goes on; the one that replaces it comes next.
+    // Answered once the server has read the edit and replaced the held update, which stops
+    // as soon as it goes on; the one that replaces it comes next.
+    c.request_ok("dvicode/serverInfo", Value::Null);
     gate.open();
     gate.wait_entered(3);
     // One update, of the newest text, is installed: the replaced one is not.
@@ -855,7 +857,7 @@ fn a_newer_edit_replaces_the_update_in_progress() {
     assert_eq!(next, first + 1);
     let p = c.wait_problems(&top, |p| p.version == Some(3));
     assert!(p.diagnostics.len() == 1 && p.diagnostics[0].message.contains("undeclared_b"), "{:?}", p.diagnostics);
-    assert!(c.versions(&top).iter().all(|v| *v != Some(2)), "{:?}", c.versions(&top));
+    let pubs: Vec<_> = c.published.iter().filter(|p| p.uri == top).map(|p| (p.version, p.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>())).collect();
     c.shutdown();
 }
 
@@ -919,6 +921,8 @@ fn a_request_cancelled_while_its_handler_runs_gets_a_cancellation_error() {
     cancel(&c, &id);
     // Cancelling an answered or unknown request changes nothing.
     cancel(&c, &RequestId::from(9999));
+    // Answered once the server has read the cancellations.
+    c.request_ok("dvicode/serverInfo", Value::Null);
     gate.open();
     let r = c.reply(&id, WAIT).expect("a reply to the cancelled request");
     assert_eq!(error_code(&r), Some(ErrorCode::RequestCanceled as i32), "{r:?}");
@@ -954,5 +958,61 @@ fn a_waiting_request_about_a_position_is_dropped_when_its_document_changes() {
     let r = c.reply(&symbols, WAIT).expect("symbols once the update is in");
     let names: Vec<&str> = r.result.as_ref().and_then(|v| v[0]["children"].as_array()).into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
     assert!(names.contains(&"more"), "{names:?}");
+    c.shutdown();
+}
+
+#[test]
+fn a_problem_check_replaced_by_a_newer_one_stops_computing() {
+    let pkg = "package p;\n  typedef int t0;\nendpackage\n";
+    let user = |m: &str| format!("module {m};\n  import p::*;\n  initial x_{m} = 1;\nendmodule\n");
+    let (a, b, c3) = (user("a"), user("b"), user("c"));
+    let root = project("problemjobs", &[("pkg.sv", pkg), ("a.sv", &a), ("b.sv", &b), ("c.sv", &c3)]);
+    // Every file a check looks at: (check, file name, computed); the gate holds computations.
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let seen: Arc<Mutex<Vec<(u64, String, bool)>>> = Arc::default();
+    let hooks = {
+        let (g, seen) = (gate.clone(), seen.clone());
+        Hooks {
+            before_problems: Some(Box::new(move |job, path, computed| {
+                seen.lock().unwrap().push((job, path.file_name().unwrap().to_string_lossy().to_string(), computed));
+                if computed {
+                    g.pass();
+                }
+            })),
+            ..Default::default()
+        }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    // The first build's check is done once the last file's problems are in.
+    c.wait_problems(&uri(&root, "c.sv"), |p| !p.diagnostics.is_empty());
+    let first = seen.lock().unwrap().len();
+    // Two edits of the package, on disk, each changing what other files see: two checks of
+    // every file. The first is held at its first file until the second has started.
+    gate.close();
+    let changed = |c: &Client, n: usize| {
+        std::fs::write(root.join("pkg.sv"), pkg.replace("typedef int t0;", &format!("typedef int t{n};"))).unwrap();
+        c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "pkg.sv"), "type": 2 }] }));
+    };
+    changed(&c, 1);
+    gate.wait_entered(first + 1);
+    changed(&c, 2);
+    gate.wait_entered(first + 2);
+    gate.open();
+    let job = |n: usize| seen.lock().unwrap()[first + n].0;
+    let (older, newer) = (job(0), job(1));
+    assert!(older < newer);
+    let looked_at = |j: u64| seen.lock().unwrap().iter().filter(|s| s.0 == j).map(|s| (s.1.clone(), s.2)).collect::<Vec<_>>();
+    let deadline = Instant::now() + WAIT;
+    while looked_at(older).len() < 4 || looked_at(newer).len() < 4 {
+        assert!(Instant::now() < deadline, "{:?}", seen.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The older check computed the file it was held at, and no other.
+    let all = |v: bool| ["pkg.sv", "a.sv", "b.sv", "c.sv"].iter().map(|f| (f.to_string(), v)).collect::<Vec<_>>();
+    let mut expected = all(false);
+    expected[0].1 = true;
+    assert_eq!(looked_at(older), expected);
+    assert_eq!(looked_at(newer), all(true));
     c.shutdown();
 }

@@ -175,6 +175,9 @@ pub(crate) struct Hooks {
     pub before_update: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called on a worker thread before a request's handler runs, with the method.
     pub before_request: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    /// Called for each file of a problem check: the check's number, the file, and whether its
+    /// problems are computed (not when a newer check covers the file).
+    pub before_problems: Option<Box<dyn Fn(u64, &std::path::Path, bool) + Send + Sync>>,
 }
 
 /// The requests being answered, and the flags that cancel them.
@@ -818,6 +821,7 @@ impl Server {
         };
         let open: FxHashSet<FileId> = self.open.keys().copied().collect();
         let limit = self.settings.max_problems.unwrap_or(1000);
+        let hooks = self.hooks.clone();
         rayon::spawn(move || {
             let mut total = 0usize;
             let mut now: FxHashSet<Url> = FxHashSet::default();
@@ -826,6 +830,17 @@ impl Server {
             files.sort_by_key(|f| !open.contains(f));
             for f in files {
                 if a.vfs.is_builtin(f) {
+                    continue;
+                }
+                let path = a.vfs.path(f);
+                let uri = url_of(&path);
+                // A newer job owns this file (an edit came in while this one ran): its problems
+                // are not computed here at all.
+                let owned = published.lock().unwrap().latest.get(&uri) == Some(&generation);
+                if let Some(h) = &hooks.before_problems {
+                    h(generation, &path, owned);
+                }
+                if !owned {
                     continue;
                 }
                 let Some(diags) = crash::catch("problem check", Some(&sender), || a.file_diagnostics(f)) else {
@@ -841,7 +856,6 @@ impl Server {
                     }
                 }
                 total += lsp.len();
-                let uri = url_of(&a.vfs.path(f));
                 // Check and send under the lock, so a newer job cannot publish in between.
                 let mut st = published.lock().unwrap();
                 if st.latest.get(&uri) != Some(&generation) {
