@@ -35,6 +35,11 @@ and the linked Rust crates, and copies `LICENSE`, `NOTICE` and the Rust standard
 notices into the extension. Commit the regenerated `THIRD_PARTY_NOTICES.md` when dependencies
 change.
 
+The Windows engine embeds `server/crates/dvicode-server/windows.manifest` (by its `build.rs`),
+which selects the segment heap: with the default heap, compiling again the thousands of files
+that include an edited header gets many times slower in a long session. It is embedded only
+when building on Windows with the MSVC toolchain.
+
 ## Testing on the command line
 
 `dvicode-server check <dir> [--build FILE]` compiles a project and prints its problems.
