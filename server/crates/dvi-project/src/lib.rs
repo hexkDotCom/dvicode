@@ -72,6 +72,9 @@ pub struct BuildConfig {
     pub problems: Vec<BuildProblem>,
     /// The argument files read, and how (to check one the way the build reads it).
     pub arg_files: Vec<ArgFile>,
+    /// Every file the build reads or looked for (build file, argument files, compile logs):
+    /// a change to one of them, whatever its name, means building again.
+    pub inputs: Vec<PathBuf>,
 }
 
 /// An argument file a build reads, and what it is read with.
@@ -205,6 +208,7 @@ pub fn parse_build(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<S
 /// [`parse_build`], scanning `+dvicode_init_auto` sections on (and cancelled through) `progress`.
 pub fn parse_build_with(root: &Path, build_file: &Path, text: &str, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
     let mut b = Builder::new(root, build_file, env, false);
+    b.input(build_file);
     b.parse_text(build_file, text, root.to_path_buf());
     b.finish(progress)
 }
@@ -400,6 +404,13 @@ impl Builder {
     fn note(&mut self, file: &Path, text: String) {
         if self.inspecting {
             self.notes.push((file.to_path_buf(), self.span.0, self.span.1, text));
+        }
+    }
+
+    /// Records a file the build reads (or would, once it exists).
+    fn input(&mut self, path: &Path) {
+        if !self.inspecting && !self.cfg.inputs.iter().any(|p| p == path) {
+            self.cfg.inputs.push(path.to_path_buf());
         }
     }
 
@@ -1020,6 +1031,7 @@ impl Builder {
             return;
         }
         self.files_read += 1;
+        self.input(&path);
         let text = match read_input(&path, MAX_ARG_FILE) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(_) if !path.exists() => return self.problem(file, line, format!("Argument file not found: {}", path.display())),
@@ -1059,6 +1071,7 @@ impl Builder {
         }
         let e = self.expand(log, true).unwrap_or_default();
         self.link(file, &path);
+        self.input(&path);
         let text = match read_input(&path, MAX_LOG) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(_) if !path.exists() => {

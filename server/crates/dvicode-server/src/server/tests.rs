@@ -69,6 +69,8 @@ struct Client {
     published: Vec<PublishDiagnosticsParams>,
     /// Replies not consumed yet.
     replies: Vec<Response>,
+    /// Requests of the server, in arrival order (each is acknowledged).
+    requests: Vec<Request>,
 }
 
 impl Client {
@@ -78,6 +80,11 @@ impl Client {
     }
 
     fn start_with(root: &Path, options: Value, hooks: Hooks) -> (Client, Value) {
+        Client::start_full(root, options, hooks, json!({}))
+    }
+
+    /// [`Client::start_with`] for a client with `capabilities`.
+    fn start_full(root: &Path, options: Value, hooks: Hooks, capabilities: Value) -> (Client, Value) {
         // The server's panic hook (internal error locations), and the test harness's after it.
         static HOOK: Once = Once::new();
         HOOK.call_once(|| {
@@ -91,7 +98,7 @@ impl Client {
         });
         let (server, conn) = Connection::memory();
         let handle = std::thread::spawn(move || run_with(server, hooks).expect("server loop"));
-        let mut c = Client { conn, server: Some(handle), next_id: 0, notes: Vec::new(), published: Vec::new(), replies: Vec::new() };
+        let mut c = Client { conn, server: Some(handle), next_id: 0, notes: Vec::new(), published: Vec::new(), replies: Vec::new(), requests: Vec::new() };
         let root_uri = Url::from_file_path(root).unwrap();
         let init = c.request_ok(
             "initialize",
@@ -99,7 +106,7 @@ impl Client {
                 "processId": null,
                 "rootUri": root_uri,
                 "workspaceFolders": [{ "uri": root_uri, "name": "test" }],
-                "capabilities": {},
+                "capabilities": capabilities,
                 "initializationOptions": options,
             }),
         );
@@ -125,9 +132,11 @@ impl Client {
             Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => {
                 self.published.push(serde_json::from_value(n.params.clone()).unwrap());
             }
-            // Requests of the server (none expected without client capabilities) are acknowledged.
+            // Requests of the server (none expected without client capabilities) are acknowledged
+            // and kept.
             Message::Request(r) => {
                 self.conn.sender.send(Message::Response(Response::new_ok(r.id.clone(), Value::Null))).unwrap();
+                self.requests.push(r.clone());
             }
             _ => {}
         }
@@ -1631,5 +1640,29 @@ fn a_header_opened_during_an_update_is_looked_for_while_a_build_runs() {
     let d = c.reply(&def, WAIT).expect("an answer").result.unwrap_or(Value::Null);
     assert!(d[0]["uri"].as_str().is_some_and(|u| u.ends_with("b.svh")), "{d}");
     builds.open();
+    c.shutdown();
+}
+
+#[test]
+fn argument_files_of_any_name_are_watched_and_rebuild() {
+    // `-f sources.list`: the client is asked to watch it, and a change to it builds again.
+    let root = project("arglist", &[("a.sv", "module a_only; endmodule\n"), ("b.sv", "module b_only; endmodule\n")]);
+    std::fs::write(root.join("sources.list"), "a.sv\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-f sources.list\n").unwrap();
+    let caps = json!({ "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } } });
+    let (mut c, _) = Client::start_full(&root, Value::Null, Hooks::default(), caps);
+    c.sync();
+    let reg = c.requests.iter().find(|r| r.method == "client/registerCapability").expect("a watcher registration");
+    let watchers = reg.params["registrations"][0]["registerOptions"]["watchers"].as_array().cloned().unwrap_or_default();
+    assert!(watchers.iter().any(|w| w["globPattern"]["pattern"] == "sources.list"), "{watchers:?}");
+    let found = |c: &mut Client, q: &str| c.request_ok("workspace/symbol", json!({ "query": q })).as_array().map_or(0, |a| a.len());
+    assert_eq!((found(&mut c, "a_only"), found(&mut c, "b_only")), (1, 0));
+    std::fs::write(root.join("sources.list"), "b.sv\n").unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "sources.list"), "type": 2 }] }));
+    let deadline = Instant::now() + WAIT;
+    while found(&mut c, "b_only") == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!((found(&mut c, "a_only"), found(&mut c, "b_only")), (0, 1));
     c.shutdown();
 }
