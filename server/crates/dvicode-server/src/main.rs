@@ -18,6 +18,11 @@ mod writes;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// musl's allocator serialises the threads that build a project; mimalloc does not.
+#[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     crash::install_hook();
     // Parsing and analysis run on these threads; the default 2 MB stack is too small for

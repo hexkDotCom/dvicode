@@ -175,7 +175,8 @@ One-time setup on the Windows machine:
 - Rust with the MSVC toolchain (`rustup-init.exe` from <https://rustup.rs>) and the Visual Studio
   Build Tools with the C++ workload; Node.js; VS Code; Git.
 - A WSL distribution (default `Ubuntu`, option `-Distro`) with Rust (`rustup target add
-  x86_64-unknown-linux-musl`), Python 3 and `rsync`.
+  x86_64-unknown-linux-musl`), `musl-tools` (the C compiler for the engine's allocator,
+  mimalloc), Python 3 and `rsync`.
 - For `e2e-ssh`: a second WSL distribution (default `dvicode-remote`, option `-SshDistro`) that
   plays the remote Linux host. Install OpenSSH server there, create the user (default `dv`), and
   start a separate `sshd` on its own port with key login only, from `/etc/ssh/sshd_dvicode.conf`:

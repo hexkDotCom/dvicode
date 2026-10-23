@@ -23,3 +23,9 @@ url.workspace = true
 log.workspace = true
 rayon.workspace = true
 base64 = "0.22"
+
+# musl's own allocator serialises the parallel builds (4x slower than glibc on large projects):
+# the static x86_64 Linux engine uses mimalloc instead (it needs musl-tools to build; the ARM
+# engine, cross-compiled without a C compiler, keeps musl's).
+[target.'cfg(all(target_env = "musl", target_arch = "x86_64"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }

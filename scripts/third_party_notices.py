@@ -27,6 +27,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = "x86_64-unknown-linux-musl"
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "copyright", "unlicense")
+# License files of code a package bundles, below its top level: libmimalloc-sys compiles
+# Microsoft's mimalloc (the default version, v2) into the x86_64 Linux engine.
+BUNDLED = {"libmimalloc-sys": ["c_src/mimalloc/v2/LICENSE"]}
 
 
 def license_files(directory: Path):
@@ -111,7 +114,7 @@ def section(title, intro, pkgs, problems):
     texts = {}
     order = []
     for p in pkgs:
-        files = license_files(p["dir"])
+        files = license_files(p["dir"]) + [p["dir"] / b for b in BUNDLED.get(p["name"], []) if (p["dir"] / b).is_file()]
         if not files:
             problems.append(f"{p['name']} {p['version']}: no license file in {p['dir']}")
             continue
@@ -121,7 +124,7 @@ def section(title, intro, pkgs, problems):
             if key not in texts:
                 texts[key] = (text, [])
                 order.append(key)
-            texts[key][1].append(f"{p['name']} {p['version']} ({f.name})")
+            texts[key][1].append(f"{p['name']} {p['version']} ({f.relative_to(p['dir']).as_posix()})")
     for key in order:
         text, users = texts[key]
         lines.append("<details>")
