@@ -87,6 +87,8 @@ pub struct ArgFile {
     /// The variables set when it is read (the settings' and the build file's): shared with
     /// the build until it sets another.
     pub env: Arc<FxHashMap<String, String>>,
+    /// The build's variable budget used at that point.
+    pub env_bytes: usize,
     /// The `+dvicode_init` mode and compilation root at that point.
     pub mode: String,
     pub comp_root: PathBuf,
@@ -223,6 +225,7 @@ pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, Str
     let base = match argument_file {
         Some(a) => {
             b.env = a.env.clone();
+            b.env_bytes = a.env_bytes;
             b.comp_root = a.comp_root.clone();
             b.inv().mode = a.mode.clone();
             b.switches = a.switches.clone();
@@ -252,7 +255,8 @@ struct Builder {
     cur: Option<Invocation>,
     /// Copied on write: each argument file keeps the variables it was read with.
     env: Arc<FxHashMap<String, String>>,
-    /// Bytes of the values `+setenv` stored so far (bounded by [`MAX_ENV_BYTES`]).
+    /// Bytes `+setenv` stored so far, with the copies argument files keep (bounded by
+    /// [`MAX_ENV_BYTES`]).
     env_bytes: usize,
     comp_root: PathBuf,
     /// Set by `+dvicode_compilation_root+` (the new base) and `+dvicode_init` (back to the
@@ -690,7 +694,7 @@ impl Builder {
                         None => self.missing_value(file, line, &raw, "a module name"),
                     },
                     "-setenv" => match next(&mut i) {
-                        Some(kv) => self.setenv(&kv, true),
+                        Some(kv) => self.setenv(file, line, &kv, true),
                         None => self.missing_value(file, line, &raw, "NAME=VALUE"),
                     },
                     "-uvm" | "-ovm" => self.request_uvm(file, line, None, &base),
@@ -860,7 +864,7 @@ impl Builder {
             "setenv" | "env" | "setenv_no_override" => {
                 let kv = value();
                 self.focus(&kv);
-                self.setenv(&kv, d != "setenv_no_override");
+                self.setenv(file, line, &kv, d != "setenv_no_override");
                 if let Some((k, _)) = kv.split_once('=') {
                     let v = self.env.get(k).cloned().or_else(|| std::env::var(k).ok()).unwrap_or_default();
                     self.note(file, format!("**environment variable** `{k}` = `{v}`"));
@@ -926,27 +930,30 @@ impl Builder {
         }
     }
 
-    fn setenv(&mut self, kv: &str, overwrite: bool) {
-        if let Some((k, v)) = kv.split_once('=') {
-            let v = self.expand(v, false).unwrap_or_else(|| v.to_string());
-            if v.len() > MAX_EXPANDED || self.env_bytes + v.len() > MAX_ENV_BYTES {
-                // Variables doubled or copied into many others.
-                if !self.inspecting {
-                    log::debug!("build: environment {k} not set: too long");
-                }
-                return;
-            }
-            if overwrite || !(self.env.contains_key(k) || std::env::var_os(k).is_some()) {
-                if !self.inspecting {
-                    // Not the value: it can come from a secret in the environment.
-                    log::debug!("build: environment {k} set");
-                }
-                self.env_bytes += v.len();
-                Arc::make_mut(&mut self.env).insert(k.to_string(), v.trim_matches('"').to_string());
-            } else if !self.inspecting {
+    fn setenv(&mut self, file: &Path, line: u32, kv: &str, overwrite: bool) {
+        let Some((k, v)) = kv.split_once('=') else { return };
+        // Variables that are not set stay as written; a value past MAX_EXPANDED is refused.
+        let Some(v) = self.expand(v, false) else {
+            return self.problem(file, line, format!("{k} would take more than {} MB; it is not set", MAX_EXPANDED >> 20));
+        };
+        if !overwrite && (self.env.contains_key(k) || std::env::var_os(k).is_some()) {
+            if !self.inspecting {
                 log::debug!("build: environment {k} already set, kept");
             }
+            return;
         }
+        // An argument file read since the last change keeps the variables as they were: a
+        // change now copies them all.
+        let copy: usize = if Arc::strong_count(&self.env) > 1 { self.env.iter().map(|(k, v)| k.len() + v.len()).sum() } else { 0 };
+        if self.env_bytes + copy + v.len() > MAX_ENV_BYTES {
+            return self.problem(file, line, format!("The build's variables take more than {} MB; {k} is not set", MAX_ENV_BYTES >> 20));
+        }
+        self.env_bytes += copy + v.len();
+        if !self.inspecting {
+            // Not the value: it can come from a secret in the environment.
+            log::debug!("build: environment {k} set");
+        }
+        Arc::make_mut(&mut self.env).insert(k.to_string(), v.trim_matches('"').to_string());
     }
 
     fn add_define(&mut self, d: &str) {
@@ -1061,6 +1068,7 @@ impl Builder {
                 path: path.clone(),
                 base: nested_base.clone(),
                 env: self.env.clone(),
+                env_bytes: self.env_bytes,
                 mode,
                 comp_root: self.comp_root.clone(),
                 switches: self.switches.clone(),
@@ -1244,7 +1252,11 @@ No command line found in the log: no defines from it.");
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
-        let found: Vec<PathBuf> = if glob::is_pattern(&e, &abs) { glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect() } else { Vec::new() };
+        let (found, complete) = if glob::is_pattern(&e, &abs) { glob::expand_bounded(&abs) } else { (Vec::new(), true) };
+        let found: Vec<PathBuf> = found.into_iter().filter(|d| d.is_dir()).collect();
+        if !complete {
+            self.stopped_glob(file, line, &abs);
+        }
         // A name with brackets only, that matches nothing, is that folder, made later perhaps.
         if glob::has_wildcard(&e) || !found.is_empty() {
             if !self.inspecting {
@@ -1267,7 +1279,10 @@ No command line found in the log: no defines from it.");
     fn add_file(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
-        let mut found = if glob::is_pattern(&e, &abs) { glob::expand(&abs) } else { Vec::new() };
+        let (mut found, complete) = if glob::is_pattern(&e, &abs) { glob::expand_bounded(&abs) } else { (Vec::new(), true) };
+        if !complete {
+            self.stopped_glob(file, line, &abs);
+        }
         found.retain(|f| f.is_file());
         found.sort();
         // A name with brackets only, that matches nothing, is that file.
@@ -1312,6 +1327,10 @@ No command line found in the log: no defines from it.");
         s
     }
 
+    fn stopped_glob(&mut self, file: &Path, line: u32, abs: &Path) {
+        self.problem(file, line, format!("{} looks at more than {} folders and files; it stopped there, and may have missed some", abs.display(), glob::MAX_STEPS));
+    }
+
     /// A path with an environment variable that is not set.
     fn undefined(&mut self, file: &Path, line: u32, p: &str) {
         let msg = match undefined_var(p, &self.env) {
@@ -1341,7 +1360,7 @@ No command line found in the log: no defines from it.");
 
 /// The most one value or path expands to: `+setenv+A=${A}${A}` doubles at each line.
 const MAX_EXPANDED: usize = 1 << 20;
-/// The most all `+setenv` values of a build take; past it values are stored as written.
+/// The most all `+setenv` values of a build take, with the copies argument files keep.
 const MAX_ENV_BYTES: usize = 64 << 20;
 
 /// Expands variables as `Builder::expand` does; `None` also past [`MAX_EXPANDED`] bytes.
@@ -1876,6 +1895,28 @@ mod tests {
         env.insert("BIG".to_string(), "x".repeat(MAX_EXPANDED));
         assert!(expand_env("${BIG}", &env, false).is_some());
         assert_eq!(expand_env("${BIG}${BIG}", &env, false), None);
+    }
+
+    #[test]
+    fn argument_files_count_the_variables_they_keep() {
+        // Each argument file keeps the variables as they are; a change after it copies them.
+        let dir = std::env::temp_dir().join(format!("dvicode-envkeep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("empty.f"), "").unwrap();
+        let mut text = String::from("+dvicode_setenv+BIG=xxxxxxxxxxxxxxxx\n");
+        for _ in 0..16 {
+            text.push_str("+dvicode_setenv+BIG=${BIG}${BIG}\n");
+        }
+        for _ in 0..200 {
+            text.push_str("-f empty.f\n+dvicode_setenv+TICK=x\n");
+        }
+        let cfg = parse_build(&dir, &dir.join("x.build"), &text, &FxHashMap::default());
+        let refused: Vec<_> = cfg.problems.iter().filter(|p| p.message.contains("take more than 64 MB")).collect();
+        assert!(!refused.is_empty() && refused.len() < 200, "{:?}", cfg.problems.first());
+        // Too long is said, and the old value stays.
+        let text = "+dvicode_setenv+A=short\n+dvicode_setenv+BIG=xxxxxxxxxxxxxxxx\n".to_string() + &"+dvicode_setenv+BIG=${BIG}${BIG}\n".repeat(17) + "+dvicode_setenv+A=${BIG}${BIG}\n";
+        let cfg = parse_build(&dir, &dir.join("x.build"), &text, &FxHashMap::default());
+        assert!(cfg.problems.iter().any(|p| p.message.starts_with("A would take more than 1 MB")), "{:?}", cfg.problems);
     }
 
     #[test]

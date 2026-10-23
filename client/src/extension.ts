@@ -569,10 +569,19 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     // the engine that was refused, or offer a restart when the settings differ (a TCP engine
     // serves one client and would not take the new one).
     vscode.workspace.onDidGrantWorkspaceTrust(() => {
-      if (client?.isRunning()) {
-        offerRestart(ctx);
+      const next = () => {
+        if (client?.isRunning()) {
+          offerRestart(ctx);
+        } else {
+          void restart(ctx);
+        }
+      };
+      // After a start under way: it may succeed with the same engine.
+      const busy = restarting ?? starting;
+      if (busy) {
+        void busy.then(next, next);
       } else {
-        void restart(ctx);
+        next();
       }
     }),
   );

@@ -238,14 +238,30 @@ impl Analysis {
             return true;
         }
         let (p, root) = (self.vfs.path(file), &self.setup.root);
+        let exact = p.starts_with(root);
         // Drive letters and folder names may differ in case on Windows.
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
-        if !(p.starts_with(root) || cfg!(windows) && lower(&p).starts_with(lower(root))) {
+        if !(exact || cfg!(windows) && lower(&p).starts_with(lower(root))) {
             return false;
         }
-        // A link in the folder to a file outside it (shared IP): not the folder's to change.
-        // Canonical paths have the names' real case, so they compare exactly (a folder where
-        // case matters may hold both `Work` and `work`); one that cannot be found is not edited.
+        // A link in the folder to a file outside it (shared IP) is not the folder's to change:
+        // look for one below the root (each name exists, so a file that cannot be found is
+        // not edited).
+        let n = root.components().count();
+        let mut cur: PathBuf = p.components().take(n).collect();
+        let mut linked = false;
+        for c in p.components().skip(n) {
+            cur.push(c);
+            match std::fs::symlink_metadata(&cur) {
+                Ok(m) => linked |= m.file_type().is_symlink(),
+                Err(_) => return false,
+            }
+        }
+        if exact && !linked {
+            return true;
+        }
+        // Through a link, or spelt in another case (a folder where case matters may hold both
+        // `Work` and `work`): where it really is. Canonical paths have the names' real case.
         match (std::fs::canonicalize(&p), std::fs::canonicalize(root)) {
             (Ok(p), Ok(root)) => p.starts_with(root),
             _ => false,

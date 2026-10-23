@@ -80,7 +80,14 @@ pub fn match_component(pat: &str, s: &str) -> bool {
 }
 
 /// Expands an absolute pattern to existing paths.
+#[cfg(test)]
 pub fn expand(pattern: &Path) -> Vec<PathBuf> {
+    expand_bounded(pattern).0
+}
+
+/// Expands an absolute pattern to existing paths, and says whether it looked everywhere
+/// (`false`: it stopped after [`MAX_STEPS`]).
+pub fn expand_bounded(pattern: &Path) -> (Vec<PathBuf>, bool) {
     let mut comps: Vec<String> = pattern.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
     // `**/**` is `**`.
     comps.dedup_by(|a, b| a == "**" && b == "**");
@@ -94,12 +101,12 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = Seen { steps_left: MAX_STEPS, ..Default::default() };
     walk(&base, &comps[i..], &mut out, 0, &mut seen);
-    out
+    (out, seen.steps_left > 0)
 }
 
-/// Folders one pattern visits at most: links that lead back up, met by `*` rather than `**`,
-/// could otherwise give millions of paths to two folders.
-const MAX_STEPS: usize = 1_000_000;
+/// Folders and folder entries one pattern looks at, at most: links that lead back up, met by
+/// `*` rather than `**`, could otherwise give millions of paths to two folders.
+pub const MAX_STEPS: usize = 2_000_000;
 
 #[derive(Default)]
 struct Seen {
@@ -113,11 +120,18 @@ struct Seen {
     links: FxHashSet<(PathBuf, usize)>,
 }
 
+impl Seen {
+    /// Counts one step; `false` when there are none left.
+    fn step(&mut self) -> bool {
+        self.steps_left = self.steps_left.saturating_sub(1);
+        self.steps_left > 0
+    }
+}
+
 fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen: &mut Seen) {
-    if depth > 64 || seen.steps_left == 0 || !seen.states.insert((dir.to_path_buf(), rest.len())) {
+    if depth > 64 || seen.steps_left == 0 || !seen.states.insert((dir.to_path_buf(), rest.len())) || !seen.step() {
         return;
     }
-    seen.steps_left -= 1;
     let Some(first) = rest.first() else {
         out.push(dir.to_path_buf());
         return;
@@ -128,6 +142,9 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen:
         // ...or one more.
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
+                if !seen.step() {
+                    return;
+                }
                 let p = e.path();
                 if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, rest.len(), &mut seen.links) {
                     walk(&p, rest, out, depth + 1, seen);
@@ -145,7 +162,13 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen:
         return;
     }
     if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut entries: Vec<_> = rd.flatten().collect();
+        let mut entries = Vec::new();
+        for e in rd.flatten() {
+            if !seen.step() {
+                return;
+            }
+            entries.push(e);
+        }
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
             if match_component(first, &e.file_name().to_string_lossy()) {

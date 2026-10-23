@@ -17,7 +17,19 @@ fn same_secret(a: &[u8], b: &[u8]) -> bool {
 /// An accept error that concerns only the client that went away (it reset the connection
 /// before it was accepted): the server keeps listening.
 fn one_client(e: &std::io::Error) -> bool {
-    matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::TimedOut)
+    // Linux also passes on the network errors of a pending connection (accept(2)): EPROTO,
+    // ENOPROTOOPT, EHOSTDOWN, ENONET, EOPNOTSUPP.
+    const LINUX: &[i32] = &[71, 92, 112, 64, 95];
+    matches!(
+        e.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::TimedOut
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::NetworkDown
+    ) || cfg!(target_os = "linux") && e.raw_os_error().is_some_and(|n| LINUX.contains(&n))
 }
 
 /// Handshakes still running at once; more connections are closed straight away.
