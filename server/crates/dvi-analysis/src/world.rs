@@ -345,9 +345,10 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     // elements defined twice: without a build file they pick the copy the instances are,
     // which other files reach through them (`Analysis::instance_definitions`).
     // A statement is the span of its type name, as the resolver groups them (and its copy is
-    // that of all its instances). Hashed are the scope it is in, all its instances and the
-    // names they connect, not where it is.
-    type Group<'a> = (&'a str, Vec<&'a str>, std::collections::BTreeSet<&'a str>, std::collections::BTreeSet<&'a str>);
+    // that of all its instances). Hashed are its instances, each with the scopes it is in (a
+    // header may be included in several), and the names they connect, not where it is; only
+    // statements that connect names, the only ones whose copy is picked by them.
+    type Group<'a> = (&'a str, std::collections::BTreeSet<(Vec<&'a str>, &'a str)>, std::collections::BTreeSet<&'a str>);
     let mut groups: std::collections::BTreeMap<Span, Group> = Default::default();
     let statement = |d: &dvi_syntax::ast::Decl| -> Option<(Span, &str)> {
         let rid = d.ty.as_ref().and_then(|t| t.ref_id)?;
@@ -356,26 +357,23 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     };
     for d in u.parsed.decls.iter().filter(|d| d.kind == DeclKind::Instance) {
         let Some((span, name)) = statement(d) else { continue };
-        let g = groups.entry(span).or_insert_with(|| {
-            let mut scope = Vec::new();
-            let mut p = d.parent;
-            while let Some(x) = p {
-                let pd = u.parsed.decl(x);
-                scope.push(pd.name.as_str());
-                p = pd.parent;
-            }
-            (name, scope, Default::default(), Default::default())
-        });
-        g.2.insert(d.name.as_str());
+        let mut scope = Vec::new();
+        let mut p = d.parent;
+        while let Some(x) = p {
+            let pd = u.parsed.decl(x);
+            scope.push(pd.name.as_str());
+            p = pd.parent;
+        }
+        groups.entry(span).or_insert_with(|| (name, Default::default(), Default::default())).1.insert((scope, d.name.as_str()));
     }
     for r in &u.parsed.refs {
         if let RefKind::Port { inst } | RefKind::Param { inst } = r.kind {
             if let Some(g) = statement(u.parsed.decl(inst)).and_then(|(span, _)| groups.get_mut(&span)) {
-                g.3.extend(r.segs.first().map(|s| s.name.as_str()));
+                g.2.extend(r.segs.first().map(|s| s.name.as_str()));
             }
         }
     }
-    for g in groups.values() {
+    for g in groups.values().filter(|g| !g.2.is_empty()) {
         g.hash(&mut h);
     }
     // `bind`: which design element gets which instance.

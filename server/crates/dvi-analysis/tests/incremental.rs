@@ -526,3 +526,27 @@ fn connecting_a_sibling_the_same_way_changes_nothing_others_see() {
     ];
     assert!(!edit_like_the_server("ifacesame", &files, ("a/top.sv", "module top;\n  D a(.x()), b(.x());\nendmodule\n")));
 }
+
+#[test]
+fn a_header_included_in_several_scopes_counts_each() {
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/hx.svh", "D u(.x());\n"),
+        ("a/hy.svh", "D u(.y());\n"),
+        ("a/m.sv", "module AnchorX;\n`include \"hx.svh\"\nendmodule\nmodule AnchorY;\n`include \"hy.svh\"\nendmodule\nmodule B;\n`include \"hx.svh\"\nendmodule\nmodule C;\n`include \"hy.svh\"\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(B.u.secret);\nendmodule\n"),
+    ];
+    let swapped = "module AnchorX;\n`include \"hx.svh\"\nendmodule\nmodule AnchorY;\n`include \"hy.svh\"\nendmodule\nmodule B;\n`include \"hy.svh\"\nendmodule\nmodule C;\n`include \"hx.svh\"\nendmodule\n";
+    assert!(edit_like_the_server("ifacerepeat", &files, ("a/m.sv", swapped)));
+}
+
+#[test]
+fn splitting_a_statement_without_connections_changes_nothing_others_see() {
+    let files = [
+        ("a/d.sv", "module D(input logic x);\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/top.sv", "module top;\n  D a(), b();\nendmodule\n"),
+    ];
+    assert!(!edit_like_the_server("ifacesplit", &files, ("a/top.sv", "module top;\n  D a();\n  D b();\nendmodule\n")));
+}
