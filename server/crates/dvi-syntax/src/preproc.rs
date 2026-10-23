@@ -257,7 +257,7 @@ pub fn preprocess(
     pp.enter_file(root);
     // The root file's tokens are most of the output: room for them at once.
     if let Some(f) = pp.frames.last() {
-        let n = f.toks.len();
+        let n = f.toks.len().min(1 << 20);
         pp.res.tokens.reserve(n);
     }
     pp.run();

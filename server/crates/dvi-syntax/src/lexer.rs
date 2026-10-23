@@ -20,11 +20,28 @@ const PUNCTS: &[&str] = &[
 
 pub fn lex(text: &str, file: FileId) -> Vec<Token> {
     // About one token per six bytes of source: room for them at once, rather than copying a
-    // growing vector of a large file over and over.
-    let mut lx = Lexer { src: text.as_bytes(), text, pos: 0, file, out: Vec::with_capacity(text.len() / 6 + 16), in_macro_str: false, long: Default::default() };
+    // growing vector of a large file over and over (bounded: a huge comment has no tokens).
+    let mut lx = Lexer {
+        src: text.as_bytes(),
+        text,
+        pos: 0,
+        file,
+        out: Vec::with_capacity((text.len() / 6).min(1 << 20)),
+        in_macro_str: false,
+        intern: text.len() > 1 << 16,
+        long: Default::default(),
+    };
     lx.run();
-    lx.out.shrink_to_fit();
+    shrink_if_wasteful(&mut lx.out);
     lx.out
+}
+
+/// Gives back what a vector reserved and did not use, when that is worth a copy.
+pub(crate) fn shrink_if_wasteful<T>(v: &mut Vec<T>) {
+    let spare = v.capacity() - v.len();
+    if spare > 4096 && spare > v.len() / 8 {
+        v.shrink_to_fit();
+    }
 }
 
 struct Lexer<'a> {
@@ -38,6 +55,8 @@ struct Lexer<'a> {
     /// Identifiers too long to be stored inline, once each: the others share the string (as
     /// the long names of a register model come again and again).
     long: rustc_hash::FxHashMap<&'a str, SmolStr>,
+    /// Large texts only: a short one (a request's line, a define) gains nothing from it.
+    intern: bool,
 }
 
 #[inline]
@@ -58,7 +77,7 @@ impl<'a> Lexer<'a> {
     /// The text of an identifier: shared with the earlier ones of the same name when it is
     /// too long to be stored inline.
     fn ident(&mut self, s: &'a str) -> SmolStr {
-        if s.len() <= 23 {
+        if s.len() <= 23 || !self.intern {
             return SmolStr::new(s);
         }
         self.long.entry(s).or_insert_with(|| SmolStr::new(s)).clone()
