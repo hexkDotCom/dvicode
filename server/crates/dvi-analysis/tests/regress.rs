@@ -2461,12 +2461,52 @@ fn completion_stops_at_its_item_limit() {
     for i in 0..3500 {
         text.push_str(&format!("module cell_{i}(input logic a); endmodule\n"));
     }
-    text.push_str("module top;\n  cel\nendmodule\n");
-    let files = [("cells.sv", text.as_str())];
+    // In another file: the cells come from the project's definitions, not the scope.
+    let top = "module top;\n  cel\nendmodule\n";
+    let files = [("cells.sv", text.as_str()), ("top.sv", top)];
     let (a, root) = project("completionlimit", &files);
-    let f = a.vfs.lookup(&root.join("cells.sv")).unwrap();
-    let off = (text.find("  cel\n").unwrap() + 5) as u32;
+    let f = a.vfs.lookup(&root.join("top.sv")).unwrap();
+    let off = (top.find("  cel\n").unwrap() + 5) as u32;
     let items = a.completions(f, off);
     assert_eq!(items.len(), 3000);
     assert!(items.iter().all(|c| c.label.starts_with("cel")), "{:?}", items.iter().take(5).map(|c| &c.label).collect::<Vec<_>>());
+}
+
+#[test]
+fn completion_keeps_the_exact_member_past_the_limit() {
+    let mut class = String::from("class c;\n");
+    for i in 0..3000 {
+        class.push_str(&format!("  int foo_{i};\n"));
+    }
+    class.push_str("  int foo;\nendclass\nmodule m;\n  c obj;\n  initial obj.foo\nendmodule\n");
+    let files = [("c.sv", class.as_str())];
+    let (a, root) = project("completionexact", &files);
+    let f = a.vfs.lookup(&root.join("c.sv")).unwrap();
+    let off = (class.find("obj.foo\n").unwrap() + 7) as u32;
+    let names: Vec<String> = a.completions(f, off).into_iter().map(|c| c.label).collect();
+    assert!(names.iter().any(|n| n == "foo"), "{}", names.len());
+}
+
+#[test]
+fn library_cells_are_compiled_in_reference_order() {
+    // E is named first, so E.sv is compiled first and its define reaches C.sv.
+    let files = [
+        ("top.sv", "module top;\n  E e();\n  C c();\nendmodule\n"),
+        ("lib/E.v", "`define ENABLE_C\nmodule E; endmodule\n"),
+        ("lib/C.v", "`ifdef ENABLE_C\nmodule C; endmodule\n`endif\n"),
+    ];
+    for name in ["liborder", "liborder2"] {
+        let root = std::env::temp_dir().join(format!("dvicode-regress-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+        for (f, text) in &files {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, text).unwrap();
+        }
+        std::fs::write(root.join(".dvicode/default.build"), "-y lib\ntop.sv\n").unwrap();
+        let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+        let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+        assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    }
 }

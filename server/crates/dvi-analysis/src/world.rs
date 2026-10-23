@@ -441,7 +441,10 @@ impl Analysis {
         for o in &old {
             old_by_root.entry(self.unit(*o).root).or_default().push(*o);
         }
-        let mut wanted: FxHashSet<SmolStr> = FxHashSet::default();
+        // In the order the references come (units in order): it is the order library files are
+        // compiled in, and macros one defines can decide what the next one declares.
+        let mut wanted: Vec<SmolStr> = Vec::new();
+        let mut wanted_set: FxHashSet<SmolStr> = FxHashSet::default();
         let mut to_scan: Vec<UnitId> = self.units.iter().flatten().filter(|u| own(u)).map(|u| u.id).collect();
         // One round per level of the hierarchy found in libraries; it ends when a round adds
         // nothing (the bound only guards against a loop).
@@ -451,12 +454,12 @@ impl Analysis {
             }
             for uid in std::mem::take(&mut to_scan) {
                 for r in &self.unit(uid).parsed.refs {
-                    if r.kind == RefKind::Definition {
-                        wanted.insert(r.segs[0].name.clone());
+                    if r.kind == RefKind::Definition && wanted_set.insert(r.segs[0].name.clone()) {
+                        wanted.push(r.segs[0].name.clone());
                     }
                 }
             }
-            let missing: FxHashSet<SmolStr> = wanted.iter().filter(|n| !defined.contains(*n)).cloned().collect();
+            let missing: Vec<&SmolStr> = wanted.iter().filter(|n| !defined.contains(*n)).collect();
             if missing.is_empty() {
                 break;
             }

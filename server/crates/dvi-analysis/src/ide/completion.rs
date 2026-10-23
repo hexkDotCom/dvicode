@@ -214,9 +214,6 @@ impl Analysis {
             // Through `::` only static items and types make sense; keep all, VS Code filters.
             if seen.insert(md.name.clone()) {
                 out.push(self.decl_completion(m));
-                if out.len() >= MAX_ITEMS {
-                    return out;
-                }
             }
         }
         let cd = self.decl(container);
@@ -322,10 +319,9 @@ impl Analysis {
         let u = self.unit(ctx.unit);
         let mut cur = Some(ctx.scope);
         let mut design_ctx = false;
-        // Items are built only while there is room (they carry signatures and snippets).
         let push = |this: &Analysis, r: DeclRef, out: &mut Vec<CompletionItem>, seen: &mut FxHashSet<SmolStr>| {
             let d = this.decl(r);
-            if out.len() >= MAX_ITEMS || d.name.is_empty() || d.has(dflags::OUT_OF_BLOCK) || d.has(dflags::FROM_MACRO) && d.kind == DeclKind::Generate {
+            if d.name.is_empty() || d.has(dflags::OUT_OF_BLOCK) || d.has(dflags::FROM_MACRO) && d.kind == DeclKind::Generate {
                 return;
             }
             if !starts_like(&d.name, prefix) || !seen.insert(d.name.clone()) {
@@ -362,20 +358,28 @@ impl Analysis {
                     }
                 }
             }
-            if out.len() >= MAX_ITEMS {
+            if out.len() > MAX_ITEMS {
                 return out;
             }
             cur = d.parent;
         }
         let root = u.parsed.decl(ParsedUnit::ROOT);
         let _ = root;
-        // Compilation-unit items, packages, definitions.
+        // Compilation-unit items, packages, definitions: the scopes' items all stay (the exact
+        // name is among them), these only while there is room (they carry signatures and
+        // instance snippets).
         for v in self.global.unit_items.values() {
+            if out.len() >= MAX_ITEMS {
+                break;
+            }
             if let Some(r) = v.first() {
                 push(self, *r, &mut out, &mut seen);
             }
         }
         for v in self.global.packages.values() {
+            if out.len() >= MAX_ITEMS {
+                break;
+            }
             if let Some(r) = v.first() {
                 if self.unit(r.unit).kind != UnitKind::Builtin {
                     push(self, *r, &mut out, &mut seen);
@@ -400,6 +404,9 @@ impl Analysis {
         }
         if let Some(std) = self.global.std_pkg {
             for m in self.scope_members(std) {
+                if out.len() >= MAX_ITEMS {
+                    break;
+                }
                 push(self, m, &mut out, &mut seen);
             }
         }

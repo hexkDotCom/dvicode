@@ -252,17 +252,17 @@ impl Analysis {
                 return None;
             }
         }
-        // The lines just above, read backwards: not every line of a large file before it.
-        let mut lines: Vec<&str> = before[..line_start].lines().rev().take(500).collect();
-        lines.reverse();
+        // The lines just above, read backwards as far as the comment goes: not every line of a
+        // large file before it.
+        let mut lines = before[..line_start].lines().rev().peekable();
         let mut out: Vec<String> = Vec::new();
         // Skip attribute or blank? A blank line ends the comment block.
-        if let Some(last) = lines.last() {
+        if let Some(last) = lines.peek() {
             let t = last.trim();
             if t.ends_with("*/") {
                 // Block comment.
                 let mut block = Vec::new();
-                while let Some(l) = lines.pop() {
+                for l in lines.by_ref() {
                     block.push(l);
                     if l.contains("/*") {
                         break;
@@ -275,12 +275,12 @@ impl Analysis {
                     out.push(t.to_string());
                 }
             } else {
-                while let Some(l) = lines.last() {
+                while let Some(l) = lines.peek() {
                     let t = l.trim();
                     if let Some(c) = t.strip_prefix("//") {
                         let c = c.trim_start_matches('/').trim_start_matches('!');
                         out.push(c.strip_prefix(' ').unwrap_or(c).to_string());
-                        lines.pop();
+                        lines.next();
                     } else {
                         break;
                     }
