@@ -344,21 +344,35 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     // The ports and parameters the instances of one statement connect by name, for design
     // elements defined twice: without a build file they pick the copy the instances are,
     // which other files reach through them (`Analysis::instance_definitions`).
-    // A statement is the span of its type name, as the resolver groups them; hashed are the
-    // instances it has and the names they connect, not where it is.
-    type Group<'a> = (&'a str, std::collections::BTreeSet<&'a str>, std::collections::BTreeSet<&'a str>);
+    // A statement is the span of its type name, as the resolver groups them (and its copy is
+    // that of all its instances). Hashed are the scope it is in, all its instances and the
+    // names they connect, not where it is.
+    type Group<'a> = (&'a str, Vec<&'a str>, std::collections::BTreeSet<&'a str>, std::collections::BTreeSet<&'a str>);
     let mut groups: std::collections::BTreeMap<Span, Group> = Default::default();
+    let statement = |d: &dvi_syntax::ast::Decl| -> Option<(Span, &str)> {
+        let rid = d.ty.as_ref().and_then(|t| t.ref_id)?;
+        let seg = u.parsed.reference(rid).segs.first().filter(|s| !s.from_macro)?;
+        defined_twice(&seg.name).then_some((seg.span, seg.name.as_str()))
+    };
+    for d in u.parsed.decls.iter().filter(|d| d.kind == DeclKind::Instance) {
+        let Some((span, name)) = statement(d) else { continue };
+        let g = groups.entry(span).or_insert_with(|| {
+            let mut scope = Vec::new();
+            let mut p = d.parent;
+            while let Some(x) = p {
+                let pd = u.parsed.decl(x);
+                scope.push(pd.name.as_str());
+                p = pd.parent;
+            }
+            (name, scope, Default::default(), Default::default())
+        });
+        g.2.insert(d.name.as_str());
+    }
     for r in &u.parsed.refs {
         if let RefKind::Port { inst } | RefKind::Param { inst } = r.kind {
-            let d = u.parsed.decl(inst);
-            let Some(rid) = d.ty.as_ref().and_then(|t| t.ref_id) else { continue };
-            let Some(seg) = u.parsed.reference(rid).segs.first().filter(|s| !s.from_macro) else { continue };
-            if !defined_twice(&seg.name) {
-                continue;
+            if let Some(g) = statement(u.parsed.decl(inst)).and_then(|(span, _)| groups.get_mut(&span)) {
+                g.3.extend(r.segs.first().map(|s| s.name.as_str()));
             }
-            let g = groups.entry(seg.span).or_insert_with(|| (seg.name.as_str(), Default::default(), Default::default()));
-            g.1.insert(d.name.as_str());
-            g.2.extend(r.segs.first().map(|s| s.name.as_str()));
         }
     }
     for g in groups.values() {

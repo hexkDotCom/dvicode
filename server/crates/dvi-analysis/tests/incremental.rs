@@ -492,3 +492,37 @@ fn statements_in_two_headers_are_told_apart() {
     ];
     assert!(edit_like_the_server("ifaceheaders", &files, ("a/second.svh", "D c(.y());\n")));
 }
+
+#[test]
+fn an_instance_without_connections_follows_its_statement() {
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/top.sv", "module top;\n  D a(.x()), b();\n  D c(.y());\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(top.b.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifacesibling", &files, ("a/top.sv", "module top;\n  D a(.x());\n  D b(), c(.y());\nendmodule\n")));
+}
+
+#[test]
+fn a_statement_moved_to_another_scope_changes_what_other_files_see() {
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/hx.svh", "D u(.x());\n"),
+        ("a/hy.svh", "D u(.y());\n"),
+        ("a/ab.sv", "module A;\n`include \"hx.svh\"\nendmodule\nmodule B;\n`include \"hy.svh\"\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(A.u.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifacescope", &files, ("a/ab.sv", "module A;\n`include \"hy.svh\"\nendmodule\nmodule B;\n`include \"hx.svh\"\nendmodule\n")));
+}
+
+#[test]
+fn connecting_a_sibling_the_same_way_changes_nothing_others_see() {
+    let files = [
+        ("a/d.sv", "module D(input logic x);\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/top.sv", "module top;\n  D a(.x()), b();\nendmodule\n"),
+    ];
+    assert!(!edit_like_the_server("ifacesame", &files, ("a/top.sv", "module top;\n  D a(.x()), b(.x());\nendmodule\n")));
+}
