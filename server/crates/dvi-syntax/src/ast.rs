@@ -315,7 +315,7 @@ pub struct ParsedUnit {
     pub refs: Vec<RefChain>,
     pub diags: Vec<Diag>,
     /// Members of each scope by name (enum items are hoisted into the enclosing scope).
-    pub members: FxHashMap<(DeclId, SmolStr), Vec<DeclId>>,
+    pub members: FxHashMap<DeclId, FxHashMap<SmolStr, Vec<DeclId>>>,
     /// Top-level declarations per file, for the outline.
     pub file_tops: FxHashMap<FileId, Vec<DeclId>>,
     /// `bind target ... inst (...)`: the target (a module name, or an instance path such as
@@ -335,12 +335,14 @@ impl ParsedUnit {
     }
 
     pub fn lookup_member(&self, scope: DeclId, name: &str) -> &[DeclId] {
-        self.members.get(&(scope, SmolStr::new(name))).map(|v| v.as_slice()).unwrap_or(&[])
+        // By scope, then by name as `&str`: no key is built (names of register fields are longer
+        // than a `SmolStr` holds inline, and this runs for every name resolved).
+        self.members.get(&scope).and_then(|m| m.get(name)).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Fills [`ParsedUnit::members`] and [`ParsedUnit::file_tops`].
     pub fn build_index(&mut self) {
-        let mut members: FxHashMap<(DeclId, SmolStr), Vec<DeclId>> = FxHashMap::default();
+        let mut members: FxHashMap<DeclId, FxHashMap<SmolStr, Vec<DeclId>>> = FxHashMap::default();
         for (id, d) in self.decls.iter().enumerate() {
             let id = id as DeclId;
             let Some(parent) = d.parent else { continue };
@@ -350,7 +352,7 @@ impl ParsedUnit {
                 continue;
             }
             if !d.name.is_empty() {
-                members.entry((parent, d.name.clone())).or_default().push(id);
+                members.entry(parent).or_default().entry(d.name.clone()).or_default().push(id);
             }
             // Enum items are visible in the scope of the enum type declaration.
             if d.kind == DeclKind::EnumMember {
@@ -362,7 +364,7 @@ impl ParsedUnit {
                     }
                 }
                 if p != parent {
-                    members.entry((p, d.name.clone())).or_default().push(id);
+                    members.entry(p).or_default().entry(d.name.clone()).or_default().push(id);
                 }
             }
         }

@@ -772,9 +772,10 @@ impl Analysis {
         if progress.is_cancelled() {
             return None;
         }
-        // A file opened, edited or closed in a `-y` folder (or a `-v` file) may be the library
-        // file a design element is now found in, saved or not.
-        let library_file = files.iter().any(|f| self.in_library_folder(*f));
+        // A file opened or closed in a `-y` folder (or a `-v` file) that no build unit compiles
+        // may be the library file a design element is now found in, saved or not. One that is
+        // compiled already is compared like any other unit below.
+        let library_file = files.iter().any(|f| !self.units_of_file(*f).iter().any(|u| self.unit(*u).kind != UnitKind::AdHoc) && self.in_library_folder(*f));
         if affected.is_empty() && !library_file {
             return Some(self.clone());
         }
