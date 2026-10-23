@@ -166,7 +166,7 @@ testbench; it needs no UVM installation.
 | `dvicode.server.wslDistro` | | WSL distribution (default: the folder's, else the default one) |
 | `dvicode.server.sshHost`, `.sshArgs`, `.sshCommand` | | SSH destination and options |
 | `dvicode.server.launchCommand` | `${SERVER_CMD}` | Wrapper for `custom`, e.g. `ssh farm bsub -Is ${SERVER_CMD}` |
-| `dvicode.server.tcpAddress`, `.tcpToken` | `127.0.0.1:7777` | Attach to `DVICODE_TOKEN=T dvicode-server --listen HOST:PORT` |
+| `dvicode.server.tcpAddress`, `.tcpToken` | `127.0.0.1:7777` | Attach to `DVICODE_TOKEN=T dvicode-server --listen HOST:PORT` (without a token the engine listens on loopback only) |
 | `dvicode.server.path` | | Engine binary on the target (default: bundled, installed to `~/.dvicode/server/`) |
 | `dvicode.server.autoDeploy` | `true` | Install the bundled engine on WSL and SSH targets (Linux x64; for other hosts, build the engine there and set `dvicode.server.path`) |
 | `dvicode.pathMappings` | `[]` | Same folder seen by both sides, e.g. `[{ "local": "Z:\\proj", "remote": "/home/me/proj" }]` |
@@ -235,8 +235,13 @@ programs. Run **DVICode: Rebuild Project**, which reads every file again.
 The extension starts the engine directly, or through `wsl.exe` or `ssh`, and talks the
 Language Server Protocol over that process's input and output. The WSL and SSH modes
 therefore need no extra port for the language server; the optional `tcp` mode attaches to an
-engine you started yourself. See [docs/architecture.md](docs/architecture.md) for the
-details.
+engine you started yourself. Such an engine needs a token (`DVICODE_TOKEN`, and the same value
+in `dvicode.server.tcpToken`) to listen on any address but loopback, since whoever connects
+can read and write that account's files; the connection is not encrypted, so across a network
+listen on `127.0.0.1` and use an SSH tunnel (`ssh -L 7777:127.0.0.1:7777 host`), or the `ssh`
+mode, which needs no port. In Restricted Mode, a `dvicode://` folder reaches an SSH or TCP
+engine only when your own settings name it; trust the workspace to use another. See
+[docs/architecture.md](docs/architecture.md) for the details.
 
 ## Status
 

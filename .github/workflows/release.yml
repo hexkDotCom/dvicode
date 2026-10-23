@@ -1,10 +1,13 @@
 # Builds the engine for each platform and packages one VS Code extension per platform.
 #
-# - Push a tag `v<version>` (matching client/package.json) to build and attach the packages
-#   to a GitHub release.
-# - Run the workflow by hand to build the packages as artifacts; tick "publish" to also
-#   publish them to Open VSX through trusted publishing (no stored token; see
-#   docs/releasing.md). The VS Code Marketplace is updated by uploading the packages by hand.
+# - Push a tag `v<version>` (matching client/package.json) to build the packages, attach them
+#   to a GitHub release and attest their provenance (which workflow run built them, from which
+#   commit).
+# - Run the workflow by hand from main to build the packages as artifacts, to try them first.
+# - Run it by hand from main with `tag` set (`v0.3.2`) to publish that release's packages to
+#   Open VSX through trusted publishing (no stored token; see docs/releasing.md): the very
+#   packages the tag built, checked against their attestations, not a new build. The VS Code
+#   Marketplace is updated by uploading the same packages by hand.
 #
 # Every package contains the engine for its own platform (local use) and the static Linux
 # x64 engine (deployed to WSL and SSH hosts).
@@ -16,10 +19,10 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      publish:
-        description: Publish to Open VSX
-        type: boolean
-        default: false
+      tag:
+        description: Publish the packages of this release to Open VSX (a tag such as v0.3.2; empty to build packages only)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -27,6 +30,7 @@ permissions:
 jobs:
   engine:
     name: Engine ${{ matrix.platform }}
+    if: inputs.tag == ''
     strategy:
       fail-fast: false
       matrix:
@@ -40,7 +44,7 @@ jobs:
           - { platform: darwin-x64, os: macos-14, target: x86_64-apple-darwin, exe: dvicode-server, emulator: arch -x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -83,7 +87,7 @@ jobs:
         if: matrix.platform == 'linux-x64'
         working-directory: server
         run: cargo test --locked --target x86_64-unknown-linux-musl
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-${{ matrix.platform }}
           path: server/target/${{ matrix.target }}/release/${{ matrix.exe }}
@@ -95,17 +99,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Provenance attestations of the released packages.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: client/package-lock.json
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+          node-version: 22
+          # No cache: what goes into a release comes from the lock file alone.
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: engine-*
           path: engines
@@ -161,13 +168,20 @@ jobs:
             fi
           done
           ls -l dist
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vsix
           path: dist/*.vsix
           if-no-files-found: error
+      - name: Provenance
+        # Only for the tag push: the packages of a release say which run built them, from
+        # which commit (`gh attestation verify <file> -R hexkDotCom/dvicode`).
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.vsix
       - name: GitHub release
-        # Only for the tag push: a run started by hand (to publish) finds the release there.
+        # Only for the tag push: publishing to Open VSX later takes the packages from there.
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -175,8 +189,7 @@ jobs:
 
   open-vsx:
     name: Publish to Open VSX
-    needs: package
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
     runs-on: ubuntu-latest
     # Trusted publishing: Open VSX is registered to trust this workflow file, in this repository,
     # in this environment, and exchanges the job's OIDC ID token for a token that can publish this
@@ -185,23 +198,39 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: read
     steps:
       # Only the publishing tool's locked dependency list.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: scripts/ovsx
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Install ovsx
         # Exactly the versions and hashes of scripts/ovsx/package-lock.json, with no install
         # scripts: nothing else runs in this job, which can publish.
         run: npm ci --ignore-scripts --prefix scripts/ovsx
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: vsix
-          path: dist
+      - name: The release's packages, as the tag's run built them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p '*.vsix' -D dist
+          version=${TAG#v}
+          ls -l dist
+          # The six packages of that version, and nothing else.
+          test "$(ls dist | wc -l)" -eq 6
+          for f in dist/*.vsix; do
+            case "$(basename "$f")" in *-"$version".vsix) ;; *) echo "not version $version: $f"; exit 1 ;; esac
+            # Built by this workflow, in this repository, from the tag.
+            gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
+          done
       - name: Publish
         run: |
           set -euo pipefail

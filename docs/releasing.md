@@ -32,8 +32,9 @@ on ARM, for example), use WSL or SSH, or build the engine there and set
    `--locked` and fail otherwise), and commit all three files.
 3. Tag and push: `git tag vX.Y.Z && git push origin main vX.Y.Z` (the version of step 2).
 4. The workflow checks that the tag matches the version, builds everything, runs the engine
-   on the demo project on Windows, Linux and macOS, and creates a GitHub pre-release with the
-   packages attached.
+   on the demo project on Windows, Linux and macOS, attests the packages' provenance, and
+   creates a GitHub pre-release with the packages attached. Anyone can check that a package
+   came from that run: `gh attestation verify dvicode-X.Y.Z.vsix -R hexkDotCom/dvicode`.
 5. Try the packages, then edit the release on GitHub to mark it as the latest release.
 
 To build packages without a release (for testing), run the workflow by hand from the
@@ -55,10 +56,12 @@ Open VSX is the store used by VSCodium, Cursor, Windsurf, Gitpod and other VS Co
 `Release` workflow publishes to it with *trusted publishing*: Open VSX trusts the workflow
 itself, so no access token is stored in GitHub. Run the workflow by hand from the **Actions**
 tab, **from `main`** (the `open-vsx` environment accepts only that branch: a run from the tag
-fails at once), with **publish** ticked; its `Publish to Open VSX` job waits for the reviewer's
-approval, then publishes the packages built in that run. Re-running it skips versions that are
-already published; if a job fails in a GitHub service step, start a new run rather than
-re-running the failed jobs.
+fails at once), with **tag** set to the release (`v0.3.2`), or
+`gh workflow run release.yml -R hexkDotCom/dvicode --ref main -f tag=vX.Y.Z`. Nothing is built:
+its `Publish to Open VSX` job waits for the reviewer's approval, downloads the release's six
+packages, checks each against its provenance attestation (built by this workflow from that
+tag), and publishes them. Re-running it skips versions that are already published; if a job
+fails in a GitHub service step, start a new run rather than re-running the failed jobs.
 
 One-time setup:
 
