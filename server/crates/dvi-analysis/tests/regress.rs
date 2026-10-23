@@ -2327,3 +2327,15 @@ fn completion_in_a_file_included_inside_a_module() {
     let names: Vec<String> = a.completions(f, body.len() as u32).into_iter().map(|c| c.label).collect();
     assert!(names.iter().any(|n| n == "local_signal") && !names.iter().any(|n| n == "t"), "{names:?}");
 }
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn an_include_and_the_editor_spelling_a_file_differently_share_it() {
+    // `include "defs.svh" finds Defs.svh where case does not matter; the editor's text of
+    // Defs.svh is what the includer sees.
+    let (a, root) = project("casefile", &[("Defs.svh", "`define READY 1\n"), ("top.sv", "`include \"defs.svh\"\n`ifndef READY\nmodule m; initial undeclared_q = 1; endmodule\n`endif\n")]);
+    assert!(codes(&a, "top.sv").is_empty(), "{:?}", codes(&a, "top.sv"));
+    let f = a.vfs.set_overlay(&root.join("Defs.svh"), Arc::from("`define NOT_READY 1\n"));
+    let a2 = a.update(&[f]);
+    assert_eq!(codes(&a2, "top.sv"), vec!["UNDECLARED_IDENTIFIER"]);
+}

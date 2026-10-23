@@ -34,6 +34,7 @@ struct Entry {
 #[derive(Default)]
 struct Inner {
     paths: Vec<PathBuf>,
+    /// By [`id_key`]: one file under every spelling the file system takes for it.
     ids: FxHashMap<PathBuf, FileId>,
     entries: Vec<Entry>,
 }
@@ -124,7 +125,7 @@ impl Vfs {
 
     pub fn lookup(&self, path: &Path) -> Option<FileId> {
         let p = normalize(path);
-        self.inner.read().unwrap().ids.get(&p).copied()
+        self.inner.read().unwrap().ids.get(&id_key(&p)).copied()
     }
 
     /// Sets the editor contents of a file.
@@ -324,19 +325,31 @@ impl Vfs {
     }
 }
 
+/// The key of a normalized path in the file ids. Where the file system ignores case (Windows,
+/// macOS), `Defs.svh` and `defs.svh` are one file: an `` `include "defs.svh" `` and the editor's
+/// `Defs.svh` must share its text. The first spelling seen is the one shown.
+fn id_key(p: &Path) -> PathBuf {
+    if cfg!(any(windows, target_os = "macos")) {
+        PathBuf::from(p.to_string_lossy().to_lowercase())
+    } else {
+        p.to_path_buf()
+    }
+}
+
 impl SourceProvider for Vfs {
     fn file_id(&self, path: &Path) -> FileId {
         let p = normalize(path);
-        if let Some(id) = self.inner.read().unwrap().ids.get(&p) {
+        let key = id_key(&p);
+        if let Some(id) = self.inner.read().unwrap().ids.get(&key) {
             return *id;
         }
         let mut g = self.inner.write().unwrap();
-        if let Some(id) = g.ids.get(&p) {
+        if let Some(id) = g.ids.get(&key) {
             return *id;
         }
         let id = g.paths.len() as FileId;
-        g.paths.push(p.clone());
-        g.ids.insert(p, id);
+        g.paths.push(p);
+        g.ids.insert(key, id);
         g.entries.push(Entry::default());
         id
     }
