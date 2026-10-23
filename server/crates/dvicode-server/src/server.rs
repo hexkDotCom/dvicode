@@ -255,9 +255,9 @@ struct Server {
     /// Files changed on disk while an update or a build waiting for one ran, that the snapshot
     /// in use does not compile: the update may have read them (see `on_updated`).
     changed_while_updating: FxHashSet<FileId>,
-    /// Files opened while an update or a build ran, which did not see them (see `on_updated`),
-    /// and the number of the edit that opened each.
-    opened_while_updating: FxHashMap<FileId, u64>,
+    /// Files opened while an update or a build ran, which did not see them (see `on_updated`):
+    /// the number of the edit that opened each, and whether it was looked for since.
+    opened_while_updating: FxHashMap<FileId, (u64, bool)>,
     /// Numbers the edits (`note_change`).
     edit_seq: u64,
     /// Files with edits the snapshot in use does not have yet: the number of the first.
@@ -648,6 +648,10 @@ impl Server {
         };
         // A running update started from the snapshot this replaces (or from an older build).
         self.cancel_update();
+        // Files opened while it ran are looked for again in it once it is in.
+        for (_, done) in self.opened_while_updating.values_mut() {
+            *done = false;
+        }
         // The update thread applies the edits made while the build ran, including those
         // already applied to the previous snapshot by the debounce (the build may have read
         // older text), and compiles open files that are not part of the build ad hoc.
@@ -754,7 +758,8 @@ impl Server {
             .collect();
         for r in roots {
             if let Some(seq) = opened {
-                self.dirty.entry(r).or_insert(seq);
+                let first = self.dirty.entry(r).or_insert(seq);
+                *first = (*first).min(seq);
             }
             self.compile_again(r);
         }
@@ -870,13 +875,20 @@ impl Server {
                 self.dirty.remove(&f);
             }
         }
-        // Files opened while it ran, whose name an include it compiled may have looked for.
-        if self.update.is_none() && self.built.is_none() && !self.building {
-            for (f, seq) in std::mem::take(&mut self.opened_while_updating) {
-                if self.open.contains_key(&f) {
-                    self.retry_includes_of(f, Some(seq));
-                }
+        // Files opened while it ran, whose name an include it compiled may have looked for;
+        // kept while a build or an update that may not have seen them either is still to come.
+        // Once each (an include that does not reach it would be tried again and again).
+        let opened: Vec<(FileId, u64)> = self.opened_while_updating.iter_mut().filter(|(_, (_, done))| !*done).map(|(f, (s, done))| {
+            *done = true;
+            (*f, *s)
+        }).collect();
+        for (f, seq) in opened {
+            if self.open.contains_key(&f) {
+                self.retry_includes_of(f, Some(seq));
             }
+        }
+        if self.built.is_none() && !self.building {
+            self.opened_while_updating.clear();
         }
         if self.announce.is_some() {
             self.announce_build();
@@ -1107,7 +1119,7 @@ impl Server {
                 if self.update.is_some() || self.built.is_some() || self.building {
                     // What that update or build looks for, it may not find in this file: the
                     // same once it is in.
-                    self.opened_while_updating.insert(id, self.edit_seq);
+                    self.opened_while_updating.insert(id, (self.edit_seq, false));
                 }
                 // Make the file available right away.
                 self.flush_pending();

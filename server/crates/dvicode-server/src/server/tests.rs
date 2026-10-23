@@ -1580,3 +1580,56 @@ fn a_header_opened_while_an_update_finds_its_include_is_found_after_it() {
     assert!(last.is_none_or(|p| p.diagnostics.is_empty()), "{last:?}");
     c.shutdown();
 }
+
+#[test]
+fn a_retry_for_a_later_header_does_not_hide_an_earlier_one() {
+    let top_text = "module top;\n`include \"a.svh\"\n`include \"c.svh\"\n  new_t v;\nendmodule\n";
+    let root = project("tworetries", &[("top.sv", top_text)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    gate.close();
+    c.open(&uri(&root, "a.svh"), 1, "`include \"b.svh\"\n");
+    gate.wait_entered(1);
+    c.open(&uri(&root, "b.svh"), 1, "  typedef int new_t;\n");
+    let def = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(top_text, "new_t v") }));
+    c.open(&uri(&root, "c.svh"), 1, "\n");
+    c.sync();
+    gate.open();
+    let d = c.reply(&def, WAIT).expect("an answer").result.unwrap_or(Value::Null);
+    assert!(d[0]["uri"].as_str().is_some_and(|u| u.ends_with("b.svh")), "{d}");
+    c.shutdown();
+}
+
+#[test]
+fn a_header_opened_during_an_update_is_looked_for_while_a_build_runs() {
+    let top_text = "module top;\n`include \"a.svh\"\n  new_t v;\nendmodule\n";
+    let root = project("retrybuild", &[("top.sv", top_text)]);
+    let (builds, updates) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+    let _openers = (Opener(builds.clone()), Opener(updates.clone()));
+    let hooks = {
+        let (b, u) = (builds.clone(), updates.clone());
+        Hooks { after_build: Some(Box::new(move || b.pass())), before_update: Some(Box::new(move || u.pass())), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let top = uri(&root, "top.sv");
+    c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    // A full build runs (held) while a.svh is opened, its update held, and b.svh opened.
+    builds.close();
+    c.request_ok("dvicode/rebuild", Value::Null);
+    builds.wait_entered(2);
+    updates.close();
+    c.open(&uri(&root, "a.svh"), 1, "`include \"b.svh\"\n");
+    updates.wait_entered(1);
+    c.open(&uri(&root, "b.svh"), 1, "  typedef int new_t;\n");
+    let def = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(top_text, "new_t v") }));
+    c.sync();
+    updates.open();
+    // Answered with b.svh before the build is done.
+    let d = c.reply(&def, WAIT).expect("an answer").result.unwrap_or(Value::Null);
+    assert!(d[0]["uri"].as_str().is_some_and(|u| u.ends_with("b.svh")), "{d}");
+    builds.open();
+    c.shutdown();
+}
