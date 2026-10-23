@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.1 (preview)
+
+**Responsiveness**
+
+- Project updates run off the message loop: hover, completion and navigation answer while a
+  large project is being rebuilt, and wait only for the edits they need. Cancelled requests
+  (`$/cancelRequest`) stop early, and problem checks skip files a newer check owns.
+- Editing a header included by many files preprocesses each includer once, in order: a header
+  with 20,000 includers updates in about a second.
+- The Linux x86_64 engine uses mimalloc and the Windows engine the segment heap: full builds
+  are up to 3x faster on Linux, with memory returned at once.
+- Faster cursor-scope lookups, renames across many files, library discovery, macro
+  highlights, and completion in large designs.
+
+**Also**
+
+- The files a build reads (build file, argument files, simulator logs) are watched whatever
+  their names; a new build file is announced when its build is in use.
+- Opening a header that an `` `include `` did not find compiles the files that include it
+  again; completion in a file included inside a module or class sees that scope.
+- Where case does not matter (Windows, macOS), one file is one file under every spelling of
+  its name.
+
+**Fixes**
+
+- Deeply nested constraints and structs, and include cycles, no longer crash completion or
+  the parser; saving then closing a file no longer leaves its old text in use.
+- Bracketed characters in build paths (`[abc]`) are read as a class only when they match.
+- The client: Restart works while a start hangs; `\\wsl.localhost` paths, remote TCP engines
+  with IPv6 addresses, custom launch commands with quotes, any typed design top, and `case` /
+  `endcase` indentation.
+
+**Security**
+
+- An engine started with `--listen` and no token accepts only loopback addresses; token
+  handshakes no longer hold up other clients.
+- In Restricted Mode, a `dvicode://` folder may only name the SSH host or TCP address your own
+  settings name.
+- Build files cannot make variables or `**` patterns grow without bound; `.gitignore` is read
+  only as a regular file of sensible size; variable values are no longer logged.
+- Rename does not change a file linked into the workspace from outside it.
+
 ## 0.3.0 (preview)
 
 **UVM Verification Hierarchy: as UVM builds it**

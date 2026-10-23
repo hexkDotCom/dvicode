@@ -30,7 +30,7 @@ on ARM, for example), use WSL or SSH, or build the engine there and set
 2. Update `version` in `client/package.json` and `server/Cargo.toml`, run `cargo update -w` in
    `server/` so that `server/Cargo.lock` has the new version too (the release builds use
    `--locked` and fail otherwise), and commit all three files.
-3. Tag and push: `git tag v0.3.0 && git push origin main v0.3.0`.
+3. Tag and push: `git tag vX.Y.Z && git push origin main vX.Y.Z` (the version of step 2).
 4. The workflow checks that the tag matches the version, builds everything, runs the engine
    on the demo project on Windows, Linux and macOS, and creates a GitHub pre-release with the
    packages attached.
