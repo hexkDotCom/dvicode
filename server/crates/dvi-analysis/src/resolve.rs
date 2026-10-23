@@ -764,13 +764,18 @@ impl Analysis {
             for (sp, rid, _) in pos.refs[k.saturating_sub(1)..].iter().take(2) {
                 consider(sp.start, u.parsed.reference(*rid).scope);
             }
-        }
-        for d in u.parsed.decls.iter().filter(|d| d.name_span.file == file) {
-            if let Some(p) = d.parent {
-                consider(d.name_span.start, p);
+            let k = pos.decls.partition_point(|d| u.parsed.decl(*d).name_span.start <= off);
+            for d in pos.decls[k.saturating_sub(1)..].iter().take(2).map(|d| u.parsed.decl(*d)) {
+                if let Some(p) = d.parent {
+                    consider(d.name_span.start, p);
+                }
             }
         }
-        let mut s = before.or(after)?.1;
+        let Some((_, mut s)) = before.or(after) else {
+            // Nothing written in it yet (blank, or comments): the scope where it is included.
+            let site = u.includes.iter().find(|i| i.resolved == Some(file) && i.span.file != file)?.span;
+            return Some(self.scope_at(unit, site.file, site.start));
+        };
         loop {
             let d = u.parsed.decl(s);
             let inside = d.span.file != file || (d.span.start <= off && off <= d.span.end);

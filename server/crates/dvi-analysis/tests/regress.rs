@@ -2328,10 +2328,16 @@ fn completion_in_a_file_included_inside_a_module() {
     let off = (body.find("endfunction").unwrap() + "endfunction\n".len()) as u32;
     let names: Vec<String> = a.completions(f, off).into_iter().map(|c| c.label).collect();
     assert!(names.iter().any(|n| n == "local_signal") && !names.iter().any(|n| n == "t"), "{names:?}");
-    // A header that only declares, and the cursor before the first name of a header.
-    let files = [("top.sv", "module m;\n  int local_signal;\n  `include \"decl.svh\"\n  `include \"use.svh\"\nendmodule\n"), ("decl.svh", "int header_var;\n"), ("use.svh", "\nassign local_signal = 1;\n")];
+    // A header that only declares, the cursor before the first name of a header, and a header
+    // with nothing in it yet (the scope where it is included).
+    let files = [
+        ("top.sv", "module m;\n  int local_signal;\n  `include \"decl.svh\"\n  `include \"use.svh\"\n  `include \"blank.svh\"\nendmodule\n"),
+        ("decl.svh", "int header_var;\n"),
+        ("use.svh", "\nassign local_signal = 1;\n"),
+        ("blank.svh", "// to do\n"),
+    ];
     let (a, root) = project("fragcomplete3", &files);
-    for (file, off) in [("decl.svh", 16u32), ("use.svh", 0)] {
+    for (file, off) in [("decl.svh", 16u32), ("use.svh", 0), ("blank.svh", 9)] {
         let f = a.vfs.lookup(&root.join(file)).unwrap();
         let names: Vec<String> = a.completions(f, off).into_iter().map(|c| c.label).collect();
         assert!(names.iter().any(|n| n == "local_signal"), "{file}: {names:?}");

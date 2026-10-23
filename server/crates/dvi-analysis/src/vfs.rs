@@ -127,8 +127,14 @@ impl Vfs {
 
     pub fn lookup(&self, path: &Path) -> Option<FileId> {
         let p = normalize(path);
-        let g = self.inner.read().unwrap();
-        g.ids.get(&p).copied().or_else(|| g.spelled_otherwise(&p))
+        let candidates = {
+            let g = self.inner.read().unwrap();
+            if let Some(id) = g.ids.get(&p) {
+                return Some(*id);
+            }
+            g.spellings(&p)
+        };
+        same_as(&candidates, &p)
     }
 
     /// Sets the editor contents of a file.
@@ -344,25 +350,36 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 impl Inner {
-    /// The id of `p` under another spelling of the same file, if one has an id.
-    fn spelled_otherwise(&self, p: &Path) -> Option<FileId> {
-        let ids = self.folded.get(&fold(p)?)?;
-        ids.iter().copied().find(|id| same_file(&self.paths[*id as usize], p))
+    /// The ids and paths `p` may be another spelling of (the same path ignoring case).
+    fn spellings(&self, p: &Path) -> Vec<(FileId, PathBuf)> {
+        let ids = fold(p).and_then(|f| self.folded.get(&f));
+        ids.into_iter().flatten().map(|id| (*id, self.paths[*id as usize].clone())).collect()
     }
+}
+
+/// Which of `candidates` names the same file as `p`, asking the file system (without a lock
+/// held: it may be slow, on a network share).
+fn same_as(candidates: &[(FileId, PathBuf)], p: &Path) -> Option<FileId> {
+    candidates.iter().find(|(_, q)| same_file(q, p)).map(|(id, _)| *id)
 }
 
 impl SourceProvider for Vfs {
     fn file_id(&self, path: &Path) -> FileId {
         let p = normalize(path);
-        if let Some(id) = self.inner.read().unwrap().ids.get(&p) {
-            return *id;
-        }
+        let candidates = {
+            let g = self.inner.read().unwrap();
+            if let Some(id) = g.ids.get(&p) {
+                return *id;
+            }
+            g.spellings(&p)
+        };
+        // An `include "defs.svh"` and the editor's `Defs.svh` must share the file's text.
+        let other = same_as(&candidates, &p);
         let mut g = self.inner.write().unwrap();
         if let Some(id) = g.ids.get(&p) {
             return *id;
         }
-        // An `include "defs.svh"` and the editor's `Defs.svh` must share the file's text.
-        if let Some(id) = g.spelled_otherwise(&p) {
+        if let Some(id) = other {
             g.ids.insert(p, id);
             return id;
         }
