@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (preview)
 
 **UVM Verification Hierarchy: as UVM builds it**
 
