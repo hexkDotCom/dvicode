@@ -1227,7 +1227,7 @@ No command line found in the log: no defines from it.");
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
-        if glob::has_wildcard(&e) {
+        if glob::is_pattern(&e, &abs) {
             let found: Vec<PathBuf> = glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect();
             if !self.inspecting {
                 log::debug!("build: {}:{}: +incdir+{p} matches {} directories", file.display(), line + 1, found.len());
@@ -1249,7 +1249,7 @@ No command line found in the log: no defines from it.");
     fn add_file(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
-        if glob::has_wildcard(&e) {
+        if glob::is_pattern(&e, &abs) {
             let mut found = glob::expand(&abs);
             found.retain(|f| f.is_file());
             found.sort();

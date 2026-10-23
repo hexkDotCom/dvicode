@@ -10,6 +10,17 @@ pub fn has_wildcard(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
+/// A character class (`[ab]`) in some path component: a `[` closed later in the component.
+pub fn has_class(s: &str) -> bool {
+    s.split(['/', '\\']).any(|c| c.find('[').is_some_and(|i| c[i + 1..].contains(']')))
+}
+
+/// Whether a path written in a build file is a pattern to expand: a wildcard, or a character
+/// class unless a file or folder has that very name (`a[1].sv`).
+pub fn is_pattern(written: &str, abs: &Path) -> bool {
+    has_wildcard(written) || (has_class(written) && !abs.exists())
+}
+
 /// The character class starting at `p[i]` (`[`): whether it matches `c`, and the index after
 /// its `]`. `None` when there is no closing `]` (the `[` is then an ordinary character). A `]`
 /// right after `[` or `[!` belongs to the class; `!` or `^` first negates it.
@@ -71,7 +82,7 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
     // Fixed prefix.
     let mut base = PathBuf::new();
     let mut i = 0;
-    while i < comps.len() && !has_wildcard(&comps[i]) {
+    while i < comps.len() && !has_wildcard(&comps[i]) && !has_class(&comps[i]) {
         base.push(&comps[i]);
         i += 1;
     }
@@ -105,7 +116,8 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links
         }
         return;
     }
-    if !has_wildcard(first) {
+    // A class names itself when a file or folder has that name.
+    if !has_wildcard(first) && (!has_class(first) || dir.join(first).exists()) {
         let p = dir.join(first);
         if p.exists() {
             walk(&p, &rest[1..], out, depth + 1, links);
@@ -194,6 +206,22 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("ip"), p.join("z/rtl/link")).unwrap();
         let found = expand(&p.join("**/rtl/**/*.sv"));
         assert_eq!(found, vec![p.join("z/rtl/link/x.sv")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn character_classes_expand_unless_a_file_has_that_name() {
+        let dir = std::env::temp_dir().join(format!("dvicode_glob_classes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("rtl")).unwrap();
+        for f in ["rtl/a.sv", "rtl/b.sv", "rtl/c.sv", "rtl/x[1].sv", "rtl/x1.sv"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let p = dir.join("rtl/[ab].sv");
+        assert!(is_pattern("rtl/[ab].sv", &p));
+        assert_eq!(expand(&p), vec![dir.join("rtl/a.sv"), dir.join("rtl/b.sv")]);
+        // A file named with brackets is that file.
+        assert!(!is_pattern("rtl/x[1].sv", &dir.join("rtl/x[1].sv")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

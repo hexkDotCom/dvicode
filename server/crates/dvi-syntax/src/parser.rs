@@ -1635,6 +1635,17 @@ impl<'t> Parser<'t> {
             self.error(sp, "Expected '{'");
             return id;
         }
+        // Struct members can be structs: nested like statements, and as deep at most.
+        if self.stmt_depth >= MAX_STMT_DEPTH {
+            if !self.too_deep {
+                self.too_deep = true;
+                let span = self.tok().span;
+                self.error(span, "Types are nested too deeply; this one is skipped");
+            }
+            self.pos = self.skip_group_from(self.pos);
+            return id;
+        }
+        self.stmt_depth += 1;
         self.bump();
         self.push_scope(id);
         while !self.at_eof() && !self.at_p("}") {
@@ -1654,6 +1665,7 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
         }
+        self.stmt_depth -= 1;
         self.pop_scope();
         self.expect_p("}");
         self.finish(id);
@@ -2115,7 +2127,23 @@ impl<'t> Parser<'t> {
         self.eat_p("}");
     }
 
+    /// One constraint item, guarded like statements: `if` and `foreach` nest items in items.
     fn constraint_item(&mut self) {
+        if self.stmt_depth >= MAX_STMT_DEPTH {
+            if !self.too_deep {
+                self.too_deep = true;
+                let span = self.tok().span;
+                self.error(span, "Constraints are nested too deeply; the rest of this block is skipped");
+            }
+            self.bump();
+            return;
+        }
+        self.stmt_depth += 1;
+        self.constraint_item_inner();
+        self.stmt_depth -= 1;
+    }
+
+    fn constraint_item_inner(&mut self) {
         if self.at_p("{") {
             self.constraint_block();
             return;

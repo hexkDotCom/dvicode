@@ -1176,6 +1176,9 @@ impl Server {
             "textDocument/didSave" => {
                 let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
+                // The file on disk is now what the editor has: the text read from disk before
+                // is out of date (it is what the file goes back to when closed).
+                self.vfs.invalidate(&path);
                 if self.building && !is_log(&path) {
                     self.changed_while_building.insert(path.clone());
                 }

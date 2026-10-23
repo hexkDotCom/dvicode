@@ -721,6 +721,12 @@ impl Analysis {
 
     /// Innermost declaration scope of `unit` containing offset `off` of `file`.
     pub fn scope_at(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32) -> DeclId {
+        self.scope_at_depth(unit, file, off, 0)
+    }
+
+    /// [`Analysis::scope_at`] through `depth` include sites already (files can include each
+    /// other: the preprocessor refuses the loop but records both includes).
+    fn scope_at_depth(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32, depth: usize) -> DeclId {
         let u = self.unit(unit);
         let mut best = ParsedUnit::ROOT;
         let mut best_len = u32::MAX;
@@ -737,14 +743,14 @@ impl Analysis {
             // A file included inside a scope (`include "body.svh"` in a module): the scope's
             // extent is in the includer. The names written in this file know their scope: take
             // the nearest one's, leaving the scopes of this file that end before `off`.
-            if let Some(s) = self.included_scope_at(unit, file, off) {
+            if let Some(s) = self.included_scope_at(unit, file, off, depth) {
                 return s;
             }
         }
         best
     }
 
-    fn included_scope_at(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32) -> Option<DeclId> {
+    fn included_scope_at(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32, depth: usize) -> Option<DeclId> {
         let u = self.unit(unit);
         // Anchors: the names used and declared in this file, with the scope each is in. The
         // nearest one before `off`, else the first one after it.
@@ -773,8 +779,11 @@ impl Analysis {
         }
         let Some((_, mut s)) = before.or(after) else {
             // Nothing written in it yet (blank, or comments): the scope where it is included.
+            if depth >= MAX_DEPTH {
+                return None;
+            }
             let site = u.includes.iter().find(|i| i.resolved == Some(file) && i.span.file != file)?.span;
-            return Some(self.scope_at(unit, site.file, site.start));
+            return Some(self.scope_at_depth(unit, site.file, site.start, depth + 1));
         };
         loop {
             let d = u.parsed.decl(s);

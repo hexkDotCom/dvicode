@@ -1691,3 +1691,25 @@ fn watcher_patterns_and_input_identity() {
         assert!(!super::same_input(Path::new("/nowhere/SOURCES.list"), Path::new("/nowhere/sources.list")) || cfg!(target_os = "macos"));
     }
 }
+
+#[test]
+fn a_saved_then_closed_file_keeps_the_saved_text() {
+    // The build read the old text from disk; the editor saves a new one and closes the file
+    // (no watched-file notification): the project has the saved text.
+    let root = project("saveclose", &[("p.sv", "module old_name; endmodule\n")]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let u = uri(&root, "p.sv");
+    let new = "module new_name; endmodule\n";
+    c.open(&u, 1, "module old_name; endmodule\n");
+    c.change(&u, 2, new);
+    std::fs::write(root.join("p.sv"), new).unwrap();
+    c.notify("textDocument/didSave", json!({ "textDocument": { "uri": u } }));
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": u } }));
+    let found = |c: &mut Client, q: &str| c.request_ok("workspace/symbol", json!({ "query": q })).as_array().map_or(0, |a| a.len());
+    let deadline = Instant::now() + WAIT;
+    while found(&mut c, "new_name") == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!((found(&mut c, "new_name"), found(&mut c, "old_name")), (1, 0));
+    c.shutdown();
+}

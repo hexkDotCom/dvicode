@@ -198,13 +198,23 @@ impl Vfs {
             }
         });
         drop(dirs);
-        let id = self.lookup(path)?;
+        let ids: Vec<FileId> = match self.lookup(path) {
+            Some(id) => vec![id],
+            // A spelling not met before, of a file the file system can no longer name (deleted):
+            // where case does not matter, every spelling of the same path.
+            None => {
+                let g = self.inner.read().unwrap();
+                fold(&p).and_then(|f| g.folded.get(&f).cloned()).unwrap_or_default()
+            }
+        };
         let mut g = self.inner.write().unwrap();
-        let e = &mut g.entries[id as usize];
-        e.disk = None;
-        e.disk_loaded = false;
-        e.version += 1;
-        Some(id)
+        for id in &ids {
+            let e = &mut g.entries[*id as usize];
+            e.disk = None;
+            e.disk_loaded = false;
+            e.version += 1;
+        }
+        ids.first().copied()
     }
 
     pub fn version(&self, id: FileId) -> u64 {
@@ -271,7 +281,14 @@ impl Vfs {
                 (g.paths[id as usize].clone(), e.version)
             };
             // Regular files only: reading a FIFO named as a source would block.
-            let text: Option<Arc<str>> = std::fs::metadata(&path).ok().filter(|m| m.is_file()).and_then(|_| std::fs::read(&path).ok()).map(|b| match String::from_utf8(b) {
+            let bytes = std::fs::metadata(&path).ok().filter(|m| m.is_file()).and_then(|_| match std::fs::read(&path) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    log::warn!("cannot read {}: {e}", path.display());
+                    None
+                }
+            });
+            let text: Option<Arc<str>> = bytes.map(|b| match String::from_utf8(b) {
                 Ok(s) => Arc::from(s),
                 Err(e) => Arc::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
             });
@@ -387,23 +404,33 @@ fn same_as(candidates: &[(FileId, PathBuf)], p: &Path) -> Option<FileId> {
 impl SourceProvider for Vfs {
     fn file_id(&self, path: &Path) -> FileId {
         let p = normalize(path);
-        let candidates = {
+        let mut candidates = {
             let g = self.inner.read().unwrap();
             if let Some(id) = g.ids.get(&p) {
                 return *id;
             }
             g.spellings(&p)
         };
-        // An `include "defs.svh"` and the editor's `Defs.svh` must share the file's text.
-        let other = same_as(&candidates, &p);
-        let mut g = self.inner.write().unwrap();
-        if let Some(id) = g.ids.get(&p) {
-            return *id;
-        }
-        if let Some(id) = other {
-            g.ids.insert(p, id);
-            return id;
-        }
+        // An `include "defs.svh"` and the editor's `Defs.svh` must share the file's text. The
+        // file system is asked without the lock held; a spelling another thread added meanwhile
+        // is asked about too, before this one gets an id of its own.
+        let mut g = loop {
+            let other = same_as(&candidates, &p);
+            let mut g = self.inner.write().unwrap();
+            if let Some(id) = g.ids.get(&p) {
+                return *id;
+            }
+            if let Some(id) = other {
+                g.ids.insert(p, id);
+                return id;
+            }
+            let now = g.spellings(&p);
+            if now.len() == candidates.len() {
+                break g;
+            }
+            drop(g);
+            candidates = now;
+        };
         let id = g.paths.len() as FileId;
         if let Some(f) = fold(&p) {
             g.folded.entry(f).or_default().push(id);

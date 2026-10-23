@@ -2377,3 +2377,42 @@ fn files_differing_in_case_stay_apart_in_a_case_sensitive_folder() {
     let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
+
+#[test]
+fn completion_in_files_that_include_each_other_ends() {
+    // a.sv includes b.svh, which includes a.sv: the preprocessor refuses the loop but records
+    // both includes; completion in either looks for the scope where it is included, a bounded
+    // number of times.
+    let (a, root) = project("inccycle", &[("a.sv", "`include \"b.svh\"\n\n"), ("b.svh", "`include \"a.sv\"\n\n")]);
+    for f in ["a.sv", "b.svh"] {
+        let id = a.vfs.lookup(&root.join(f)).unwrap();
+        let _ = a.completions(id, 1 + "`include \"b.svh\"".len() as u32);
+    }
+}
+
+#[test]
+fn deeply_nested_constraints_and_structs_end() {
+    // On a stack the size of the engine's worker threads.
+    let run = || {
+        let n = 100_000;
+        let c = format!("class c; rand int x; constraint k {{ {}x == 1; }} endclass\n", "if (1) ".repeat(n));
+        let s = format!("package p; typedef {} int a; {} t; endpackage\n", "struct { ".repeat(n), "} f;".repeat(n));
+        let parse = |t: &str| dvi_syntax::parser::parse(&dvi_syntax::lexer::lex(t, 0), 0).diags.iter().filter(|d| d.message.contains("nested too deeply")).count();
+        (parse(&c), parse(&s))
+    };
+    let r = std::thread::Builder::new().stack_size(16 << 20).spawn(run).unwrap().join().expect("no stack overflow");
+    assert_eq!(r, (1, 1));
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_deleted_file_named_with_other_case_is_forgotten() {
+    // The file system cannot name a deleted file: the change event's spelling, never met
+    // before, still reaches the file's cached text where case does not matter.
+    let (a, root) = project("casedelete", &[("top.sv", "module top; endmodule\n")]);
+    let id = a.vfs.lookup(&root.join("top.sv")).unwrap();
+    assert!(dvi_syntax::SourceProvider::text(&*a.vfs, id).is_some());
+    std::fs::remove_file(root.join("top.sv")).unwrap();
+    assert_eq!(a.vfs.invalidate(&root.join("TOP.SV")), Some(id));
+    assert!(dvi_syntax::SourceProvider::text(&*a.vfs, id).is_none());
+}
