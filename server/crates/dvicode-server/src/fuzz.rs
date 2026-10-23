@@ -238,9 +238,13 @@ impl Incr {
             return;
         }
         let old = self.a.clone();
-        let next = old.update(&files).sync_open_files(&Self::open_ids(&self.vfs, &self.open));
+        let mut next = old.update(&files).sync_open_files(&Self::open_ids(&self.vfs, &self.open));
         let interface_changed = next.interface_changed(&old);
         let recompiled = next.recompiled_files(&old);
+        if !interface_changed {
+            // As the server does.
+            next.reuse_hidden_uses(&old);
+        }
         self.a = next;
         if interface_changed {
             self.shown = all_problems(&self.a, &self.open);

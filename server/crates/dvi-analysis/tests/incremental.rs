@@ -278,3 +278,48 @@ fn an_update_from_a_pin_compiles_the_editor_texts_of_that_moment() {
         assert_eq!((&*s.text, s.lsp_version), ("`define W 16\n", Some(1)));
     }
 }
+
+/// The SKIPPED_CODE notice of `file`: its line and message.
+fn skipped_notice(a: &Analysis, root: &Path, file: &str) -> Option<(u32, String)> {
+    let f = a.vfs.lookup(&root.join(file))?;
+    let text = a.file_text(f)?;
+    a.file_diagnostics(f)
+        .into_iter()
+        .find(|d| d.message.starts_with("SKIPPED_CODE"))
+        .map(|d| (text[..d.span.start as usize].matches('\n').count() as u32, d.message))
+}
+
+#[test]
+fn skipped_code_uses_are_counted_again_only_where_an_edit_can_change_them() {
+    // No build file: env_pkg's `ifdef region hides NUM_AGENTS, which user.sv uses twice.
+    let files = [
+        ("env_pkg.sv", "package env_pkg;\n`ifdef FULL_ENV\n  parameter int NUM_AGENTS = 4;\n`endif\n  parameter int VISIBLE = 1;\nendpackage\n"),
+        ("user.sv", "class user_seq;\n  int slots[env_pkg::NUM_AGENTS];\nendclass\nmodule user_top;\n  import env_pkg::*;\n  int n = NUM_AGENTS;\nendmodule\n"),
+        ("other.sv", "module other;\n  initial begin\n  end\nendmodule\n"),
+    ];
+    let (_, root) = project("hiddenreuse", &files);
+    std::fs::remove_file(root.join(".dvicode/default.build")).unwrap();
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let (line, msg) = skipped_notice(&a, &root, "env_pkg.sv").expect("a notice");
+    assert!(line == 1 && msg.contains("2 uses"), "{line} {msg}");
+
+    // A third use, in a block: nothing other files see changes, so only other.sv is counted
+    // again, the others' uses are taken over.
+    let other = edit(&a, &root, "other.sv", "module other;\n  initial begin\n    $display(env_pkg::NUM_AGENTS);\n  end\nendmodule\n");
+    let mut b = a.update_with(&[other], &dvi_project::Progress::new()).unwrap();
+    assert!(!b.interface_changed(&a));
+    b.reuse_hidden_uses(&a);
+    assert!(b.hidden_seed.as_ref().is_some_and(|s| s.len() == 2), "env_pkg.sv and user.sv taken over");
+    let (line, msg) = skipped_notice(&b, &root, "env_pkg.sv").unwrap();
+    assert!(line == 1 && msg.contains("3 uses"), "{line} {msg}");
+
+    // A comment above the `ifdef moves the region: every file is counted again.
+    let pkg = edit(&b, &root, "env_pkg.sv", &format!("// moved\n{}", files[0].1));
+    let mut c = b.update_with(&[pkg], &dvi_project::Progress::new()).unwrap();
+    assert!(!c.interface_changed(&b));
+    c.reuse_hidden_uses(&b);
+    assert!(c.hidden_seed.is_none());
+    let (line, msg) = skipped_notice(&c, &root, "env_pkg.sv").unwrap();
+    assert!(line == 2 && msg.contains("3 uses"), "{line} {msg}");
+}

@@ -358,22 +358,27 @@ impl Analysis {
     }
 
     /// For each region of code removed by `` `ifdef `` that may declare names used elsewhere
-    /// (no build file), how many uses in the project were not checked because of it. Computed
-    /// over every project file, once per snapshot.
+    /// (no build file), how many uses in the project were not checked because of it. Counted
+    /// over every project file once per snapshot, but for the files whose part was taken over
+    /// from the snapshot before (`Analysis::reuse_hidden_uses`).
     pub fn hidden_uses(&self) -> &FxHashMap<(FileId, u32), usize> {
-        self.hidden_uses.get_or_init(|| self.count_hidden_uses())
+        &self.hidden_uses.get_or_init(|| self.count_hidden_uses()).counts
     }
 
-    fn count_hidden_uses(&self) -> FxHashMap<(FileId, u32), usize> {
-        let mut counts: FxHashMap<(FileId, u32), usize> = FxHashMap::default();
+    fn count_hidden_uses(&self) -> crate::world::HiddenUses {
+        let mut out = crate::world::HiddenUses::default();
         if self.setup.config.build_file.is_some() {
-            return counts;
+            return out;
         }
         use rayon::prelude::*;
-        let hidden: Vec<Span> = self
+        let seed = self.hidden_seed.as_deref();
+        out.per_file = self
             .project_files()
             .par_iter()
-            .flat_map_iter(|&file| {
+            .map(|&file| {
+                if let Some(v) = seed.and_then(|s| s.get(&file)) {
+                    return (file, v.clone());
+                }
                 let mut hidden = Vec::new();
                 for uid in self.units_for(file) {
                     let _ = self.semantic_check(uid, file, &mut hidden);
@@ -382,13 +387,15 @@ impl Analysis {
                         break;
                     }
                 }
-                hidden
+                (file, std::sync::Arc::from(hidden))
             })
             .collect();
-        for s in hidden {
-            *counts.entry((s.file, s.start)).or_default() += 1;
+        for v in out.per_file.values() {
+            for s in v.iter() {
+                *out.counts.entry((s.file, s.start)).or_default() += 1;
+            }
         }
-        counts
+        out
     }
 
     /// Files that may show a SKIPPED_CODE notice (no build file): those with code removed by

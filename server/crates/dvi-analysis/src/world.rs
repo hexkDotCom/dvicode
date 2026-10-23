@@ -70,9 +70,18 @@ pub struct Unit {
     pub parse_ms: u128,
     /// A `-y`/`-v` library file, compiled because it provides a missing design element.
     pub library: bool,
-    /// Hash of each leading part of the root file's path (`/a`, `/a/b`, ...): how near two
-    /// units are is the number of leading hashes they share, without asking for paths.
-    pub path_key: Arc<[u64]>,
+    /// The root file's path, kept here so that how near two units are (the number of leading
+    /// path parts they share) is found without asking the file table.
+    pub root_path: Arc<Path>,
+}
+
+/// Without a build file: the uses in each project file that were not checked because code that
+/// may declare them is removed by `` `ifdef `` (the removed regions they point at), and their
+/// number by region (file, start).
+#[derive(Default)]
+pub struct HiddenUses {
+    pub per_file: FxHashMap<FileId, Arc<[Span]>>,
+    pub counts: FxHashMap<(FileId, u32), usize>,
 }
 
 /// A file's text as an analysis snapshot saw it. Positions in the snapshot are converted with
@@ -162,9 +171,11 @@ pub struct Analysis {
     /// Set by the server: a number that grows with each snapshot it uses.
     pub revision: u64,
     /// Without a build file: uses not checked because code that may declare them is removed by
-    /// `` `ifdef ``, by region (file, start). Counted for each snapshot when first needed
-    /// (`Analysis::hidden_uses`).
-    pub hidden_uses: Arc<std::sync::OnceLock<FxHashMap<(FileId, u32), usize>>>,
+    /// `` `ifdef ``. Counted for each snapshot when first needed (`Analysis::hidden_uses`).
+    pub hidden_uses: Arc<std::sync::OnceLock<HiddenUses>>,
+    /// Each file's part of `hidden_uses` taken over from the snapshot before, where an edit
+    /// cannot have changed it (`Analysis::reuse_hidden_uses`): only the others are counted.
+    pub hidden_seed: Option<Arc<FxHashMap<FileId, Arc<[Span]>>>>,
     /// Without a build file: the copy of a design element defined more than once that each
     /// instance means (`Analysis::instance_definitions`).
     pub instance_defs: Arc<std::sync::OnceLock<FxHashMap<(UnitId, Span), DeclRef>>>,
@@ -271,20 +282,8 @@ fn make_unit(
         sources: Arc::new(sources),
         parse_ms: t0.elapsed().as_millis(),
         library: false,
-        path_key: path_key(&src.path(root)),
+        root_path: Arc::from(src.path(root)),
     }
-}
-
-/// See [`Unit::path_key`].
-fn path_key(p: &Path) -> Arc<[u64]> {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    p.components()
-        .map(|c| {
-            c.hash(&mut h);
-            h.finish()
-        })
-        .collect()
 }
 
 /// Hash of a unit's declarations that other files can refer to.
@@ -399,6 +398,7 @@ impl Analysis {
             build_ms: 0,
             revision: 0,
             hidden_uses: Arc::default(),
+            hidden_seed: None,
             instance_defs: Arc::default(),
             out_of_block: Arc::default(),
             factory_names: Arc::default(),
@@ -704,6 +704,7 @@ impl Analysis {
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
+        next.hidden_seed = None;
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
         next.factory_names = Arc::default();
@@ -964,6 +965,7 @@ impl Analysis {
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
+        next.hidden_seed = None;
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
         next.factory_names = Arc::default();
@@ -991,6 +993,7 @@ impl Analysis {
         }
         let mut next = self.clone();
         next.hidden_uses = Arc::default();
+        next.hidden_seed = None;
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
         next.factory_names = Arc::default();
@@ -1038,6 +1041,23 @@ impl Analysis {
             (None, None) => false,
             _ => true,
         })
+    }
+
+    /// After an update from `old` that changed nothing other files can see
+    /// ([`Analysis::interface_changed`] is false): the skipped-code uses of the files whose units
+    /// were not compiled again are those `old` counted, if it did. The uses point at removed
+    /// regions by position, so the regions of the units compiled again must not have moved.
+    pub fn reuse_hidden_uses(&mut self, old: &Analysis) {
+        let Some(prev) = old.hidden_uses.get() else { return };
+        for u in self.units.iter().flatten() {
+            if old.try_unit(u.id).is_some_and(|o| !Arc::ptr_eq(&o.parsed, &u.parsed) && o.inactive != u.inactive) {
+                return;
+            }
+        }
+        let recompiled: FxHashSet<FileId> = self.recompiled_files(old).into_iter().collect();
+        let seed = prev.per_file.iter().filter(|(f, _)| !recompiled.contains(*f)).map(|(f, v)| (*f, v.clone())).collect();
+        self.hidden_uses = Arc::default();
+        self.hidden_seed = Some(Arc::new(seed));
     }
 
     /// Files of the units compiled again since `old` (not those only pointed at moved macro

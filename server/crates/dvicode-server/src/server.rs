@@ -1750,9 +1750,14 @@ fn update_thread(jobs: Receiver<UpdateJob>, events: Sender<Event>, client: Sende
         });
         let done = match r {
             Some(None) => continue, // cancelled: a newer job replaces it
-            Some(Some(next)) => {
+            Some(Some(mut next)) => {
                 let interface_changed = next.interface_changed(&job.base);
                 let recompiled = next.recompiled_files(&job.base);
+                if !interface_changed {
+                    // Other files' skipped-code uses cannot have changed: only the edited
+                    // files are checked again for them.
+                    next.reuse_hidden_uses(&job.base);
+                }
                 log::debug!("incremental update of {} file(s) in {} ms", job.files.len(), t0.elapsed().as_millis());
                 Some(Box::new(Updated { analysis: next, interface_changed, recompiled }))
             }
