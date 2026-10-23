@@ -255,6 +255,8 @@ struct Server {
     /// Files changed on disk while an update or a build waiting for one ran, that the snapshot
     /// in use does not compile: the update may have read them (see `on_updated`).
     changed_while_updating: FxHashSet<FileId>,
+    /// Files opened while an update or a build ran, which did not see them (see `on_updated`).
+    opened_while_updating: FxHashSet<FileId>,
     /// Numbers the edits (`note_change`).
     edit_seq: u64,
     /// Files with edits the snapshot in use does not have yet: the number of the first.
@@ -353,6 +355,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         built: None,
         announce: None,
         changed_while_updating: FxHashSet::default(),
+        opened_while_updating: FxHashSet::default(),
         edit_seq: 0,
         dirty: FxHashMap::default(),
         redirty: FxHashMap::default(),
@@ -734,6 +737,24 @@ impl Server {
         self.compile_again(id);
     }
 
+    /// A new header not saved yet, or one opened while an update that looked for it ran: the
+    /// files whose `include found no file of its name are compiled again.
+    fn retry_includes_of(&mut self, id: FileId) {
+        let path = self.vfs.path(id);
+        let name = path.file_name();
+        let roots: Vec<FileId> = self
+            .analysis
+            .units
+            .iter()
+            .flatten()
+            .filter(|u| u.includes.iter().any(|i| i.resolved.is_none() && std::path::Path::new(&i.path_text).file_name() == name))
+            .map(|u| u.root)
+            .collect();
+        for r in roots {
+            self.compile_again(r);
+        }
+    }
+
     /// Has the units of `id` compiled again, as after an edit of it (its text is the same:
     /// requests about positions in it stay valid).
     fn compile_again(&mut self, id: FileId) {
@@ -842,6 +863,14 @@ impl Server {
                 self.note_change(f);
             } else if !self.pending.contains(&f) {
                 self.dirty.remove(&f);
+            }
+        }
+        // Files opened while it ran, whose name an include it compiled may have looked for.
+        if self.update.is_none() && self.built.is_none() && !self.building {
+            for f in std::mem::take(&mut self.opened_while_updating) {
+                if self.open.contains_key(&f) {
+                    self.retry_includes_of(f);
+                }
             }
         }
         if self.announce.is_some() {
@@ -1067,20 +1096,12 @@ impl Server {
                 let id =self.vfs.set_overlay_versioned(&path, Arc::from(p.text_document.text), Some(p.text_document.version));
                 self.open.insert(id, p.text_document.uri);
                 if self.analysis.units_of_file(id).is_empty() {
-                    // A new header not saved yet, or one opened while an update that looked for
-                    // it ran: the files whose `include found no such file are compiled again.
-                    let name = path.file_name();
-                    let roots: Vec<FileId> = self
-                        .analysis
-                        .units
-                        .iter()
-                        .flatten()
-                        .filter(|u| u.includes.iter().any(|i| i.resolved.is_none() && std::path::Path::new(&i.path_text).file_name() == name))
-                        .map(|u| u.root)
-                        .collect();
-                    for r in roots {
-                        self.compile_again(r);
-                    }
+                    self.retry_includes_of(id);
+                }
+                if self.update.is_some() || self.built.is_some() || self.building {
+                    // What that update or build looks for, it may not find in this file: the
+                    // same once it is in.
+                    self.opened_while_updating.insert(id);
                 }
                 self.note_change(id);
                 // Make the file available right away.

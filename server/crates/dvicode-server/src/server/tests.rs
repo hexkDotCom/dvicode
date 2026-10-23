@@ -1547,3 +1547,24 @@ fn a_header_opened_before_it_is_saved_is_found_by_the_files_that_include_it() {
     c.wait_problems(&top, |p| p.diagnostics.is_empty());
     c.shutdown();
 }
+
+#[test]
+fn a_header_opened_while_an_update_finds_its_include_is_found_after_it() {
+    let top_text = "module top;\n`include \"a.svh\"\n  new_t v;\nendmodule\n";
+    let root = project("openedduring", &[("top.sv", top_text)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    // a.svh, not saved, includes b.svh; its update (of top.sv too) is held when b.svh opens.
+    gate.close();
+    c.open(&uri(&root, "a.svh"), 1, "`include \"b.svh\"\n");
+    gate.wait_entered(1);
+    c.open(&uri(&root, "b.svh"), 1, "  typedef int new_t;\n");
+    c.sync();
+    gate.open();
+    // top.sv is compiled again with b.svh: the include in a.svh finds it.
+    c.wait_problems(&uri(&root, "a.svh"), |p| p.diagnostics.is_empty());
+    c.shutdown();
+}
