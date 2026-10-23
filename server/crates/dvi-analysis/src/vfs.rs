@@ -34,8 +34,10 @@ struct Entry {
 #[derive(Default)]
 struct Inner {
     paths: Vec<PathBuf>,
-    /// By [`id_key`]: one file under every spelling the file system takes for it.
+    /// By path, and other spellings of the same file as they are met.
     ids: FxHashMap<PathBuf, FileId>,
+    /// The ids by [`fold`]ed path, to find another spelling of a file.
+    folded: FxHashMap<PathBuf, Vec<FileId>>,
     entries: Vec<Entry>,
 }
 
@@ -125,7 +127,8 @@ impl Vfs {
 
     pub fn lookup(&self, path: &Path) -> Option<FileId> {
         let p = normalize(path);
-        self.inner.read().unwrap().ids.get(&id_key(&p)).copied()
+        let g = self.inner.read().unwrap();
+        g.ids.get(&p).copied().or_else(|| g.spelled_otherwise(&p))
     }
 
     /// Sets the editor contents of a file.
@@ -325,31 +328,50 @@ impl Vfs {
     }
 }
 
-/// The key of a normalized path in the file ids. Where the file system ignores case (Windows,
-/// macOS), `Defs.svh` and `defs.svh` are one file: an `` `include "defs.svh" `` and the editor's
-/// `Defs.svh` must share its text. The first spelling seen is the one shown.
-fn id_key(p: &Path) -> PathBuf {
-    if cfg!(any(windows, target_os = "macos")) {
-        PathBuf::from(p.to_string_lossy().to_lowercase())
-    } else {
-        p.to_path_buf()
+/// Paths that differ in case only, by their lowercase form (Windows and macOS, whose file
+/// systems usually ignore case).
+fn fold(p: &Path) -> Option<PathBuf> {
+    cfg!(any(windows, target_os = "macos")).then(|| PathBuf::from(p.to_string_lossy().to_lowercase()))
+}
+
+/// Two spellings of one existing file: `Defs.svh` and `defs.svh` where the folder ignores
+/// case. A folder that does not (a case-sensitive one) has two files, kept apart.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+impl Inner {
+    /// The id of `p` under another spelling of the same file, if one has an id.
+    fn spelled_otherwise(&self, p: &Path) -> Option<FileId> {
+        let ids = self.folded.get(&fold(p)?)?;
+        ids.iter().copied().find(|id| same_file(&self.paths[*id as usize], p))
     }
 }
 
 impl SourceProvider for Vfs {
     fn file_id(&self, path: &Path) -> FileId {
         let p = normalize(path);
-        let key = id_key(&p);
-        if let Some(id) = self.inner.read().unwrap().ids.get(&key) {
+        if let Some(id) = self.inner.read().unwrap().ids.get(&p) {
             return *id;
         }
         let mut g = self.inner.write().unwrap();
-        if let Some(id) = g.ids.get(&key) {
+        if let Some(id) = g.ids.get(&p) {
             return *id;
         }
+        // An `include "defs.svh"` and the editor's `Defs.svh` must share the file's text.
+        if let Some(id) = g.spelled_otherwise(&p) {
+            g.ids.insert(p, id);
+            return id;
+        }
         let id = g.paths.len() as FileId;
-        g.paths.push(p);
-        g.ids.insert(key, id);
+        if let Some(f) = fold(&p) {
+            g.folded.entry(f).or_default().push(id);
+        }
+        g.paths.push(p.clone());
+        g.ids.insert(p, id);
         g.entries.push(Entry::default());
         id
     }

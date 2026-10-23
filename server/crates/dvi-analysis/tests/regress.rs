@@ -2324,8 +2324,18 @@ fn completion_in_a_file_included_inside_a_module() {
     let files = [("top.sv", "module m;\n  int local_signal;\n  `include \"body.svh\"\nendmodule\n"), ("body.svh", body)];
     let (a, root) = project("fragcomplete2", &files);
     let f = a.vfs.lookup(&root.join("body.svh")).unwrap();
-    let names: Vec<String> = a.completions(f, body.len() as u32).into_iter().map(|c| c.label).collect();
+    // Right after `endfunction`: the nearest name is `t`, in g.
+    let off = (body.find("endfunction").unwrap() + "endfunction\n".len()) as u32;
+    let names: Vec<String> = a.completions(f, off).into_iter().map(|c| c.label).collect();
     assert!(names.iter().any(|n| n == "local_signal") && !names.iter().any(|n| n == "t"), "{names:?}");
+    // A header that only declares, and the cursor before the first name of a header.
+    let files = [("top.sv", "module m;\n  int local_signal;\n  `include \"decl.svh\"\n  `include \"use.svh\"\nendmodule\n"), ("decl.svh", "int header_var;\n"), ("use.svh", "\nassign local_signal = 1;\n")];
+    let (a, root) = project("fragcomplete3", &files);
+    for (file, off) in [("decl.svh", 16u32), ("use.svh", 0)] {
+        let f = a.vfs.lookup(&root.join(file)).unwrap();
+        let names: Vec<String> = a.completions(f, off).into_iter().map(|c| c.label).collect();
+        assert!(names.iter().any(|n| n == "local_signal"), "{file}: {names:?}");
+    }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -2338,4 +2348,26 @@ fn an_include_and_the_editor_spelling_a_file_differently_share_it() {
     let f = a.vfs.set_overlay(&root.join("Defs.svh"), Arc::from("`define NOT_READY 1\n"));
     let a2 = a.update(&[f]);
     assert_eq!(codes(&a2, "top.sv"), vec!["UNDECLARED_IDENTIFIER"]);
+}
+
+#[cfg(windows)]
+#[test]
+fn files_differing_in_case_stay_apart_in_a_case_sensitive_folder() {
+    // A folder made case-sensitive holds two files: they are not one file under two spellings.
+    let root = std::env::temp_dir().join(format!("dvicode-regress-casesens-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    std::fs::create_dir_all(root.join("inc")).unwrap();
+    let made = std::process::Command::new("fsutil.exe").args(["file", "setCaseSensitiveInfo"]).arg(root.join("inc")).arg("enable").output();
+    if !made.is_ok_and(|o| o.status.success()) {
+        eprintln!("skipped: no case-sensitive folders here");
+        return;
+    }
+    std::fs::write(root.join("inc/A.svh"), "typedef int A_t;\n").unwrap();
+    std::fs::write(root.join("inc/a.svh"), "typedef int a_t;\n").unwrap();
+    std::fs::write(root.join("top.sv"), "module top;\n`include \"A.svh\"\n`include \"a.svh\"\n  A_t x;\n  a_t y;\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "+incdir+inc\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }

@@ -746,10 +746,31 @@ impl Analysis {
 
     fn included_scope_at(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32) -> Option<DeclId> {
         let u = self.unit(unit);
-        let refs = &u.positions.get(&file)?.refs;
-        let k = refs.partition_point(|(s, _, _)| s.start <= off);
-        let (_, rid, _) = refs.get(k.checked_sub(1)?).or_else(|| refs.get(k))?;
-        let mut s = u.parsed.reference(*rid).scope;
+        // Anchors: the names used and declared in this file, with the scope each is in. The
+        // nearest one before `off`, else the first one after it.
+        let mut before: Option<(u32, DeclId)> = None;
+        let mut after: Option<(u32, DeclId)> = None;
+        let mut consider = |at: u32, scope: DeclId| {
+            if at <= off {
+                if before.is_none_or(|(b, _)| at >= b) {
+                    before = Some((at, scope));
+                }
+            } else if after.is_none_or(|(a, _)| at < a) {
+                after = Some((at, scope));
+            }
+        };
+        if let Some(pos) = u.positions.get(&file) {
+            let k = pos.refs.partition_point(|(s, _, _)| s.start <= off);
+            for (sp, rid, _) in pos.refs[k.saturating_sub(1)..].iter().take(2) {
+                consider(sp.start, u.parsed.reference(*rid).scope);
+            }
+        }
+        for d in u.parsed.decls.iter().filter(|d| d.name_span.file == file) {
+            if let Some(p) = d.parent {
+                consider(d.name_span.start, p);
+            }
+        }
+        let mut s = before.or(after)?.1;
         loop {
             let d = u.parsed.decl(s);
             let inside = d.span.file != file || (d.span.start <= off && off <= d.span.end);
