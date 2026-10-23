@@ -1,6 +1,6 @@
 //! Project compilation and analysis snapshots.
 
-use crate::vfs::{Vfs, BUILTIN_DIR};
+use crate::vfs::{Pin, Reader, Vfs, BUILTIN_DIR};
 use dvi_project::{BuildConfig, Phase, Progress};
 use dvi_syntax::ast::{DeclId, DeclKind, ParsedUnit, RefId, RefKind};
 use dvi_syntax::preproc::{command_line_define, def_identity, preprocess, IncludeInfo, MacroDef, MacroName, MacroTable, MacroUse, PpConfig};
@@ -171,6 +171,9 @@ pub struct Analysis {
     /// Set by the server on the copy that answers a request: when the request is cancelled,
     /// searches over the whole project stop early (see `Analysis::cancelled`).
     pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set by the server on the copy an update starts from: units compiled from it read the
+    /// editor texts of that moment (see `Pin`), not newer ones.
+    pub pin: Option<Arc<Pin>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -203,7 +206,7 @@ fn mark_encrypted(parsed: &mut dvi_syntax::ast::ParsedUnit, regions: &[Span]) {
 }
 
 fn make_unit(
-    vfs: &Vfs,
+    src: &Reader,
     id: UnitId,
     root: FileId,
     kind: UnitKind,
@@ -237,7 +240,7 @@ fn make_unit(
     let sources = pp
         .sources
         .iter()
-        .map(|(f, text)| (*f, Arc::new(Source::new(text.clone(), vfs.lsp_version_for(*f, text)))))
+        .map(|(f, text)| (*f, Arc::new(Source::new(text.clone(), src.lsp_version_for(*f, text)))))
         .collect();
     Unit {
         id,
@@ -356,7 +359,7 @@ impl Analysis {
                 if progress.is_cancelled() {
                     return None;
                 }
-                let u = make_unit(&vfs, base + i as UnitId, id, UnitKind::Project, inv, pp, before);
+                let u = make_unit(&vfs.reader(None), base + i as UnitId, id, UnitKind::Project, inv, pp, before);
                 progress.step();
                 Some(u)
             })
@@ -379,6 +382,7 @@ impl Analysis {
             out_of_block: Arc::default(),
             factory_names: Arc::default(),
             cancel: None,
+            pin: None,
         };
         a.reindex();
         a.update_library_units(Some(progress));
@@ -394,7 +398,7 @@ impl Analysis {
         let path = PathBuf::from(BUILTIN_DIR).join("std.sv");
         let id = vfs.set_overlay(&path, Arc::from(PRELUDE));
         let pp = preprocess(vfs, &PpConfig::default(), id, MacroTable::new());
-        make_unit(vfs, 0, id, UnitKind::Builtin, usize::MAX, pp, MacroTable::new())
+        make_unit(&vfs.reader(None), 0, id, UnitKind::Builtin, usize::MAX, pp, MacroTable::new())
     }
 
     /// Compiles the `-y`/`-v` library files that provide otherwise missing design elements,
@@ -481,9 +485,10 @@ impl Analysis {
                 let uid = match reuse {
                     Some(o) => o,
                     None => {
-                        let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv_idx], id, macros.clone());
+                        let src = self.reader();
+                        let pp = preprocess(&src, &self.setup.pp_configs[inv_idx], id, macros.clone());
                         let uid = self.units.len() as UnitId;
-                        let mut u = make_unit(&self.vfs, uid, id, UnitKind::Project, inv_idx, pp, macros);
+                        let mut u = make_unit(&src, uid, id, UnitKind::Project, inv_idx, pp, macros);
                         u.library = true;
                         self.units.push(Some(Arc::new(u)));
                         changed = true;
@@ -633,6 +638,11 @@ impl Analysis {
         self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// What units compiled from this snapshot read.
+    fn reader(&self) -> Reader<'_> {
+        self.vfs.reader(self.pin.as_deref())
+    }
+
     pub fn units_of_file(&self, f: FileId) -> &[UnitId] {
         self.file_units.get(&f).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -652,6 +662,9 @@ impl Analysis {
                     affected.push(*u);
                 }
             }
+        }
+        if progress.is_cancelled() {
+            return None;
         }
         if affected.is_empty() {
             return Some(self.clone());
@@ -692,8 +705,9 @@ impl Analysis {
 
     fn recompile(&self, old: &Unit, macros_before: MacroTable) -> Unit {
         let cfg = self.pp_config_for(old);
-        let pp = preprocess(&*self.vfs, cfg, old.root, macros_before.clone());
-        let mut u = make_unit(&self.vfs, old.id, old.root, old.kind, old.invocation, pp, macros_before);
+        let src = self.reader();
+        let pp = preprocess(&src, cfg, old.root, macros_before.clone());
+        let mut u = make_unit(&src, old.id, old.root, old.kind, old.invocation, pp, macros_before);
         u.library = old.library;
         u
     }
@@ -814,12 +828,20 @@ impl Analysis {
     /// also when another open file includes it (so that the result does not depend on which
     /// was opened first), and an open file that a project unit now compiles loses its own.
     pub fn sync_open_files(&self, open: &[FileId]) -> Analysis {
+        self.sync_open_files_with(open, &Progress::new()).expect("nothing cancels it")
+    }
+
+    /// [`Analysis::sync_open_files`], stopped when `progress` is cancelled (`None`).
+    pub fn sync_open_files_with(&self, open: &[FileId], progress: &Progress) -> Option<Analysis> {
         let mut next: Option<Analysis> = None;
         // Until nothing changes: a new ad-hoc unit can make a library unit unnecessary, whose
         // file, when open, then needs one of its own.
         for _ in 0..=open.len() {
             let mut changed = false;
             for &f in open {
+                if progress.is_cancelled() {
+                    return None;
+                }
                 let cur = next.as_ref().unwrap_or(self);
                 let in_project = cur.in_project_unit(f);
                 let own = cur.is_adhoc_root(f);
@@ -835,7 +857,7 @@ impl Analysis {
                 break;
             }
         }
-        next.unwrap_or_else(|| self.clone())
+        Some(next.unwrap_or_else(|| self.clone()))
     }
 
     /// Whether a unit of the build compiles `file`.
@@ -859,9 +881,10 @@ impl Analysis {
         next.factory_names = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
-        let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
+        let src = self.reader();
+        let pp = preprocess(&src, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
         let uid = next.units.len() as UnitId;
-        next.units.push(Some(Arc::new(make_unit(&self.vfs, uid, file, UnitKind::AdHoc, inv, pp, macros))));
+        next.units.push(Some(Arc::new(make_unit(&src, uid, file, UnitKind::AdHoc, inv, pp, macros))));
         next.reindex();
         next
     }

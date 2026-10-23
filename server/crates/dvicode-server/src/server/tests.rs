@@ -6,7 +6,7 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestI
 use lsp_types::{PublishDiagnosticsParams, Url};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -321,7 +321,8 @@ fn initialize_announces_capabilities_and_builds() {
 #[test]
 fn problems_follow_edits_and_never_go_back_to_an_older_version() {
     let root = project("edits", &[("pkg.sv", PKG), ("top.sv", TOP)]);
-    let (mut c, _) = Client::start(&root, Value::Null);
+    let checks = Arc::new(Checks::default());
+    let (mut c, _) = Client::start_with(&root, Value::Null, checks.hooks());
     let top = uri(&root, "top.sv");
     c.open(&top, 1, TOP);
     // Three quick edits, within the debounce: an error appears, changes, and is fixed later.
@@ -336,8 +337,8 @@ fn problems_follow_edits_and_never_go_back_to_an_older_version() {
     c.change(&top, 4, TOP);
     let p = c.wait_problems(&top, |p| p.version == Some(4));
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
-    // Requests are answered from the newest text, so everything published so far is in.
-    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    // Every check done, everything they published is in.
+    checks.wait_done(&mut c);
     let v = c.versions(&top);
     assert!(v.windows(2).all(|w| w[0] <= w[1]), "publication versions {v:?}");
     c.shutdown();
@@ -950,18 +951,16 @@ fn a_waiting_request_about_a_position_is_dropped_when_its_document_changes() {
     let at_position = fresh_definition(&mut c, &top, FRESH);
     let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
     gate.wait_entered(2);
-    // Its position is in text that is gone; a request about the whole document goes on.
-    c.change(&top, 3, &FRESH.replace("  int fresh;
-", "  int fresh;
-  int more;
-"));
+    // Its position is in text that is gone; a request about the whole document goes on, and
+    // is answered from the text it was sent after.
+    c.change(&top, 3, &FRESH.replace("  int fresh;\n", "  int fresh;\n  int more;\n"));
     let r = c.reply(&at_position, WAIT).expect("a reply to the dropped request");
     assert_eq!(error_code(&r), Some(ErrorCode::ContentModified as i32), "{r:?}");
     assert!(c.reply(&symbols, Duration::from_millis(200)).is_none());
     gate.open();
     let r = c.reply(&symbols, WAIT).expect("symbols once the update is in");
     let names: Vec<&str> = r.result.as_ref().and_then(|v| v[0]["children"].as_array()).into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
-    assert!(names.contains(&"more"), "{names:?}");
+    assert!(names.contains(&"fresh") && !names.contains(&"more"), "{names:?}");
     c.shutdown();
 }
 
@@ -1145,5 +1144,292 @@ fn a_new_build_file_is_announced_when_its_build_is_in_use() {
     let m = c.wait_note("window/showMessage", |_| true);
     assert!(m["message"].as_str().unwrap_or("").contains("default.build"), "{m}");
     assert_eq!(c.request_ok("dvicode/status", Value::Null)["top_files"], 2);
+    c.shutdown();
+}
+
+/// Counts the problem checks not finished yet, so that a test can wait for all of them.
+#[derive(Default)]
+struct Checks(AtomicIsize);
+
+impl Checks {
+    fn hooks(self: &Arc<Self>) -> Hooks {
+        Hooks { problem_check: Some(self.hook()), ..Default::default() }
+    }
+
+    fn hook(self: &Arc<Self>) -> Box<dyn Fn(bool) + Send + Sync> {
+        let c = self.clone();
+        Box::new(move |started| {
+            c.0.fetch_add(if started { 1 } else { -1 }, Ordering::SeqCst);
+        })
+    }
+
+    /// Once the server has read what was sent, waits until every check it started is done, and
+    /// receives what they published.
+    fn wait_done(&self, c: &mut Client) {
+        c.sync();
+        let deadline = Instant::now() + WAIT;
+        while self.0.load(Ordering::SeqCst) != 0 {
+            assert!(Instant::now() < deadline, "problem checks still running");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        c.sync();
+    }
+}
+
+#[test]
+fn a_request_about_the_project_waits_for_earlier_edits_of_other_files() {
+    let root = project("projectwait", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (pkg, top) = (uri(&root, "pkg.sv"), uri(&root, "top.sv"));
+    c.open(&top, 1, TOP);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // A second call of twice() in top.sv, held at the gate; references asked from pkg.sv.
+    gate.close();
+    c.change(&top, 2, &TOP.replace("int n = twice(3);", "int n = twice(3);\n  int m = twice(4);"));
+    let params = json!({ "textDocument": { "uri": pkg }, "position": at(PKG, "twice"), "context": { "includeDeclaration": true } });
+    let refs = c.send_request("textDocument/references", params);
+    gate.wait_entered(2);
+    // A request about pkg.sv alone does not wait.
+    c.request_ok("textDocument/hover", json!({ "textDocument": { "uri": pkg }, "position": at(PKG, "twice") }));
+    assert!(c.reply(&refs, Duration::from_millis(200)).is_none(), "answered without the edit of top.sv");
+    gate.open();
+    let r = c.reply(&refs, WAIT).expect("references once the edit is in");
+    assert_eq!(r.result.as_ref().and_then(|v| v.as_array()).map(|v| v.len()), Some(3), "{r:?}");
+    c.shutdown();
+}
+
+#[test]
+fn a_request_about_a_file_waits_for_earlier_edits_of_the_headers_it_includes() {
+    let h = "  function automatic int f();\n    int k;\n";
+    let p_text = "package p;\n`include \"h.svh\"\n    k = 1;\n    return k;\n  endfunction\nendpackage\n";
+    let root = project("headerwait", &[("h.svh", h), ("p.sv", p_text)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (hu, pu) = (uri(&root, "h.svh"), uri(&root, "p.sv"));
+    c.open(&hu, 1, h);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // k is renamed in the header; where k in p.sv is declared asks for that edit.
+    gate.close();
+    c.change(&hu, 2, &h.replace("int k;", "int k2;"));
+    let def = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": pu }, "position": at(p_text, "k = 1") }));
+    gate.wait_entered(2);
+    assert!(c.reply(&def, Duration::from_millis(200)).is_none(), "answered without the edit of the header");
+    gate.open();
+    let r = c.reply(&def, WAIT).expect("an answer once the edit is in");
+    assert_eq!(r.result.as_ref().and_then(|v| v.as_array()).map(|v| v.len()), Some(0), "{r:?}");
+    c.shutdown();
+}
+
+#[test]
+fn typing_in_another_file_does_not_hold_up_a_waiting_request() {
+    let other = "module other;\nendmodule\n";
+    let root = project("starve", &[("pkg.sv", PKG), ("top.sv", TOP), ("other.sv", other)]);
+    // Updates as slow as typing is fast (a large project), once the files are open.
+    let slow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hooks = {
+        let slow = slow.clone();
+        Hooks {
+            before_update: Some(Box::new(move || {
+                if slow.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            })),
+            ..Default::default()
+        }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let (pkg, ou) = (uri(&root, "pkg.sv"), uri(&root, "other.sv"));
+    for u in [&pkg, &ou] {
+        let text = std::fs::read_to_string(u.to_file_path().unwrap()).unwrap();
+        c.open(u, 1, &text);
+        c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": u } }));
+    }
+    slow.store(true, Ordering::SeqCst);
+    // other.sv and pkg.sv edited, then a question about pkg.sv: one update of both starts.
+    let mut v = 2;
+    c.change(&ou, v, &format!("module other;\n  int x{v};\nendmodule\n"));
+    let pkg2 = PKG.replace("BUSY", "BUSY, DONE");
+    c.change(&pkg, 2, &pkg2);
+    let waiting = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": pkg }, "position": at(&pkg2, "DONE") }));
+    // Typing goes on in other.sv, faster than an update, and the editor asks about it after
+    // each key: none of that replaces the update the question waits for.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        v += 1;
+        c.change(&ou, v, &format!("module other;\n  int x{v};\nendmodule\n"));
+        let _ = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": ou } }));
+        if let Some(r) = c.reply(&waiting, Duration::from_millis(30)) {
+            assert_eq!(r.result.as_ref().and_then(|v| v.as_array()).map(|v| v.len()), Some(1), "{r:?}");
+            slow.store(false, Ordering::SeqCst);
+            c.shutdown();
+            return;
+        }
+    }
+    panic!("no answer while other.sv was typed in");
+}
+
+#[test]
+fn a_waiting_request_does_not_wait_for_a_pause_in_typing_elsewhere() {
+    let other = "module other;\nendmodule\n";
+    let root = project("starve", &[("pkg.sv", PKG), ("top.sv", TOP), ("other.sv", other)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (pkg, top, ou) = (uri(&root, "pkg.sv"), uri(&root, "top.sv"), uri(&root, "other.sv"));
+    for u in [&pkg, &top, &ou] {
+        let text = std::fs::read_to_string(u.to_file_path().unwrap()).unwrap();
+        c.open(u, 1, &text);
+        c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": u } }));
+    }
+    // An update of top.sv is held; pkg.sv is edited and asked about meanwhile.
+    gate.close();
+    c.change(&top, 2, FRESH);
+    let n = gate.entered.load(Ordering::SeqCst);
+    let _ = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    gate.wait_entered(n + 1);
+    let pkg2 = PKG.replace("BUSY", "BUSY, DONE");
+    c.change(&pkg, 2, &pkg2);
+    let waiting = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": pkg }, "position": at(&pkg2, "DONE") }));
+    c.sync();
+    gate.open();
+    // Typing goes on in other.sv, faster than the pause that starts an update.
+    for v in 2..60 {
+        c.change(&ou, v, &format!("module other;\n  int x{v};\nendmodule\n"));
+        if let Some(r) = c.reply(&waiting, Duration::from_millis(50)) {
+            assert_eq!(r.result.as_ref().and_then(|v| v.as_array()).map(|v| v.len()), Some(1), "{r:?}");
+            c.shutdown();
+            return;
+        }
+    }
+    panic!("no answer while other.sv was typed in");
+}
+
+#[test]
+fn a_waiting_hierarchy_request_is_dropped_when_its_document_changes() {
+    let text = "package p;\n  class base_c; endclass\n  class mid_c extends base_c; endclass\nendpackage\n";
+    let root = project("hiermodified", &[("p.sv", text)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let u = uri(&root, "p.sv");
+    c.open(&u, 1, text);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    let items = c.request_ok("textDocument/prepareTypeHierarchy", json!({ "textDocument": { "uri": u }, "position": at(text, "mid_c extends") }));
+    gate.close();
+    let edited = text.replace("package p;\n", "package p;\n  // moved down\n");
+    c.change(&u, 2, &edited);
+    let sup = c.send_request("typeHierarchy/supertypes", json!({ "item": items[0] }));
+    gate.wait_entered(2);
+    // The item's range is in text that is gone.
+    c.change(&u, 3, &edited.replace("moved", "moved again"));
+    let r = c.reply(&sup, WAIT).expect("a reply to the dropped request");
+    assert_eq!(error_code(&r), Some(ErrorCode::ContentModified as i32), "{r:?}");
+    gate.open();
+    c.shutdown();
+}
+
+#[test]
+fn exit_stops_a_running_update_and_lets_go_of_the_connection() {
+    let root = project("exitbusy", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let finished = Arc::new(AtomicUsize::new(0));
+    let hooks = {
+        let (g, f) = (gate.clone(), finished.clone());
+        Hooks {
+            before_update: Some(Box::new(move || g.pass())),
+            after_update: Some(Box::new(move || {
+                f.fetch_add(1, Ordering::SeqCst);
+            })),
+            ..Default::default()
+        }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    gate.close();
+    c.open(&uri(&root, "top.sv"), 1, TOP);
+    gate.wait_entered(1);
+    c.request_ok("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    c.server.take().unwrap().join().expect("server thread");
+    // Let go, the held update stops at once: it is not finished, and the server's side of the
+    // connection is closed (nothing holds a sender any more).
+    gate.open();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match c.conn.receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(e) => panic!("the connection stays open: {e:?}"),
+        }
+    }
+    assert_eq!(finished.load(Ordering::SeqCst), 0, "the update went on after exit");
+}
+
+#[test]
+fn problems_carry_the_version_of_the_text_they_were_found_in() {
+    let root = project("versions", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let checks = Arc::new(Checks::default());
+    let hooks = {
+        let g = gate.clone();
+        Hooks { before_update: Some(Box::new(move || g.pass())), problem_check: Some(checks.hook()), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, TOP);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // An update of version 2 is held while version 3 comes; whether it is installed or
+    // replaced, each publication names the version whose text it was found in.
+    gate.close();
+    let text = |v: usize| TOP.replace("initial s = IDLE;", &format!("initial s = IDLE;\n  initial undeclared_{v} = 1;"));
+    c.change(&top, 2, &text(2));
+    let _ = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    gate.wait_entered(2);
+    c.change(&top, 3, &text(3));
+    c.sync();
+    gate.open();
+    c.wait_problems(&top, |p| p.version == Some(3));
+    checks.wait_done(&mut c);
+    for p in c.published.iter().filter(|p| p.uri == top) {
+        let v = p.version.unwrap_or_else(|| panic!("a publication without a version: {p:?}"));
+        assert!(p.diagnostics.iter().all(|d| d.message.contains(&format!("undeclared_{v}"))), "{p:?}");
+    }
+    c.shutdown();
+}
+
+#[test]
+fn closing_a_file_outside_the_build_before_its_first_update_leaves_nothing() {
+    let root = project("closeearly", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let checks = Arc::new(Checks::default());
+    let hooks = {
+        let g = gate.clone();
+        Hooks { before_update: Some(Box::new(move || g.pass())), problem_check: Some(checks.hook()), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let scratch = uri(&root, "scratch.sv");
+    // Opened while updates are held, closed before its first update is in.
+    gate.close();
+    c.open(&scratch, 1, "module scratch;\n  no_such_type x;\nendmodule\n");
+    gate.wait_entered(1);
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": scratch } }));
+    c.sync();
+    gate.open();
+    // The status (which waits for every earlier edit) counts no unit of its own, and its
+    // problems end cleared.
+    let st = c.request_ok("dvicode/status", Value::Null);
+    assert_eq!(st["units"], 3, "{st}");
+    checks.wait_done(&mut c);
+    let last = c.published.iter().filter(|p| p.uri == scratch).last();
+    assert!(last.is_none_or(|p| p.diagnostics.is_empty()), "{last:?}");
     c.shutdown();
 }

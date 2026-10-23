@@ -15,7 +15,7 @@ use dvi_syntax::{FileId, LineIndex, SourceProvider, Token};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Default)]
 struct Entry {
@@ -227,11 +227,32 @@ impl Vfs {
     /// The text of a file and the version it belongs to, read consistently: a concurrent edit
     /// or invalidation either happens entirely before (newer pair) or after (older pair).
     pub fn text_versioned(&self, id: FileId) -> Option<(Arc<str>, u64)> {
+        self.read_text(id, true)
+    }
+
+    /// The disk contents of a file, also when the editor has it open.
+    pub fn disk_text(&self, id: FileId) -> Option<Arc<str>> {
+        self.read_text(id, false).map(|(t, _)| t)
+    }
+
+    /// The editor texts of all open files, with their versions, as they are now.
+    pub fn pin(&self) -> Pin {
+        let g = self.inner.read().unwrap();
+        let overlays = g.entries.iter().enumerate().filter_map(|(i, e)| e.overlay.clone().map(|o| (i as FileId, (o, e.overlay_version)))).collect();
+        Pin { overlays, tokens: Mutex::default() }
+    }
+
+    /// The store as an update reads it: with editor texts as of `pin`, or as they are now.
+    pub fn reader<'a>(&'a self, pin: Option<&'a Pin>) -> Reader<'a> {
+        Reader { vfs: self, pin }
+    }
+
+    fn read_text(&self, id: FileId, overlay: bool) -> Option<(Arc<str>, u64)> {
         loop {
             let (path, version) = {
                 let g = self.inner.read().unwrap();
                 let e = g.entries.get(id as usize)?;
-                if let Some(o) = &e.overlay {
+                if let Some(o) = e.overlay.as_ref().filter(|_| overlay) {
                     return Some((o.clone(), e.version));
                 }
                 if e.disk_loaded {
@@ -376,6 +397,12 @@ impl SourceProvider for Vfs {
                 return true;
             }
         }
+        self.is_file_on_disk(path)
+    }
+}
+
+impl Vfs {
+    fn is_file_on_disk(&self, path: &Path) -> bool {
         // `dir/..` resolves only if `dir` exists (on Windows, the system drops both first).
         let mut prefix = PathBuf::new();
         for c in path.components() {
@@ -398,9 +425,115 @@ impl SourceProvider for Vfs {
     }
 }
 
+/// The editor texts of the open files at one moment ([`Vfs::pin`]). An update reads these,
+/// not the newer ones the editor sends while it runs: its snapshot is one consistent state of
+/// the editor, and each text keeps its document version.
+pub struct Pin {
+    overlays: FxHashMap<FileId, (Arc<str>, Option<i32>)>,
+    /// Tokens of texts the store no longer has (the editor's newer text, or a file opened
+    /// after the pin, whose disk text counts): lexed once for all the units that include them.
+    tokens: Mutex<FxHashMap<FileId, (Arc<str>, Arc<Vec<Token>>)>>,
+}
+
+/// The store read through a [`Pin`], or as it is now without one.
+pub struct Reader<'a> {
+    vfs: &'a Vfs,
+    pin: Option<&'a Pin>,
+}
+
+impl Reader<'_> {
+    /// The editor version of `text`, when it is the editor text this reader reads.
+    pub fn lsp_version_for(&self, id: FileId, text: &Arc<str>) -> Option<i32> {
+        match self.pin {
+            None => self.vfs.lsp_version_for(id, text),
+            Some(p) => p.overlays.get(&id).filter(|(o, _)| Arc::ptr_eq(o, text)).and_then(|(_, v)| *v),
+        }
+    }
+
+    /// For a pin: the text it says the file has; `None` when it does not decide (no pin, or a
+    /// file that was not open then and is not now).
+    fn pinned_text(&self, id: FileId) -> Option<Option<Arc<str>>> {
+        let p = self.pin?;
+        if let Some((o, _)) = p.overlays.get(&id) {
+            return Some(Some(o.clone()));
+        }
+        // Opened since: what was on disk counts.
+        self.vfs.has_overlay(id).then(|| self.vfs.disk_text(id))
+    }
+}
+
+impl SourceProvider for Reader<'_> {
+    fn file_id(&self, path: &Path) -> FileId {
+        self.vfs.file_id(path)
+    }
+
+    fn path(&self, id: FileId) -> PathBuf {
+        self.vfs.path(id)
+    }
+
+    fn text(&self, id: FileId) -> Option<Arc<str>> {
+        match self.pinned_text(id) {
+            Some(t) => t,
+            None => self.vfs.text(id),
+        }
+    }
+
+    fn source(&self, id: FileId) -> Option<(Arc<str>, Arc<Vec<Token>>)> {
+        let (Some(text), Some(pin)) = (self.pinned_text(id), self.pin) else { return self.vfs.source(id) };
+        let text = text?;
+        // The store's tokens while it has the same text.
+        if let Some((t, toks)) = self.vfs.source(id).filter(|(t, _)| Arc::ptr_eq(t, &text)) {
+            return Some((t, toks));
+        }
+        let mut cache = pin.tokens.lock().unwrap();
+        if let Some((t, toks)) = cache.get(&id).filter(|(t, _)| Arc::ptr_eq(t, &text)) {
+            return Some((t.clone(), toks.clone()));
+        }
+        let toks = Arc::new(lex(&text, id));
+        cache.insert(id, (text.clone(), toks.clone()));
+        Some((text, toks))
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        match self.vfs.lookup(path).and_then(|id| self.pinned_text(id)) {
+            Some(t) => t.is_some() || self.vfs.is_file_on_disk(path),
+            None => self.vfs.is_file(path),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pin_keeps_the_editor_texts_and_versions_of_its_moment() {
+        let root = std::env::temp_dir().join(format!("dvicode-vfs-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("b.sv"), "on disk").unwrap();
+        let vfs = Vfs::new();
+        let (a, b, c) = (root.join("a.sv"), root.join("b.sv"), root.join("c.sv"));
+        let ia = vfs.set_overlay_versioned(&a, Arc::from("a v1"), Some(1));
+        let pin = vfs.pin();
+        // Edited, opened and created after the pin.
+        vfs.set_overlay_versioned(&a, Arc::from("a v2"), Some(2));
+        let ib = vfs.set_overlay_versioned(&b, Arc::from("b in the editor"), Some(7));
+        let ic = vfs.set_overlay_versioned(&c, Arc::from("c in the editor"), Some(1));
+        let r = vfs.reader(Some(&pin));
+        let (ta, toks) = r.source(ia).unwrap();
+        assert_eq!((&*ta, toks[0].text.as_str()), ("a v1", "a"));
+        assert_eq!(r.lsp_version_for(ia, &ta), Some(1));
+        assert_eq!(&*r.text(ib).unwrap(), "on disk");
+        assert_eq!(r.lsp_version_for(ib, &r.text(ib).unwrap()), None);
+        assert!(r.text(ic).is_none() && !r.is_file(&c) && r.is_file(&b) && r.is_file(&a));
+        // Without a pin: the texts of now.
+        let now = vfs.reader(None);
+        let ta2 = now.text(ia).unwrap();
+        assert_eq!((&*ta2, now.lsp_version_for(ia, &ta2)), ("a v2", Some(2)));
+        assert!(now.is_file(&c));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn caches_follow_the_latest_text() {

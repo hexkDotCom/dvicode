@@ -202,3 +202,22 @@ fn a_cancelled_update_gives_no_snapshot() {
     assert!(!Arc::ptr_eq(&unit(&a).parsed, &unit(&next).parsed));
     assert!(next.interface_changed(&a), "W changed");
 }
+
+#[test]
+fn an_update_from_a_pin_compiles_the_editor_texts_of_that_moment() {
+    let (a, root) = project("pinned", &[("defs.svh", DEFS), ("a.sv", A), ("b.sv", &format!("`include \"defs.svh\"\n{B}"))]);
+    let h = a.vfs.set_overlay_versioned(&root.join("defs.svh"), Arc::from("`define W 16\n"), Some(1));
+    let pin = Arc::new(a.vfs.pin());
+    // The editor sends a newer text while the update runs.
+    a.vfs.set_overlay_versioned(&root.join("defs.svh"), Arc::from("`define W 32\n"), Some(2));
+    let mut base = a.clone();
+    base.pin = Some(pin);
+    let next = base.update_with(&[h], &dvi_project::Progress::new()).unwrap();
+    // Every unit that includes the header has the pinned text, with its version.
+    let units = next.units_of_file(h).to_vec();
+    assert_eq!(units.len(), 2);
+    for u in units {
+        let s = next.unit(u).sources.get(&h).unwrap().clone();
+        assert_eq!((&*s.text, s.lsp_version), ("`define W 16\n", Some(1)));
+    }
+}

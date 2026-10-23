@@ -5,5 +5,5 @@ pub mod resolve;
 pub mod vfs;
 pub mod world;
 
-pub use vfs::Vfs;
+pub use vfs::{Pin, Vfs};
 pub use world::{Analysis, DeclRef, ProjectSetup, Unit, UnitId, UnitKind};

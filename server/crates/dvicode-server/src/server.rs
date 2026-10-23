@@ -7,7 +7,7 @@ use build_docs::{BuildDoc, Inspected};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
-use dvi_analysis::{Analysis, ProjectSetup, UnitKind, Vfs};
+use dvi_analysis::{Analysis, Pin, ProjectSetup, UnitKind, Vfs};
 use dvi_project::Progress;
 use dvi_syntax::{FileId, SourceProvider};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -144,6 +144,8 @@ struct UpdateJob {
     files: Vec<FileId>,
     /// The open documents, in a stable order.
     open: Vec<FileId>,
+    /// The editor texts it compiles: those of the moment it started.
+    pin: Arc<Pin>,
     /// Cancelled when a newer job replaces it.
     progress: Arc<Progress>,
 }
@@ -160,7 +162,13 @@ struct Updated {
 /// A request that waits for edits to be analysed (see `Server::spawn`).
 struct Deferred {
     id: RequestId,
-    /// The file it is about; `None`: it waits until every edit is analysed.
+    /// The last edit made before it came (`Server::edit_seq`): it waits for edits up to that
+    /// one, never for later ones.
+    seq: u64,
+    /// It looks at the whole project, so it waits for every edit; otherwise for the edits of
+    /// files compiled with `file`.
+    project: bool,
+    /// The file it is about (`None`: none, it waits for every edit).
     file: Option<FileId>,
     /// It names a position or range in the file, which a later edit makes meaningless.
     positional: bool,
@@ -177,8 +185,11 @@ pub(crate) struct Hooks {
     pub after_update: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called on the build thread when a full build is done, before it is handed to the loop.
     pub after_build: Option<Box<dyn Fn() + Send + Sync>>,
-    /// Called on a worker thread before a request's handler runs, with the method.
+    /// Called on a worker thread when a request's handler starts (not cancelled before it
+    /// could), with the method.
     pub before_request: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    /// Called when a problem check starts (true, on the loop) and when it is done (false).
+    pub problem_check: Option<Box<dyn Fn(bool) + Send + Sync>>,
     /// Called for each file of a problem check: the check's number, the file, and whether its
     /// problems are computed (not when a newer check covers the file).
     pub before_problems: Option<Box<dyn Fn(u64, &std::path::Path, bool) + Send + Sync>>,
@@ -241,6 +252,13 @@ struct Server {
     /// Files changed on disk while an update or a build waiting for one ran, that the snapshot
     /// in use does not compile: the update may have read them (see `on_updated`).
     changed_while_updating: FxHashSet<FileId>,
+    /// Numbers the edits (`note_change`).
+    edit_seq: u64,
+    /// Files with edits the snapshot in use does not have yet: the number of the first.
+    dirty: FxHashMap<FileId, u64>,
+    /// Files of the running update edited again after it started: the number of the first
+    /// such edit (dirty again when it is installed).
+    redirty: FxHashMap<FileId, u64>,
 }
 
 /// How long typing in a build file pauses before it is checked.
@@ -332,6 +350,9 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         built: None,
         announce: None,
         changed_while_updating: FxHashSet::default(),
+        edit_seq: 0,
+        dirty: FxHashMap::default(),
+        redirty: FxHashMap::default(),
     };
     s.start_build();
     s.main_loop(&conn)
@@ -355,9 +376,15 @@ impl Server {
             }
             select! {
                 recv(conn.receiver) -> msg => {
-                    let Ok(msg) = msg else { return Ok(()) };
+                    let Ok(msg) = msg else {
+                        self.stop_work();
+                        return Ok(());
+                    };
                     match msg {
                         Message::Request(req) => {
+                            if req.method == "shutdown" {
+                                self.stop_work();
+                            }
                             if conn.handle_shutdown(&req)? {
                                 return Ok(());
                             }
@@ -369,6 +396,7 @@ impl Server {
                         }
                         Message::Notification(n) => {
                             if n.method == "exit" {
+                                self.stop_work();
                                 return Ok(());
                             }
                             let method = n.method.clone();
@@ -402,6 +430,17 @@ impl Server {
                 self.inspect_at = None;
                 self.inspect_build_docs();
             }
+        }
+    }
+
+    /// At shutdown: the running update and build stop, so that their threads let go of the
+    /// connection (a TCP transport waits for them before the process exits).
+    fn stop_work(&mut self) {
+        if let Some(job) = self.update.take() {
+            job.progress.cancel();
+        }
+        if let Some(p) = &self.build_progress {
+            p.cancel();
         }
     }
 
@@ -689,6 +728,11 @@ impl Server {
     /// the result of a running full build.
     fn note_change(&mut self, id: FileId) {
         self.drop_deferred(&[], Some(id));
+        self.edit_seq += 1;
+        self.dirty.entry(id).or_insert(self.edit_seq);
+        if self.update.as_ref().is_some_and(|j| j.files.binary_search(&id).is_ok()) {
+            self.redirty.entry(id).or_insert(self.edit_seq);
+        }
         self.pending.insert(id);
         self.pending_since.get_or_insert_with(Instant::now);
         if self.building {
@@ -698,10 +742,12 @@ impl Server {
 
     /// Hands the pending edits to the update thread. An update that is running already goes
     /// on unless a file it compiles was edited again: then one update with the files of both
-    /// replaces it (it may have read text that is out of date). Other edits wait for it.
+    /// replaces it, unless a waiting request needs it (one request after another could then
+    /// wait for ever). Other edits wait for it.
     fn flush_pending(&mut self) {
         if let Some(job) = &self.update {
-            if !self.pending.iter().any(|f| job.files.binary_search(f).is_ok()) {
+            let again = self.pending.iter().any(|f| job.files.binary_search(f).is_ok());
+            if !again || self.deferred.iter().any(|d| job.files.iter().any(|f| self.needs(d, *f))) {
                 // Flushed when it is done (`on_updated`).
                 self.pending_since = None;
                 return;
@@ -716,9 +762,11 @@ impl Server {
         files.sort_unstable();
         self.update_seq += 1;
         let base = self.built.clone().unwrap_or_else(|| self.analysis.clone());
-        let job = UpdateJob { seq: self.update_seq, base, files, open: self.open_files(), progress: Arc::new(Progress::new()) };
+        let pin = Arc::new(self.vfs.pin());
+        let job = UpdateJob { seq: self.update_seq, base, files, open: self.open_files(), pin, progress: Arc::new(Progress::new()) };
         let _ = self.update_tx.send(job.clone());
         self.update = Some(job);
+        self.redirty.clear();
     }
 
     /// Stops the running update (its snapshot is being replaced): its files are pending again.
@@ -763,6 +811,14 @@ impl Server {
                 }
             }
         }
+        // Its edits are in (or given up on, when it failed); those made after it started are not.
+        for f in &job.files {
+            match self.redirty.remove(f) {
+                Some(first) => self.dirty.insert(*f, first),
+                None => self.dirty.remove(f),
+            };
+        }
+        self.redirty.clear();
         // Files changed on disk while it ran that it may have read (an edit added an
         // `include of them): they are compiled again.
         for f in std::mem::take(&mut self.changed_while_updating) {
@@ -788,25 +844,38 @@ impl Server {
             self.publish(targets.into_iter().collect(), false);
         }
         self.run_deferred();
-        // Edits that waited for this update, their pause in typing over.
-        if self.pending_since.is_none() {
+        // Edits that waited for this update: their pause in typing is over, or a request
+        // waits for them (typing elsewhere must not hold it up).
+        if self.pending_since.is_none() || !self.deferred.is_empty() {
             self.flush_pending();
         }
     }
 
-    /// Whether a request about `file` (`None`: about no file in particular) must wait: the
-    /// file's edits are not analysed yet (any edit, for `None`).
-    fn waits(&self, file: Option<FileId>) -> bool {
-        match file {
-            Some(f) => self.pending.contains(&f) || self.update.as_ref().is_some_and(|j| j.files.binary_search(&f).is_ok()),
-            None => !self.pending.is_empty() || self.update.is_some(),
+    /// Whether request `d` needs the edits of file `f` that are not analysed yet: those made
+    /// before it came, of `f` itself or of a file compiled with it (a header and the files
+    /// that include it), or of any file for a request about the whole project.
+    fn needs(&self, d: &Deferred, f: FileId) -> bool {
+        self.dirty.get(&f).is_some_and(|first| *first <= d.seq) && self.related(d.project, d.file, f)
+    }
+
+    fn related(&self, project: bool, file: Option<FileId>, f: FileId) -> bool {
+        let Some(file) = file.filter(|_| !project) else { return true };
+        if file == f {
+            return true;
         }
+        let units = self.analysis.units_of_file(file);
+        !units.is_empty() && self.analysis.units_of_file(f).iter().any(|u| units.contains(u))
+    }
+
+    /// Whether `d` must wait for edits not analysed yet.
+    fn waits(&self, d: &Deferred) -> bool {
+        self.dirty.keys().any(|f| self.needs(d, *f))
     }
 
     /// Answers the waiting requests whose edits are analysed now.
     fn run_deferred(&mut self) {
         for d in std::mem::take(&mut self.deferred) {
-            if self.waits(d.file) {
+            if self.waits(&d) {
                 self.deferred.push(d);
             } else {
                 (d.run)(self.analysis.clone());
@@ -852,11 +921,23 @@ impl Server {
             for f in &files {
                 st.latest.insert(url_of(&a.vfs.path(*f)), g);
             }
+            if full {
+                // The files it does not cover (no longer compiled) are its too, to clear: an
+                // older job still running must not publish them after it.
+                for (u, owner) in st.latest.iter_mut() {
+                    if *owner < g && !skip.contains(u) {
+                        *owner = g;
+                    }
+                }
+            }
             g
         };
         let open: FxHashSet<FileId> = self.open.keys().copied().collect();
         let limit = self.settings.max_problems.unwrap_or(1000);
         let hooks = self.hooks.clone();
+        if let Some(h) = &hooks.problem_check {
+            h(true);
+        }
         rayon::spawn(move || {
             let mut total = 0usize;
             let mut now: FxHashSet<Url> = FxHashSet::default();
@@ -932,6 +1013,9 @@ impl Server {
                     let p = PublishDiagnosticsParams { uri: u, diagnostics: Vec::new(), version: None };
                     let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
                 }
+            }
+            if let Some(h) = &hooks.problem_check {
+                h(false);
             }
         });
     }
@@ -1017,10 +1101,10 @@ impl Server {
                 self.vfs.clear_overlay(&path);
                 if let Some(id) = self.vfs.lookup(&path) {
                     self.open.remove(&id);
+                    // Back to the disk contents, also in the units of other open files that
+                    // include it.
+                    self.note_change(id);
                     if self.analysis.is_adhoc_root(id) {
-                        let next = self.analysis.remove_adhoc(id);
-                        self.cancel_update();
-                        self.install(next);
                         let uri = p.text_document.uri;
                         let mut st = self.published.lock().unwrap();
                         // Supersede any job still computing problems for this file.
@@ -1031,12 +1115,10 @@ impl Server {
                         let msg = PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None };
                         let _ = self.sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), msg)));
                         drop(st);
-                        // Other files may have used its declarations or macros.
-                        self.publish_all();
+                        // The update thread drops its unit (not open any more); other files may
+                        // have used its declarations or macros, which it then reports.
+                        self.flush_pending();
                     }
-                    // Back to the disk contents, also in the units of other open files that
-                    // include it.
-                    self.note_change(id);
                 }
             }
             "workspace/didChangeWatchedFiles" => {
@@ -1100,16 +1182,26 @@ impl Server {
         self.analysis = Arc::new(a);
     }
 
-    /// Answers `req` with `f` on a worker thread. A request about a file whose edits are not
-    /// analysed yet (about any edit, when it names no file) waits for the update that
-    /// analyses them, so that it sees the text the editor sent before it.
+    /// Answers `req` with `f` on a worker thread. A request about a file waits for the edits
+    /// made before it, of that file and of the files compiled with it, so that it sees the text
+    /// the editor sent before it; one about no file waits for all of them. Other edits may still
+    /// be analysed meanwhile: what other units declare can be a little older.
     fn spawn<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
         R: Serialize,
     {
-        let file = self.file_of_request(&req.params);
-        self.spawn_with(req, Some(file), f);
+        self.spawn_with(req, Some(false), f);
+    }
+
+    /// [`Server::spawn`] for requests that look through the whole project (references, rename,
+    /// subclasses, the views): they wait for every edit made before them.
+    fn spawn_project<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
+    where
+        P: DeserializeOwned + Send + 'static,
+        R: Serialize,
+    {
+        self.spawn_with(req, Some(true), f);
     }
 
     /// [`Server::spawn`] for requests that do not depend on edits: answered at once.
@@ -1121,14 +1213,17 @@ impl Server {
         self.spawn_with(req, None, f);
     }
 
-    /// `about`: the file the request is about, when it may have to wait for edits.
-    fn spawn_with<P, R>(&mut self, req: Request, about: Option<Option<FileId>>, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
+    /// `project`: whether it waits for all earlier edits or for those of its file; `None`: for
+    /// none.
+    fn spawn_with<P, R>(&mut self, req: Request, project: Option<bool>, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
         R: Serialize,
     {
         let id = req.id.clone();
-        let positional = req.params.get("position").is_some() || req.params.get("range").is_some();
+        let file = self.file_of_request(&req.params);
+        // Call and type hierarchy items carry their document and position.
+        let positional = ["position", "range", "item"].iter().any(|k| req.params.get(k).is_some());
         let params: P = match serde_json::from_value(req.params) {
             Ok(p) => p,
             Err(e) => {
@@ -1144,14 +1239,14 @@ impl Server {
         let run = move |a: Arc<Analysis>| {
             rayon::spawn(move || {
                 let t0 = Instant::now();
-                if let Some(h) = &hooks.before_request {
-                    h(&method);
-                }
                 // Not started when it was cancelled while it waited for a thread; its result is
                 // thrown away when it was cancelled while it ran (long searches stop early).
                 let resp = if cancel.load(Ordering::Relaxed) {
                     cancelled(rid)
                 } else {
+                    if let Some(h) = &hooks.before_request {
+                        h(&method);
+                    }
                     let mut a = (*a).clone();
                     a.cancel = Some(cancel.clone());
                     let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
@@ -1173,13 +1268,13 @@ impl Server {
                 let _ = sender.send(Message::Response(resp));
             })
         };
-        match about {
-            Some(file) if self.waits(file) => {
-                // Its edits are analysed now, not after the pause in typing.
-                self.flush_pending();
-                self.deferred.push(Deferred { id, file, positional, run: Box::new(run) });
-            }
-            _ => run(self.analysis.clone()),
+        let d = Deferred { id, seq: self.edit_seq, project: project.unwrap_or(false), file, positional, run: Box::new(run) };
+        if project.is_some() && self.waits(&d) {
+            self.deferred.push(d);
+            // Its edits are analysed now, not after the pause in typing.
+            self.flush_pending();
+        } else {
+            (d.run)(self.analysis.clone());
         }
     }
 
@@ -1202,9 +1297,10 @@ impl Server {
         self.deferred = kept;
     }
 
-    /// The document a request is about (`textDocument.uri`), when the server knows it.
+    /// The document a request is about (`textDocument.uri`, or the `uri` of a call or type
+    /// hierarchy item), when the server knows it.
     fn file_of_request(&self, params: &Value) -> Option<FileId> {
-        let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str());
+        let uri = params.get("textDocument").or_else(|| params.get("item")).and_then(|t| t.get("uri")).and_then(|u| u.as_str());
         uri.and_then(|u| Url::parse(u).ok()).and_then(|u| self.analysis.file_of_url(&u))
     }
 
@@ -1268,12 +1364,12 @@ impl Server {
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 Ok(Some(GotoDefinitionResponse::Array(a.goto_type_definition(f, off))))
             }),
-            "textDocument/implementation" => self.spawn(req, |a, p: GotoDefinitionParams| {
+            "textDocument/implementation" => self.spawn_project(req, |a, p: GotoDefinitionParams| {
                 let tp = p.text_document_position_params;
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 Ok(Some(GotoDefinitionResponse::Array(a.goto_implementation(f, off))))
             }),
-            "textDocument/references" => self.spawn(req, |a, p: ReferenceParams| {
+            "textDocument/references" => self.spawn_project(req, |a, p: ReferenceParams| {
                 let tp = p.text_document_position;
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 Ok(Some(a.references(f, off, p.context.include_declaration)))
@@ -1294,12 +1390,12 @@ impl Server {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(None) };
                 Ok(Some(DocumentSymbolResponse::Nested(a.document_symbols(f))))
             }),
-            "workspace/symbol" => self.spawn(req, |a, p: WorkspaceSymbolParams| Ok(Some(WorkspaceSymbolResponse::Flat(a.workspace_symbols(&p.query, 500))))),
+            "workspace/symbol" => self.spawn_project(req, |a, p: WorkspaceSymbolParams| Ok(Some(WorkspaceSymbolResponse::Flat(a.workspace_symbols(&p.query, 500))))),
             "textDocument/prepareRename" => self.spawn(req, |a, p: TextDocumentPositionParams| {
                 let Some((f, off)) = pos(a, &p.text_document.uri, p.position) else { return Ok(None) };
                 Ok(a.prepare_rename(f, off).and_then(|s| a.to_range(s)).map(PrepareRenameResponse::Range))
             }),
-            "textDocument/rename" => self.spawn(req, |a, p: RenameParams| {
+            "textDocument/rename" => self.spawn_project(req, |a, p: RenameParams| {
                 let tp = p.text_document_position;
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 a.rename(f, off, &p.new_name).map(Some)
@@ -1319,7 +1415,7 @@ impl Server {
             }),
             "typeHierarchy/supertypes" | "typeHierarchy/subtypes" => {
                 let sup = req.method == "typeHierarchy/supertypes";
-                self.spawn(req, move |a, p: TypeHierarchySupertypesParams| {
+                self.spawn_project(req, move |a, p: TypeHierarchySupertypesParams| {
                     let it = p.item;
                     let Some((f, off)) = pos(a, &it.uri, it.selection_range.start) else { return Ok(None) };
                     let Some(c) = a.class_at_location(f, off) else { return Ok(None) };
@@ -1331,7 +1427,7 @@ impl Server {
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 Ok(Some(a.prepare_call_hierarchy(f, off)))
             }),
-            "callHierarchy/incomingCalls" => self.spawn(req, |a, p: CallHierarchyIncomingCallsParams| {
+            "callHierarchy/incomingCalls" => self.spawn_project(req, |a, p: CallHierarchyIncomingCallsParams| {
                 let it = p.item;
                 let Some((f, off)) = pos(a, &it.uri, it.selection_range.start) else { return Ok(None) };
                 Ok(a.call_item_decl(f, off).map(|r| a.incoming_calls(r)))
@@ -1367,7 +1463,7 @@ impl Server {
                 Ok(Some(actions))
             }),
             // ---------------------------------------------------------- custom
-            "dvicode/status" => self.spawn(req, |a, _: Value| Ok(a.status())),
+            "dvicode/status" => self.spawn_project(req, |a, _: Value| Ok(a.status())),
             "dvicode/serverInfo" => self.spawn_now(req, |_, _: Value| {
                 Ok(json!({
                     "version": crate::VERSION,
@@ -1378,21 +1474,21 @@ impl Server {
                     "home": std::env::var("HOME").unwrap_or_default(),
                 }))
             }),
-            "dvicode/compiledFiles" => self.spawn(req, |a, _: Value| Ok(a.compiled_files())),
-            "dvicode/designTops" => self.spawn(req, |a, _: Value| {
+            "dvicode/compiledFiles" => self.spawn_project(req, |a, _: Value| Ok(a.compiled_files())),
+            "dvicode/designTops" => self.spawn_project(req, |a, _: Value| {
                 Ok(a.design_tops().into_iter().map(|r| a.decl(r).name.to_string()).collect::<Vec<_>>())
             }),
-            "dvicode/designHierarchy" => self.spawn(req, |a, p: Value| {
+            "dvicode/designHierarchy" => self.spawn_project(req, |a, p: Value| {
                 let top = p.get("top").and_then(|t| t.as_str()).map(|s| s.to_string());
                 Ok(a.design_hierarchy(top.as_deref(), 20000))
             }),
-            "dvicode/verificationHierarchy" => self.spawn(req, |a, p: Value| {
+            "dvicode/verificationHierarchy" => self.spawn_project(req, |a, p: Value| {
                 let test = p.get("test").and_then(|t| t.as_str()).filter(|t| !t.is_empty()).map(|s| s.to_string());
                 Ok(a.verification_hierarchy(test.as_deref(), 20000))
             }),
             // The views: one tree, filtered and limited (see TreeParams).
-            "dvicode/tree" => self.spawn(req, |a, p: TreeParams| Ok(view_tree(a, p))),
-            "dvicode/locate" => self.spawn(req, |a, p: LocateParams| {
+            "dvicode/tree" => self.spawn_project(req, |a, p: TreeParams| Ok(view_tree(a, p))),
+            "dvicode/locate" => self.spawn_project(req, |a, p: LocateParams| {
                 let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
                 Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))
             }),
@@ -1404,7 +1500,7 @@ impl Server {
                 let version = a.source(f).and_then(|s| s.lsp_version);
                 Ok(json!({ "revision": a.revision, "version": version, "status": t.status, "context": t.context, "others": t.others, "incomplete": t.incomplete, "nodes": t.nodes }))
             }),
-            "dvicode/includingFiles" => self.spawn(req, |a, p: TextDocumentIdentifierParams| {
+            "dvicode/includingFiles" => self.spawn_project(req, |a, p: TextDocumentIdentifierParams| {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(Vec::new()) };
                 Ok(a.including_files(f))
             }),
@@ -1464,7 +1560,11 @@ fn cancelled(id: RequestId) -> Response {
 /// Applies edits to snapshots, one job after another, away from the loop that reads the
 /// editor's messages: compiling a header again that thousands of files include takes long.
 fn update_thread(jobs: Receiver<UpdateJob>, events: Sender<Event>, client: Sender<Message>, hooks: Arc<Hooks>) {
-    for job in jobs {
+    while let Ok(mut job) = jobs.recv() {
+        // Only the newest job can be one the loop still waits for: the others were replaced.
+        while let Ok(newer) = jobs.try_recv() {
+            job = newer;
+        }
         if job.progress.is_cancelled() {
             continue;
         }
@@ -1476,13 +1576,16 @@ fn update_thread(jobs: Receiver<UpdateJob>, events: Sender<Event>, client: Sende
             // Files closed while an update that counted them as open ran keep no unit of
             // their own (closing one replaces the update only when it had one already).
             let mut base = (*job.base).clone();
+            base.pin = Some(job.pin.clone());
             let closed: Vec<FileId> = base.units.iter().flatten().filter(|u| u.kind == UnitKind::AdHoc && job.open.binary_search(&u.root).is_err()).map(|u| u.root).collect();
             for f in closed {
                 base = base.remove_adhoc(f);
             }
             // An open header may have lost its last includer, or an open file outside the
             // build gained one.
-            base.update_with(&job.files, &job.progress).map(|next| next.sync_open_files(&job.open))
+            let mut next = base.update_with(&job.files, &job.progress)?.sync_open_files_with(&job.open, &job.progress)?;
+            next.pin = None;
+            Some(next)
         });
         let done = match r {
             Some(None) => continue, // cancelled: a newer job replaces it
