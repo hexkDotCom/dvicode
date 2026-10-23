@@ -28,8 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 TARGET = "x86_64-unknown-linux-musl"
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "copyright", "unlicense")
 # License files of code a package bundles, below its top level: libmimalloc-sys compiles
-# Microsoft's mimalloc (the default version, v2) into the x86_64 Linux engine.
-BUNDLED = {"libmimalloc-sys": ["c_src/mimalloc/v2/LICENSE"]}
+# Microsoft's mimalloc (v3, unless its `v2` feature is on) into the x86_64 Linux engine. A
+# listed file that is missing is an error: the package may have moved it.
+BUNDLED = {"libmimalloc-sys": ["c_src/mimalloc/v3/LICENSE"]}
 
 
 def license_files(directory: Path):
@@ -114,7 +115,12 @@ def section(title, intro, pkgs, problems):
     texts = {}
     order = []
     for p in pkgs:
-        files = license_files(p["dir"]) + [p["dir"] / b for b in BUNDLED.get(p["name"], []) if (p["dir"] / b).is_file()]
+        files = license_files(p["dir"])
+        for b in BUNDLED.get(p["name"], []):
+            if (p["dir"] / b).is_file():
+                files.append(p["dir"] / b)
+            else:
+                problems.append(f"{p['name']} {p['version']}: no bundled license {b} in {p['dir']}")
         if not files:
             problems.append(f"{p['name']} {p['version']}: no license file in {p['dir']}")
             continue

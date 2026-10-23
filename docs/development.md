@@ -22,7 +22,11 @@ scripts/media/record.mjs   record the README animation and screenshots
 
 ## Building
 
-The server builds on Linux or WSL with stable Rust. Commands start in the repository root:
+The server builds on Linux or WSL with stable Rust. The static engine that `scripts/package.sh`
+builds needs the `x86_64-unknown-linux-musl` target (`rustup target add`) and musl's C compiler
+for its allocator, mimalloc (`sudo apt install musl-tools` on Debian and Ubuntu; without it the
+build stops in `libmimalloc-sys`, which cannot find `x86_64-linux-musl-gcc`). Commands start in
+the repository root:
 
 ```bash
 (cd server && cargo test)                       # unit + integration tests

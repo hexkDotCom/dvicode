@@ -29,3 +29,5 @@ base64 = "0.22"
 # engine, cross-compiled without a C compiler, keeps musl's).
 [target.'cfg(all(target_env = "musl", target_arch = "x86_64"))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
+# Its options (memory returned to the system at once, see main.rs).
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }

@@ -156,6 +156,7 @@ These Rust crates are statically linked into the server binaries (targets `x86_6
 | [crossbeam-deque](https://github.com/crossbeam-rs/crossbeam) | 0.8.8 | MIT OR Apache-2.0 |
 | [crossbeam-epoch](https://github.com/crossbeam-rs/crossbeam) | 0.9.21 | MIT OR Apache-2.0 |
 | [crossbeam-utils](https://github.com/crossbeam-rs/crossbeam) | 0.8.23 | MIT OR Apache-2.0 |
+| [cty](https://github.com/japaric/cty) | 0.2.2 | MIT OR Apache-2.0 |
 | [displaydoc](https://github.com/yaahc/displaydoc) | 0.2.7 | MIT OR Apache-2.0 |
 | [either](https://github.com/rayon-rs/either) | 1.19.0 | MIT OR Apache-2.0 |
 | [form_urlencoded](https://github.com/servo/rust-url) | 1.2.2 | MIT OR Apache-2.0 |
@@ -208,7 +209,7 @@ These Rust crates are statically linked into the server binaries (targets `x86_6
 | [zmij](https://github.com/dtolnay/zmij) | 1.0.23 | MIT |
 
 <details>
-<summary>base64 0.22.1 (LICENSE-APACHE), bitflags 1.3.2 (LICENSE-APACHE), crossbeam-channel 0.5.17 (LICENSE-APACHE), crossbeam-deque 0.8.8 (LICENSE-APACHE), crossbeam-epoch 0.9.21 (LICENSE-APACHE), crossbeam-utils 0.8.23 (LICENSE-APACHE), displaydoc 0.2.7 (LICENSE-APACHE), either 1.19.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), log 0.4.34 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), rayon 1.12.0 (LICENSE-APACHE), rayon-core 1.13.0 (LICENSE-APACHE), smallvec 1.16.3 (LICENSE-APACHE), smol_str 0.3.6 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE)</summary>
+<summary>base64 0.22.1 (LICENSE-APACHE), bitflags 1.3.2 (LICENSE-APACHE), crossbeam-channel 0.5.17 (LICENSE-APACHE), crossbeam-deque 0.8.8 (LICENSE-APACHE), crossbeam-epoch 0.9.21 (LICENSE-APACHE), crossbeam-utils 0.8.23 (LICENSE-APACHE), cty 0.2.2 (LICENSE-APACHE), displaydoc 0.2.7 (LICENSE-APACHE), either 1.19.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), log 0.4.34 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), rayon 1.12.0 (LICENSE-APACHE), rayon-core 1.13.0 (LICENSE-APACHE), smallvec 1.16.3 (LICENSE-APACHE), smol_str 0.3.6 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE)</summary>
 
 ```text
 Apache License
@@ -1388,6 +1389,39 @@ limitations under the License.
 </details>
 
 <details>
+<summary>cty 0.2.2 (LICENSE-MIT)</summary>
+
+```text
+Copyright (c) 2017 Jorge Aparicio
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+</details>
+
+<details>
 <summary>either 1.19.0 (LICENSE-MIT)</summary>
 
 ```text
@@ -1791,7 +1825,7 @@ DEALINGS IN THE SOFTWARE.
 </details>
 
 <details>
-<summary>libmimalloc-sys 0.1.49 (c_src/mimalloc/v2/LICENSE)</summary>
+<summary>libmimalloc-sys 0.1.49 (c_src/mimalloc/v3/LICENSE)</summary>
 
 ```text
 MIT License

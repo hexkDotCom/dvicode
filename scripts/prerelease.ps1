@@ -29,7 +29,7 @@
   With -Vsix they run a packaged extension (the universal package of a Release workflow run).
 
   Prerequisites (see docs/development.md, "Before a release"): Rust and the MSVC build tools on
-  Windows, Rust and Python in the WSL distribution, Node.js, VS Code, and for e2e-ssh a WSL
+  Windows, Rust, musl-tools and Python in the WSL distribution, Node.js, VS Code, and for e2e-ssh a WSL
   distribution with sshd configured on -SshPort for key login with -SshKey. The remote-window
   steps install Microsoft's Remote - WSL and Remote - SSH extensions into client/.vscode-test on
   first use, and VS Code downloads its server into WSL and onto the SSH host.
