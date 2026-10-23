@@ -33,7 +33,8 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 /// 20,000-file project), for builds less than a tenth faster.
 fn configure_allocator() {
     #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
-    // SAFETY: setting an option is allowed at any time, from any thread.
+    // SAFETY: options are plain fields, not safe to set while other threads use the allocator:
+    // this runs first in `main`, before any thread is started.
     unsafe {
         libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0)
     };
@@ -131,6 +132,19 @@ fn main() {
 mod allocator_tests {
     #[test]
     fn the_purge_delay_option_is_the_one_set() {
+        // In a process of its own, as in `main`: setting an option races with other threads, and
+        // the environment can set this one.
+        if std::env::var_os("DVICODE_ALLOCATOR_CHECK").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "allocator_tests::the_purge_delay_option_is_the_one_set", "--test-threads=1"])
+                .env("DVICODE_ALLOCATOR_CHECK", "1")
+                .env_remove("MIMALLOC_PURGE_DELAY")
+                .env_remove("MIMALLOC_RESET_DELAY")
+                .output()
+                .unwrap();
+            assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"), "{}", String::from_utf8_lossy(&out.stdout));
+            return;
+        }
         // Its default in mimalloc v3 (src/options.c: 1000 ms) identifies the option; then it is 0.
         let get = || unsafe { libmimalloc_sys::mi_option_get(super::MI_OPTION_PURGE_DELAY) };
         assert_eq!(get(), 1000);
