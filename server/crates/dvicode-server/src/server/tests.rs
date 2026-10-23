@@ -1074,9 +1074,11 @@ fn edits_analysed_during_a_build_stay_in_use_until_its_replay_is_done() {
 
 #[test]
 fn a_file_changed_on_disk_while_an_update_reads_it_is_read_again() {
-    let top_text = "module top;\nendmodule\n";
-    let h_text = "  int from_h_old;\n";
-    let root = project("watchupdate", &[("top.sv", top_text), ("h.svh", h_text)]);
+    let top_text = "module top;
+endmodule
+";
+    let root = project("watchupdate", &[("top.sv", top_text), ("h.svh", "  typedef int old_t;
+")]);
     let gate = Arc::new(Gate::default());
     let _opener = Opener(gate.clone());
     let hooks = {
@@ -1091,17 +1093,57 @@ fn a_file_changed_on_disk_while_an_update_reads_it_is_read_again() {
     // The edit includes h.svh, which no snapshot compiles yet; its update has read it and is
     // held before it is installed when the header changes on disk.
     gate.close();
-    let included = "module top;\n`include \"h.svh\"\n  initial from_h_new = 1;\nendmodule\n";
-    c.change(&top, 2, included);
-    c.request_ok("dvicode/serverInfo", Value::Null);
+    c.change(&top, 2, "module top;
+`include \"h.svh\"
+  new_t v;
+endmodule
+");
     let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
     gate.wait_entered(2);
-    std::fs::write(root.join("h.svh"), "  int from_h_new;\n").unwrap();
+    std::fs::write(root.join("h.svh"), "  typedef int new_t;
+").unwrap();
     c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "h.svh"), "type": 2 }] }));
     c.sync();
     gate.open();
     c.reply(&symbols, WAIT).expect("symbols once the update is in");
-    // The update read the old header: from_h_new is undeclared, until the header is read again.
-    c.wait_problems(&top, |p| p.version == Some(2) && p.diagnostics.is_empty());
+    // The header is read again: a request about the whole project waits for that.
+    let found = c.request_ok("workspace/symbol", json!({ "query": "new_t" }));
+    let found: Vec<&str> = found.as_array().into_iter().flatten().filter_map(|s| s["location"]["uri"].as_str()).collect();
+    assert!(found.len() == 1 && found[0].ends_with("h.svh"), "{found:?}");
+    c.shutdown();
+}
+
+#[test]
+fn a_new_build_file_is_announced_when_its_build_is_in_use() {
+    let root = project("announce", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    std::fs::write(root.join(".dvicode/pkg_only.build"), "pkg.sv\n").unwrap();
+    let (builds, updates) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+    let _openers = (Opener(builds.clone()), Opener(updates.clone()));
+    let hooks = {
+        let (b, u) = (builds.clone(), updates.clone());
+        Hooks { after_build: Some(Box::new(move || b.pass())), before_update: Some(Box::new(move || u.pass())), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, json!({ "buildFile": ".dvicode/pkg_only.build" }), hooks);
+    let pkg = uri(&root, "pkg.sv");
+    c.open(&pkg, 1, PKG);
+    updates.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // Another build file; the package is edited while its build runs.
+    builds.close();
+    c.notify("workspace/didChangeConfiguration", json!({ "settings": { "dvicode": { "buildFile": "" } } }));
+    builds.wait_entered(2);
+    c.change(&pkg, 2, &PKG.replace("BUSY", "BUSY, DONE"));
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": pkg } }));
+    // The build is done, the edit is applied to it again (held): not in use yet, not announced.
+    updates.close();
+    builds.open();
+    updates.wait_entered(3);
+    c.sync();
+    assert!(!c.notes.iter().any(|n| n.method == "window/showMessage"), "announced before it is in use");
+    assert_eq!(c.request_ok("dvicode/serverInfo", Value::Null)["pid"], std::process::id());
+    updates.open();
+    let m = c.wait_note("window/showMessage", |_| true);
+    assert!(m["message"].as_str().unwrap_or("").contains("default.build"), "{m}");
+    assert_eq!(c.request_ok("dvicode/status", Value::Null)["top_files"], 2);
     c.shutdown();
 }

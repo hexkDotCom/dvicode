@@ -206,7 +206,8 @@ struct Server {
     /// Revision of the current analysis (see `Server::install`).
     revision: u64,
     rebuild_at: Option<Instant>,
-    built_once: bool,
+    /// The build file of the last full build announced (`None` before the first).
+    announced_build_file: Option<Option<PathBuf>>,
     published: Arc<Mutex<PubState>>,
     next_id: i32,
     /// The client shows `$/progress` notifications.
@@ -311,7 +312,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         build_generation: 0,
         revision: 0,
         rebuild_at: None,
-        built_once: false,
+        announced_build_file: None,
         published: Arc::new(Mutex::new(PubState::default())),
         next_id: 1,
         progress,
@@ -599,19 +600,6 @@ impl Server {
             }
             return;
         };
-        // Tell when the build file in use changed (one added, removed or chosen).
-        let new_bf = a.setup.config.build_file.clone();
-        if self.built_once && self.analysis.setup.config.build_file != new_bf {
-            let text = match &new_bf {
-                Some(bf) => {
-                    let shown = self.root.as_deref().and_then(|r| bf.strip_prefix(r).ok()).unwrap_or(bf);
-                    format!("DVICode now uses the build file {}", shown.display())
-                }
-                None => "DVICode now configures the project automatically (no build file)".to_string(),
-            };
-            log::info!("{text}");
-            self.notify("window/showMessage", ShowMessageParams { typ: MessageType::INFO, message: text });
-        }
         // A running update started from the snapshot this replaces (or from an older build).
         self.cancel_update();
         // The update thread applies the edits made while the build ran, including those
@@ -623,7 +611,6 @@ impl Server {
                 self.pending.insert(*f);
             }
         }
-        self.built_once = true;
         self.end_progress();
         self.announce = Some(error);
         if self.pending.is_empty() {
@@ -644,6 +631,20 @@ impl Server {
     /// Tells the client about the full build installed last: its status, and all problems.
     fn announce_build(&mut self) {
         let Some(error) = self.announce.take() else { return };
+        // Tell when the build file in use changed (one added, removed or chosen).
+        let bf = self.analysis.setup.config.build_file.clone();
+        if self.announced_build_file.as_ref().is_some_and(|old| *old != bf) {
+            let text = match &bf {
+                Some(bf) => {
+                    let shown = self.root.as_deref().and_then(|r| bf.strip_prefix(r).ok()).unwrap_or(bf);
+                    format!("DVICode now uses the build file {}", shown.display())
+                }
+                None => "DVICode now configures the project automatically (no build file)".to_string(),
+            };
+            log::info!("{text}");
+            self.notify("window/showMessage", ShowMessageParams { typ: MessageType::INFO, message: text });
+        }
+        self.announced_build_file = Some(bf);
         let st = self.analysis.status();
         log::info!(
             "project ready: {} top files, {} files, {} declarations; {} s since the build started",
