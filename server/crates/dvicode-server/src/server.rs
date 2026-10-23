@@ -117,8 +117,8 @@ fn capabilities() -> ServerCapabilities {
 /// What has been published, and which publishing job may publish each file.
 #[derive(Default)]
 struct PubState {
-    /// Files that currently show problems in the client.
-    published: FxHashSet<Url>,
+    /// Files that currently show problems in the client, and how many.
+    published: FxHashMap<Url, usize>,
     /// File -> sequence number of the newest job that covers it.
     latest: FxHashMap<Url, u64>,
     next: u64,
@@ -171,8 +171,12 @@ struct Deferred {
 /// Lets tests hold the update thread.
 #[derive(Default)]
 pub(crate) struct Hooks {
-    /// Called on the update thread before each update.
+    /// Called on the update thread before each update, and after it (before it is handed
+    /// to the loop).
     pub before_update: Option<Box<dyn Fn() + Send + Sync>>,
+    pub after_update: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called on the build thread when a full build is done, before it is handed to the loop.
+    pub after_build: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called on a worker thread before a request's handler runs, with the method.
     pub before_request: Option<Box<dyn Fn(&str) + Send + Sync>>,
     /// Called for each file of a problem check: the check's number, the file, and whether its
@@ -227,9 +231,15 @@ struct Server {
     /// Requests handed to a handler (waiting or not), until answered.
     running: Running,
     hooks: Arc<Hooks>,
-    /// A full build was installed and is announced (status, all problems) once the edits made
-    /// while it ran are applied too; the error message when it failed.
+    /// A finished full build, installed when the update thread has applied the edits made
+    /// while it ran (until then requests use the previous snapshot, which has them).
+    built: Option<Arc<Analysis>>,
+    /// A full build is announced (status, all problems) once installed; the error message
+    /// when it failed.
     announce: Option<Option<String>>,
+    /// Files changed on disk while an update or a build waiting for one ran, that the snapshot
+    /// in use does not compile: the update may have read them (see `on_updated`).
+    changed_while_updating: FxHashSet<FileId>,
 }
 
 /// How long typing in a build file pauses before it is checked.
@@ -318,7 +328,9 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         deferred: Vec::new(),
         running: Running::default(),
         hooks,
+        built: None,
         announce: None,
+        changed_while_updating: FxHashSet::default(),
     };
     s.start_build();
     s.main_loop(&conn)
@@ -447,7 +459,7 @@ impl Server {
         if diagnostics.is_empty() {
             st.published.remove(&uri);
         } else {
-            st.published.insert(uri.clone());
+            st.published.insert(uri.clone(), diagnostics.len());
         }
         let p = PublishDiagnosticsParams { uri, diagnostics, version: Some(version) };
         let _ = self.sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
@@ -535,6 +547,7 @@ impl Server {
         let vfs = self.vfs.clone();
         let tx = self.events_tx.clone();
         let client = self.sender.clone();
+        let hooks = self.hooks.clone();
         std::thread::Builder::new()
             .name("dvicode-build".into())
             .stack_size(64 << 20)
@@ -566,6 +579,9 @@ impl Server {
                     ),
                     None => log::info!("build cancelled after {} ms", t0.elapsed().as_millis()),
                 }
+                if let Some(h) = &hooks.after_build {
+                    h();
+                }
                 let _ = tx.send(Event::Built(a.map(Box::new), generation, error));
             })
             .expect("spawn build thread");
@@ -596,7 +612,7 @@ impl Server {
             log::info!("{text}");
             self.notify("window/showMessage", ShowMessageParams { typ: MessageType::INFO, message: text });
         }
-        // A running update started from the snapshot this replaces.
+        // A running update started from the snapshot this replaces (or from an older build).
         self.cancel_update();
         // The update thread applies the edits made while the build ran, including those
         // already applied to the previous snapshot by the debounce (the build may have read
@@ -607,18 +623,16 @@ impl Server {
                 self.pending.insert(*f);
             }
         }
-        self.install(a);
         self.built_once = true;
         self.end_progress();
         self.announce = Some(error);
         if self.pending.is_empty() {
+            self.built = None;
+            self.install(a);
             self.announce_build();
         } else {
+            self.built = Some(Arc::new(a));
             self.flush_pending();
-        }
-        // The build may read open argument files differently now.
-        if !self.build_docs.is_empty() {
-            self.inspect_at = Some(Instant::now());
         }
         if self.build_again {
             self.build_again = false;
@@ -645,6 +659,10 @@ impl Server {
         }
         self.notify("dvicode/status", &status);
         self.publish_all();
+        // The build may read open argument files differently now.
+        if !self.build_docs.is_empty() {
+            self.inspect_at = Some(Instant::now());
+        }
     }
 
     fn end_progress(&self) {
@@ -696,7 +714,8 @@ impl Server {
         let mut files: Vec<FileId> = self.pending.drain().collect();
         files.sort_unstable();
         self.update_seq += 1;
-        let job = UpdateJob { seq: self.update_seq, base: self.analysis.clone(), files, open: self.open_files(), progress: Arc::new(Progress::new()) };
+        let base = self.built.clone().unwrap_or_else(|| self.analysis.clone());
+        let job = UpdateJob { seq: self.update_seq, base, files, open: self.open_files(), progress: Arc::new(Progress::new()) };
         let _ = self.update_tx.send(job.clone());
         self.update = Some(job);
     }
@@ -717,8 +736,9 @@ impl Server {
         let Some(job) = self.update.take() else { return };
         let mut interface_changed = false;
         let mut recompiled = Vec::new();
+        let base = self.built.as_ref().unwrap_or(&self.analysis);
         match done {
-            Some(_) if !Arc::ptr_eq(&job.base, &self.analysis) => {
+            Some(_) if !Arc::ptr_eq(&job.base, base) => {
                 // Started from a snapshot that was replaced since (replacing one cancels the
                 // update, so this is a safety net): again, from the one in use.
                 log::warn!("update of {} file(s) started from an older snapshot; updating again", job.files.len());
@@ -729,11 +749,25 @@ impl Server {
             Some(u) => {
                 interface_changed = u.interface_changed;
                 recompiled = u.recompiled;
+                self.built = None;
                 self.install(u.analysis);
                 // The views refresh what they show.
                 self.notify("dvicode/revision", &json!({ "revision": self.revision }));
             }
-            None => log::error!("kept the previous analysis of {:?}", job.files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>()),
+            None => {
+                log::error!("kept the previous analysis of {:?}", job.files.iter().map(|f| self.vfs.path(*f)).collect::<Vec<_>>());
+                // A finished build is used without the edits.
+                if let Some(b) = self.built.take() {
+                    self.install((*b).clone());
+                }
+            }
+        }
+        // Files changed on disk while it ran that it may have read (an edit added an
+        // `include of them): they are compiled again.
+        for f in std::mem::take(&mut self.changed_while_updating) {
+            if !self.analysis.units_of_file(f).is_empty() {
+                self.note_change(f);
+            }
         }
         if self.announce.is_some() {
             self.announce_build();
@@ -835,8 +869,16 @@ impl Server {
                 let path = a.vfs.path(f);
                 let uri = url_of(&path);
                 // A newer job owns this file (an edit came in while this one ran): its problems
-                // are not computed here at all.
-                let owned = published.lock().unwrap().latest.get(&uri) == Some(&generation);
+                // are not computed here at all. What it shows counts against the limit, as its
+                // problems would.
+                let owned = {
+                    let st = published.lock().unwrap();
+                    let owned = st.latest.get(&uri) == Some(&generation);
+                    if !owned && !open.contains(&f) {
+                        total += st.published.get(&uri).copied().unwrap_or(0);
+                    }
+                    owned
+                };
                 if let Some(h) = &hooks.before_problems {
                     h(generation, &path, owned);
                 }
@@ -862,13 +904,13 @@ impl Server {
                     continue; // a newer job owns this file
                 }
                 now.insert(uri.clone());
-                if lsp.is_empty() && !st.published.contains(&uri) {
+                if lsp.is_empty() && !st.published.contains_key(&uri) {
                     continue;
                 }
                 if lsp.is_empty() {
                     st.published.remove(&uri);
                 } else {
-                    st.published.insert(uri.clone());
+                    st.published.insert(uri.clone(), lsp.len());
                 }
                 // The document version these problems belong to (open files only).
                 let version = a.source(f).and_then(|s| s.lsp_version);
@@ -879,7 +921,7 @@ impl Server {
                 let mut st = published.lock().unwrap();
                 let stale: Vec<Url> = st
                     .published
-                    .iter()
+                    .keys()
                     .filter(|u| !now.contains(*u) && !skip.contains(*u) && st.latest.get(*u).map_or(true, |g| *g <= generation))
                     .cloned()
                     .collect();
@@ -1025,6 +1067,8 @@ impl Server {
                             }
                             if !self.analysis.units_of_file(id).is_empty() {
                                 self.note_change(id);
+                            } else if self.update.is_some() || self.built.is_some() {
+                                self.changed_while_updating.insert(id);
                             }
                         }
                     }
@@ -1449,6 +1493,9 @@ fn update_thread(jobs: Receiver<UpdateJob>, events: Sender<Event>, client: Sende
             }
             None => None,
         };
+        if let Some(h) = &hooks.after_update {
+            h();
+        }
         let _ = events.send(Event::Updated(job.seq, done));
     }
 }

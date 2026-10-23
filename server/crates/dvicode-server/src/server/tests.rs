@@ -108,6 +108,12 @@ impl Client {
         (c, init)
     }
 
+    /// A round trip through the server's message loop, answered there (not on a worker
+    /// thread, which a test may hold): the server has read everything sent before.
+    fn sync(&mut self) {
+        self.request_ok("textDocument/documentLink", json!({ "textDocument": { "uri": "file:///nowhere/x.sv" } }));
+    }
+
     fn notify(&self, method: &str, params: Value) {
         self.conn.sender.send(Message::Notification(Notification::new(method.into(), params))).unwrap();
     }
@@ -844,9 +850,9 @@ fn a_newer_edit_replaces_the_update_in_progress() {
   initial undeclared_b = 1;");
     c.change(&top, 3, &v3);
     let waiting = fresh_definition(&mut c, &top, &v3);
-    // Answered once the server has read the edit and replaced the held update, which stops
-    // as soon as it goes on; the one that replaces it comes next.
-    c.request_ok("dvicode/serverInfo", Value::Null);
+    // Once the server has read the edit and replaced the held update, which stops as soon
+    // as it goes on; the one that replaces it comes next.
+    c.sync();
     gate.open();
     gate.wait_entered(3);
     // One update, of the newest text, is installed: the replaced one is not.
@@ -857,7 +863,6 @@ fn a_newer_edit_replaces_the_update_in_progress() {
     assert_eq!(next, first + 1);
     let p = c.wait_problems(&top, |p| p.version == Some(3));
     assert!(p.diagnostics.len() == 1 && p.diagnostics[0].message.contains("undeclared_b"), "{:?}", p.diagnostics);
-    let pubs: Vec<_> = c.published.iter().filter(|p| p.uri == top).map(|p| (p.version, p.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>())).collect();
     c.shutdown();
 }
 
@@ -921,8 +926,7 @@ fn a_request_cancelled_while_its_handler_runs_gets_a_cancellation_error() {
     cancel(&c, &id);
     // Cancelling an answered or unknown request changes nothing.
     cancel(&c, &RequestId::from(9999));
-    // Answered once the server has read the cancellations.
-    c.request_ok("dvicode/serverInfo", Value::Null);
+    c.sync();
     gate.open();
     let r = c.reply(&id, WAIT).expect("a reply to the cancelled request");
     assert_eq!(error_code(&r), Some(ErrorCode::RequestCanceled as i32), "{r:?}");
@@ -963,11 +967,19 @@ fn a_waiting_request_about_a_position_is_dropped_when_its_document_changes() {
 
 #[test]
 fn a_problem_check_replaced_by_a_newer_one_stops_computing() {
-    let pkg = "package p;\n  typedef int t0;\nendpackage\n";
-    let user = |m: &str| format!("module {m};\n  import p::*;\n  initial x_{m} = 1;\nendmodule\n");
+    let pkg = "package p;
+  typedef int t0;
+endpackage
+";
+    let user = |m: &str| format!("module {m};
+  import p::*;
+  initial x_{m} = 1;
+endmodule
+");
     let (a, b, c3) = (user("a"), user("b"), user("c"));
     let root = project("problemjobs", &[("pkg.sv", pkg), ("a.sv", &a), ("b.sv", &b), ("c.sv", &c3)]);
-    // Every file a check looks at: (check, file name, computed); the gate holds computations.
+    // Every file a check looks at: (check, file name, computed). The gate holds computations
+    // (on a worker thread: nothing below needs another one until it opens).
     let gate = Arc::new(Gate::default());
     let _opener = Opener(gate.clone());
     let seen: Arc<Mutex<Vec<(u64, String, bool)>>> = Arc::default();
@@ -983,36 +995,113 @@ fn a_problem_check_replaced_by_a_newer_one_stops_computing() {
             ..Default::default()
         }
     };
-    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
-    // The first build's check is done once the last file's problems are in.
-    c.wait_problems(&uri(&root, "c.sv"), |p| !p.diagnostics.is_empty());
-    let first = seen.lock().unwrap().len();
-    // Two edits of the package, on disk, each changing what other files see: two checks of
-    // every file. The first is held at its first file until the second has started.
+    // The first build's check of every file is held at its first file.
     gate.close();
-    let changed = |c: &Client, n: usize| {
-        std::fs::write(root.join("pkg.sv"), pkg.replace("typedef int t0;", &format!("typedef int t{n};"))).unwrap();
-        c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "pkg.sv"), "type": 2 }] }));
-    };
-    changed(&c, 1);
-    gate.wait_entered(first + 1);
-    changed(&c, 2);
-    gate.wait_entered(first + 2);
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    gate.wait_entered(1);
+    // Closing a file outside the build that was open starts a check of every file.
+    let scratch = uri(&root, "scratch.sv");
+    c.open(&scratch, 1, "module scratch;
+endmodule
+");
+    c.wait_note("dvicode/revision", |_| true);
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": scratch } }));
+    c.sync();
     gate.open();
-    let job = |n: usize| seen.lock().unwrap()[first + n].0;
-    let (older, newer) = (job(0), job(1));
-    assert!(older < newer);
-    let looked_at = |j: u64| seen.lock().unwrap().iter().filter(|s| s.0 == j).map(|s| (s.1.clone(), s.2)).collect::<Vec<_>>();
+    let files = ["pkg.sv", "a.sv", "b.sv", "c.sv"];
+    let job = |s: &[(u64, String, bool)], f: &str, computed: bool| s.iter().find(|x| x.1 == f && x.2 == computed).map(|x| x.0);
+    let looked_at = |j: u64| seen.lock().unwrap().iter().filter(|s| s.0 == j && files.contains(&s.1.as_str())).map(|s| (s.1.clone(), s.2)).collect::<Vec<_>>();
     let deadline = Instant::now() + WAIT;
-    while looked_at(older).len() < 4 || looked_at(newer).len() < 4 {
-        assert!(Instant::now() < deadline, "{:?}", seen.lock().unwrap());
+    let (older, newer) = loop {
+        let s = seen.lock().unwrap().clone();
+        let older = s[0].0;
+        if let Some(newer) = job(&s, "c.sv", true).filter(|n| *n != older) {
+            if looked_at(older).len() == 4 && looked_at(newer).len() == 4 {
+                break (older, newer);
+            }
+        }
+        assert!(Instant::now() < deadline, "{s:?}");
         std::thread::sleep(Duration::from_millis(5));
-    }
+    };
+    assert!(older < newer);
     // The older check computed the file it was held at, and no other.
-    let all = |v: bool| ["pkg.sv", "a.sv", "b.sv", "c.sv"].iter().map(|f| (f.to_string(), v)).collect::<Vec<_>>();
+    let all = |v: bool| files.iter().map(|f| (f.to_string(), v)).collect::<Vec<_>>();
     let mut expected = all(false);
     expected[0].1 = true;
     assert_eq!(looked_at(older), expected);
     assert_eq!(looked_at(newer), all(true));
+    c.wait_problems(&uri(&root, "c.sv"), |p| !p.diagnostics.is_empty());
+    c.shutdown();
+}
+
+#[test]
+fn edits_analysed_during_a_build_stay_in_use_until_its_replay_is_done() {
+    let old = "package p;\n  class Old; endclass\nendpackage\n";
+    let new = old.replace("Old", "New");
+    let top_text = "module top;\n  import p::*;\n  New n;\nendmodule\n";
+    let root = project("buildreplay", &[("pkg.sv", old), ("top.sv", top_text)]);
+    let (builds, updates) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+    let _openers = (Opener(builds.clone()), Opener(updates.clone()));
+    let hooks = {
+        let (b, u) = (builds.clone(), updates.clone());
+        Hooks { after_build: Some(Box::new(move || b.pass())), before_update: Some(Box::new(move || u.pass())), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let (pkg, top) = (uri(&root, "pkg.sv"), uri(&root, "top.sv"));
+    let definition = |c: &mut Client| c.request_ok("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(top_text, "New n") }));
+    c.open(&pkg, 1, old);
+    updates.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // A full build that has read the class as Old waits to be handed over.
+    builds.close();
+    c.request_ok("dvicode/rebuild", Value::Null);
+    builds.wait_entered(2);
+    // Renamed meanwhile, and analysed: top.sv finds New.
+    c.change(&pkg, 2, &new);
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": pkg } }));
+    assert_eq!(definition(&mut c)[0]["uri"], pkg.as_str());
+    // The build is done; the rename is applied to it again, held at the gate. Until then
+    // requests use the snapshot that has the rename, not the build's older text.
+    updates.close();
+    builds.open();
+    updates.wait_entered(3);
+    assert_eq!(definition(&mut c)[0]["uri"], pkg.as_str());
+    updates.open();
+    c.wait_note("dvicode/status", |_| true);
+    assert_eq!(definition(&mut c)[0]["uri"], pkg.as_str());
+    c.shutdown();
+}
+
+#[test]
+fn a_file_changed_on_disk_while_an_update_reads_it_is_read_again() {
+    let top_text = "module top;\nendmodule\n";
+    let h_text = "  int from_h_old;\n";
+    let root = project("watchupdate", &[("top.sv", top_text), ("h.svh", h_text)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let hooks = {
+        let g = gate.clone();
+        Hooks { after_update: Some(Box::new(move || g.pass())), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, top_text);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // The edit includes h.svh, which no snapshot compiles yet; its update has read it and is
+    // held before it is installed when the header changes on disk.
+    gate.close();
+    let included = "module top;\n`include \"h.svh\"\n  initial from_h_new = 1;\nendmodule\n";
+    c.change(&top, 2, included);
+    c.request_ok("dvicode/serverInfo", Value::Null);
+    let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    gate.wait_entered(2);
+    std::fs::write(root.join("h.svh"), "  int from_h_new;\n").unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "h.svh"), "type": 2 }] }));
+    c.sync();
+    gate.open();
+    c.reply(&symbols, WAIT).expect("symbols once the update is in");
+    // The update read the old header: from_h_new is undeclared, until the header is read again.
+    c.wait_problems(&top, |p| p.version == Some(2) && p.diagnostics.is_empty());
     c.shutdown();
 }
