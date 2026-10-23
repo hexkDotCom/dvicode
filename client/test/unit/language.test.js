@@ -11,7 +11,7 @@ const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'languag
 test.describe('Language configuration', () => {
   test.it('indents after headers and blocks, not after prototypes or one-line bodies', () => {
     const inc = new RegExp(cfg.indentationRules.increaseIndentPattern);
-    for (const t of ['  if (a) begin', '  begin : named', 'class c extends b;', '  virtual function void build_phase(uvm_phase phase);', 'module top (input logic clk);', '  fork', '  case (s)']) {
+    for (const t of ['  if (a) begin', '  begin : named', 'class c extends b;', '  virtual function void build_phase(uvm_phase phase);', 'module top (input logic clk);', '  fork', '  case (s)', '  unique case (s)', '  sel: casez (s)', '  case (s) // endcase below']) {
       assert.ok(inc.test(t), t);
     }
     for (const t of ['  extern function void f();', '  pure virtual task t();', '  virtual interface bus_if vif;', '  function void f(); endfunction', '  if (a) begin x = 1; end', '  case (s) 0: x = 0; default: x = 1; endcase', '  int x;']) {

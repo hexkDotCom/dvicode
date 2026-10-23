@@ -313,3 +313,24 @@ test.describe('spaces, non-ASCII and percent-encoding', () => {
     assert.equal(m.toServer(r), 'file:///opt/x%20y/%C3%A9.sv');
   });
 });
+
+test.describe('Engine addresses', () => {
+  const { pathmap } = win;
+  test.it('knows this machine by every spelling', () => {
+    for (const h of ['', 'localhost', '127.0.0.1', '127.0.0.2', '[::1]', '[0:0:0:0:0:0:0:1]', '[::ffff:127.0.0.1]']) {
+      assert.ok(pathmap.isLoopback(h), h);
+    }
+    for (const h of ['build01', '10.0.0.5', '[::2]', '[fe80::1]']) {
+      assert.ok(!pathmap.isLoopback(h), h);
+    }
+  });
+});
+
+test.describe('WSL folders opened through \\wsl.localhost', () => {
+  const { vscode, pathmap } = win;
+  test.it('keep their spelling under /mnt; other drive files stay drive paths', () => {
+    const m = pathmap.makeMapper({ wslDistro: 'Ubuntu', wslHost: 'wsl.localhost', wslRoots: ['/mnt/c/proj'], mappings: [] });
+    assert.equal(m.toClient('file:///mnt/c/proj/a.sv').toString(), vscode.Uri.from({ scheme: 'file', authority: 'wsl.localhost', path: '/Ubuntu/mnt/c/proj/a.sv' }).toString());
+    assert.equal(m.toClient('file:///mnt/c/other/b.sv').toString(), vscode.Uri.file('c:/other/b.sv').toString());
+  });
+});

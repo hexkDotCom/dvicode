@@ -7,6 +7,7 @@
 //  dvicode://ssh+build01/home/me/p/a.sv        <->  file:///home/me/p/a.sv     (remote folder)
 //  file:///z%3A/proj/a.sv (pathMappings)       <->  file:///home/me/proj/a.sv   (Samba/NFS/SSHFS)
 
+import * as net from 'net';
 import * as vscode from 'vscode';
 
 export interface PathMapping {
@@ -21,6 +22,12 @@ export interface MapperOptions {
   remoteAuthority?: string;
   /** `wsl$` or `wsl.localhost`, as the workspace folder spells it (default `wsl.localhost`). */
   wslHost?: string;
+  /**
+   * Linux paths of the workspace folders opened through `wslHost`: files under /mnt inside
+   * them keep that spelling; other /mnt files are drive paths (`C:\...`). Every /mnt path when
+   * not given.
+   */
+  wslRoots?: string[];
   /**
    * Authority of dvicode:// URIs for server paths outside `localRoots` (SSH mode: UVM under
    * /opt on the server, say). Paths inside them are shared with this machine and stay files.
@@ -156,7 +163,8 @@ export function makeMapper(opts: MapperOptions): Mapper {
         const d = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
         // Under /mnt as a drive path, unless the workspace is opened through \\wsl.localhost:
         // replies must name the documents the editor has open.
-        if (d && isWin && !opts.wslHost) {
+        const unc = opts.wslHost !== undefined && (opts.wslRoots === undefined || opts.wslRoots.some((r) => startsWithPath(p, r, false)));
+        if (d && isWin && !unc) {
           return vscode.Uri.file(`${d[1]}:${d[2] || '/'}`);
         }
         return vscode.Uri.from({ scheme: 'file', authority: opts.wslHost || 'wsl.localhost', path: `/${opts.wslDistro}${p}` });
@@ -183,4 +191,20 @@ export function makeMapper(opts: MapperOptions): Mapper {
       return parts.length ? parts.join('; ') : 'none';
     },
   };
+}
+
+/** Whether a host is this machine: localhost, 127.0.0.0/8, ::1 (also as ::ffff:127.x.x.x). */
+export function isLoopback(host: string): boolean {
+  const h = host.replace(/^\[(.*)\]$/, '$1').toLowerCase();
+  if (h === '' || h === 'localhost') {
+    return true;
+  }
+  const loop = new net.BlockList();
+  loop.addSubnet('127.0.0.0', 8, 'ipv4');
+  loop.addAddress('::1', 'ipv6');
+  loop.addSubnet('::ffff:127.0.0.0', 104, 'ipv6');
+  if (net.isIPv4(h)) {
+    return loop.check(h, 'ipv4');
+  }
+  return net.isIPv6(h) && loop.check(h, 'ipv6');
 }

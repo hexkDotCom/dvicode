@@ -3,7 +3,7 @@
 
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, RevealOutputChannelOn, State } from 'vscode-languageclient/node';
-import { Launch, makeLaunch, serverSettingsKey } from './launcher';
+import { Launch, closeTcpConnections, makeLaunch, serverSettingsKey } from './launcher';
 import { Mapper } from './pathmap';
 import { RemoteFs } from './remotefs';
 import { InternalError, LogChannel, Reporter } from './report';
@@ -96,7 +96,11 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   const first = startedWith === undefined;
   startedWith = serverSettingsKey();
   try {
-    launch = await makeLaunch(ctx, output);
+    const l = await makeLaunch(ctx, output);
+    if (generation !== startGeneration) {
+      throw new Error('superseded by a restart');
+    }
+    launch = l;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // In a remote window, the local user's values of the server settings (a Windows user's
@@ -138,7 +142,8 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   };
   const c = new LanguageClient('dvicode', 'DVICode', launch.serverOptions, clientOptions);
   c.onDidChangeState((e) => {
-    if (e.newState === State.Stopped) {
+    // A client a restart dropped stops later: the status is the current one's.
+    if (e.newState === State.Stopped && (client === c || pendingClient === c)) {
       statusItem.text = '$(debug-disconnect) DVICode';
       statusItem.tooltip = 'The DVICode language server stopped. Click to restart.';
       statusItem.command = 'dvicode.restartServer';
@@ -146,7 +151,11 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
       structure.reset();
     }
   });
-  c.onNotification('dvicode/internalError', (e: InternalError) => reporter.onInternalError(e));
+  c.onNotification('dvicode/internalError', (e: InternalError) => {
+    if (client === c || pendingClient === c) {
+      reporter.onInternalError(e);
+    }
+  });
   pendingClient = c;
   await c.start();
   if (generation !== startGeneration) {
@@ -237,6 +246,10 @@ function restart(ctx: vscode.ExtensionContext): Promise<void> {
     // connection and never answers would hold it.
     if (starting) {
       await Promise.race([starting.catch(() => undefined), new Promise((r) => setTimeout(r, 15000))]);
+      if (pendingClient?.state === State.Starting) {
+        // Its engine never answered: the connection goes, and the start fails.
+        closeTcpConnections();
+      }
     }
     const c = client ?? pendingClient;
     client = undefined;
@@ -363,10 +376,15 @@ async function selectDesignTop(): Promise<void> {
   const qp = vscode.window.createQuickPick<Item>();
   qp.items = items;
   qp.placeholder = 'Top of the design hierarchy (or type any module name)';
+  // What is typed comes first, unless a listed top has that very name.
+  qp.onDidChangeValue((v) => {
+    const typed = v.trim();
+    const listed = items.some((i) => i.value === typed);
+    qp.items = typed && !listed ? [{ label: typed, description: 'module name as typed', value: typed, alwaysShow: true }, ...items] : items;
+  });
   const pick = await new Promise<{ value: string | undefined } | undefined>((resolve) => {
     qp.onDidAccept(() => {
-      const typed = qp.value.trim();
-      resolve(qp.activeItems[0] ?? (typed ? { value: typed } : undefined));
+      resolve(qp.activeItems[0]);
       qp.hide();
     });
     qp.onDidHide(() => resolve(undefined));

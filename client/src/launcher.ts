@@ -11,7 +11,7 @@ import * as net from 'net';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Executable, ServerOptions, StreamInfo } from 'vscode-languageclient/node';
-import { identityMapper, makeMapper, Mapper, parseWslUri, PathMapping } from './pathmap';
+import { identityMapper, isLoopback, makeMapper, Mapper, parseWslUri, PathMapping } from './pathmap';
 
 export type Mode = 'local' | 'wsl' | 'ssh' | 'tcp' | 'custom';
 
@@ -86,10 +86,17 @@ function serverArgs(cfg: Cfg): string[] {
   return ['--stdio', '--log-level', cfg.logLevel, ...cfg.extraArgs];
 }
 
-/** An argument as the platform's shell (cmd.exe or sh) reads it: `R&D` or `$HOME` literally. */
+/**
+ * An argument as the platform's shell reads it: `R&D` or `$HOME` literally. cmd.exe expands
+ * `%VAR%` even in quotes; a path with `%` needs the template-free form (no shell).
+ */
 function shellArg(s: string): string {
   if (process.platform === 'win32') {
-    return /[\s&|<>^()%!"]/.test(s) ? `"${s.replace(/"/g, '')}"` : s;
+    if (s !== '' && !/[\s&|<>^()!"]/.test(s)) {
+      return s;
+    }
+    // Quotes escaped, and backslashes before a quote doubled (the program's argument parser).
+    return `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
   }
   return /^[\w./=:+@%-]+$/.test(s) ? s : shQuote(s);
 }
@@ -210,6 +217,17 @@ async function prepareSsh(ctx: vscode.ExtensionContext, cfg: Cfg, host: string, 
   return target;
 }
 
+/** Open TCP connections to engines, to close a start that the engine never answers. */
+const sockets = new Set<net.Socket>();
+
+/** Closes every TCP connection to an engine (a start waiting on one then fails). */
+export function closeTcpConnections(): void {
+  for (const s of sockets) {
+    s.destroy();
+  }
+  sockets.clear();
+}
+
 function tcpStream(address: string, token: string): () => Promise<StreamInfo> {
   return () =>
     new Promise((resolve, reject) => {
@@ -223,9 +241,12 @@ function tcpStream(address: string, token: string): () => Promise<StreamInfo> {
         }
         resolve({ reader: socket, writer: socket });
       });
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
       socket.on('error', reject);
     });
 }
+
 
 /** Works out the launch configuration for the current workspace and settings. */
 export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.OutputChannel): Promise<Launch> {
@@ -299,7 +320,7 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
       return {
         mode,
         serverOptions: exe,
-        mapper: makeMapperFor(cfg, wslDistro, remoteAuthority, wslFolder ? folder?.authority : undefined),
+        mapper: makeMapperFor(cfg, wslDistro, remoteAuthority, wslFolder ? folder?.authority : undefined, wslRoots(wslDistro)),
         target: `WSL ${wslDistro}`,
         authority: remoteAuthority ?? `wsl+${wslDistro}`,
       };
@@ -331,8 +352,7 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
       // An engine on another machine: its files outside dvicode.pathMappings and the workspace
       // folders (UVM under /opt) open as dvicode:// files, as over SSH. One on this machine
       // sees the same files as the editor.
-      const host = tcpAddress.slice(0, Math.max(0, tcpAddress.lastIndexOf(':'))).replace(/^\[(.*)\]$/, '$1');
-      const local = ['', '127.0.0.1', 'localhost', '::1'].includes(host.toLowerCase());
+      const local = isLoopback(tcpAddress.slice(0, Math.max(0, tcpAddress.lastIndexOf(':'))));
       const mapper =
         remoteAuthority || local
           ? makeMapperFor(cfg, undefined, remoteAuthority)
@@ -344,8 +364,16 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
       return { mode, serverOptions: tcpStream(tcpAddress, cfg.tcpToken), mapper, target: `tcp ${tcpAddress}`, authority };
     }
     case 'custom': {
-      const serverCmd = [cfg.path || 'dvicode-server', ...serverArgs(cfg)].map(shellArg).join(' ');
-      const cmd = (cfg.launchCommand || '${SERVER_CMD}').replace('${SERVER_CMD}', serverCmd);
+      const program = cfg.path || 'dvicode-server';
+      const template = cfg.launchCommand || '${SERVER_CMD}';
+      // The server alone runs as a program with its arguments, no shell between; a template of
+      // the user's runs in the shell, with the server's command quoted for it.
+      if (template.trim() === '${SERVER_CMD}') {
+        const exe: Executable = { command: program, args: serverArgs(cfg) };
+        return { mode, serverOptions: exe, mapper: makeMapperFor(cfg, undefined, remoteAuthority), target: `custom: ${program}` };
+      }
+      const serverCmd = [program, ...serverArgs(cfg)].map(shellArg).join(' ');
+      const cmd = template.replace('${SERVER_CMD}', serverCmd);
       const exe: Executable = { command: cmd, options: { shell: true } };
       return { mode, serverOptions: exe, mapper: makeMapperFor(cfg, undefined, remoteAuthority), target: `custom: ${cmd}` };
     }
@@ -353,9 +381,17 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
   throw new Error(`unknown dvicode.server.mode '${mode}'`);
 }
 
-function makeMapperFor(cfg: Cfg, wslDistro: string | undefined, remoteAuthority: string | undefined, wslHost?: string): Mapper {
+function makeMapperFor(cfg: Cfg, wslDistro: string | undefined, remoteAuthority: string | undefined, wslHost?: string, wslRoots?: string[]): Mapper {
   if (wslDistro === undefined && !remoteAuthority && cfg.pathMappings.length === 0) {
     return identityMapper();
   }
-  return makeMapper({ wslDistro, remoteAuthority, wslHost, mappings: cfg.pathMappings });
+  return makeMapper({ wslDistro, remoteAuthority, wslHost, wslRoots, mappings: cfg.pathMappings });
+}
+
+/** The Linux paths of the workspace folders opened through \\wsl.localhost in `distro`. */
+function wslRoots(distro: string): string[] {
+  return (vscode.workspace.workspaceFolders ?? [])
+    .map((f) => parseWslUri(f.uri))
+    .filter((w): w is { distro: string; path: string } => w !== undefined && w.distro.toLowerCase() === distro.toLowerCase())
+    .map((w) => w.path);
 }
