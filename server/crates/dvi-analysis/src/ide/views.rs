@@ -568,8 +568,13 @@ struct Scan {
     objects: bool,
     /// What building each class makes (by its most derived class).
     built: RefCell<FxHashMap<DeclRef, Rc<Built>>>,
+    /// Functions that make one component of the parent they are given, by implementation:
+    /// their arguments and the creation (none for any other function).
+    helpers: RefCell<FxHashMap<DeclRef, Option<Rc<(Vec<String>, Creation)>>>>,
 }
 
+/// Default sequences placed per request at most.
+const MAX_DEFAULTS: usize = 10_000;
 /// Events instantiated per request at most.
 const MAX_EVENTS: usize = 2_000_000;
 /// Events instantiated per component at most.
@@ -1418,6 +1423,11 @@ impl Analysis {
         fn collect(a: &Analysis, inst: &Inst, out: &mut Vec<(String, DefaultSeq)>) {
             if let Some(built) = &inst.built {
                 for s in built.sets.iter().filter(|s| s.set.field.as_deref() == Some("default_sequence")) {
+                    // Each component's sets are its class's: thousands of components with
+                    // thousands of sets each would multiply.
+                    if out.len() >= MAX_DEFAULTS {
+                        return;
+                    }
                     let Some(i) = &s.set.inst else { continue };
                     let (target, phase) = match i.rsplit_once('.') {
                         Some((t, p)) if p.ends_with("_phase") => (t.to_string(), p.to_string()),
@@ -1490,6 +1500,8 @@ impl Analysis {
             let Some(c) = child.class.filter(|_| child.kind != "port") else { continue };
             let key = self.decl_key(c);
             if stack.contains(&key) || stack.len() >= 64 {
+                // A class built inside itself (`if (get_depth() < 4)`): not followed, and said so.
+                child.cut = true;
                 continue;
             }
             stack.push(key);
@@ -1673,6 +1685,9 @@ impl Analysis {
                 stack.push(key);
                 self.construct_inst(&mut child, factory, nodes, stack, scan);
                 stack.pop();
+            } else {
+                // Made inside itself: shown, not followed, and marked so.
+                child.cut = true;
             }
         }
         inst.children.push(child);
@@ -2324,17 +2339,8 @@ impl Analysis {
             }
             let Some(f) = self.resolve_at_span(body.unit, t[m].span).filter(|f| self.decl(*f).kind == DeclKind::Function) else { continue };
             let fb = self.implementation_of(f).unwrap_or(f);
-            let formals: Vec<String> = {
-                let u = self.unit(fb.unit);
-                u.parsed.decl(fb.decl).children.iter().map(|c| u.parsed.decl(*c)).filter(|d| d.kind == DeclKind::Argument).map(|d| d.name.to_string()).collect()
-            };
-            let fb_toks = self.body_tokens(fb, scan);
-            let made: Vec<Creation> = scan_creations(&fb_toks).into_iter().chain(scan_returned_creations(&fb_toks)).map(|(_, c)| c).filter(|c| formals.contains(&c.parent)).collect();
-            let [cr] = made.as_slice() else { continue };
-            // `parent = owner;` inside the factory: the argument is not what the caller gave.
-            if [Some(&cr.parent), cr.name_arg.as_ref()].into_iter().flatten().filter(|f| formals.contains(f)).any(|f| assigns(&fb_toks, f)) {
-                continue;
-            }
+            let Some(helper) = self.factory_helper(fb, scan) else { continue };
+            let (formals, cr) = (&helper.0, &helper.1);
             // What the call gives an argument of `make`: by name, else by position.
             let args = call_args(t, m + 1);
             let actual = |formal: &str| -> Option<&[Token]> {
@@ -2366,6 +2372,29 @@ impl Analysis {
             ));
         }
         out
+    }
+
+    /// The one component `fb` makes of a parent it is given (`make(name, parent)` returning or
+    /// assigning a creation), with its arguments; scanned once per request.
+    fn factory_helper(&self, fb: DeclRef, scan: &Scan) -> Option<Rc<(Vec<String>, Creation)>> {
+        if let Some(h) = scan.helpers.borrow().get(&fb) {
+            return h.clone();
+        }
+        let formals: Vec<String> = {
+            let u = self.unit(fb.unit);
+            u.parsed.decl(fb.decl).children.iter().map(|c| u.parsed.decl(*c)).filter(|d| d.kind == DeclKind::Argument).map(|d| d.name.to_string()).collect()
+        };
+        let fb_toks = self.body_tokens(fb, scan);
+        let made: Vec<Creation> = scan_creations(&fb_toks).into_iter().chain(scan_returned_creations(&fb_toks)).map(|(_, c)| c).filter(|c| formals.contains(&c.parent)).collect();
+        let helper = match made.as_slice() {
+            // `parent = owner;` inside the factory: the argument is not what the caller gave.
+            [cr] if ![Some(&cr.parent), cr.name_arg.as_ref()].into_iter().flatten().filter(|f| formals.contains(f)).any(|f| assigns(&fb_toks, f)) => {
+                Some(Rc::new((formals.clone(), cr.clone())))
+            }
+            _ => None,
+        };
+        scan.helpers.borrow_mut().insert(fb, helper.clone());
+        helper
     }
 
     /// The method `name` a method of `derived_first[at]` calls on `this`: the one that class

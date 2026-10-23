@@ -166,6 +166,8 @@ pub struct Analysis {
     /// Out-of-block method and constraint bodies (`function C::f()`) by name, for finding a
     /// prototype's implementation (`Analysis::implementation_of`).
     pub out_of_block: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
+    /// The class each factory name registers (`class_by_factory_name`), as asked.
+    pub factory_names: Arc<std::sync::Mutex<FxHashMap<SmolStr, Option<DeclRef>>>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -372,6 +374,7 @@ impl Analysis {
             hidden_uses: Arc::default(),
             instance_defs: Arc::default(),
             out_of_block: Arc::default(),
+            factory_names: Arc::default(),
         };
         a.reindex();
         a.update_library_units(Some(progress));
@@ -604,6 +607,7 @@ impl Analysis {
         self.file_units = Arc::new(fu);
         self.instance_defs = Arc::default();
         self.out_of_block = Arc::default();
+        self.factory_names = Arc::default();
     }
 
     pub fn unit(&self, id: UnitId) -> &Arc<Unit> {
@@ -639,6 +643,7 @@ impl Analysis {
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
+        next.factory_names = Arc::default();
         let rebuilt: Vec<Unit> = affected
             .par_iter()
             .map(|&uid| {
@@ -817,6 +822,7 @@ impl Analysis {
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
+        next.factory_names = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
         let pp = preprocess(&*self.vfs, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
@@ -842,6 +848,7 @@ impl Analysis {
         next.hidden_uses = Arc::default();
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
+        next.factory_names = Arc::default();
         for id in ids {
             next.units[id as usize] = None;
         }

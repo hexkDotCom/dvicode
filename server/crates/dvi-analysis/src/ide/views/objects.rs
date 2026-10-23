@@ -466,6 +466,8 @@ impl Analysis {
     fn sequence_children(&self, c: DeclRef, node: &mut VerifNode, parent: Vec<(String, bool)>, child_pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, scan: &Scan, factory: &Factory) -> Vec<VerifNode> {
         let key = self.decl_key(c);
         if stack.contains(&key) || stack.len() >= 64 {
+            // A sequence started inside itself: not followed, and marked so.
+            node.truncated = true;
             return Vec::new();
         }
         stack.push(key);

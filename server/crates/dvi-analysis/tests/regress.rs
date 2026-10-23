@@ -2234,3 +2234,57 @@ fn named_connections_name_ports_and_parameters_only() {
     assert_eq!(p.len(), 2, "{p:?}");
     assert!(p.iter().any(|m| m.contains("Parameter 'L'")) && p.iter().any(|m| m.contains("Port 'internal_signal'")), "{p:?}");
 }
+
+#[test]
+fn codebase_review_hierarchy_bounds() {
+    let uvm = "package uvm_pkg;\n  class uvm_object; function new(string name = \"\"); endfunction endclass\n  class uvm_component extends uvm_object; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+    // Constants of constants: D names C 1,000 times, C names B 1,000 times...
+    let sum = |x: &str| vec![x; 1000].join(" + ");
+    let overrides: String = (0..1000).map(|_| "      set_type_override(\"leaf\", \"leaf2\");\n").collect();
+    let steps: String = (0..20_000).map(|_| "      x = x + 1;\n").collect();
+    let calls: String = (0..2_000).map(|_| "      scratch = helper(0);\n").collect();
+    let tb = format!(
+        r#"package tb_pkg;
+  import uvm_pkg::*;
+  localparam int A = 0;
+  localparam int B = {b};
+  localparam int C = {c};
+  localparam int D = {d};
+  class leaf extends uvm_env; `uvm_component_utils(leaf) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class leaf2 extends leaf; `uvm_component_utils(leaf2) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class e extends uvm_env;
+    e child;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (get_depth() < 4) child = e::type_id::create("child", this);
+    endfunction
+  endclass
+  class t extends uvm_test;
+    leaf x;
+    e top_e;
+    int scratch;
+    function int helper(int x);
+{steps}      return x;
+    endfunction
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+{overrides}{calls}      repeat (D) x = leaf::type_id::create("x", this);
+      top_e = e::type_id::create("top_e", this);
+    endfunction
+  endclass
+endpackage
+"#,
+        b = sum("A"),
+        c = sum("B"),
+        d = sum("C")
+    );
+    let (a, _) = project("reviewbounds", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
+    let t0 = std::time::Instant::now();
+    let (h, meta) = a.verification_tree(Some("t"), &dvi_analysis::ide::views::TreeQuery::new(100));
+    assert!(t0.elapsed().as_secs() < 30, "took {:?}", t0.elapsed());
+    let kids: Vec<String> = h.roots[0].children.iter().map(|c| format!("{}:{}", c.name, c.class)).collect();
+    assert_eq!(kids, ["x:leaf2", "top_e:e"]);
+    // e builds an e inside itself: the inner one is shown, not followed, and said to be cut.
+    let inner = &h.roots[0].children[1].children[0];
+    assert!(inner.name == "child" && inner.truncated && meta.incomplete.is_some(), "{} {} {:?}", inner.name, inner.truncated, meta.incomplete);
+}

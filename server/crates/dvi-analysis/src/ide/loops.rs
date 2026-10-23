@@ -129,6 +129,9 @@ impl Analysis {
         if depth > 4 || t.is_empty() {
             return None;
         }
+        if depth == 0 {
+            CONST_WORK.with(|w| w.set(0));
+        }
         let mut p = Expr { a: self, t, k: 0, unit, depth, nest: 0, toks };
         let v = p.sum()?;
         (p.k == t.len()).then_some(v)
@@ -136,6 +139,14 @@ impl Analysis {
 
     /// The value of a parameter, localparam or macro named by `x`.
     fn const_name(&self, x: &Token, unit: UnitId, depth: usize, toks: Toks) -> Option<i64> {
+        // Each name is evaluated afresh: bounded, since a few levels of constants that each
+        // name many others would multiply.
+        if CONST_WORK.with(|w| {
+            w.set(w.get() + 1);
+            w.get() > MAX_CONST_WORK
+        }) {
+            return None;
+        }
         if x.kind == TokKind::Directive {
             // Every definition of the macro must give the same value.
             let defs = self.global.macros.get(&x.text)?;
@@ -184,6 +195,12 @@ impl Analysis {
         self.const_value(&file[lo + 1..hi], r.unit, depth + 1, toks)
     }
 }
+
+thread_local! {
+    /// Names evaluated during the outermost [`Analysis::const_value`] call on this thread.
+    static CONST_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+const MAX_CONST_WORK: usize = 10_000;
 
 /// The loop variable of a `for` header (`int i = 0; ...`): the name before the first `=` of its
 /// initialization, when there is one variable.

@@ -4,6 +4,7 @@
 use crate::world::{Analysis, DeclRef, UnitKind};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind};
 use dvi_syntax::{Span, TokKind, Token};
+use smol_str::SmolStr;
 
 /// An override call with literal arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +228,16 @@ impl Analysis {
     /// register "X"; the `_param_utils` macros register no name). `None` when there is none, or
     /// several.
     pub(crate) fn class_by_factory_name(&self, name: &str) -> Option<DeclRef> {
+        // Asked once per name and snapshot: a test may set many overrides by name.
+        if let Some(c) = self.factory_names.lock().unwrap().get(name) {
+            return *c;
+        }
+        let found = self.find_class_by_factory_name(name);
+        self.factory_names.lock().unwrap().insert(SmolStr::new(name), found);
+        found
+    }
+
+    fn find_class_by_factory_name(&self, name: &str) -> Option<DeclRef> {
         let mut found: Option<DeclRef> = None;
         for u in self.units.iter().flatten() {
             if u.kind == UnitKind::Builtin {
@@ -286,6 +297,10 @@ impl Analysis {
 /// matches here.
 pub(crate) fn glob_match(pattern: &str, s: &str) -> bool {
     if pattern.len() > 1 && pattern.starts_with('/') && pattern.ends_with('/') {
+        return false;
+    }
+    // The work is the product of the lengths: no real instance path or pattern is this long.
+    if pattern.len() > 4096 || s.len() > 4096 {
         return false;
     }
     let p: Vec<char> = pattern.chars().collect();
