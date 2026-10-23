@@ -550,3 +550,27 @@ fn splitting_a_statement_without_connections_changes_nothing_others_see() {
     ];
     assert!(!edit_like_the_server("ifacesplit", &files, ("a/top.sv", "module top;\n  D a();\n  D b();\nendmodule\n")));
 }
+
+#[test]
+fn closing_an_unsaved_empty_library_file_brings_back_the_one_on_disk() {
+    let files = [("top.sv", "module top;\n  X x();\nendmodule\n")];
+    let (_, root) = project("libclose", &files);
+    std::fs::create_dir_all(root.join("preferred")).unwrap();
+    std::fs::create_dir_all(root.join("fallback")).unwrap();
+    std::fs::write(root.join("fallback/X.v"), "module X;\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-y preferred\n-y fallback\n+libext+.v\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let lib = |a: &Analysis| -> Vec<String> {
+        let mut v: Vec<String> = a.units.iter().flatten().filter(|u| u.library).map(|u| a.path(u.root).parent().unwrap().file_name().unwrap().to_string_lossy().to_string()).collect();
+        v.sort();
+        v
+    };
+    // An empty unsaved preferred/X.v is found first, then closed without saving.
+    let p = edit(&a, &root, "preferred/X.v", "");
+    let b = a.update_with(&[p], &dvi_project::Progress::new()).unwrap();
+    assert_eq!(lib(&b), ["preferred"]);
+    b.vfs.clear_overlay(&root.join("preferred/X.v"));
+    let c = b.update_with(&[p], &dvi_project::Progress::new()).unwrap();
+    assert_eq!(lib(&c), ["fallback"]);
+}
