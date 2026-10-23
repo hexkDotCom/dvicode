@@ -21,7 +21,7 @@ currently in preview.
   the UBUS example, and no errors on OpenTitan, Ibex, core-v-verif, CVA6 and PULP AXI with
   their own file lists (see [the test corpus](scripts/corpus/README.md)).
 - **Go anywhere**: definitions, references, implementations and overrides, through macros,
-  packages, class inheritance and port connections.
+  packages, class inheritance and port connections; call and type hierarchies.
 - **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,
   and complete module instantiations in one step.
 - **Hover documentation**: signatures, doc comments and what a macro expands to.

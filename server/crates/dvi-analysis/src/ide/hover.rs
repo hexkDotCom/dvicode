@@ -352,7 +352,7 @@ pub fn format_expansion(s: &str) -> String {
     };
     for t in toks {
         // Hover shows far less than this.
-        if out.len() > 100_000 {
+        if out.len() + line.len() > 100_000 {
             break;
         }
         match t {

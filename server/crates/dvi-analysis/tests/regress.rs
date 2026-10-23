@@ -2086,6 +2086,16 @@ fn auto_config_excludes_the_file_an_include_names_not_its_namesakes() {
     assert!(tops.contains(&"tb/common.sv".to_string()) && !tops.contains(&"rtl/common.sv".to_string()), "{tops:?}");
     let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // One file includes common.sv both ways: the bare one is still an include.
+    let files = [
+        ("rtl/common.sv", "localparam int RTL_ONLY = 1;\n"),
+        ("common.sv", "class C extends base; endclass\n"),
+        ("top.sv", "package p;\n  class base; endclass\n`include \"rtl/common.sv\"\n`include \"common.sv\"\nendpackage\n"),
+    ];
+    let (_, root) = project("autoinc2", &files);
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
 
 #[test]
@@ -2287,4 +2297,50 @@ endpackage
     // e builds an e inside itself: the inner one is shown, not followed, and said to be cut.
     let inner = &h.roots[0].children[1].children[0];
     assert!(inner.name == "child" && inner.truncated && meta.incomplete.is_some(), "{} {} {:?}", inner.name, inner.truncated, meta.incomplete);
+}
+
+#[test]
+fn the_expansion_budget_counts_what_is_produced() {
+    // A guarded header of 50,000 tokens included 101 times costs nothing past the first.
+    let table: String = "0, ".repeat(25_000);
+    let defs = format!("`ifndef DEFS\n`define DEFS\n`define TABLE {table}\n`endif\n");
+    let incs: String = "`include \"defs.svh\"\n".repeat(101);
+    let guarded = format!("{incs}module after_includes; endmodule\n");
+    // A body repeating its argument 10,000 times, given 10,000 tokens: stopped while built.
+    let xs = "x ".repeat(10_000);
+    let args = "a ".repeat(10_000);
+    let wide = format!("`define W(x) {xs}\nmodule w;\n  initial begin `W({args}); end\nendmodule\n");
+    // Crossing the budget inside a stringification is still reported.
+    let mut s = format!("`define A0 {}\n", "0 ".repeat(100));
+    for k in 1..=20 {
+        s.push_str(&format!("`define A{k} `A{} `A{}\n", k - 1, k - 1));
+    }
+    s.push_str("`define STR `\"`A20`\"\nmodule q;\n  string v = `STR;\nendmodule\n");
+    let (a, _) = project("budgetkinds", &[("defs.svh", defs.as_str()), ("g.sv", guarded.as_str()), ("w.sv", wide.as_str()), ("s.sv", s.as_str())]);
+    let p = problems(&a);
+    let limit = |f: &str| p.iter().filter(|m| m.starts_with(f) && m.contains("Preprocessing stops here")).count();
+    assert_eq!((limit("g.sv"), limit("w.sv"), limit("s.sv")), (0, 1, 1), "{p:?}");
+    assert!(a.workspace_symbols("after_includes", 5).iter().any(|s| s.name == "after_includes"));
+}
+
+#[test]
+fn for_loops_with_qualified_types_and_long_generate_chains() {
+    let chain = format!("module g;\n  if (1) begin end\n{}  wire w;\nendmodule\n", "  else if (1) begin end\n".repeat(100_000));
+    let files = [
+        ("p.sv", "package p;\n  typedef int index_t;\nendpackage\n"),
+        ("m.sv", "module m;\n  initial\n    for (p::index_t i = 0, j = 0; i < 4; i++, j++)\n      $display(i, j);\nendmodule\n"),
+    ];
+    let (a, root) = project("forqual", &files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let f = a.vfs.lookup(&root.join("m.sv")).unwrap();
+    let j = a.goto_definition(f, files[1].1.find("i, j)").unwrap() as u32 + 3);
+    assert_eq!(j.first().map(|l| l.range.start.line), Some(2));
+    // A long `else if` chain is a loop, not a recursion: no stack is needed for it.
+    let u = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || dvi_syntax::parser::parse(&dvi_syntax::lexer::lex(&chain, 0), 0).diags.len())
+        .unwrap()
+        .join()
+        .expect("no stack overflow");
+    assert_eq!(u, 0);
 }

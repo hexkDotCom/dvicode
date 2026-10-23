@@ -1459,6 +1459,10 @@ impl Analysis {
         }
         let mut found = Vec::new();
         collect(self, root, &mut found);
+        if found.len() >= MAX_DEFAULTS {
+            // Said, not silent: the tree is incomplete.
+            root.cut = true;
+        }
         for (setter, mut d) in found {
             let literal = !d.target.contains(['*', '?', '+']);
             if literal {

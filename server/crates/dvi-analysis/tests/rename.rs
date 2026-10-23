@@ -242,6 +242,12 @@ fn renaming_an_argument_renames_its_named_bindings() {
     let (f, off) = at(&a, &root, "t.sv", "value,", 0);
     let texts = apply(&a, a.rename(f, off, "data").unwrap());
     assert_eq!(texts["t.sv"], t.replace("int value,", "int data,").replace("return value", "return data").replace(".value(", ".data("));
+    // A member call in a positional argument is no binding.
+    let t = "class C;\n  function int value(); return 1; endfunction\nendclass\nmodule m;\n  function int f(int value); return value; endfunction\n  C obj;\n  initial $display(f(obj.value()), f(.value(obj.value())));\nendmodule\n";
+    let (a, root) = project("namedarg2", &[("t.sv", t)]);
+    let (f, off) = at(&a, &root, "t.sv", "value); return value", 0);
+    let texts = apply(&a, a.rename(f, off, "data").unwrap());
+    assert_eq!(texts["t.sv"], t.replace("int value); return value;", "int data); return data;").replace("f(.value(", "f(.data("));
 }
 
 #[test]

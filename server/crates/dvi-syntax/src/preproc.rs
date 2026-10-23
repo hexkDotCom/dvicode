@@ -264,7 +264,7 @@ pub fn expand_snippet(
         line_index: Default::default(),
         work: Default::default(),
     };
-    pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
+    pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
     pp.run();
     pp.res.tokens
@@ -291,6 +291,8 @@ pub fn join_tokens(toks: &[Token]) -> String {
 struct Frame {
     toks: Arc<Vec<Token>>,
     pos: usize,
+    /// A file included again: its active tokens count against the work budget.
+    repeat: bool,
     kind: FrameKind,
     cond_depth: usize,
 }
@@ -366,11 +368,9 @@ impl<'a> Pp<'a> {
         };
         if first {
             self.res.sources.push((id, text));
-        } else if !self.charge(toks.len() as u64, Span::new(id, 0, 0)) {
-            return;
         }
         let depth = self.conds.len();
-        self.frames.push(Frame { toks, pos: 0, kind: FrameKind::File(id), cond_depth: depth });
+        self.frames.push(Frame { toks, pos: 0, repeat: !first, kind: FrameKind::File(id), cond_depth: depth });
     }
 
     /// Text a file was lexed from in this run (falls back to the provider).
@@ -408,7 +408,10 @@ impl<'a> Pp<'a> {
             if f.pos < f.toks.len() {
                 let t = f.toks[f.pos].clone();
                 f.pos += 1;
-                if matches!(f.kind, FrameKind::Macro { .. }) && !self.charge(1, self.real_span(&t)) {
+                // Macro text, and what a file included again adds (not what its guard skips).
+                let charged = matches!(f.kind, FrameKind::Macro { .. }) || f.repeat;
+                if (charged && (matches!(f.kind, FrameKind::Macro { .. }) || self.active()) && !self.charge(1, self.real_span(&t))) || self.work.get() > MAX_WORK {
+                    self.over_budget(self.real_span(&t));
                     return None;
                 }
                 return Some(t);
@@ -431,12 +434,18 @@ impl<'a> Pp<'a> {
         if work <= MAX_WORK {
             return true;
         }
-        if work - n <= MAX_WORK {
+        self.over_budget(at);
+        false
+    }
+
+    /// Ends the preprocessing past the work budget (crossed here or in a nested preprocessor,
+    /// whose problems are not kept), reporting it once.
+    fn over_budget(&mut self, at: Span) {
+        if !self.res.diags.iter().any(|d| d.code == "EXPANSION_LIMIT") {
             let msg = format!("Preprocessing stops here: macro expansions and repeated includes produced over {MAX_WORK} tokens");
             self.res.diags.push(Diag::error(at, "EXPANSION_LIMIT", msg));
         }
         self.frames.clear();
-        false
     }
 
     /// Next token without consuming, looking through exhausted frames.
@@ -865,7 +874,7 @@ impl<'a> Pp<'a> {
                 // Within the expansion around it: same macros being expanded, depth and budget.
                 let (out, uses) = match self.nested(None) {
                     Some(mut pp) => {
-                        pp.frames.push(Frame { toks: Arc::new(call), pos: 0, kind: FrameKind::File(file), cond_depth: 0 });
+                        pp.frames.push(Frame { toks: Arc::new(call), pos: 0, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
                         pp.run();
                         (pp.res.tokens, pp.res.macro_uses)
                     }
@@ -1039,10 +1048,14 @@ impl<'a> Pp<'a> {
             self.nested_runs.set(self.nested_runs.get() + 1);
         }
         let first_flags = tok.flags & (flags::NL_BEFORE | flags::WS_BEFORE);
-        let toks = substitute(&def, &args, site, first_flags, &|a| self.called_name(a, site, &def.name), &|a| self.expand_tokens(a, site, &def.name));
+        // Built only up to what the budget can still read: a body repeating a long argument
+        // would otherwise be built whole first.
+        let limit = MAX_WORK.saturating_sub(self.work.get()) as usize;
+        let toks = substitute(&def, &args, site, first_flags, limit, &|a| self.called_name(a, site, &def.name), &|a| self.expand_tokens(a, site, &def.name));
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
+            repeat: false,
             kind: FrameKind::Macro { site, name: def.name.clone() },
             cond_depth: self.conds.len(),
         });
@@ -1069,7 +1082,7 @@ impl<'a> Pp<'a> {
     /// work). `current`: the macro whose body `actual` is in.
     fn expand_tokens(&self, actual: &[Token], site: Span, current: &SmolStr) -> Option<Vec<Token>> {
         let mut pp = self.nested(Some(current))?;
-        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
+        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, repeat: false, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
         pp.run();
         if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
             return None;
@@ -1184,6 +1197,7 @@ fn substitute(
     args: &[Vec<Token>],
     site: Span,
     first_flags: u8,
+    limit: usize,
     called: &dyn Fn(&[Token]) -> Option<SmolStr>,
     expand: &dyn Fn(&[Token]) -> Option<Vec<Token>>,
 ) -> Vec<Token> {
@@ -1213,7 +1227,7 @@ fn substitute(
     };
     let mut out: Vec<Token> = Vec::with_capacity(def.body.len());
     let mut i = 0;
-    while i < def.body.len() {
+    while i < def.body.len() && out.len() <= limit {
         let t = &def.body[i];
         match t.kind {
             TokKind::MacroQuote => {

@@ -499,7 +499,12 @@ fn named_arguments(toks: &[Token], call: Span, name: &str) -> Vec<Span> {
             if depth == 0 {
                 break;
             }
-        } else if depth == 1 && t.is_punct(".") && toks.get(k + 1).is_some_and(|n| n.text == name && toks.get(k + 2).is_some_and(|p| p.is_punct("("))) {
+        } else if depth == 1
+            // Starting an argument: `obj.value()` inside a positional argument is no binding.
+            && (toks[k - 1].is_punct(",") || k - 1 == i + 1)
+            && t.is_punct(".")
+            && toks.get(k + 1).is_some_and(|n| n.text == name && toks.get(k + 2).is_some_and(|p| p.is_punct("(")))
+        {
             out.push(toks[k + 1].span);
         }
     }

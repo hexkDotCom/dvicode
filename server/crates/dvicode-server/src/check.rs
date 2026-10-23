@@ -135,9 +135,12 @@ pub fn run(args: &[String]) -> i32 {
     };
     let cfg_ms = t0.elapsed().as_millis();
     // Nothing was checked: say so in the exit status, not only in a message.
-    if let Some(bf) = cfg.build_file.as_ref().filter(|f| !f.is_file()) {
-        eprintln!("check: cannot read the build file {}", bf.display());
-        return 2;
+    if let Some(bf) = cfg.build_file.as_ref() {
+        let unread = cfg.problems.iter().find(|p| p.message.starts_with("Cannot read the build file"));
+        if !bf.is_file() || unread.is_some() {
+            eprintln!("check: {}", unread.map_or_else(|| format!("cannot read the build file {}", bf.display()), |p| p.message.clone()));
+            return 2;
+        }
     }
     let setup = Arc::new(ProjectSetup::new(&root, cfg, env));
     if let Some(file) = replay {

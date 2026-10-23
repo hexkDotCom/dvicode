@@ -176,6 +176,8 @@ struct FileFacts {
     includes: Vec<String>,
     /// Include operands with a directory part (`common_cells/registers.svh`).
     include_paths: Vec<String>,
+    /// Include operands without one (`registers.svh`).
+    bare_includes: Vec<String>,
     packages: Vec<String>,
     uses: FxHashSet<String>,
     defines: usize,
@@ -216,7 +218,7 @@ pub(crate) fn include_bases(sources: &[PathBuf], included: &[PathBuf]) -> Vec<Pa
 
 fn scan(text: &str) -> FileFacts {
     let toks = lex(text, 0);
-    let mut f = FileFacts { includes: Vec::new(), include_paths: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0 };
+    let mut f = FileFacts { includes: Vec::new(), include_paths: Vec::new(), bare_includes: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0 };
     for (i, t) in toks.iter().enumerate() {
         match t.kind {
             TokKind::Directive if t.text == "include" => {
@@ -226,6 +228,8 @@ fn scan(text: &str) -> FileFacts {
                     f.includes.push(base.to_string());
                     if base.len() < p.len() {
                         f.include_paths.push(p.replace('\\', "/"));
+                    } else {
+                        f.bare_includes.push(base.to_string());
                     }
                 }
             }
@@ -296,8 +300,7 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
     let mut included_files: FxHashSet<&PathBuf> = FxHashSet::default();
     let mut included_names: FxHashSet<String> = FxHashSet::default();
     for (_, f) in &facts {
-        let pathy: FxHashSet<&str> = f.include_paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
-        included_names.extend(f.includes.iter().filter(|b| !pathy.contains(b.as_str())).cloned());
+        included_names.extend(f.bare_includes.iter().cloned());
     }
     for inc in include_paths {
         let parts: Vec<&str> = inc.split('/').filter(|s| !s.is_empty() && *s != ".").collect();

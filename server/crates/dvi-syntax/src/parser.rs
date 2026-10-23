@@ -2678,16 +2678,19 @@ impl<'t> Parser<'t> {
     }
 
     fn generate_if(&mut self) {
-        self.bump();
-        if self.at_p("(") {
-            self.paren_group(RefKind::Expr);
-        }
-        self.generate_body(None);
-        if self.eat_kw("else") {
-            if self.at_kw("if") {
-                self.generate_if();
-            } else {
+        // `else if` chains in a loop: a generated chain of any length takes no stack.
+        loop {
+            self.bump();
+            if self.at_p("(") {
+                self.paren_group(RefKind::Expr);
+            }
+            self.generate_body(None);
+            if !self.eat_kw("else") {
+                return;
+            }
+            if !self.at_kw("if") {
                 self.generate_body(None);
+                return;
             }
         }
     }
@@ -3069,8 +3072,15 @@ impl<'t> Parser<'t> {
             // another variable of its type (`for (int i = 0, j = 0; ...)`).
             let mut decl_ty: Option<Option<TypeRef>> = None;
             loop {
-                let is_decl = (self.tok().kind == TokKind::Keyword && (is_builtin_type_kw(&self.tok().text) || self.at_kw("var") || self.at_kw("automatic")))
-                    || (self.at_ident() && self.nth(1).kind == TokKind::Ident);
+                // A user type: `t i`, `p::t i`, `t #(8) i` (no expression starts so).
+                let user_type = {
+                    let mut k = 0;
+                    while self.nth(k).kind == TokKind::Ident && self.nth(k + 1).is_punct("::") {
+                        k += 2;
+                    }
+                    self.nth(k).kind == TokKind::Ident && (self.nth(k + 1).kind == TokKind::Ident || self.nth(k + 1).is_punct("#"))
+                };
+                let is_decl = (self.tok().kind == TokKind::Keyword && (is_builtin_type_kw(&self.tok().text) || self.at_kw("var") || self.at_kw("automatic"))) || user_type;
                 let same_type = decl_ty.is_some() && self.at_ident() && self.nth(1).is_punct("=");
                 if is_decl || same_type {
                     let ty = if same_type {

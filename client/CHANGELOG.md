@@ -52,6 +52,37 @@
   fails), and analysis ports and imps (#11).
 - A build file with `-top+NAME` is told to write `-top NAME` (or `+xmtop+NAME`); NAME is still
   the design top (#10).
+- **Show Type Hierarchy** works on classes (the engine had it; editors were not told).
+- Pressing Enter after a class, module or method header indents the next line; `// #region`
+  folds (the language configuration's patterns were not read as written).
+
+**Fixes**
+
+- Renaming a port, or the signal a `.*` connection takes, is refused with the instance that
+  connects it (the `.*` would have been left behind). Renaming a function argument renames
+  its named bindings (`f(.value(1))`); renaming a macro renames its use in an `` `include ``.
+- A named connection to something that is not a port (`.internal_signal(1)`), or an
+  override of something that is not a parameter, is reported.
+- `for (int i = 0, j = 0; ...)` declares `j`.
+- `-y` libraries are followed through hierarchies deeper than eight levels.
+- Auto-configuration no longer leaves out a file because another file of the same name is
+  included by its path.
+- Build files: `+define+ONES='1+ZERO='0` gives two defines; Questa command lines keep the
+  order of their defines and a quoted `+incdir+` folder with spaces.
+- Crashes and hangs on unusual input: `typedef T::X T;`, a long declaration header with a
+  non-ASCII character at the cut, deeply nested `` `ifdef `` expressions or generate blocks,
+  macros or includes that double at every level (stopped with an error after 5 million
+  tokens), an argument file that is a FIFO or a device, symbolic links between sibling
+  folders under `**`.
+- Faster on large generated files: `` `__LINE__ `` (UVM report macros), non-ANSI port lists,
+  packages of many inline typedefs, long lines after a non-ASCII character, renaming a port
+  of a module instantiated thousands of times.
+- The hierarchy marks a component that builds its own class as cut instead of stopping
+  there silently, and stays bounded on generated constants, helpers and overrides.
+- Settings: `dvicode.server.logLevel` is checked (it reaches the launch command) and ignored
+  in untrusted workspaces; a setting of the wrong type no longer resets the others. In a
+  `dvicode://` workspace with path mappings, results open the workspace's own documents.
+- `dvicode-server check` exits 2 when its build file cannot be read.
 
 ## 0.2.0 (preview)
 

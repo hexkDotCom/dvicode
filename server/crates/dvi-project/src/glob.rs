@@ -80,9 +80,10 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `links`: the directories that `**` reached through symbolic links, each walked once (links
-/// between sibling folders would otherwise branch again at every level).
-fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links: &mut FxHashSet<PathBuf>) {
+/// `links`: the directories that `**` reached through symbolic links, with the part of the
+/// pattern left there, each walked once (links between sibling folders would otherwise branch
+/// again at every level).
+fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links: &mut FxHashSet<(PathBuf, usize)>) {
     if depth > 64 {
         return;
     }
@@ -97,7 +98,7 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, links) {
+                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, rest.len(), links) {
                     walk(&p, rest, out, depth + 1, links);
                 }
             }
@@ -122,12 +123,12 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links
     }
 }
 
-/// Not a symbolic link, or the first one to its target.
-fn first_visit(e: &std::fs::DirEntry, links: &mut FxHashSet<PathBuf>) -> bool {
+/// Not a symbolic link, or the first one to its target with this much of the pattern left.
+fn first_visit(e: &std::fs::DirEntry, left: usize, links: &mut FxHashSet<(PathBuf, usize)>) -> bool {
     if !e.file_type().is_ok_and(|t| t.is_symlink()) {
         return true;
     }
-    std::fs::canonicalize(e.path()).is_ok_and(|t| links.insert(t))
+    std::fs::canonicalize(e.path()).is_ok_and(|t| links.insert((t, left)))
 }
 
 /// A symbolic link in `dir` to `dir` itself or a directory above it (`a -> .`): following it
@@ -182,6 +183,17 @@ mod tests {
         let found = expand(&dir.join("**/*.sv"));
         assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
         assert!(found.len() <= 8 && found.iter().any(|p| p.ends_with("a/a.sv")) && found.iter().any(|p| p.ends_with("b/b.sv")), "{found:?}");
+        // One target reached twice, with different parts of the pattern left: p/a/link while
+        // `rtl` is still to come, p/z/rtl/link after it.
+        let p = dir.join("p");
+        std::fs::create_dir_all(p.join("a")).unwrap();
+        std::fs::create_dir_all(p.join("z/rtl")).unwrap();
+        std::fs::create_dir_all(dir.join("ip")).unwrap();
+        std::fs::write(dir.join("ip/x.sv"), "").unwrap();
+        std::os::unix::fs::symlink(dir.join("ip"), p.join("a/link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("ip"), p.join("z/rtl/link")).unwrap();
+        let found = expand(&p.join("**/rtl/**/*.sv"));
+        assert_eq!(found, vec![p.join("z/rtl/link/x.sv")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

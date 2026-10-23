@@ -1435,7 +1435,7 @@ fn split_defines(s: &str) -> Vec<String> {
         let quote_start = c == '"'
             || (c == '\''
                 && !(i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_'))
-                && !unsized_literal(chars.get(i + 1).copied(), chars.get(i + 2).copied())
+                && !unsized_literal(i.checked_sub(1).map(|p| chars[p]), chars.get(i + 1).copied(), chars.get(i + 2).copied())
                 && chars[i + 1..].contains(&'\''));
         match quote {
             Some(q) if c == q => quote = None,
@@ -1461,10 +1461,13 @@ fn split_defines(s: &str) -> Vec<String> {
     out
 }
 
-/// Whether a `'` followed by `next` and `after` is an unsized literal (`'0`, `'1`, `'x`, `'z`
-/// not followed by a name), as in `+define+ONES='1+ZERO='0`, rather than an opening quote.
-fn unsized_literal(next: Option<char>, after: Option<char>) -> bool {
-    next.is_some_and(|c| matches!(c, '0' | '1' | 'x' | 'X' | 'z' | 'Z')) && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+/// Whether a `'` after `prev` and followed by `next` and `after` is an unsized literal given
+/// as a value (`='0`, `='1`, `='x`, `='z` not followed by a name), as in
+/// `+define+ONES='1+ZERO='0`, rather than an opening quote (`'x y.sv'` is a quoted path).
+fn unsized_literal(prev: Option<char>, next: Option<char>, after: Option<char>) -> bool {
+    prev == Some('=')
+        && next.is_some_and(|c| matches!(c, '0' | '1' | 'x' | 'X' | 'z' | 'Z'))
+        && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 /// Whether the `'` at `b[i]` starts quoted text rather than a SystemVerilog number such as
@@ -1473,7 +1476,7 @@ pub(crate) fn opens_quote(b: &[u8], i: usize) -> bool {
     if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
         return false;
     }
-    if unsized_literal(b.get(i + 1).map(|c| *c as char), b.get(i + 2).map(|c| *c as char)) {
+    if unsized_literal(i.checked_sub(1).map(|p| b[p] as char), b.get(i + 1).map(|c| *c as char), b.get(i + 2).map(|c| *c as char)) {
         return false;
     }
     b[i + 1..].iter().take_while(|c| **c != b'\n').any(|c| *c == b'\'')
@@ -1705,10 +1708,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.sv"), "").unwrap();
         std::fs::write(dir.join("b.sv"), "").unwrap();
-        let text = "+define+MASK=8'hFF+ALL='1\n-define W='hA\n+define+MSG='a b'\n+define+ONES='1+ZERO='0+HIZ='z\na.sv\nb.sv\n";
+        std::fs::write(dir.join("x y.sv"), "").unwrap();
+        std::fs::write(dir.join("1 z.sv"), "").unwrap();
+        let text = "+define+MASK=8'hFF+ALL='1\n-define W='hA\n+define+MSG='a b'\n+define+ONES='1+ZERO='0+HIZ='z\na.sv\nb.sv\n'x y.sv'\n'1 z.sv'\n";
         let cfg = parse_build(&dir, &dir.join("x.build"), text, &FxHashMap::default());
         let inv = &cfg.invocations[0];
-        assert_eq!(inv.files, vec![dir.join("a.sv"), dir.join("b.sv")]);
+        // Quoted paths that start like a literal stay quoted.
+        assert_eq!(inv.files, vec![dir.join("a.sv"), dir.join("b.sv"), dir.join("x y.sv"), dir.join("1 z.sv")]);
         let d: Vec<_> = inv.defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
         assert_eq!(d, vec!["MASK=8'hFF", "ALL='1", "W='hA", "MSG='a b'", "ONES='1", "ZERO='0", "HIZ='z"]);
     }
