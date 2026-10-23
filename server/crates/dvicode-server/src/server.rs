@@ -1247,13 +1247,13 @@ impl Server {
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
                         continue;
                     }
-                    let id = self.vfs.invalidate(&path);
+                    let ids = self.vfs.invalidate_all(&path);
                     // A new or deleted source changes what auto-configuration finds, which files
                     // a build-file wildcard matches, and whether an `include resolves.
                     if c.typ != FileChangeType::CHANGED && (auto || is_sv_file(&path)) {
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(1500));
                     }
-                    if let Some(id) = id {
+                    for id in ids {
                         if !self.vfs.has_overlay(id) {
                             if self.building {
                                 // The running build may have read the old text, even of a file

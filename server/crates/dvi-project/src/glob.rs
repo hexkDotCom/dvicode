@@ -12,7 +12,10 @@ pub fn has_wildcard(s: &str) -> bool {
 
 /// A character class (`[ab]`) in some path component: a `[` closed later in the component.
 pub fn has_class(s: &str) -> bool {
-    s.split(['/', '\\']).any(|c| c.find('[').is_some_and(|i| c[i + 1..].contains(']')))
+    s.split(['/', '\\']).any(|c| {
+        let p: Vec<char> = c.chars().collect();
+        (0..p.len()).any(|i| p[i] == '[' && class_at(&p, i, ' ').is_some())
+    })
 }
 
 /// Whether a path written in a build file is a pattern to expand: a wildcard, or a character
@@ -220,8 +223,9 @@ mod tests {
         let p = dir.join("rtl/[ab].sv");
         assert!(is_pattern("rtl/[ab].sv", &p));
         assert_eq!(expand(&p), vec![dir.join("rtl/a.sv"), dir.join("rtl/b.sv")]);
-        // A file named with brackets is that file.
+        // A file named with brackets is that file; `[]` is no class.
         assert!(!is_pattern("rtl/x[1].sv", &dir.join("rtl/x[1].sv")));
+        assert!(!has_class("gen[]/x.sv") && has_class("gen[ab]/x.sv"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -8,6 +8,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 const MAX_DEPTH: usize = 32;
+/// Include sites followed to find the scope of an included file: as deep as the preprocessor
+/// includes (64), and no further when files include each other.
+const MAX_INCLUDE_LEVELS: usize = 70;
 
 thread_local! {
     /// How many `class_base` calls are on this thread's stack.
@@ -779,7 +782,7 @@ impl Analysis {
         }
         let Some((_, mut s)) = before.or(after) else {
             // Nothing written in it yet (blank, or comments): the scope where it is included.
-            if depth >= MAX_DEPTH {
+            if depth >= MAX_INCLUDE_LEVELS {
                 return None;
             }
             let site = u.includes.iter().find(|i| i.resolved == Some(file) && i.span.file != file)?.span;

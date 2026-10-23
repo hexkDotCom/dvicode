@@ -2416,3 +2416,23 @@ fn a_deleted_file_named_with_other_case_is_forgotten() {
     assert_eq!(a.vfs.invalidate(&root.join("TOP.SV")), Some(id));
     assert!(dvi_syntax::SourceProvider::text(&*a.vfs, id).is_none());
 }
+
+#[test]
+fn bounds_keep_real_include_chains_and_constraint_braces() {
+    // A header 34 includes deep, with nothing written in it, is still in the module.
+    let mut files = vec![("top.sv".to_string(), "module m;\n  int local_signal;\n`include \"h1.svh\"\nendmodule\n".to_string())];
+    for k in 1..34 {
+        files.push((format!("h{k}.svh"), format!("`include \"h{}.svh\"\n", k + 1)));
+    }
+    files.push(("h34.svh".to_string(), "// to do\n".to_string()));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let (a, root) = project("deepinc", &refs);
+    let f = a.vfs.lookup(&root.join("h34.svh")).unwrap();
+    let names: Vec<String> = a.completions(f, 9).into_iter().map(|c| c.label).collect();
+    assert!(names.iter().any(|n| n == "local_signal"), "{names:?}");
+    // At the depth limit a constraint group is skipped whole: the class goes on after it.
+    let c = format!("class c;\n  rand int x;\n  constraint k {{ {}{{ x == 1; }} x == 2; }}\n  int tail;\nendclass\n", "if (1) ".repeat(998));
+    let u = dvi_syntax::parser::parse(&dvi_syntax::lexer::lex(&c, 0), 0);
+    let errors: Vec<&str> = u.diags.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+}

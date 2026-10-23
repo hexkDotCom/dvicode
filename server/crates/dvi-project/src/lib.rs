@@ -1227,8 +1227,9 @@ No command line found in the log: no defines from it.");
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
-        if glob::is_pattern(&e, &abs) {
-            let found: Vec<PathBuf> = glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect();
+        let found: Vec<PathBuf> = if glob::is_pattern(&e, &abs) { glob::expand(&abs).into_iter().filter(|d| d.is_dir()).collect() } else { Vec::new() };
+        // A name with brackets only, that matches nothing, is that folder, made later perhaps.
+        if glob::has_wildcard(&e) || !found.is_empty() {
             if !self.inspecting {
                 log::debug!("build: {}:{}: +incdir+{p} matches {} directories", file.display(), line + 1, found.len());
             }
@@ -1249,10 +1250,11 @@ No command line found in the log: no defines from it.");
     fn add_file(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
-        if glob::is_pattern(&e, &abs) {
-            let mut found = glob::expand(&abs);
-            found.retain(|f| f.is_file());
-            found.sort();
+        let mut found = if glob::is_pattern(&e, &abs) { glob::expand(&abs) } else { Vec::new() };
+        found.retain(|f| f.is_file());
+        found.sort();
+        // A name with brackets only, that matches nothing, is that file.
+        if glob::has_wildcard(&e) || !found.is_empty() {
             if !self.inspecting {
                 log::debug!("build: {}:{}: {p} matches {} files", file.display(), line + 1, found.len());
             }
@@ -1713,6 +1715,17 @@ mod tests {
         let auto = load_auto(&dir, &env);
         assert!(auto.build_file.is_none() && auto.problems.is_empty());
         assert_eq!(auto.invocations[0].files, vec![dir.join("x.sv")]);
+    }
+
+    #[test]
+    fn a_bracketed_path_that_matches_nothing_is_that_path() {
+        // gen[1] does not exist yet: the folder stays an include folder, the file a source.
+        let dir = std::env::temp_dir().join("dvicode_build_test_brackets");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = parse_build(&dir, &dir.join("x.build"), "+incdir+gen[1]\ngen[1]/a.sv\n", &FxHashMap::default());
+        assert_eq!(cfg.invocations[0].incdirs, vec![dir.join("gen[1]")]);
+        assert_eq!(cfg.invocations[0].files, vec![dir.join("gen[1]/a.sv")]);
     }
 
     #[test]

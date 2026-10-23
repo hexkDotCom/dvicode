@@ -2135,7 +2135,12 @@ impl<'t> Parser<'t> {
                 let span = self.tok().span;
                 self.error(span, "Constraints are nested too deeply; the rest of this block is skipped");
             }
-            self.bump();
+            // A `{` takes its group along, so that braces still pair up.
+            if self.at_p("{") {
+                self.pos = self.skip_group_from(self.pos);
+            } else {
+                self.bump();
+            }
             return;
         }
         self.stmt_depth += 1;

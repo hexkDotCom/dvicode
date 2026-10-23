@@ -183,6 +183,12 @@ impl Vfs {
     /// (a created or deleted directory), and of ancestors that did not have the way to it (a
     /// file created in a new directory).
     pub fn invalidate(&self, path: &Path) -> Option<FileId> {
+        self.invalidate_all(path).first().copied()
+    }
+
+    /// [`Vfs::invalidate`] for every file id the path may name: where case does not matter,
+    /// each spelling met (a deleted file cannot be asked which spellings are its own).
+    pub fn invalidate_all(&self, path: &Path) -> Vec<FileId> {
         let p = normalize(path);
         let mut dirs = self.dirs.write().unwrap();
         dirs.generation += 1;
@@ -198,15 +204,15 @@ impl Vfs {
             }
         });
         drop(dirs);
-        let ids: Vec<FileId> = match self.lookup(path) {
-            Some(id) => vec![id],
-            // A spelling not met before, of a file the file system can no longer name (deleted):
-            // where case does not matter, every spelling of the same path.
-            None => {
-                let g = self.inner.read().unwrap();
-                fold(&p).and_then(|f| g.folded.get(&f).cloned()).unwrap_or_default()
+        let mut ids: Vec<FileId> = self.lookup(path).into_iter().collect();
+        {
+            let g = self.inner.read().unwrap();
+            for id in fold(&p).and_then(|f| g.folded.get(&f)).into_iter().flatten() {
+                if !ids.contains(id) {
+                    ids.push(*id);
+                }
             }
-        };
+        }
         let mut g = self.inner.write().unwrap();
         for id in &ids {
             let e = &mut g.entries[*id as usize];
@@ -214,7 +220,7 @@ impl Vfs {
             e.disk_loaded = false;
             e.version += 1;
         }
-        ids.first().copied()
+        ids
     }
 
     pub fn version(&self, id: FileId) -> u64 {
@@ -281,7 +287,12 @@ impl Vfs {
                 (g.paths[id as usize].clone(), e.version)
             };
             // Regular files only: reading a FIFO named as a source would block.
-            let bytes = std::fs::metadata(&path).ok().filter(|m| m.is_file()).and_then(|_| match std::fs::read(&path) {
+            let meta = std::fs::metadata(&path).map_err(|e| {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("cannot read {}: {e}", path.display());
+                }
+            });
+            let bytes = meta.ok().filter(|m| m.is_file()).and_then(|_| match std::fs::read(&path) {
                 Ok(b) => Some(b),
                 Err(e) => {
                     log::warn!("cannot read {}: {e}", path.display());
