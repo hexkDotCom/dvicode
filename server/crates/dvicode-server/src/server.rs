@@ -237,7 +237,7 @@ struct Server {
     watch_request: Option<RequestId>,
     /// Files changed while a build ran: one the new build turns out to read makes it out of
     /// date (it may have read the old text, and no watcher saw the change).
-    changed_while_building: Vec<PathBuf>,
+    changed_while_building: FxHashSet<PathBuf>,
     /// Progress of the running build, and the switch that cancels it.
     build_progress: Option<Arc<Progress>>,
     build_started: Instant,
@@ -359,7 +359,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         relative_patterns,
         watched: Vec::new(),
         watch_request: None,
-        changed_while_building: Vec::new(),
+        changed_while_building: FxHashSet::default(),
         build_progress: None,
         build_started: Instant::now(),
         reported: (String::new(), 0),
@@ -595,6 +595,7 @@ impl Server {
         }
         self.building = true;
         self.changed_during_build.clear();
+        self.changed_while_building.clear();
         self.build_generation += 1;
         let generation = self.build_generation;
         let progress = Arc::new(Progress::new());
@@ -1175,8 +1176,8 @@ impl Server {
             "textDocument/didSave" => {
                 let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
-                if self.building {
-                    self.changed_while_building.push(path.clone());
+                if self.building && !is_log(&path) {
+                    self.changed_while_building.insert(path.clone());
                 }
                 // Macro changes reach later files through incremental updates; only a changed
                 // build configuration needs a full build.
@@ -1236,8 +1237,8 @@ impl Server {
                 }
                 for c in p.changes {
                     let Some(path) = path_of(&c.uri) else { continue };
-                    if self.building {
-                        self.changed_while_building.push(path.clone());
+                    if self.building && !is_log(&path) {
+                        self.changed_while_building.insert(path.clone());
                     }
                     if self.is_build_input(&path) {
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
@@ -1309,7 +1310,7 @@ impl Server {
         }
         // A name is a pattern: its glob characters each stand for one character (`?`), which
         // matches the name itself (and at most a few look-alikes, which are not inputs).
-        let literal = |s: &str| s.chars().map(|c| if "*?[]{}".contains(c) { '?' } else { c }).collect::<String>();
+        let literal = |s: &str| s.chars().map(|c| if "*?[]{}\\".contains(c) { '?' } else { c }).collect::<String>();
         let watchers: Vec<Value> = inputs
             .iter()
             .filter_map(|p| {
@@ -1317,7 +1318,7 @@ impl Server {
                 Some(if self.relative_patterns {
                     json!({ "globPattern": { "baseUri": url_of(dir), "pattern": literal(name) } })
                 } else {
-                    json!({ "globPattern": literal(&p.to_string_lossy().replace('\\', "/")) })
+                    json!({ "globPattern": format!("{}/{}", absolute_pattern(p)?, literal(name)) })
                 })
             })
             .collect();
@@ -1331,7 +1332,11 @@ impl Server {
     /// A file whose change means building again: a build or argument file by its name, or any
     /// file the current build read.
     fn is_build_input(&self, path: &std::path::Path) -> bool {
-        path.extension().is_some_and(|e| e == "build" || e == "f" || e == "F") || self.analysis.setup.config.inputs.iter().any(|p| build_docs::same_file(p, path))
+        if is_log(path) {
+            // Written at every build: a log named `server.f`, or one the build also reads.
+            return false;
+        }
+        path.extension().is_some_and(|e| e == "build" || e == "f" || e == "F") || self.analysis.setup.config.inputs.iter().any(|p| same_input(p, path))
     }
 
     /// Answers `req` with `f` on a worker thread. A request about a file waits for the edits
@@ -1880,6 +1885,28 @@ fn describe_config(setup: &ProjectSetup) -> String {
 }
 
 /// A SystemVerilog or Verilog source or header, by extension.
+/// The server's own log file.
+fn is_log(p: &std::path::Path) -> bool {
+    crate::logger::file().is_some_and(|l| build_docs::same_file(l, p))
+}
+
+/// One build input under two spellings: the same file on disk, or (where case does not matter)
+/// the same path ignoring case, also once the file is deleted.
+fn same_input(input: &std::path::Path, p: &std::path::Path) -> bool {
+    let folded = |x: &std::path::Path| x.to_string_lossy().to_lowercase();
+    input == p || build_docs::same_file(input, p) || (cfg!(any(windows, target_os = "macos")) && folded(input) == folded(p))
+}
+
+/// A folder as an absolute glob pattern for a client without relative patterns: forward
+/// slashes on Windows, no `\\?\` prefix, glob characters of its names standing for one
+/// character each.
+fn absolute_pattern(p: &std::path::Path) -> Option<String> {
+    let dir = p.parent()?.to_string_lossy().into_owned();
+    let dir = dir.strip_prefix(r"\\?\").unwrap_or(&dir);
+    let dir = if cfg!(windows) { dir.replace('\\', "/") } else { dir.to_string() };
+    Some(dir.chars().map(|c| if "*?[]{}".contains(c) || (!cfg!(windows) && c == '\\') { '?' } else { c }).collect())
+}
+
 fn is_sv_file(p: &std::path::Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())

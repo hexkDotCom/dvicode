@@ -1676,3 +1676,18 @@ fn argument_files_of_any_name_are_watched_and_rebuild() {
     assert_eq!(registrations(&c).len(), 1);
     c.shutdown();
 }
+
+#[test]
+fn watcher_patterns_and_input_identity() {
+    use std::path::Path;
+    if cfg!(windows) {
+        // No verbatim prefix, forward slashes, glob characters of folder names as `?`.
+        assert_eq!(super::absolute_pattern(Path::new(r"\\?\C:\p[1]\sources.list")).as_deref(), Some("C:/p?1?"));
+        // A deleted input under another spelling is still the input.
+        assert!(super::same_input(Path::new(r"C:\nowhere\SOURCES.list"), Path::new(r"c:\nowhere\sources.list")));
+    } else {
+        // A backslash is part of a name here: one character of the pattern.
+        assert_eq!(super::absolute_pattern(Path::new(r"/p/a\b/sources.list")).as_deref(), Some("/p/a?b"));
+        assert!(!super::same_input(Path::new("/nowhere/SOURCES.list"), Path::new("/nowhere/sources.list")) || cfg!(target_os = "macos"));
+    }
+}

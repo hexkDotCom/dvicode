@@ -193,12 +193,7 @@ pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String,
                 cfg
             }
         },
-        None => BuildConfig {
-            root: root.to_path_buf(),
-            build_file: None,
-            invocations: vec![auto_config_with(root, env, progress)],
-            ..Default::default()
-        },
+        None => load_auto_with(root, env, progress),
     }
 }
 
@@ -1769,6 +1764,7 @@ mod tests {
         }
         // Both ways of configuring automatically read it: a change to it builds again.
         assert_eq!(load_auto(&dir, &FxHashMap::default()).inputs, vec![dir.join(".gitignore")]);
+        assert_eq!(load(&dir, None, &FxHashMap::default()).inputs, vec![dir.join(".gitignore")]);
         let cfg = parse_build(&dir, &dir.join("x.build"), "+dvicode_init_auto\n", &FxHashMap::default());
         assert!(cfg.inputs.contains(&dir.join(".gitignore")), "{:?}", cfg.inputs);
         let files = auto::collect_sources_with(&dir, &Progress::new());
