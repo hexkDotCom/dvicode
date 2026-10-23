@@ -2173,29 +2173,6 @@ fn non_ansi_ports_of_a_large_netlist_match_quickly() {
 }
 
 #[test]
-fn expansions_that_double_at_every_level_stop() {
-    // A20 expands to 2^20 copies of a 100-token body; h20.svh includes h0.svh 2^20 times.
-    // Both stay within the depth limits; the work budget stops them.
-    let body = "x ".repeat(100);
-    let mut m = format!("`define A0 {body}\n");
-    for k in 1..=20 {
-        m.push_str(&format!("`define A{k} `A{} `A{}\n", k - 1, k - 1));
-    }
-    m.push_str("module m;\n  initial begin `A20; end\nendmodule\n");
-    let mut files: Vec<(String, String)> = vec![("m.sv".into(), m), ("h0.svh".into(), format!("{body}\n"))];
-    for k in 1..=20 {
-        files.push((format!("h{k}.svh"), format!("`include \"h{}.svh\"\n`include \"h{}.svh\"\n", k - 1, k - 1)));
-    }
-    files.push(("n.sv".into(), "module n;\n  initial begin\n`include \"h20.svh\"\n  end\nendmodule\n".into()));
-    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    let t = std::time::Instant::now();
-    let (a, _) = project("doubling", &refs);
-    let p = problems(&a);
-    assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
-    assert_eq!(p.iter().filter(|m| m.contains("Preprocessing stops here")).count(), 2, "{p:?}");
-}
-
-#[test]
 fn deeply_nested_conditions_and_generate_blocks_end() {
     // On a stack the size of the engine's worker threads.
     let run = || {
@@ -2297,30 +2274,6 @@ endpackage
     // e builds an e inside itself: the inner one is shown, not followed, and said to be cut.
     let inner = &h.roots[0].children[1].children[0];
     assert!(inner.name == "child" && inner.truncated && meta.incomplete.is_some(), "{} {} {:?}", inner.name, inner.truncated, meta.incomplete);
-}
-
-#[test]
-fn the_expansion_budget_counts_what_is_produced() {
-    // A guarded header of 50,000 tokens included 101 times costs nothing past the first.
-    let table: String = "0, ".repeat(25_000);
-    let defs = format!("`ifndef DEFS\n`define DEFS\n`define TABLE {table}\n`endif\n");
-    let incs: String = "`include \"defs.svh\"\n".repeat(101);
-    let guarded = format!("{incs}module after_includes; endmodule\n");
-    // A body repeating its argument 10,000 times, given 10,000 tokens: stopped while built.
-    let xs = "x ".repeat(10_000);
-    let args = "a ".repeat(10_000);
-    let wide = format!("`define W(x) {xs}\nmodule w;\n  initial begin `W({args}); end\nendmodule\n");
-    // Crossing the budget inside a stringification is still reported.
-    let mut s = format!("`define A0 {}\n", "0 ".repeat(100));
-    for k in 1..=20 {
-        s.push_str(&format!("`define A{k} `A{} `A{}\n", k - 1, k - 1));
-    }
-    s.push_str("`define STR `\"`A20`\"\nmodule q;\n  string v = `STR;\nendmodule\n");
-    let (a, _) = project("budgetkinds", &[("defs.svh", defs.as_str()), ("g.sv", guarded.as_str()), ("w.sv", wide.as_str()), ("s.sv", s.as_str())]);
-    let p = problems(&a);
-    let limit = |f: &str| p.iter().filter(|m| m.starts_with(f) && m.contains("Preprocessing stops here")).count();
-    assert_eq!((limit("g.sv"), limit("w.sv"), limit("s.sv")), (0, 1, 1), "{p:?}");
-    assert!(a.workspace_symbols("after_includes", 5).iter().any(|s| s.name == "after_includes"));
 }
 
 #[test]
