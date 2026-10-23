@@ -32,12 +32,12 @@
   },
   "core-v-verif-auto": {
    "commit": "083728bd8d548fd188e0ef43e0c1b038bce24002",
-   "total": 431,
-   "errors": 412,
+   "total": 434,
+   "errors": 415,
    "warnings": 19,
    "codes": {
+    "NON_EXISTING_PORT": 105,
     "UNDECLARED_IDENTIFIER": 105,
-    "NON_EXISTING_PORT": 102,
     "NOT_A_MEMBER": 72,
     "NON_EXISTING_TYPE": 61,
     "NON_EXISTING_PACKAGE": 44,
@@ -47,8 +47,8 @@
     "INCLUDE_NOT_FOUND": 11
    },
    "files": 806,
-   "build_ms": 144,
-   "config_ms": 129
+   "build_ms": 190,
+   "config_ms": 68
   },
   "cv32e40p-auto": {
    "commit": "fcd59685681bc2b58e5805497b0c59df14eda810",
@@ -192,8 +192,8 @@
   },
   "opentitan-auto": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
-   "total": 585,
-   "errors": 463,
+   "total": 587,
+   "errors": 465,
    "warnings": 122,
    "codes": {
     "UNDECLARED_IDENTIFIER": 202,
@@ -202,15 +202,15 @@
     "NON_EXISTING_TYPE": 78,
     "NON_EXISTING_PACKAGE": 73,
     "NOT_A_MEMBER": 48,
-    "NON_EXISTING_PORT": 44,
+    "NON_EXISTING_PORT": 46,
     "SYNTAX_ERROR": 10,
     "SKIPPED_CODE": 6,
     "INCLUDE_NOT_FOUND": 3,
     "INCLUDE_SYNTAX": 1
    },
    "files": 3730,
-   "build_ms": 774,
-   "config_ms": 206
+   "build_ms": 799,
+   "config_ms": 262
   },
   "opentitan-earlgrey-rtl": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",

@@ -63,7 +63,7 @@
   its named bindings (`f(.value(1))`); renaming a macro renames its use in an `` `include ``.
 - A named connection to something that is not a port (`.internal_signal(1)`), or an
   override of something that is not a parameter, is reported.
-- `for (int i = 0, j = 0; ...)` declares `j`.
+- `for (int i = 0, j = 0; ...)` declares `j`; `nettype T name with f;` declares `name`.
 - `-y` libraries are followed through hierarchies deeper than eight levels.
 - Auto-configuration no longer leaves out a file because another file of the same name is
   included by its path.
