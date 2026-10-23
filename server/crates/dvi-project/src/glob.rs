@@ -100,6 +100,10 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
 /// Expands an absolute pattern to existing paths, and says whether it looked everywhere
 /// (`false`: it stopped after [`MAX_STEPS`]).
 pub fn expand_bounded(pattern: &Path) -> (Vec<PathBuf>, bool) {
+    expand_steps(pattern, MAX_STEPS)
+}
+
+fn expand_steps(pattern: &Path, steps: usize) -> (Vec<PathBuf>, bool) {
     let mut comps: Vec<String> = pattern.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
     // `**/**` is `**`.
     comps.dedup_by(|a, b| a == "**" && b == "**");
@@ -111,7 +115,7 @@ pub fn expand_bounded(pattern: &Path) -> (Vec<PathBuf>, bool) {
         i += 1;
     }
     let mut out = Vec::new();
-    let mut seen = Seen { steps_left: MAX_STEPS, ..Default::default() };
+    let mut seen = Seen { steps_left: steps, ..Default::default() };
     walk(&base, &comps[i..], &mut out, 0, &mut seen);
     (out, seen.steps_left > 0)
 }
@@ -298,10 +302,10 @@ mod tests {
         let found = expand(&dir.join("**/*.sv"));
         assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
         assert!(found.len() <= 8 && found.iter().any(|p| p.ends_with("a/a.sv")) && found.iter().any(|p| p.ends_with("b/b.sv")), "{found:?}");
-        // `*` through the same links: 2^22 paths to two folders.
-        let t = std::time::Instant::now();
-        assert!(expand(&dir.join(format!("{}missing.sv", "*/".repeat(22)))).is_empty());
-        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+        // `*` through the same links: 2^22 paths to two folders. The walk stops at its budget
+        // (a small one here: the real one takes seconds on slow file systems) and says so.
+        let (found, complete) = expand_steps(&dir.join(format!("{}missing.sv", "*/".repeat(22))), 20_000);
+        assert!(found.is_empty() && !complete);
         // One target reached twice, with different parts of the pattern left: p/a/link while
         // `rtl` is still to come, p/z/rtl/link after it.
         let p = dir.join("p");

@@ -34,7 +34,10 @@ on ARM, for example), use WSL or SSH, or build the engine there and set
 4. The workflow checks that the tag matches the version, builds everything, runs the engine
    on the demo project on Windows, Linux and macOS, attests the packages' provenance, and
    creates a GitHub pre-release with the packages attached. Anyone can check that a package
-   came from that run: `gh attestation verify dvicode-X.Y.Z.vsix -R hexkDotCom/dvicode`.
+   was built by this workflow from that tag:
+   `gh attestation verify dvicode-X.Y.Z.vsix -R hexkDotCom/dvicode --signer-workflow
+   hexkDotCom/dvicode/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z`
+   (releases up to 0.3.1 have no attestations).
 5. Try the packages, then edit the release on GitHub to mark it as the latest release.
 
 To build packages without a release (for testing), run the workflow by hand from the
