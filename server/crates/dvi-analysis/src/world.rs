@@ -452,7 +452,8 @@ impl Analysis {
                     'dirs: for d in &inv.lib_dirs {
                         for e in &exts {
                             let p = d.join(format!("{name}{e}"));
-                            if self.vfs.is_file(&p) {
+                            // As the units are read: with the editor texts of the pin.
+                            if self.reader().is_file(&p) {
                                 new_files.push((p, inv_idx));
                                 break 'dirs;
                             }

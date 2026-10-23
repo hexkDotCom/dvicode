@@ -170,6 +170,9 @@ struct Deferred {
     project: bool,
     /// The file it is about (`None`: none, it waits for every edit).
     file: Option<FileId>,
+    /// The files with edits it needed when it came (compiled with `file` then): an update
+    /// in between that separates them does not make it go without them.
+    needed: Vec<FileId>,
     /// It names a position or range in the file, which a later edit makes meaningless.
     positional: bool,
     /// Answers it from a snapshot.
@@ -728,15 +731,21 @@ impl Server {
     /// the result of a running full build.
     fn note_change(&mut self, id: FileId) {
         self.drop_deferred(&[], Some(id));
-        self.edit_seq += 1;
-        self.dirty.entry(id).or_insert(self.edit_seq);
-        if self.update.as_ref().is_some_and(|j| j.files.binary_search(&id).is_ok()) {
-            self.redirty.entry(id).or_insert(self.edit_seq);
-        }
+        self.number_edit(id);
         self.pending.insert(id);
         self.pending_since.get_or_insert_with(Instant::now);
         if self.building {
             self.changed_during_build.insert(id);
+        }
+    }
+
+    /// Gives an edit of `id` its number: requests that come later do not wait for it, those
+    /// before do (an edit made while the running update compiles the file is not in it).
+    fn number_edit(&mut self, id: FileId) {
+        self.edit_seq += 1;
+        self.dirty.entry(id).or_insert(self.edit_seq);
+        if self.update.as_ref().is_some_and(|j| j.files.binary_search(&id).is_ok()) {
+            self.redirty.entry(id).or_insert(self.edit_seq);
         }
     }
 
@@ -823,8 +832,9 @@ impl Server {
         // `include of them): they are compiled again; requests sent since wait for that.
         for f in std::mem::take(&mut self.changed_while_updating) {
             if !self.analysis.units_of_file(f).is_empty() {
+                // Keeps the number it was given when the change was reported.
                 self.note_change(f);
-            } else {
+            } else if !self.pending.contains(&f) {
                 self.dirty.remove(&f);
             }
         }
@@ -857,7 +867,7 @@ impl Server {
     /// before it came, of `f` itself or of a file compiled with it (a header and the files
     /// that include it), or of any file for a request about the whole project.
     fn needs(&self, d: &Deferred, f: FileId) -> bool {
-        self.dirty.get(&f).is_some_and(|first| *first <= d.seq) && self.related(d.project, d.file, f)
+        self.dirty.get(&f).is_some_and(|first| *first <= d.seq) && (d.needed.contains(&f) || self.related(d.project, d.file, f))
     }
 
     fn related(&self, project: bool, file: Option<FileId>, f: FileId) -> bool {
@@ -1154,8 +1164,7 @@ impl Server {
                                 self.note_change(id);
                             } else if self.update.is_some() || self.built.is_some() {
                                 // Numbered now: a request sent after it waits for it.
-                                self.edit_seq += 1;
-                                self.dirty.entry(id).or_insert(self.edit_seq);
+                                self.number_edit(id);
                                 self.changed_while_updating.insert(id);
                             }
                         }
@@ -1273,8 +1282,9 @@ impl Server {
                 let _ = sender.send(Message::Response(resp));
             })
         };
-        let d = Deferred { id, seq: self.edit_seq, project: project.unwrap_or(false), file, positional, run: Box::new(run) };
-        if project.is_some() && self.waits(&d) {
+        let mut d = Deferred { id, seq: self.edit_seq, project: project.unwrap_or(false), file, needed: Vec::new(), positional, run: Box::new(run) };
+        d.needed = self.dirty.keys().copied().filter(|f| self.needs(&d, *f)).collect();
+        if project.is_some() && !d.needed.is_empty() {
             self.deferred.push(d);
             // Its edits are analysed now, not after the pause in typing.
             self.flush_pending();

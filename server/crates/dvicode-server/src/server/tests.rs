@@ -739,7 +739,8 @@ fn type_hierarchy_walks_bases_and_subclasses() {
 /// while an update runs (as a header that thousands of files include keeps it busy).
 #[derive(Default)]
 struct Gate {
-    closed: Mutex<bool>,
+    /// Closed, and how many may pass anyway (`allow`).
+    closed: Mutex<(bool, usize)>,
     opened: Condvar,
     /// Updates that reached the gate.
     entered: AtomicUsize,
@@ -761,17 +762,30 @@ impl Gate {
     fn pass(&self) {
         self.entered.fetch_add(1, Ordering::SeqCst);
         let mut closed = self.closed.lock().unwrap();
-        while *closed {
-            closed = self.opened.wait(closed).unwrap();
+        loop {
+            match *closed {
+                (false, _) => return,
+                (true, n) if n > 0 => {
+                    closed.1 -= 1;
+                    return;
+                }
+                _ => closed = self.opened.wait(closed).unwrap(),
+            }
         }
     }
 
     fn close(&self) {
-        *self.closed.lock().unwrap() = true;
+        *self.closed.lock().unwrap() = (true, 0);
     }
 
     fn open(&self) {
-        *self.closed.lock().unwrap() = false;
+        *self.closed.lock().unwrap() = (false, 0);
+        self.opened.notify_all();
+    }
+
+    /// Lets `n` more pass while it stays closed.
+    fn allow(&self, n: usize) {
+        self.closed.lock().unwrap().1 += n;
         self.opened.notify_all();
     }
 
@@ -1418,3 +1432,104 @@ fn closing_a_file_outside_the_build_before_its_first_update_leaves_nothing() {
     assert!(last.is_none_or(|p| p.diagnostics.is_empty()), "{last:?}");
     c.shutdown();
 }
+
+#[test]
+fn a_waiting_request_keeps_the_edits_it_needed_when_an_update_separates_its_file() {
+    // x is declared in top.sv and used in h.svh, which top.sv includes.
+    let top_text = "module top;\n  int x;\n`include \"h.svh\"\nendmodule\n";
+    let root = project("separated", &[("top.sv", top_text), ("h.svh", "  initial x = 1;\n")]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (top, hu) = (uri(&root, "top.sv"), uri(&root, "h.svh"));
+    let h_text = "  initial x = 1;\n";
+    c.open(&top, 1, top_text);
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    c.open(&hu, 1, h_text);
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": hu } }));
+    // The include is removed (that update held), then put back, and x asked about in h.svh.
+    gate.close();
+    let n = gate.entered.load(Ordering::SeqCst);
+    c.change(&top, 2, &top_text.replace("`include \"h.svh\"\n", ""));
+    let _ = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    gate.wait_entered(n + 1);
+    c.change(&top, 3, top_text);
+    let def = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": hu }, "position": at(h_text, "x = 1") }));
+    c.sync();
+    gate.open();
+    // Answered once the include is back, not from the update in between.
+    let r = c.reply(&def, WAIT).expect("an answer");
+    let locs = r.result.unwrap_or(Value::Null);
+    assert_eq!(locs.as_array().map(|l| l.len()), Some(1), "{locs}");
+    assert_eq!(locs[0]["uri"], top.as_str());
+    c.shutdown();
+}
+
+#[test]
+fn a_disk_change_of_a_file_the_running_update_reads_keeps_its_place() {
+    let top_text = "module top;\nendmodule\n";
+    let root = project("diskorder", &[("top.sv", top_text), ("h.svh", "  typedef int old_t;\n")]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let hooks = {
+        let g = gate.clone();
+        Hooks { after_update: Some(Box::new(move || g.pass())), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let (top, hu) = (uri(&root, "top.sv"), uri(&root, "h.svh"));
+    c.open(&top, 1, top_text);
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    // The header is opened and closed, and top.sv starts to include it: one update of both
+    // replaces the first, has read the old header and is held when it changes on disk.
+    gate.close();
+    let n = gate.entered.load(Ordering::SeqCst);
+    c.open(&hu, 1, "  typedef int old_t;\n");
+    gate.wait_entered(n + 1);
+    c.notify("textDocument/didClose", json!({ "textDocument": { "uri": hu } }));
+    c.change(&top, 2, "module top;\n`include \"h.svh\"\n  new_t v;\nendmodule\n");
+    let _ = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    c.sync();
+    gate.allow(1);
+    gate.wait_entered(n + 2);
+    std::fs::write(root.join("h.svh"), "  typedef int new_t;\n").unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": hu, "type": 2 }] }));
+    let found = c.send_request("workspace/symbol", json!({ "query": "new_t" }));
+    c.sync();
+    gate.open();
+    let found = c.reply(&found, WAIT).expect("symbols of the project").result.unwrap_or(Value::Null);
+    let found: Vec<&str> = found.as_array().into_iter().flatten().filter_map(|s| s["location"]["uri"].as_str()).collect();
+    assert!(found.len() == 1 && found[0].ends_with("h.svh"), "{found:?}");
+    c.shutdown();
+}
+
+#[test]
+fn library_files_are_found_as_the_update_reads_them() {
+    let root = project("libpin", &[("top.sv", TOP_LIB)]);
+    std::fs::create_dir_all(root.join("early")).unwrap();
+    std::fs::create_dir_all(root.join("late")).unwrap();
+    std::fs::write(root.join("late/m.sv"), "module m; endmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "top.sv\n-y early\n-y late\n").unwrap();
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, TOP_LIB);
+    c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    // m is instantiated (that update held); meanwhile early/m.sv is opened, not saved.
+    gate.close();
+    let n = gate.entered.load(Ordering::SeqCst);
+    let text = TOP_LIB.replace("endmodule", "  m u();\nendmodule");
+    c.change(&top, 2, &text);
+    let def = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(&text, "m u()") }));
+    gate.wait_entered(n + 1);
+    c.open(&uri(&root, "early/m.sv"), 1, "module m; endmodule\n");
+    c.sync();
+    gate.open();
+    // The update read the folders as they were: m is in late/.
+    let r = c.reply(&def, WAIT).expect("an answer");
+    let locs = r.result.unwrap_or(Value::Null);
+    assert!(locs[0]["uri"].as_str().is_some_and(|u| u.ends_with("late/m.sv")), "{locs}");
+    c.shutdown();
+}
+
+const TOP_LIB: &str = "module top;\nendmodule\n";
