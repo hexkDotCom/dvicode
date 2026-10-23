@@ -305,7 +305,7 @@ fn library_names(u: &Unit) -> (Vec<&SmolStr>, Vec<&SmolStr>) {
 
 /// Hash of what other files can see of a unit: its declarations (outside bodies), the connections
 /// and binds that decide what instances are, and where its removed regions are in its scopes.
-fn interface_fingerprint(u: &Unit) -> u64 {
+fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
     for d in &u.parsed.decls {
@@ -314,7 +314,8 @@ fn interface_fingerprint(u: &Unit) -> u64 {
         let mut local = false;
         while let Some(x) = p {
             let pd = u.parsed.decl(x);
-            if matches!(pd.kind, DeclKind::Function | DeclKind::Task | DeclKind::Block | DeclKind::Constraint | DeclKind::Covergroup) {
+            // A named block outside subroutines is a scope other files reach (`top.blk.x`).
+            if matches!(pd.kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint | DeclKind::Covergroup) || pd.kind == DeclKind::Block && pd.name.is_empty() {
                 local = true;
                 break;
             }
@@ -336,12 +337,23 @@ fn interface_fingerprint(u: &Unit) -> u64 {
         }
         d.exports.len().hash(&mut h);
     }
-    // The ports and parameters each instance connects by name: without a build file they pick
-    // the copy of a design element defined twice, which other files reach through the instance.
+    // The ports and parameters the instances of one statement connect by name, for design
+    // elements defined twice: without a build file they pick the copy the instances are,
+    // which other files reach through them (`Analysis::instance_definitions`).
+    let mut groups: std::collections::BTreeMap<u32, (&str, std::collections::BTreeSet<&str>)> = Default::default();
     for r in &u.parsed.refs {
         if let RefKind::Port { inst } | RefKind::Param { inst } = r.kind {
-            (u.parsed.decl(inst).name.as_str(), r.segs.first().map(|s| s.name.as_str())).hash(&mut h);
+            let Some(rid) = u.parsed.decl(inst).ty.as_ref().and_then(|t| t.ref_id) else { continue };
+            let Some(seg) = u.parsed.reference(rid).segs.first() else { continue };
+            if !defined_twice(&seg.name) {
+                continue;
+            }
+            let g = groups.entry(seg.span.start).or_insert_with(|| (seg.name.as_str(), Default::default()));
+            g.1.extend(r.segs.first().map(|s| s.name.as_str()));
         }
+    }
+    for g in groups.values() {
+        g.hash(&mut h);
     }
     // `bind`: which design element gets which instance.
     for (target, inst) in &u.parsed.binds {
@@ -739,7 +751,10 @@ impl Analysis {
         if progress.is_cancelled() {
             return None;
         }
-        if affected.is_empty() {
+        // A file opened, edited or closed in a `-y` folder (or a `-v` file) may be the library
+        // file a design element is now found in, saved or not.
+        let library_file = files.iter().any(|f| self.in_library_folder(*f));
+        if affected.is_empty() && !library_file {
             return Some(self.clone());
         }
         let mut next = self.clone();
@@ -789,13 +804,22 @@ impl Analysis {
         // instantiate, and on the macros they leave behind: an edit inside a body changes none
         // of that, and looking for every missing design element in every library folder again
         // costs more than the edit itself. (New files in library folders start a build.)
-        if !next.library_inputs_same(self) {
+        if library_file || !next.library_inputs_same(self) {
             next.update_library_units(Some(progress));
         }
         if progress.is_cancelled() {
             return None;
         }
         Some(next)
+    }
+
+    /// Whether `f` is in a `-y` folder or is a `-v` file of some invocation.
+    fn in_library_folder(&self, f: FileId) -> bool {
+        let p = self.vfs.path(f);
+        let same = |a: &Path, b: &Path| a == b || cfg!(any(windows, target_os = "macos")) && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase();
+        self.setup.config.invocations.iter().any(|inv| {
+            inv.lib_files.iter().any(|l| same(l, &p)) || p.parent().is_some_and(|d| inv.lib_dirs.iter().any(|l| same(l, d)))
+        })
     }
 
     /// Whether every unit compiled again since `old` defines and instantiates the same design
@@ -1102,7 +1126,14 @@ impl Analysis {
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => false,
             // Only pointed at moved macro definitions: the same declarations.
             (Some(a), Some(b)) if Arc::ptr_eq(&a.parsed, &b.parsed) => !a.macros_after.same_definitions(&b.macros_after),
-            (Some(a), Some(b)) => interface_fingerprint(a) != interface_fingerprint(b) || !a.macros_after.same_definitions(&b.macros_after),
+            (Some(a), Some(b)) => {
+                // Connections pick a copy only without a build file, among copies.
+                let twice = |n: &str| {
+                    (self.nearest_wins_unit(a) || old.nearest_wins_unit(b))
+                        && (self.global.definitions.get(n).is_some_and(|v| v.len() > 1) || old.global.definitions.get(n).is_some_and(|v| v.len() > 1))
+                };
+                interface_fingerprint(a, &twice) != interface_fingerprint(b, &twice) || !a.macros_after.same_definitions(&b.macros_after)
+            }
             (None, None) => false,
             _ => true,
         })

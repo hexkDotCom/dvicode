@@ -326,7 +326,12 @@ impl Analysis {
     }
 
     fn nearest_wins(&self, unit: UnitId) -> bool {
-        self.try_unit(unit).is_some_and(|u| u.kind != UnitKind::Builtin && self.setup.config.invocations.get(u.invocation).is_some_and(|i| i.auto))
+        self.try_unit(unit).is_some_and(|u| self.nearest_wins_unit(u))
+    }
+
+    /// [`Analysis::nearest_wins`] of a unit: auto-configured code picks the nearest copy.
+    pub(crate) fn nearest_wins_unit(&self, u: &crate::world::Unit) -> bool {
+        u.kind != UnitKind::Builtin && self.setup.config.invocations.get(u.invocation).is_some_and(|i| i.auto)
     }
 
     /// For instances in auto-configured code of design elements defined more than once: the

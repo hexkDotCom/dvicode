@@ -403,3 +403,67 @@ fn an_edit_inside_a_body_keeps_other_files_counts() {
     ];
     assert!(!edit_like_the_server("ifacebody", &files, ("other.sv", "module other;\n  initial begin\n    $display(p::secret);\n  end\nendmodule\n")));
 }
+
+#[test]
+fn splitting_an_instantiation_statement_changes_what_other_files_see() {
+    // `D a(.x()), b(.y());` must fit one copy for both: none does, so both are the nearest.
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/top.sv", "module top;\n  D a(.x()), b(.y());\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(top.b.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifacestmt", &files, ("a/top.sv", "module top;\n  D a(.x());\n  D b(.y());\nendmodule\n")));
+}
+
+#[test]
+fn a_variable_of_a_named_block_is_seen_by_other_files() {
+    let files = [
+        ("c.sv", "class C;\n`ifdef NEVER\n  int secret;\n`endif\nendclass\nclass E;\nendclass\n"),
+        ("top.sv", "module top;\n  initial begin : B\n    C obj;\n  end\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(top.B.obj.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifaceblock", &files, ("top.sv", "module top;\n  initial begin : B\n    E obj;\n  end\nendmodule\n")));
+}
+
+#[test]
+fn renaming_a_connection_of_a_design_element_defined_once_changes_nothing_others_see() {
+    let files = [
+        ("d.sv", "module D(input logic request);\nendmodule\n"),
+        ("top.sv", "module top;\n  D d(.request());\nendmodule\n"),
+    ];
+    let (_, root) = project("ifaceonce", &files);
+    std::fs::remove_file(root.join(".dvicode/default.build")).unwrap();
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let f = edit(&a, &root, "top.sv", "module top;\n  D d(.re());\nendmodule\n");
+    let b = a.update_with(&[f], &dvi_project::Progress::new()).unwrap();
+    assert!(!b.interface_changed(&a));
+}
+
+#[test]
+fn an_unsaved_file_in_a_library_folder_is_found_without_a_build() {
+    // -y preferred -y fallback: only fallback/X.v is on disk, then preferred/X.v is opened
+    // unsaved; the next update finds it first, as a build would.
+    let files = [("top.sv", "module top;\n  X x();\nendmodule\n")];
+    let (_, root) = project("libunsaved", &files);
+    std::fs::create_dir_all(root.join("preferred")).unwrap();
+    std::fs::create_dir_all(root.join("fallback")).unwrap();
+    std::fs::write(root.join("fallback/X.v"), "module X;\n  logic from_fallback;\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-y preferred\n-y fallback\n+libext+.v\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let lib = |a: &Analysis| -> Vec<String> {
+        let mut v: Vec<String> = a.units.iter().flatten().filter(|u| u.library).map(|u| a.path(u.root).parent().unwrap().file_name().unwrap().to_string_lossy().to_string()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(lib(&a), ["fallback"]);
+    let p = edit(&a, &root, "preferred/X.v", "module X;\n  logic from_preferred;\nendmodule\n");
+    let b = a.update_with(&[p], &dvi_project::Progress::new()).unwrap();
+    assert_eq!(lib(&b), ["preferred"]);
+    // A body edit after that keeps it.
+    let t = edit(&b, &root, "top.sv", "module top;\n  X x();\n  initial begin end\nendmodule\n");
+    let c = b.update_with(&[t], &dvi_project::Progress::new()).unwrap();
+    assert_eq!(lib(&c), ["preferred"]);
+}
