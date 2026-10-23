@@ -34,9 +34,10 @@ pub struct MacroDef {
 }
 
 impl MacroDef {
-    /// Whether `other` defines the macro the same way: what [`MacroDef::signature`] and the body
-    /// text show, compared without building strings (macro tables of thousands of definitions
-    /// are compared after edits).
+    /// Whether `other` defines the macro the same way: the same body text, parameter names and
+    /// defaults, compared without building strings (macro tables of thousands of definitions
+    /// are compared after edits). As [`MacroDef::signature`] shows them, but for the rare
+    /// escaped parameter name that prints like a default (`\a= ` and `a=`): those differ.
     pub fn same_as(&self, other: &MacroDef) -> bool {
         let same_tokens = |a: &[Token], b: &[Token]| {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.kind == y.kind && x.text == y.text && x.ws_before() == y.ws_before())

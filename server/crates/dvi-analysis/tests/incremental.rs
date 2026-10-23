@@ -467,3 +467,28 @@ fn an_unsaved_file_in_a_library_folder_is_found_without_a_build() {
     let c = b.update_with(&[t], &dvi_project::Progress::new()).unwrap();
     assert_eq!(lib(&c), ["preferred"]);
 }
+
+#[test]
+fn moving_an_instance_to_another_statement_changes_what_other_files_see() {
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/top.sv", "module top;\n  D a(.x()), b(.x());\n  D c(.y());\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(top.b.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifacemove", &files, ("a/top.sv", "module top;\n  D a(.x());\n  D b(.y()), c(.y());\nendmodule\n")));
+}
+
+#[test]
+fn statements_in_two_headers_are_told_apart() {
+    // Both statements start at offset 0 of their header.
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("a/first.svh", "D a(.x()), b(.y());\n"),
+        ("a/second.svh", "D c(.x());\n"),
+        ("a/top.sv", "module top;\n`include \"first.svh\"\n`include \"second.svh\"\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(top.c.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifaceheaders", &files, ("a/second.svh", "D c(.y());\n")));
+}

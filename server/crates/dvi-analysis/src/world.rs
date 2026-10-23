@@ -309,7 +309,11 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
     for d in &u.parsed.decls {
-        // Skip anything inside a subroutine, block, constraint or covergroup body.
+        // An unnamed block is no scope others reach.
+        if d.kind == DeclKind::Block && d.name.is_empty() {
+            continue;
+        }
+        // Skip anything inside a subroutine, unnamed block, constraint or covergroup body.
         let mut p = d.parent;
         let mut local = false;
         while let Some(x) = p {
@@ -340,16 +344,21 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     // The ports and parameters the instances of one statement connect by name, for design
     // elements defined twice: without a build file they pick the copy the instances are,
     // which other files reach through them (`Analysis::instance_definitions`).
-    let mut groups: std::collections::BTreeMap<u32, (&str, std::collections::BTreeSet<&str>)> = Default::default();
+    // A statement is the span of its type name, as the resolver groups them; hashed are the
+    // instances it has and the names they connect, not where it is.
+    type Group<'a> = (&'a str, std::collections::BTreeSet<&'a str>, std::collections::BTreeSet<&'a str>);
+    let mut groups: std::collections::BTreeMap<Span, Group> = Default::default();
     for r in &u.parsed.refs {
         if let RefKind::Port { inst } | RefKind::Param { inst } = r.kind {
-            let Some(rid) = u.parsed.decl(inst).ty.as_ref().and_then(|t| t.ref_id) else { continue };
-            let Some(seg) = u.parsed.reference(rid).segs.first() else { continue };
+            let d = u.parsed.decl(inst);
+            let Some(rid) = d.ty.as_ref().and_then(|t| t.ref_id) else { continue };
+            let Some(seg) = u.parsed.reference(rid).segs.first().filter(|s| !s.from_macro) else { continue };
             if !defined_twice(&seg.name) {
                 continue;
             }
-            let g = groups.entry(seg.span.start).or_insert_with(|| (seg.name.as_str(), Default::default()));
-            g.1.extend(r.segs.first().map(|s| s.name.as_str()));
+            let g = groups.entry(seg.span).or_insert_with(|| (seg.name.as_str(), Default::default(), Default::default()));
+            g.1.insert(d.name.as_str());
+            g.2.extend(r.segs.first().map(|s| s.name.as_str()));
         }
     }
     for g in groups.values() {
