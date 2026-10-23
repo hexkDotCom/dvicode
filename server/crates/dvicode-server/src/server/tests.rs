@@ -1554,17 +1554,29 @@ fn a_header_opened_while_an_update_finds_its_include_is_found_after_it() {
     let root = project("openedduring", &[("top.sv", top_text)]);
     let gate = Arc::new(Gate::default());
     let _opener = Opener(gate.clone());
-    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
-    let top = uri(&root, "top.sv");
+    let checks = Arc::new(Checks::default());
+    let hooks = {
+        let g = gate.clone();
+        Hooks { before_update: Some(Box::new(move || g.pass())), problem_check: Some(checks.hook()), ..Default::default() }
+    };
+    let (mut c, _) = Client::start_with(&root, Value::Null, hooks);
+    let (top, au) = (uri(&root, "top.sv"), uri(&root, "a.svh"));
     c.wait_problems(&top, |p| !p.diagnostics.is_empty());
     // a.svh, not saved, includes b.svh; its update (of top.sv too) is held when b.svh opens.
     gate.close();
-    c.open(&uri(&root, "a.svh"), 1, "`include \"b.svh\"\n");
+    c.open(&au, 1, "`include \"b.svh\"\n");
     gate.wait_entered(1);
     c.open(&uri(&root, "b.svh"), 1, "  typedef int new_t;\n");
+    // Asked after b.svh opened: answered once top.sv is compiled with it.
+    let def = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(top_text, "new_t v") }));
     c.sync();
     gate.open();
-    // top.sv is compiled again with b.svh: the include in a.svh finds it.
-    c.wait_problems(&uri(&root, "a.svh"), |p| p.diagnostics.is_empty());
+    let d = c.reply(&def, WAIT).expect("an answer").result.unwrap_or(Value::Null);
+    assert!(d[0]["uri"].as_str().is_some_and(|u| u.ends_with("b.svh")), "{d}");
+    // Everything settled: the include in a.svh found b.svh.
+    c.request_ok("dvicode/status", Value::Null);
+    checks.wait_done(&mut c);
+    let last = c.published.iter().filter(|p| p.uri == au).last();
+    assert!(last.is_none_or(|p| p.diagnostics.is_empty()), "{last:?}");
     c.shutdown();
 }
