@@ -202,3 +202,60 @@ fn a_cancelled_update_gives_no_snapshot() {
     assert!(!Arc::ptr_eq(&unit(&a).parsed, &unit(&next).parsed));
     assert!(next.interface_changed(&a), "W changed");
 }
+
+#[test]
+fn a_header_that_every_file_includes_updates_like_a_full_build() {
+    let header = |w: u32, above: &str| format!("{above}`define W {w}\n  typedef logic [`W-1:0] t_t;\n");
+    let file = |i: u32| format!("`include \"h.svh\"\nmodule m{i};\n  logic [`W-1:0] x{i};\nendmodule\n");
+    let files = [
+        ("h.svh".to_string(), header(8, "")),
+        ("f0.sv".to_string(), file(0)),
+        ("f1.sv".to_string(), file(1)),
+        // Defines W itself, and uses it before and after.
+        ("d.sv".to_string(), "module d;\n  logic [`W-1:0] y0;\n`define W 4\n  logic [`W-1:0] y1;\nendmodule\n".to_string()),
+        ("f2.sv".to_string(), file(2)),
+        // Includes nothing: sees what the last file left.
+        ("c.sv".to_string(), "module c;\n  logic [`W-1:0] z;\nendmodule\n".to_string()),
+    ];
+    let refs: Vec<(&str, &str)> = files.iter().map(|(f, t)| (f.as_str(), t.as_str())).collect();
+    let (mut a, root) = project("everyfile", &refs);
+    let uses = [("f0.sv", "x0"), ("f1.sv", "x1"), ("d.sv", "y0"), ("d.sv", "y1"), ("f2.sv", "x2"), ("c.sv", "z;")];
+    // What each use of W expands to and where it leads, in `x` and in a full build.
+    let seen = |x: &Analysis| -> Vec<String> {
+        uses.iter()
+            .map(|(f, v)| {
+                let fid = x.vfs.file_id(&root.join(f));
+                let text = x.file_text(fid).unwrap();
+                let hover = x.hover(fid, text.find(v).unwrap() as u32 + 1).map(|h| h.0).unwrap_or_default();
+                let before = &text[..text.find(v).unwrap()];
+                let w = before.rfind("`W").unwrap() as u32 + 1;
+                let def: Vec<String> =
+                    x.goto_definition(fid, w).iter().map(|l| format!("{}:{}", l.uri.path().rsplit('/').next().unwrap(), l.range.start.line + 1)).collect();
+                format!("{f} {v}: {} -> {def:?}", hover.lines().find(|l| l.contains("logic")).unwrap_or(""))
+            })
+            .collect()
+    };
+    let h = a.vfs.file_id(&root.join("h.svh"));
+    let f1 = a.vfs.file_id(&root.join("f1.sv"));
+    let guarded = "`ifndef H\n`define H\n`define W 32\n  typedef logic [`W-1:0] t_t;\n`endif\n".to_string();
+    let steps: Vec<(Vec<FileId>, String, Option<String>)> = vec![
+        (vec![h], header(8, ""), None),
+        (vec![h], header(16, ""), None),
+        (vec![h], header(16, "// widths\n\n"), None),
+        (vec![h], header(8, ""), None),
+        (vec![h, f1], header(12, "\n"), Some(format!("// f1\n{}", file(1)))),
+        (vec![h], guarded, None),
+        (vec![h], header(8, ""), None),
+    ];
+    for (i, (changed, text, f1_text)) in steps.into_iter().enumerate() {
+        edit(&a, &root, "h.svh", &text);
+        if let Some(t) = f1_text {
+            edit(&a, &root, "f1.sv", &t);
+        }
+        a = a.update(&changed);
+        let full = Analysis::build(a.vfs.clone(), a.setup.clone());
+        assert_eq!(seen(&a), seen(&full), "after edit {i}");
+    }
+    let last = seen(&a);
+    assert!(last[0].contains("[8-1:0]") && last[3].contains("[4-1:0]") && last[5].contains("[8-1:0]"), "{last:?}");
+}
