@@ -324,6 +324,12 @@ test.describe('Engine addresses', () => {
       assert.ok(!pathmap.isLoopback(h), h);
     }
   });
+  test.it('reads host:port, [v6]:port and a bare port', () => {
+    assert.deepEqual(pathmap.tcpEndpoint('7777'), { host: '127.0.0.1', port: 7777 });
+    assert.deepEqual(pathmap.tcpEndpoint('127.0.0.1:7777'), { host: '127.0.0.1', port: 7777 });
+    assert.deepEqual(pathmap.tcpEndpoint('Build01:9000'), { host: 'build01', port: 9000 });
+    assert.deepEqual(pathmap.tcpEndpoint('[::1]:7777'), { host: '::1', port: 7777 });
+  });
 });
 
 test.describe('WSL folders opened through \\wsl.localhost', () => {

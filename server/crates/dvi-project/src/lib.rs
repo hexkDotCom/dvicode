@@ -15,6 +15,7 @@ pub use progress::{Phase, Progress};
 
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
 pub struct Invocation {
@@ -83,8 +84,9 @@ pub struct ArgFile {
     pub path: PathBuf,
     /// Where its relative paths start.
     pub base: PathBuf,
-    /// The variables set when it is read (the settings' and the build file's).
-    pub env: FxHashMap<String, String>,
+    /// The variables set when it is read (the settings' and the build file's): shared with
+    /// the build until it sets another.
+    pub env: Arc<FxHashMap<String, String>>,
     /// The `+dvicode_init` mode and compilation root at that point.
     pub mode: String,
     pub comp_root: PathBuf,
@@ -248,7 +250,8 @@ pub fn inspect(root: &Path, file: &Path, text: &str, env: &FxHashMap<String, Str
 struct Builder {
     cfg: BuildConfig,
     cur: Option<Invocation>,
-    env: FxHashMap<String, String>,
+    /// Copied on write: each argument file keeps the variables it was read with.
+    env: Arc<FxHashMap<String, String>>,
     /// Bytes of the values `+setenv` stored so far (bounded by [`MAX_ENV_BYTES`]).
     env_bytes: usize,
     comp_root: PathBuf,
@@ -365,7 +368,7 @@ impl Builder {
         let mut b = Builder {
             cfg: BuildConfig { root: root.to_path_buf(), build_file: Some(build_file.to_path_buf()), ..Default::default() },
             cur: None,
-            env: env.clone(),
+            env: Arc::new(env.clone()),
             env_bytes: 0,
             comp_root: root.to_path_buf(),
             base_change: None,
@@ -383,9 +386,9 @@ impl Builder {
             switches: Vec::new(),
             path_maps: Vec::new(),
         };
-        b.env.insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
+        Arc::make_mut(&mut b.env).insert("DVICODE_PROJECT_LOC".into(), root.display().to_string());
         if let Some(p) = root.parent() {
-            b.env.insert("DVICODE_PROJECT_PARENT_LOC".into(), p.display().to_string());
+            Arc::make_mut(&mut b.env).insert("DVICODE_PROJECT_PARENT_LOC".into(), p.display().to_string());
         }
         b
     }
@@ -925,10 +928,13 @@ impl Builder {
 
     fn setenv(&mut self, kv: &str, overwrite: bool) {
         if let Some((k, v)) = kv.split_once('=') {
-            let mut v = self.expand(v, false).unwrap_or_else(|| v.to_string());
-            if self.env_bytes + v.len() > MAX_ENV_BYTES {
-                // Variables copied into many others: what is written, not what it expands to.
-                v = kv[k.len() + 1..].to_string();
+            let v = self.expand(v, false).unwrap_or_else(|| v.to_string());
+            if v.len() > MAX_EXPANDED || self.env_bytes + v.len() > MAX_ENV_BYTES {
+                // Variables doubled or copied into many others.
+                if !self.inspecting {
+                    log::debug!("build: environment {k} not set: too long");
+                }
+                return;
             }
             if overwrite || !(self.env.contains_key(k) || std::env::var_os(k).is_some()) {
                 if !self.inspecting {
@@ -936,7 +942,7 @@ impl Builder {
                     log::debug!("build: environment {k} set");
                 }
                 self.env_bytes += v.len();
-                self.env.insert(k.to_string(), v.trim_matches('"').to_string());
+                Arc::make_mut(&mut self.env).insert(k.to_string(), v.trim_matches('"').to_string());
             } else if !self.inspecting {
                 log::debug!("build: environment {k} already set, kept");
             }
@@ -1310,6 +1316,7 @@ No command line found in the log: no defines from it.");
     fn undefined(&mut self, file: &Path, line: u32, p: &str) {
         let msg = match undefined_var(p, &self.env) {
             Some(v) => format!("Environment variable {v} is not set (in {p}); set it before starting VS Code or with +dvicode_setenv+{v}=<value>"),
+            None if expand_env(p, &self.env, false).is_none() => format!("{p} expands to more than {} MB", MAX_EXPANDED >> 20),
             None => format!("Undefined environment variable in {p}"),
         };
         self.problem(file, line, msg);
@@ -1396,6 +1403,9 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
         }
         out.push(c);
         i += 1;
+    }
+    if out.len() > MAX_EXPANDED {
+        return None;
     }
     Some(String::from_utf8_lossy(&out).into_owned())
 }

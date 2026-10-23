@@ -92,13 +92,18 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
         i += 1;
     }
     let mut out = Vec::new();
-    let mut seen = Seen::default();
+    let mut seen = Seen { steps_left: MAX_STEPS, ..Default::default() };
     walk(&base, &comps[i..], &mut out, 0, &mut seen);
     out
 }
 
+/// Folders one pattern visits at most: links that lead back up, met by `*` rather than `**`,
+/// could otherwise give millions of paths to two folders.
+const MAX_STEPS: usize = 1_000_000;
+
 #[derive(Default)]
 struct Seen {
+    steps_left: usize,
     /// Each folder with the part of the pattern left there, walked once: `a/**/b/**/c` can
     /// otherwise reach the same folder at the same point of the pattern in many ways.
     states: FxHashSet<(PathBuf, usize)>,
@@ -109,9 +114,10 @@ struct Seen {
 }
 
 fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen: &mut Seen) {
-    if depth > 64 || !seen.states.insert((dir.to_path_buf(), rest.len())) {
+    if depth > 64 || seen.steps_left == 0 || !seen.states.insert((dir.to_path_buf(), rest.len())) {
         return;
     }
+    seen.steps_left -= 1;
     let Some(first) = rest.first() else {
         out.push(dir.to_path_buf());
         return;
@@ -242,6 +248,10 @@ mod tests {
         let found = expand(&dir.join("**/*.sv"));
         assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
         assert!(found.len() <= 8 && found.iter().any(|p| p.ends_with("a/a.sv")) && found.iter().any(|p| p.ends_with("b/b.sv")), "{found:?}");
+        // `*` through the same links: 2^22 paths to two folders.
+        let t = std::time::Instant::now();
+        assert!(expand(&dir.join(format!("{}missing.sv", "*/".repeat(22)))).is_empty());
+        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
         // One target reached twice, with different parts of the pattern left: p/a/link while
         // `rtl` is still to come, p/z/rtl/link after it.
         let p = dir.join("p");

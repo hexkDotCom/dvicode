@@ -565,8 +565,16 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
       }
     }),
     vscode.workspace.onDidChangeConfiguration(() => offerRestart(ctx)),
-    // The workspace's own engine settings (and dvicode:// targets) apply from now on.
-    vscode.workspace.onDidGrantWorkspaceTrust(() => restart(ctx)),
+    // The workspace's own engine settings (and dvicode:// targets) apply from now on: start
+    // the engine that was refused, or offer a restart when the settings differ (a TCP engine
+    // serves one client and would not take the new one).
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      if (client?.isRunning()) {
+        offerRestart(ctx);
+      } else {
+        void restart(ctx);
+      }
+    }),
   );
   const api: DvicodeApi = {
     ready: () => ensureClient(ctx),

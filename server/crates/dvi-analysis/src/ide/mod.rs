@@ -240,14 +240,15 @@ impl Analysis {
         let (p, root) = (self.vfs.path(file), &self.setup.root);
         // Drive letters and folder names may differ in case on Windows.
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
-        let inside = |p: &Path, root: &Path| p.starts_with(root) || cfg!(windows) && lower(p).starts_with(lower(root));
-        if !inside(&p, root) {
+        if !(p.starts_with(root) || cfg!(windows) && lower(&p).starts_with(lower(root))) {
             return false;
         }
         // A link in the folder to a file outside it (shared IP): not the folder's to change.
+        // Canonical paths have the names' real case, so they compare exactly (a folder where
+        // case matters may hold both `Work` and `work`); one that cannot be found is not edited.
         match (std::fs::canonicalize(&p), std::fs::canonicalize(root)) {
-            (Ok(p), Ok(root)) => inside(&p, &root),
-            _ => true,
+            (Ok(p), Ok(root)) => p.starts_with(root),
+            _ => false,
         }
     }
 

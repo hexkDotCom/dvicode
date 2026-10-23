@@ -106,7 +106,8 @@ fn main() {
         i += 1;
     }
     logger::init(log_level, log_file.as_deref());
-    let token = token.or_else(|| std::env::var("DVICODE_TOKEN").ok());
+    // An empty token is none (it would be a token everyone knows).
+    let token = token.or_else(|| std::env::var("DVICODE_TOKEN").ok()).filter(|t| !t.is_empty());
     let (conn, io_threads) = match listen {
         Some(addr) => match transport::listen(&addr, token.as_deref()) {
             Ok(x) => x,

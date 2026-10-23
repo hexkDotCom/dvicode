@@ -441,7 +441,8 @@ impl Analysis {
         let spans = self.reference_spans(file, off, true);
         // A use in a library outside the workspace would be left behind, or the library
         // changed: neither is what the user asked for.
-        if let Some(s) = spans.iter().find(|s| !self.is_editable(s.file)) {
+        let mut checked: FxHashMap<FileId, bool> = FxHashMap::default();
+        if let Some(s) = spans.iter().find(|s| !*checked.entry(s.file).or_insert_with(|| self.is_editable(s.file))) {
             return Err(format!("Renaming would change {}, which is outside the workspace", self.vfs.path(s.file).display()));
         }
         let mut seen = FxHashSet::default();

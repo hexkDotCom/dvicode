@@ -2,7 +2,7 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use lsp_server::{Connection, Message};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 /// Compares in time that depends only on the lengths, not on where the bytes differ.
 fn same_secret(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// An accept error that concerns only the client that went away (it reset the connection
+/// before it was accepted): the server keeps listening.
+fn one_client(e: &std::io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::TimedOut)
 }
 
 /// Handshakes still running at once; more connections are closed straight away.
@@ -34,8 +40,9 @@ fn accept_with_token(listener: &TcpListener, token: &str) -> Result<(TcpStream, 
         }
         let (stream, peer) = match listener.accept() {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e.to_string()),
+            Err(e) if e.kind() == ErrorKind::WouldBlock || one_client(&e) => continue,
+            // A handshake that has just succeeded still wins.
+            Err(e) => return rx.try_recv().map_err(|_| e.to_string()),
         };
         if pending.load(Ordering::SeqCst) >= MAX_PENDING || stream.set_nonblocking(false).is_err() {
             log::warn!("rejected client {peer}: too many handshakes");
@@ -64,6 +71,7 @@ fn read_token_line(mut stream: &TcpStream) -> Option<Vec<u8>> {
         let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
         stream.set_read_timeout(Some(left)).ok()?;
         match stream.read(&mut b) {
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Ok(1) if b[0] == b'\n' => {
                 stream.set_read_timeout(None).ok()?;
                 if line.last() == Some(&b'\r') {
@@ -104,7 +112,7 @@ impl IoThreads {
 pub fn listen(addr: &str, token: Option<&str>) -> Result<(Connection, IoThreads), String> {
     let listener = TcpListener::bind(addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
     let local = listener.local_addr().map_err(|e| e.to_string())?;
-    if token.is_none() && !local.ip().is_loopback() {
+    if token.is_none() && !local.ip().to_canonical().is_loopback() {
         // Whoever connected first could read and write every file this account can.
         return Err(format!("refusing to listen on {local} without a token: set DVICODE_TOKEN, or listen on 127.0.0.1 and tunnel"));
     }
@@ -115,7 +123,13 @@ pub fn listen(addr: &str, token: Option<&str>) -> Result<(Connection, IoThreads)
         log::warn!("no token: any program on this machine can connect to {local}; set DVICODE_TOKEN");
     }
     let (stream, peer) = match token {
-        None => listener.accept().map_err(|e| e.to_string())?,
+        None => loop {
+            match listener.accept() {
+                Ok(c) => break c,
+                Err(e) if one_client(&e) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        },
         Some(t) => accept_with_token(&listener, t)?,
     };
     let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);

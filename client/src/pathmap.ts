@@ -193,6 +193,14 @@ export function makeMapper(opts: MapperOptions): Mapper {
   };
 }
 
+/** Host and port of `host:port`, `[v6]:port` or a bare port (on 127.0.0.1). */
+export function tcpEndpoint(address: string): { host: string; port: number } {
+  const i = address.lastIndexOf(':');
+  // `[::1]:7777`: the brackets only delimit an IPv6 address.
+  const host = i > 0 ? address.slice(0, i).replace(/^\[(.*)\]$/, '$1') : '127.0.0.1';
+  return { host: host.toLowerCase(), port: Number(i >= 0 ? address.slice(i + 1) : address) };
+}
+
 /** Whether a host is this machine: localhost, 127.0.0.0/8, ::1 (also as ::ffff:127.x.x.x). */
 export function isLoopback(host: string): boolean {
   const h = host.replace(/^\[(.*)\]$/, '$1').toLowerCase();

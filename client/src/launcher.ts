@@ -11,7 +11,7 @@ import * as net from 'net';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Executable, ServerOptions, StreamInfo } from 'vscode-languageclient/node';
-import { identityMapper, isLoopback, makeMapper, Mapper, parseWslUri, PathMapping } from './pathmap';
+import { identityMapper, isLoopback, makeMapper, Mapper, parseWslUri, PathMapping, tcpEndpoint } from './pathmap';
 
 export type Mode = 'local' | 'wsl' | 'ssh' | 'tcp' | 'custom';
 
@@ -228,13 +228,15 @@ export function closeTcpConnections(): void {
   sockets.clear();
 }
 
+function sameEndpoint(a: string, b: string): boolean {
+  const [x, y] = [tcpEndpoint(a), tcpEndpoint(b)];
+  return x.host === y.host && x.port === y.port;
+}
+
 function tcpStream(address: string, token: string): () => Promise<StreamInfo> {
   return () =>
     new Promise((resolve, reject) => {
-      const i = address.lastIndexOf(':');
-      // `[::1]:7777`: the brackets only delimit an IPv6 address.
-      const host = i > 0 ? address.slice(0, i).replace(/^\[(.*)\]$/, '$1') : '127.0.0.1';
-      const port = Number(i >= 0 ? address.slice(i + 1) : address);
+      const { host, port } = tcpEndpoint(address);
       const socket = net.connect({ host, port }, () => {
         if (token) {
           socket.write(`DVICODE-TOKEN ${token}\n`);
@@ -265,7 +267,8 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
       // In Restricted Mode the folder may come from an untrusted .code-workspace file: it may
       // only name the SSH host or TCP address of the user's own settings, so that an engine
       // (and the TCP token) is never reached at a place the workspace chose.
-      if (ra.kind !== 'wsl' && !vscode.workspace.isTrusted && ra.target !== (ra.kind === 'ssh' ? cfg.sshHost : cfg.tcpAddress)) {
+      const own = ra.kind === 'ssh' ? ra.target === cfg.sshHost : ra.kind === 'tcp' && sameEndpoint(ra.target, cfg.tcpAddress);
+      if (ra.kind !== 'wsl' && !vscode.workspace.isTrusted && !own) {
         throw new Error(`this workspace names the ${ra.kind} engine ${ra.target}; trust the workspace to connect to it`);
       }
       remoteAuthority = folder.authority;
