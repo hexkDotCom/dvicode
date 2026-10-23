@@ -739,9 +739,16 @@ struct Gate {
 }
 
 impl Gate {
+    /// Hooks that hold updates.
     fn hooks(self: &Arc<Self>) -> Hooks {
         let g = self.clone();
-        Hooks { before_update: Some(Box::new(move || g.pass())) }
+        Hooks { before_update: Some(Box::new(move || g.pass())), ..Default::default() }
+    }
+
+    /// Hooks that hold the handlers of requests `method`.
+    fn request_hooks(self: &Arc<Self>, method: &'static str) -> Hooks {
+        let g = self.clone();
+        Hooks { before_request: Some(Box::new(move |m| if m == method { g.pass() })), ..Default::default() }
     }
 
     fn pass(&self) {
@@ -861,5 +868,91 @@ fn shutdown_is_answered_while_an_update_runs() {
     gate.close();
     c.open(&uri(&root, "top.sv"), 1, TOP);
     gate.wait_entered(1);
+    c.shutdown();
+}
+
+fn cancel(c: &Client, id: &RequestId) {
+    c.notify("$/cancelRequest", json!({ "id": serde_json::to_value(id).unwrap() }));
+}
+
+fn error_code(r: &Response) -> Option<i32> {
+    r.error.as_ref().map(|e| e.code)
+}
+
+#[test]
+fn a_cancelled_request_gets_a_cancellation_error() {
+    let root = project("cancelwaiting", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, TOP);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    gate.close();
+    c.change(&top, 2, FRESH);
+    let waiting = fresh_definition(&mut c, &top, FRESH);
+    gate.wait_entered(2);
+    // Cancelled while it waits for the update: answered at once, the update still held.
+    cancel(&c, &waiting);
+    let r = c.reply(&waiting, WAIT).expect("a reply to the cancelled request");
+    assert_eq!(error_code(&r), Some(ErrorCode::RequestCanceled as i32), "{r:?}");
+    gate.open();
+    // Once only; later requests are answered as usual.
+    let r = c.request_ok("textDocument/definition", json!({ "textDocument": { "uri": top }, "position": at(FRESH, "fresh = 2") }));
+    assert_eq!(r[0]["range"]["start"]["line"], 2, "{r}");
+    assert!(c.reply(&waiting, Duration::from_millis(200)).is_none(), "a second reply");
+    c.shutdown();
+}
+
+#[test]
+fn a_request_cancelled_while_its_handler_runs_gets_a_cancellation_error() {
+    let root = project("cancelrunning", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.request_hooks("textDocument/references"));
+    let pkg = uri(&root, "pkg.sv");
+    let params = json!({ "textDocument": { "uri": pkg }, "position": at(PKG, "twice"), "context": { "includeDeclaration": true } });
+    gate.close();
+    let id = c.send_request("textDocument/references", params.clone());
+    gate.wait_entered(1);
+    cancel(&c, &id);
+    // Cancelling an answered or unknown request changes nothing.
+    cancel(&c, &RequestId::from(9999));
+    gate.open();
+    let r = c.reply(&id, WAIT).expect("a reply to the cancelled request");
+    assert_eq!(error_code(&r), Some(ErrorCode::RequestCanceled as i32), "{r:?}");
+    let refs = c.request_ok("textDocument/references", params);
+    assert_eq!(refs.as_array().map(|r| r.len()), Some(2), "{refs}");
+    c.shutdown();
+}
+
+#[test]
+fn a_waiting_request_about_a_position_is_dropped_when_its_document_changes() {
+    let root = project("contentmodified", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, TOP);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    gate.close();
+    c.change(&top, 2, FRESH);
+    let at_position = fresh_definition(&mut c, &top, FRESH);
+    let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
+    gate.wait_entered(2);
+    // Its position is in text that is gone; a request about the whole document goes on.
+    c.change(&top, 3, &FRESH.replace("  int fresh;
+", "  int fresh;
+  int more;
+"));
+    let r = c.reply(&at_position, WAIT).expect("a reply to the dropped request");
+    assert_eq!(error_code(&r), Some(ErrorCode::ContentModified as i32), "{r:?}");
+    assert!(c.reply(&symbols, Duration::from_millis(200)).is_none());
+    gate.open();
+    let r = c.reply(&symbols, WAIT).expect("symbols once the update is in");
+    let names: Vec<&str> = r.result.as_ref().and_then(|v| v[0]["children"].as_array()).into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
+    assert!(names.contains(&"more"), "{names:?}");
     c.shutdown();
 }

@@ -897,7 +897,7 @@ impl Analysis {
 
     /// A file and the files it includes, as the walk's query asks; `None` when it is left out.
     fn file_walk(&self, f: FileId, kind: &str, by_parent: &FxHashMap<FileId, Vec<FileId>>, visited: &mut FxHashSet<FileId>, w: &mut Walk) -> Option<FileNode> {
-        if w.stopped() || !w.visit() {
+        if w.stopped() || !w.visit() || self.cancelled() {
             return None;
         }
         let reserved = w.reserve(false)?;
@@ -1034,6 +1034,9 @@ impl Analysis {
     #[allow(clippy::too_many_arguments)]
     fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>) -> Vec<HierNode> {
         let mut out = Vec::new();
+        if self.cancelled() {
+            return out;
+        }
         let u = self.unit(scope.unit);
         let mut todo: Vec<DeclId> = u.parsed.decl(scope.decl).children.clone();
         todo.reverse();
@@ -1584,6 +1587,9 @@ impl Analysis {
     /// A creation of a component being built: a child (constructed now), or an object.
     #[allow(clippy::too_many_arguments)]
     fn instantiate(&self, inst: &mut Inst, built: &Built, m: &Made, cursor: usize, factory: &mut Factory, nodes: &mut usize, stack: &mut Vec<(u32, u32)>, scan: &Scan) {
+        if self.cancelled() {
+            return;
+        }
         let name = m.cr.name.clone().unwrap_or_else(|| m.cr.lhs.trim_start_matches("this.").to_string());
         let path = format!("{}.{name}", inst.path);
         let path_known = inst.path_known && m.cr.name.is_some();
@@ -1702,6 +1708,9 @@ impl Analysis {
     /// whole build, for what the run-time phases make.
     #[allow(clippy::too_many_arguments)]
     fn emit(&self, inst: &Inst, pin: Option<&[String]>, w: &mut Walk, truncated: &mut bool, ports_hidden: &mut u32, stack: &mut Vec<(u32, u32)>, scan: &Scan, run_factory: &Factory) -> Vec<VerifNode> {
+        if self.cancelled() {
+            return Vec::new();
+        }
         if inst.cut {
             // Creations beyond a budget or the call depth are missing.
             *truncated = true;

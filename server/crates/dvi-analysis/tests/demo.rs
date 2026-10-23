@@ -291,3 +291,24 @@ fn quick_fixes_in_classes() {
     let fixed = apply(&a, file, &fixes[2].edits);
     assert!(fixed.contains("  function void f();\n    int tmp;\n    cuont++;"), "{fixed}");
 }
+
+/// A copy whose request is cancelled: searches over the project stop and find (next to)
+/// nothing; the snapshot it was copied from is not affected.
+#[test]
+fn searches_of_a_cancelled_request_stop() {
+    let a = build(".dvicode/default.build");
+    let mut c = a.clone();
+    c.cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    assert!(c.cancelled() && !a.cancelled());
+    let (f, o) = at(&a, "rtl/demo_pkg.sv", 6, "IDLE");
+    assert_eq!(a.references(f, o, false).len(), 2);
+    assert!(c.references(f, o, false).is_empty());
+    let (f, o) = at(&a, "tb/tb_pkg.sv", 46, "run");
+    let run = a.callable_at(f, o).unwrap();
+    assert!(!a.incoming_calls(run).is_empty() && c.incoming_calls(run).is_empty());
+    assert!(!a.workspace_symbols("module:", 50).is_empty() && c.workspace_symbols("module:", 50).is_empty());
+    assert!(!a.verification_hierarchy(None, 1000).roots[0].children.is_empty());
+    assert!(c.verification_hierarchy(None, 1000).roots.iter().all(|r| r.children.is_empty()));
+    assert!(c.design_hierarchy(None, 1000).iter().all(|r| r.children.is_empty()));
+    assert!(!a.design_hierarchy(None, 1000).iter().all(|r| r.children.is_empty()));
+}

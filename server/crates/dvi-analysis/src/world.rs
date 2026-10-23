@@ -168,6 +168,9 @@ pub struct Analysis {
     pub out_of_block: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
     /// The class each factory name registers (`class_by_factory_name`), as asked.
     pub factory_names: Arc<std::sync::Mutex<FxHashMap<SmolStr, Option<DeclRef>>>>,
+    /// Set by the server on the copy that answers a request: when the request is cancelled,
+    /// searches over the whole project stop early (see `Analysis::cancelled`).
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 const PRELUDE: &str = include_str!("prelude.sv");
@@ -375,6 +378,7 @@ impl Analysis {
             instance_defs: Arc::default(),
             out_of_block: Arc::default(),
             factory_names: Arc::default(),
+            cancel: None,
         };
         a.reindex();
         a.update_library_units(Some(progress));
@@ -620,6 +624,13 @@ impl Analysis {
 
     pub fn decl(&self, r: DeclRef) -> &dvi_syntax::ast::Decl {
         self.unit(r.unit).parsed.decl(r.decl)
+    }
+
+    /// The request this copy answers was cancelled. Searches that check it return what they
+    /// found so far, which the server throws away; they must not be part of anything kept in
+    /// the snapshot (such as the `OnceLock` caches), which other copies share.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn units_of_file(&self, f: FileId) -> &[UnitId] {

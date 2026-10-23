@@ -119,6 +119,9 @@ impl Analysis {
         let mut groups = Groups::new();
         let mut seen: FxHashSet<Span> = FxHashSet::default();
         for u in self.units.iter().flatten() {
+            if self.cancelled() {
+                break;
+            }
             if u.kind == UnitKind::Builtin {
                 continue;
             }

@@ -126,6 +126,9 @@ impl Analysis {
                 }
                 let mut seen = FxHashSet::default();
                 for u in self.units.iter().flatten() {
+                    if self.cancelled() {
+                        break;
+                    }
                     for mu in &u.macro_uses {
                         if mu.name == m.name && mu.def.as_ref().is_some_and(|d| d.name_span == m.name_span) && seen.insert(mu.name_span) {
                             out.push(macro_name(mu.name_span));
@@ -137,6 +140,9 @@ impl Analysis {
                 // has no other definition.
                 let unique = self.unique_macro(&m.name).is_some_and(|d| d.name_span == m.name_span);
                 for u in self.units.iter().flatten() {
+                    if self.cancelled() {
+                        break;
+                    }
                     for mn in &u.macro_names {
                         if mn.name == m.name && mn.def.as_ref().map_or(unique, |d| d.name_span == m.name_span) && seen.insert(mn.span) {
                             out.push(mn.span);
@@ -181,6 +187,9 @@ impl Analysis {
         let owner = d.parent.map(|p| DeclRef { unit: r.unit, decl: p }).filter(|o| d.kind == DeclKind::Port && self.decl(*o).kind.is_definition());
         let owner = owner.map(|o| self.decl_key(o));
         for u in self.units.iter().flatten() {
+            if self.cancelled() {
+                break;
+            }
             for (i, x) in u.parsed.decls.iter().enumerate() {
                 if x.kind != DeclKind::Instance || !x.has(dflags::DOT_STAR) {
                     continue;
@@ -204,6 +213,9 @@ impl Analysis {
         let key = self.decl_key(self.canonical(r));
         let name = &self.decl(r).name;
         for u in self.units.iter().flatten() {
+            if self.cancelled() {
+                break;
+            }
             let Some(occ) = u.names.get(name) else { continue };
             for (rid, seg) in occ {
                 let s = &u.parsed.reference(*rid).segs[*seg as usize];
@@ -267,6 +279,9 @@ impl Analysis {
         }
         let mut visited_files: FxHashMap<FileId, u32> = FxHashMap::default();
         for u in self.units.iter().flatten() {
+            if self.cancelled() {
+                break;
+            }
             if u.kind == UnitKind::Builtin {
                 continue;
             }

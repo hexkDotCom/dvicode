@@ -167,6 +167,9 @@ impl Analysis {
         let want = |k: &str| filter.as_deref().map_or(true, |f| f == k);
         let extends_filter = filter.as_deref() == Some("extends");
         for u in self.units.iter().flatten() {
+            if self.cancelled() {
+                break;
+            }
             if u.kind == UnitKind::Builtin {
                 continue;
             }

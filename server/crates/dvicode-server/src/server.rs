@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -158,8 +159,11 @@ struct Updated {
 
 /// A request that waits for edits to be analysed (see `Server::spawn`).
 struct Deferred {
+    id: RequestId,
     /// The file it is about; `None`: it waits until every edit is analysed.
     file: Option<FileId>,
+    /// It names a position or range in the file, which a later edit makes meaningless.
+    positional: bool,
     /// Answers it from a snapshot.
     run: Box<dyn FnOnce(Arc<Analysis>) + Send>,
 }
@@ -169,7 +173,12 @@ struct Deferred {
 pub(crate) struct Hooks {
     /// Called on the update thread before each update.
     pub before_update: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called on a worker thread before a request's handler runs, with the method.
+    pub before_request: Option<Box<dyn Fn(&str) + Send + Sync>>,
 }
+
+/// The requests being answered, and the flags that cancel them.
+type Running = Arc<Mutex<FxHashMap<RequestId, Arc<AtomicBool>>>>;
 
 struct Server {
     sender: Sender<Message>,
@@ -212,6 +221,9 @@ struct Server {
     update_seq: u64,
     /// Requests waiting for the running update, in arrival order.
     deferred: Vec<Deferred>,
+    /// Requests handed to a handler (waiting or not), until answered.
+    running: Running,
+    hooks: Arc<Hooks>,
     /// A full build was installed and is announced (status, all problems) once the edits made
     /// while it ran are applied too; the error message when it failed.
     announce: Option<Option<String>>,
@@ -260,8 +272,9 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let analysis = Arc::new(Analysis::build(vfs.clone(), empty_setup));
     let (events_tx, events_rx) = unbounded();
     let (update_tx, update_rx) = unbounded();
+    let hooks = Arc::new(hooks);
     {
-        let (events, client, hooks) = (events_tx.clone(), conn.sender.clone(), Arc::new(hooks));
+        let (events, client, hooks) = (events_tx.clone(), conn.sender.clone(), hooks.clone());
         std::thread::Builder::new()
             .name("dvicode-update".into())
             .stack_size(64 << 20)
@@ -300,6 +313,8 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         update: None,
         update_seq: 0,
         deferred: Vec::new(),
+        running: Running::default(),
+        hooks,
         announce: None,
     };
     s.start_build();
@@ -651,6 +666,7 @@ impl Server {
     /// Records that a file's text changed: analysed after the debounce, and replayed onto
     /// the result of a running full build.
     fn note_change(&mut self, id: FileId) {
+        self.drop_deferred(&[], Some(id));
         self.pending.insert(id);
         self.pending_since.get_or_insert_with(Instant::now);
         if self.building {
@@ -867,6 +883,19 @@ impl Server {
 
     fn on_notification(&mut self, n: Notification) {
         match n.method.as_str() {
+            "$/cancelRequest" => {
+                let Ok(p) = serde_json::from_value::<CancelParams>(n.params) else { return };
+                let id = match p.id {
+                    NumberOrString::Number(n) => RequestId::from(n),
+                    NumberOrString::String(s) => RequestId::from(s),
+                };
+                if self.deferred.iter().any(|d| d.id == id) {
+                    self.drop_deferred(&[id], None);
+                } else if let Some(c) = self.running.lock().unwrap().get(&id) {
+                    // Answered by its worker thread.
+                    c.store(true, Ordering::Relaxed);
+                }
+            }
             "textDocument/didOpen" => {
                 let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = path_of(&p.text_document.uri) else { return };
@@ -1040,6 +1069,7 @@ impl Server {
         R: Serialize,
     {
         let id = req.id.clone();
+        let positional = req.params.get("position").is_some() || req.params.get("range").is_some();
         let params: P = match serde_json::from_value(req.params) {
             Ok(p) => p,
             Err(e) => {
@@ -1047,20 +1077,40 @@ impl Server {
                 return;
             }
         };
-        let sender = self.sender.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.running.lock().unwrap().insert(id.clone(), cancel.clone());
+        let (sender, running, hooks) = (self.sender.clone(), self.running.clone(), self.hooks.clone());
         let method = req.method.clone();
+        let rid = id.clone();
         let run = move |a: Arc<Analysis>| {
             rayon::spawn(move || {
                 let t0 = Instant::now();
-                let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
-                    Some(Ok(v)) => Response::new_ok(id, v),
-                    Some(Err(msg)) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
-                    None => Response::new_err(id, ErrorCode::InternalError as i32, format!("{method} failed")),
+                if let Some(h) = &hooks.before_request {
+                    h(&method);
+                }
+                // Not started when it was cancelled while it waited for a thread; its result is
+                // thrown away when it was cancelled while it ran (long searches stop early).
+                let resp = if cancel.load(Ordering::Relaxed) {
+                    cancelled(rid)
+                } else {
+                    let mut a = (*a).clone();
+                    a.cancel = Some(cancel.clone());
+                    let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
+                        Some(Ok(v)) => Response::new_ok(rid, v),
+                        Some(Err(msg)) => Response::new_err(rid, ErrorCode::RequestFailed as i32, msg),
+                        None => Response::new_err(rid, ErrorCode::InternalError as i32, format!("{method} failed")),
+                    };
+                    if cancel.load(Ordering::Relaxed) {
+                        cancelled(resp.id)
+                    } else {
+                        resp
+                    }
                 };
                 let ms = t0.elapsed().as_millis();
                 if ms > 200 {
                     log::info!("{method} took {ms} ms");
                 }
+                running.lock().unwrap().remove(&resp.id);
                 let _ = sender.send(Message::Response(resp));
             })
         };
@@ -1068,10 +1118,29 @@ impl Server {
             Some(file) if self.waits(file) => {
                 // Its edits are analysed now, not after the pause in typing.
                 self.flush_pending();
-                self.deferred.push(Deferred { file, run: Box::new(run) });
+                self.deferred.push(Deferred { id, file, positional, run: Box::new(run) });
             }
             _ => run(self.analysis.clone()),
         }
+    }
+
+    /// Answers waiting requests that will not be answered: they were cancelled (`ids`), or
+    /// they name a position in `file`, which changed since they were sent.
+    fn drop_deferred(&mut self, ids: &[RequestId], file: Option<FileId>) {
+        let mut kept = Vec::new();
+        for d in std::mem::take(&mut self.deferred) {
+            let resp = if ids.contains(&d.id) {
+                cancelled(d.id)
+            } else if d.positional && file.is_some() && d.file == file {
+                Response::new_err(d.id, ErrorCode::ContentModified as i32, "the document changed".into())
+            } else {
+                kept.push(d);
+                continue;
+            };
+            self.running.lock().unwrap().remove(&resp.id);
+            self.send(Message::Response(resp));
+        }
+        self.deferred = kept;
     }
 
     /// The document a request is about (`textDocument.uri`), when the server knows it.
@@ -1326,6 +1395,11 @@ impl Server {
             }
         }
     }
+}
+
+/// The reply to a cancelled request.
+fn cancelled(id: RequestId) -> Response {
+    Response::new_err(id, ErrorCode::RequestCanceled as i32, "cancelled".into())
 }
 
 /// Applies edits to snapshots, one job after another, away from the loop that reads the
