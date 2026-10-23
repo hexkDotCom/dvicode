@@ -34,6 +34,33 @@ pub struct MacroDef {
 }
 
 impl MacroDef {
+    /// Whether `other` defines the macro the same way: what [`MacroDef::signature`] and the body
+    /// text show, compared without building strings (macro tables of thousands of definitions
+    /// are compared after edits).
+    pub fn same_as(&self, other: &MacroDef) -> bool {
+        let same_tokens = |a: &[Token], b: &[Token]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.kind == y.kind && x.text == y.text && x.ws_before() == y.ws_before())
+                || join_tokens(a) == join_tokens(b)
+        };
+        self.body_text == other.body_text
+            && self.name == other.name
+            && match (&self.params, &other.params) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.len() == b.len()
+                        && a.iter().zip(b).all(|(x, y)| {
+                            x.name == y.name
+                                && match (&x.default, &y.default) {
+                                    (None, None) => true,
+                                    (Some(dx), Some(dy)) => same_tokens(dx, dy),
+                                    _ => false,
+                                }
+                        })
+                }
+                _ => false,
+            }
+    }
+
     pub fn signature(&self) -> String {
         match &self.params {
             None => format!("`define {}", self.name),
@@ -124,7 +151,7 @@ impl MacroTable {
         }
         self.0.len() == other.0.len()
             && self.0.iter().all(|(k, a)| {
-                other.0.get(k).is_some_and(|b| Arc::ptr_eq(a, b) || (a.body_text == b.body_text && a.signature() == b.signature()))
+                other.0.get(k).is_some_and(|b| Arc::ptr_eq(a, b) || a.same_as(b))
             })
     }
 }

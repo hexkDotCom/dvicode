@@ -913,7 +913,7 @@ impl Analysis {
                 if let (Some(o), Some((pp, _))) = (old, &job) {
                     for (name, od) in o.macros_after.iter() {
                         if let Some(nd) = pp.macros_after.get(name) {
-                            if !Arc::ptr_eq(od, nd) && od.body_text == nd.body_text && od.signature() == nd.signature() {
+                            if !Arc::ptr_eq(od, nd) && od.same_as(nd) {
                                 moved.insert(def_identity(od), nd.clone());
                             }
                         }

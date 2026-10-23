@@ -2510,3 +2510,37 @@ fn library_cells_are_compiled_in_reference_order() {
         assert!(problems(&a).is_empty(), "{:?}", problems(&a));
     }
 }
+
+#[test]
+fn macro_definitions_compare_as_their_signatures_and_bodies() {
+    use dvi_syntax::preproc::{preprocess, MacroTable, PpConfig};
+    let vfs = Vfs::new();
+    let def = |n: usize, text: &str| {
+        let id = vfs.set_overlay(std::path::Path::new(&format!("/m{n}.svh")), Arc::from(text));
+        preprocess(&vfs, &PpConfig::default(), id, MacroTable::new()).macros_after.get("M").unwrap().clone()
+    };
+    let texts = [
+        "`define M 1\n",
+        "`define M 2\n",
+        "`define M() 1\n",
+        "`define M(a) a\n",
+        "`define M(b) a\n",
+        "`define M(a=1) a\n",
+        "`define M(a=2) a\n",
+        "`define M(a = 1) a\n",
+        "`define M(a=1+2) a\n",
+        "`define M(a=1 +2) a\n",
+        "`define M(a=`X) a\n",
+        "`define M(a=X) a\n",
+        "`define M(a, b=c) a\n",
+        "`define M(a, b) a\n",
+        "`define M(a=) a\n",
+    ];
+    let defs: Vec<_> = texts.iter().enumerate().map(|(i, t)| def(i, t)).collect();
+    for (i, a) in defs.iter().enumerate() {
+        for (j, b) in defs.iter().enumerate() {
+            let old = a.body_text == b.body_text && a.signature() == b.signature();
+            assert_eq!(a.same_as(b), old, "{} vs {}", texts[i].trim(), texts[j].trim());
+        }
+    }
+}
