@@ -820,10 +820,12 @@ impl Server {
         }
         self.redirty.clear();
         // Files changed on disk while it ran that it may have read (an edit added an
-        // `include of them): they are compiled again.
+        // `include of them): they are compiled again; requests sent since wait for that.
         for f in std::mem::take(&mut self.changed_while_updating) {
             if !self.analysis.units_of_file(f).is_empty() {
                 self.note_change(f);
+            } else {
+                self.dirty.remove(&f);
             }
         }
         if self.announce.is_some() {
@@ -1151,6 +1153,9 @@ impl Server {
                             if !self.analysis.units_of_file(id).is_empty() {
                                 self.note_change(id);
                             } else if self.update.is_some() || self.built.is_some() {
+                                // Numbered now: a request sent after it waits for it.
+                                self.edit_seq += 1;
+                                self.dirty.entry(id).or_insert(self.edit_seq);
                                 self.changed_while_updating.insert(id);
                             }
                         }

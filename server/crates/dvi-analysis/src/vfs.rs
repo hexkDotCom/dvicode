@@ -450,15 +450,14 @@ impl Reader<'_> {
         }
     }
 
-    /// For a pin: the text it says the file has; `None` when it does not decide (no pin, or a
-    /// file that was not open then and is not now).
+    /// For a pin: the text it says the file has (the disk text of a file that was not open
+    /// then, also when it is opened while the reader reads); `None` without a pin.
     fn pinned_text(&self, id: FileId) -> Option<Option<Arc<str>>> {
         let p = self.pin?;
-        if let Some((o, _)) = p.overlays.get(&id) {
-            return Some(Some(o.clone()));
-        }
-        // Opened since: what was on disk counts.
-        self.vfs.has_overlay(id).then(|| self.vfs.disk_text(id))
+        Some(match p.overlays.get(&id) {
+            Some((o, _)) => Some(o.clone()),
+            None => self.vfs.disk_text(id),
+        })
     }
 }
 
@@ -495,10 +494,8 @@ impl SourceProvider for Reader<'_> {
     }
 
     fn is_file(&self, path: &Path) -> bool {
-        match self.vfs.lookup(path).and_then(|id| self.pinned_text(id)) {
-            Some(t) => t.is_some() || self.vfs.is_file_on_disk(path),
-            None => self.vfs.is_file(path),
-        }
+        let Some(pin) = self.pin else { return self.vfs.is_file(path) };
+        self.vfs.lookup(path).is_some_and(|id| pin.overlays.contains_key(&id)) || self.vfs.is_file_on_disk(path)
     }
 }
 

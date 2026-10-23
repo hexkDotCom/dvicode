@@ -847,8 +847,7 @@ fn a_newer_edit_replaces_the_update_in_progress() {
     c.request_ok("dvicode/serverInfo", Value::Null);
     let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
     gate.wait_entered(2);
-    let v3 = FRESH.replace("initial fresh = 2;", "initial fresh = 2;
-  initial undeclared_b = 1;");
+    let v3 = FRESH.replace("initial fresh = 2;", "initial fresh = 2;\n  initial undeclared_b = 1;");
     c.change(&top, 3, &v3);
     let waiting = fresh_definition(&mut c, &top, &v3);
     // Once the server has read the edit and replaced the held update, which stops as soon
@@ -966,15 +965,8 @@ fn a_waiting_request_about_a_position_is_dropped_when_its_document_changes() {
 
 #[test]
 fn a_problem_check_replaced_by_a_newer_one_stops_computing() {
-    let pkg = "package p;
-  typedef int t0;
-endpackage
-";
-    let user = |m: &str| format!("module {m};
-  import p::*;
-  initial x_{m} = 1;
-endmodule
-");
+    let pkg = "package p;\n  typedef int t0;\nendpackage\n";
+    let user = |m: &str| format!("module {m};\n  import p::*;\n  initial x_{m} = 1;\nendmodule\n");
     let (a, b, c3) = (user("a"), user("b"), user("c"));
     let root = project("problemjobs", &[("pkg.sv", pkg), ("a.sv", &a), ("b.sv", &b), ("c.sv", &c3)]);
     // Every file a check looks at: (check, file name, computed). The gate holds computations
@@ -1000,9 +992,7 @@ endmodule
     gate.wait_entered(1);
     // Closing a file outside the build that was open starts a check of every file.
     let scratch = uri(&root, "scratch.sv");
-    c.open(&scratch, 1, "module scratch;
-endmodule
-");
+    c.open(&scratch, 1, "module scratch;\nendmodule\n");
     c.wait_note("dvicode/revision", |_| true);
     c.notify("textDocument/didClose", json!({ "textDocument": { "uri": scratch } }));
     c.sync();
@@ -1073,11 +1063,8 @@ fn edits_analysed_during_a_build_stay_in_use_until_its_replay_is_done() {
 
 #[test]
 fn a_file_changed_on_disk_while_an_update_reads_it_is_read_again() {
-    let top_text = "module top;
-endmodule
-";
-    let root = project("watchupdate", &[("top.sv", top_text), ("h.svh", "  typedef int old_t;
-")]);
+    let top_text = "module top;\nendmodule\n";
+    let root = project("watchupdate", &[("top.sv", top_text), ("h.svh", "  typedef int old_t;\n")]);
     let gate = Arc::new(Gate::default());
     let _opener = Opener(gate.clone());
     let hooks = {
@@ -1092,21 +1079,18 @@ endmodule
     // The edit includes h.svh, which no snapshot compiles yet; its update has read it and is
     // held before it is installed when the header changes on disk.
     gate.close();
-    c.change(&top, 2, "module top;
-`include \"h.svh\"
-  new_t v;
-endmodule
-");
+    c.change(&top, 2, "module top;\n`include \"h.svh\"\n  new_t v;\nendmodule\n");
     let symbols = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
     gate.wait_entered(2);
-    std::fs::write(root.join("h.svh"), "  typedef int new_t;
-").unwrap();
+    std::fs::write(root.join("h.svh"), "  typedef int new_t;\n").unwrap();
     c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": uri(&root, "h.svh"), "type": 2 }] }));
+    // A request about the whole project, sent before the update is in, waits for the header
+    // to be read again.
+    let found = c.send_request("workspace/symbol", json!({ "query": "new_t" }));
     c.sync();
     gate.open();
     c.reply(&symbols, WAIT).expect("symbols once the update is in");
-    // The header is read again: a request about the whole project waits for that.
-    let found = c.request_ok("workspace/symbol", json!({ "query": "new_t" }));
+    let found = c.reply(&found, WAIT).expect("symbols of the project").result.unwrap_or(Value::Null);
     let found: Vec<&str> = found.as_array().into_iter().flatten().filter_map(|s| s["location"]["uri"].as_str()).collect();
     assert!(found.len() == 1 && found[0].ends_with("h.svh"), "{found:?}");
     c.shutdown();
@@ -1276,7 +1260,7 @@ fn typing_in_another_file_does_not_hold_up_a_waiting_request() {
 #[test]
 fn a_waiting_request_does_not_wait_for_a_pause_in_typing_elsewhere() {
     let other = "module other;\nendmodule\n";
-    let root = project("starve", &[("pkg.sv", PKG), ("top.sv", TOP), ("other.sv", other)]);
+    let root = project("pause", &[("pkg.sv", PKG), ("top.sv", TOP), ("other.sv", other)]);
     let gate = Arc::new(Gate::default());
     let _opener = Opener(gate.clone());
     let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
@@ -1288,8 +1272,9 @@ fn a_waiting_request_does_not_wait_for_a_pause_in_typing_elsewhere() {
     }
     // An update of top.sv is held; pkg.sv is edited and asked about meanwhile.
     gate.close();
-    c.change(&top, 2, FRESH);
+    // Counted before the edit, whose update may start with the pause in typing.
     let n = gate.entered.load(Ordering::SeqCst);
+    c.change(&top, 2, FRESH);
     let _ = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": top } }));
     gate.wait_entered(n + 1);
     let pkg2 = PKG.replace("BUSY", "BUSY, DONE");
