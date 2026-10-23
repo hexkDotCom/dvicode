@@ -30,7 +30,7 @@ on ARM, for example), use WSL or SSH, or build the engine there and set
 2. Update `version` in `client/package.json` and `server/Cargo.toml`, run `cargo update -w` in
    `server/` so that `server/Cargo.lock` has the new version too (the release builds use
    `--locked` and fail otherwise), and commit all three files.
-3. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
+3. Tag and push: `git tag v0.3.0 && git push origin main v0.3.0`.
 4. The workflow checks that the tag matches the version, builds everything, runs the engine
    on the demo project on Windows, Linux and macOS, and creates a GitHub pre-release with the
    packages attached.
@@ -54,8 +54,11 @@ packages you have tried (step 5 of [Making a release](#making-a-release)).
 Open VSX is the store used by VSCodium, Cursor, Windsurf, Gitpod and other VS Code forks. The
 `Release` workflow publishes to it with *trusted publishing*: Open VSX trusts the workflow
 itself, so no access token is stored in GitHub. Run the workflow by hand from the **Actions**
-tab with **publish** ticked; its `Publish to Open VSX` job publishes the packages built in that
-run. Re-running it skips versions that are already published.
+tab, **from `main`** (the `open-vsx` environment accepts only that branch: a run from the tag
+fails at once), with **publish** ticked; its `Publish to Open VSX` job waits for the reviewer's
+approval, then publishes the packages built in that run. Re-running it skips versions that are
+already published; if a job fails in a GitHub service step, start a new run rather than
+re-running the failed jobs.
 
 One-time setup:
 

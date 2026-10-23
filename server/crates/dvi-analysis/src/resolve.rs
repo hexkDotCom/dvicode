@@ -733,7 +733,57 @@ impl Analysis {
                 best_len = d.span.len();
             }
         }
+        if best == ParsedUnit::ROOT {
+            // A file included inside a scope (`include "body.svh"` in a module): the scope's
+            // extent is in the includer. The names written in this file know their scope: take
+            // the nearest one's, leaving the scopes of this file that end before `off`.
+            if let Some(s) = self.included_scope_at(unit, file, off) {
+                return s;
+            }
+        }
         best
+    }
+
+    fn included_scope_at(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32) -> Option<DeclId> {
+        let u = self.unit(unit);
+        // Anchors: the names used and declared in this file, with the scope each is in. The
+        // nearest one before `off`, else the first one after it.
+        let mut before: Option<(u32, DeclId)> = None;
+        let mut after: Option<(u32, DeclId)> = None;
+        let mut consider = |at: u32, scope: DeclId| {
+            if at <= off {
+                if before.is_none_or(|(b, _)| at >= b) {
+                    before = Some((at, scope));
+                }
+            } else if after.is_none_or(|(a, _)| at < a) {
+                after = Some((at, scope));
+            }
+        };
+        if let Some(pos) = u.positions.get(&file) {
+            let k = pos.refs.partition_point(|(s, _, _)| s.start <= off);
+            for (sp, rid, _) in pos.refs[k.saturating_sub(1)..].iter().take(2) {
+                consider(sp.start, u.parsed.reference(*rid).scope);
+            }
+            let k = pos.decls.partition_point(|d| u.parsed.decl(*d).name_span.start <= off);
+            for d in pos.decls[k.saturating_sub(1)..].iter().take(2).map(|d| u.parsed.decl(*d)) {
+                if let Some(p) = d.parent {
+                    consider(d.name_span.start, p);
+                }
+            }
+        }
+        let Some((_, mut s)) = before.or(after) else {
+            // Nothing written in it yet (blank, or comments): the scope where it is included.
+            let site = u.includes.iter().find(|i| i.resolved == Some(file) && i.span.file != file)?.span;
+            return Some(self.scope_at(unit, site.file, site.start));
+        };
+        loop {
+            let d = u.parsed.decl(s);
+            let inside = d.span.file != file || (d.span.start <= off && off <= d.span.end);
+            if inside || s == ParsedUnit::ROOT {
+                return Some(s);
+            }
+            s = d.parent?;
+        }
     }
 }
 
