@@ -258,3 +258,23 @@ fn renaming_a_macro_renames_its_use_in_an_include() {
     let texts = apply(&a, a.rename(f, off, "DEFS").unwrap());
     assert_eq!(texts["t.sv"], t.replace("HEADER", "DEFS"));
 }
+
+#[cfg(unix)]
+#[test]
+fn rename_does_not_change_a_linked_file_outside_the_workspace() {
+    // ws/lib_pkg.sv is a link to ../lib/lib_pkg.sv: inside by its path, outside by its file.
+    let base = std::env::temp_dir().join(format!("dvicode-rename-link-{}", std::process::id()));
+    let root = base.join("ws");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    std::fs::write(base.join("lib/lib_pkg.sv"), "package lib_pkg;\n  typedef int word_t;\nendpackage\n").unwrap();
+    std::os::unix::fs::symlink("../lib/lib_pkg.sv", root.join("lib_pkg.sv")).unwrap();
+    std::fs::write(root.join("top.sv"), "module top;\n  lib_pkg::word_t w;\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "lib_pkg.sv\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let (f, off) = at(&a, &root, "top.sv", "word_t", 0);
+    assert!(a.prepare_rename(f, off).is_none(), "declared in a file outside the workspace");
+    assert!(a.rename(f, off, "w32_t").is_err());
+}

@@ -565,6 +565,8 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
       }
     }),
     vscode.workspace.onDidChangeConfiguration(() => offerRestart(ctx)),
+    // The workspace's own engine settings (and dvicode:// targets) apply from now on.
+    vscode.workspace.onDidGrantWorkspaceTrust(() => restart(ctx)),
   );
   const api: DvicodeApi = {
     ready: () => ensureClient(ctx),

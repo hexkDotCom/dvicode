@@ -164,10 +164,12 @@ pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, Stri
 /// The largest build file or argument file read, and the largest compile log.
 const MAX_ARG_FILE: u64 = 256 << 20;
 const MAX_LOG: u64 = 2 << 30;
+/// The largest source file the auto-configuration scans.
+pub(crate) const MAX_SOURCE: u64 = 2 << 30;
 
 /// Reads a build input: a regular file (a FIFO or a device such as `/dev/zero` could block or
 /// never end) of at most `limit` bytes.
-fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Error, ErrorKind, Read};
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
@@ -247,6 +249,8 @@ struct Builder {
     cfg: BuildConfig,
     cur: Option<Invocation>,
     env: FxHashMap<String, String>,
+    /// Bytes of the values `+setenv` stored so far (bounded by [`MAX_ENV_BYTES`]).
+    env_bytes: usize,
     comp_root: PathBuf,
     /// Set by `+dvicode_compilation_root+` (the new base) and `+dvicode_init` (back to the
     /// file's own base) for the file being parsed.
@@ -362,6 +366,7 @@ impl Builder {
             cfg: BuildConfig { root: root.to_path_buf(), build_file: Some(build_file.to_path_buf()), ..Default::default() },
             cur: None,
             env: env.clone(),
+            env_bytes: 0,
             comp_root: root.to_path_buf(),
             base_change: None,
             uvm: None,
@@ -920,11 +925,17 @@ impl Builder {
 
     fn setenv(&mut self, kv: &str, overwrite: bool) {
         if let Some((k, v)) = kv.split_once('=') {
-            let v = self.expand(v, false).unwrap_or_else(|| v.to_string());
+            let mut v = self.expand(v, false).unwrap_or_else(|| v.to_string());
+            if self.env_bytes + v.len() > MAX_ENV_BYTES {
+                // Variables copied into many others: what is written, not what it expands to.
+                v = kv[k.len() + 1..].to_string();
+            }
             if overwrite || !(self.env.contains_key(k) || std::env::var_os(k).is_some()) {
                 if !self.inspecting {
-                    log::debug!("build: environment {k}={}", v.trim_matches('"'));
+                    // Not the value: it can come from a secret in the environment.
+                    log::debug!("build: environment {k} set");
                 }
+                self.env_bytes += v.len();
                 self.env.insert(k.to_string(), v.trim_matches('"').to_string());
             } else if !self.inspecting {
                 log::debug!("build: environment {k} already set, kept");
@@ -1321,6 +1332,12 @@ No command line found in the log: no defines from it.");
     }
 }
 
+/// The most one value or path expands to: `+setenv+A=${A}${A}` doubles at each line.
+const MAX_EXPANDED: usize = 1 << 20;
+/// The most all `+setenv` values of a build take; past it values are stored as written.
+const MAX_ENV_BYTES: usize = 64 << 20;
+
+/// Expands variables as `Builder::expand` does; `None` also past [`MAX_EXPANDED`] bytes.
 pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Option<String> {
     let lookup = |name: &str| -> Option<String> { env.get(name).cloned().or_else(|| std::env::var(name).ok()) };
     let b = s.as_bytes();
@@ -1354,6 +1371,7 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
                 continue;
             }
             match lookup(name) {
+                Some(v) if out.len() + v.len() > MAX_EXPANDED => return None,
                 Some(v) => out.extend_from_slice(v.as_bytes()),
                 None if strict => return None,
                 None => out.extend_from_slice(&b[i..end]),
@@ -1366,6 +1384,9 @@ pub fn expand_env(s: &str, env: &FxHashMap<String, String>, strict: bool) -> Opt
                 let name = &s[i + 1..i + 1 + e];
                 if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
                     if let Some(v) = lookup(name) {
+                        if out.len() + v.len() > MAX_EXPANDED {
+                            return None;
+                        }
                         out.extend_from_slice(v.as_bytes());
                         i += e + 2;
                         continue;
@@ -1828,6 +1849,23 @@ mod tests {
         assert_eq!(cfg.invocations[0].incdirs, vec![dir.join("sub/inc")]);
         // A new invocation starts from the project folder again.
         assert_eq!(cfg.invocations[1].files, vec![dir.join("b.sv")]);
+    }
+
+    #[test]
+    fn a_variable_that_doubles_itself_stops_growing() {
+        let dir = std::env::temp_dir().join(format!("dvicode-envdouble-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut text = String::from("+dvicode_setenv+DOUBLE=xxxxxxxxxxxxxxxx\n");
+        for _ in 0..64 {
+            text.push_str("+dvicode_setenv+DOUBLE=${DOUBLE}${DOUBLE}\n");
+        }
+        let t = std::time::Instant::now();
+        let _ = parse_build(&dir, &dir.join("x.build"), &text, &FxHashMap::default());
+        assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+        let mut env = FxHashMap::default();
+        env.insert("BIG".to_string(), "x".repeat(MAX_EXPANDED));
+        assert!(expand_env("${BIG}", &env, false).is_some());
+        assert_eq!(expand_env("${BIG}${BIG}", &env, false), None);
     }
 
     #[test]

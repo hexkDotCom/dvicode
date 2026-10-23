@@ -262,6 +262,12 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
   if (folder?.scheme === 'dvicode') {
     const ra = parseRemoteAuthority(folder.authority);
     if (ra) {
+      // In Restricted Mode the folder may come from an untrusted .code-workspace file: it may
+      // only name the SSH host or TCP address of the user's own settings, so that an engine
+      // (and the TCP token) is never reached at a place the workspace chose.
+      if (ra.kind !== 'wsl' && !vscode.workspace.isTrusted && ra.target !== (ra.kind === 'ssh' ? cfg.sshHost : cfg.tcpAddress)) {
+        throw new Error(`this workspace names the ${ra.kind} engine ${ra.target}; trust the workspace to connect to it`);
+      }
       remoteAuthority = folder.authority;
       mode = ra.kind;
       if (ra.kind === 'wsl') {

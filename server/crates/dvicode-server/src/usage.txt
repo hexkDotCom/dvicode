@@ -6,7 +6,8 @@ USAGE:
                                                 $DVICODE_TOKEN (or --token T, which other users
                                                 can see in the process list), the client must
                                                 send "DVICODE-TOKEN <T>\n" first. Without one,
-                                                anyone who can connect can read and write this
+                                                only a loopback HOST is accepted, and anyone on
+                                                this machine who connects can read and write this
                                                 account's files: use a token on shared machines.
   dvicode-server check <dir> [--build FILE] [-q] [--max N]
                                                 Compile a project and print its problems

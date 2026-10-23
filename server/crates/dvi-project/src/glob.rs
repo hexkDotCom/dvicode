@@ -81,7 +81,9 @@ pub fn match_component(pat: &str, s: &str) -> bool {
 
 /// Expands an absolute pattern to existing paths.
 pub fn expand(pattern: &Path) -> Vec<PathBuf> {
-    let comps: Vec<String> = pattern.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    let mut comps: Vec<String> = pattern.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    // `**/**` is `**`.
+    comps.dedup_by(|a, b| a == "**" && b == "**");
     // Fixed prefix.
     let mut base = PathBuf::new();
     let mut i = 0;
@@ -90,15 +92,24 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
         i += 1;
     }
     let mut out = Vec::new();
-    walk(&base, &comps[i..], &mut out, 0, &mut FxHashSet::default());
+    let mut seen = Seen::default();
+    walk(&base, &comps[i..], &mut out, 0, &mut seen);
     out
 }
 
-/// `links`: the directories that `**` reached through symbolic links, with the part of the
-/// pattern left there, each walked once (links between sibling folders would otherwise branch
-/// again at every level).
-fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links: &mut FxHashSet<(PathBuf, usize)>) {
-    if depth > 64 {
+#[derive(Default)]
+struct Seen {
+    /// Each folder with the part of the pattern left there, walked once: `a/**/b/**/c` can
+    /// otherwise reach the same folder at the same point of the pattern in many ways.
+    states: FxHashSet<(PathBuf, usize)>,
+    /// The directories that `**` reached through symbolic links, with the part of the
+    /// pattern left there, each walked once (links between sibling folders would otherwise
+    /// branch again at every level).
+    links: FxHashSet<(PathBuf, usize)>,
+}
+
+fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen: &mut Seen) {
+    if depth > 64 || !seen.states.insert((dir.to_path_buf(), rest.len())) {
         return;
     }
     let Some(first) = rest.first() else {
@@ -107,13 +118,13 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links
     };
     if first == "**" {
         // Zero directories...
-        walk(dir, &rest[1..], out, depth + 1, links);
+        walk(dir, &rest[1..], out, depth + 1, seen);
         // ...or one more.
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, rest.len(), links) {
-                    walk(&p, rest, out, depth + 1, links);
+                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, rest.len(), &mut seen.links) {
+                    walk(&p, rest, out, depth + 1, seen);
                 }
             }
         }
@@ -123,7 +134,7 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links
     if !has_wildcard(first) && (!has_class(first) || dir.join(first).exists()) {
         let p = dir.join(first);
         if p.exists() {
-            walk(&p, &rest[1..], out, depth + 1, links);
+            walk(&p, &rest[1..], out, depth + 1, seen);
         }
         return;
     }
@@ -132,7 +143,7 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, links
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
             if match_component(first, &e.file_name().to_string_lossy()) {
-                walk(&e.path(), &rest[1..], out, depth + 1, links);
+                walk(&e.path(), &rest[1..], out, depth + 1, seen);
             }
         }
     }
@@ -162,24 +173,57 @@ fn links_to_ancestor(dir: &Path, e: &std::fs::DirEntry) -> bool {
 pub fn matches_path(pattern: &str, path: &Path) -> bool {
     let pat: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
     let comps: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().to_string()).filter(|c| c != "/").collect();
-    let anchored = pattern.starts_with('/');
-    if anchored {
-        return match_seq(&pat, &comps);
+    let ok = match_seq(&pat, &comps);
+    if pattern.starts_with('/') {
+        ok[0]
+    } else {
+        ok.contains(&true)
     }
-    (0..=comps.len()).any(|s| match_seq(&pat, &comps[s..]))
 }
 
-fn match_seq(pat: &[&str], comps: &[String]) -> bool {
-    match pat.first() {
-        None => comps.is_empty(),
-        Some(&"**") => (0..=comps.len()).any(|k| match_seq(&pat[1..], &comps[k..])),
-        Some(p) => !comps.is_empty() && match_component(p, &comps[0]) && match_seq(&pat[1..], &comps[1..]),
+/// For each `j`, whether the pattern matches `comps[j..]` exactly: one pass per pattern part
+/// from the last, so repeated `**` cost no more than one each.
+fn match_seq(pat: &[&str], comps: &[String]) -> Vec<bool> {
+    let n = comps.len();
+    let mut ok = vec![false; n + 1];
+    ok[n] = true;
+    for p in pat.iter().rev() {
+        let mut next = vec![false; n + 1];
+        if *p == "**" {
+            let mut any = false;
+            for j in (0..=n).rev() {
+                any |= ok[j];
+                next[j] = any;
+            }
+        } else {
+            for j in 0..n {
+                next[j] = ok[j + 1] && match_component(p, &comps[j]);
+            }
+        }
+        ok = next;
     }
+    ok
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_double_stars_stay_cheap() {
+        let dir = std::env::temp_dir().join(format!("dvicode_glob_stars_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let deep = dir.join("a/b/c/d/e/f/g/h");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("x.sv"), "").unwrap();
+        let t = std::time::Instant::now();
+        let found = expand(&dir.join("**/a/**/**/b/**/c/**/**/**/**/**/**/*.sv"));
+        let path = PathBuf::from("/r/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z.sv");
+        assert!(!matches_path(&format!("{}nothing", "**/".repeat(40)), &path));
+        assert!(matches_path(&format!("{}z.sv", "**/".repeat(40)), &path));
+        assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+        assert_eq!(found, vec![deep.join("x.sv")]);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -240,7 +240,15 @@ impl Analysis {
         let (p, root) = (self.vfs.path(file), &self.setup.root);
         // Drive letters and folder names may differ in case on Windows.
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
-        p.starts_with(root) || cfg!(windows) && lower(&p).starts_with(lower(root))
+        let inside = |p: &Path, root: &Path| p.starts_with(root) || cfg!(windows) && lower(p).starts_with(lower(root));
+        if !inside(&p, root) {
+            return false;
+        }
+        // A link in the folder to a file outside it (shared IP): not the folder's to change.
+        match (std::fs::canonicalize(&p), std::fs::canonicalize(root)) {
+            (Ok(p), Ok(root)) => inside(&p, &root),
+            _ => true,
+        }
     }
 
     /// The snapshot text of a file (see [`Analysis::source`]).

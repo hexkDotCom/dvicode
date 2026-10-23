@@ -1,5 +1,6 @@
 /server/target/
 /client/node_modules/
+/scripts/ovsx/node_modules/
 /client/out/
 /client/dist/
 /client/server/

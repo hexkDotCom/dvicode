@@ -25,7 +25,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "In Restricted Mode, DVICode ignores the workspace's settings for which engine to run and where (program path, launch command, SSH and TCP targets, extra arguments); your own user settings still apply.",
+      "description": "In Restricted Mode, DVICode ignores the workspace's settings for which engine to run and where (program path, launch command, SSH and TCP targets, extra arguments) and does not connect to an SSH or TCP engine that a dvicode:// folder names unless your own settings name it too; your own user settings still apply.",
       "restrictedConfigurations": [
         "dvicode.server.mode",
         "dvicode.server.path",

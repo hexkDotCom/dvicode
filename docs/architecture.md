@@ -33,8 +33,10 @@ stdio as the channel:
 
 In `tcp` mode the engine authenticates the client only when it was started with a token
 (`DVICODE_TOKEN=T`, or `--token T`, which other users can see in the process list). Without
-one, any program that can reach the port can connect, and with it read and write every file
-the engine's account can: use a token, and listen on `127.0.0.1` unless you need more.
+one, it only listens on a loopback address, where any program on the machine can connect and
+with it read and write every file the engine's account can: use a token on shared machines.
+The token and the files travel unencrypted; across a network, listen on `127.0.0.1` and
+tunnel (for example `ssh -L`).
 
 The login shell (`bash -lc`) gives the engine the user's environment (`UVM_HOME`, tool
 paths). `ssh` and `wsl.exe` already carry stdio, so the language server needs no port of its

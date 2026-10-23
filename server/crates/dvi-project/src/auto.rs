@@ -54,7 +54,9 @@ struct IgnorePattern {
 
 impl GitIgnore {
     fn load(root: &Path) -> GitIgnore {
-        GitIgnore::parse(&std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default())
+        // A regular file of sensible size: a checked-out link to /dev/zero would never end.
+        let text = crate::read_input(&root.join(".gitignore"), 16 << 20).unwrap_or_default();
+        GitIgnore::parse(&String::from_utf8_lossy(&text))
     }
 
     fn parse(text: &str) -> GitIgnore {
@@ -267,7 +269,7 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
             let text = if progress.is_cancelled() {
                 String::new()
             } else {
-                std::fs::read(&p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+                crate::read_input(&p, crate::MAX_SOURCE).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
             };
             let f = scan(&text);
             progress.step();

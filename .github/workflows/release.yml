@@ -186,9 +186,18 @@ jobs:
       contents: read
       id-token: write
     steps:
+      # Only the publishing tool's locked dependency list.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ovsx
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - name: Install ovsx
+        # Exactly the versions and hashes of scripts/ovsx/package-lock.json, with no install
+        # scripts: nothing else runs in this job, which can publish.
+        run: npm ci --ignore-scripts --prefix scripts/ovsx
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: vsix
@@ -197,5 +206,5 @@ jobs:
         run: |
           set -euo pipefail
           for f in dist/*.vsix; do
-            npx --yes ovsx@1.2.0 publish "$f" --trusted-publishing --skip-duplicate
+            scripts/ovsx/node_modules/.bin/ovsx publish "$f" --trusted-publishing --skip-duplicate
           done

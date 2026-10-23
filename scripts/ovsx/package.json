@@ -1,0 +1,8 @@
+{
+  "name": "dvicode-ovsx",
+  "private": true,
+  "description": "The Open VSX publishing tool, locked, for the release workflow.",
+  "dependencies": {
+    "ovsx": "1.2.0"
+  }
+}
