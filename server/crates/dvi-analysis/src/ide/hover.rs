@@ -252,7 +252,9 @@ impl Analysis {
                 return None;
             }
         }
-        let mut lines: Vec<&str> = before[..line_start].lines().collect();
+        // The lines just above, read backwards: not every line of a large file before it.
+        let mut lines: Vec<&str> = before[..line_start].lines().rev().take(500).collect();
+        lines.reverse();
         let mut out: Vec<String> = Vec::new();
         // Skip attribute or blank? A blank line ends the comment block.
         if let Some(last) = lines.last() {

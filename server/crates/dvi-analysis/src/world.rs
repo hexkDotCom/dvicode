@@ -36,6 +36,8 @@ pub struct FilePositions {
     pub refs: Vec<(Span, RefId, u16)>,
     /// Declarations with a real name in this file, sorted by name start.
     pub decls: Vec<DeclId>,
+    /// Scopes whose extent is in this file, named or not (`scope_at` looks among these only).
+    pub scopes: Vec<DeclId>,
 }
 
 /// The heavy parts are shared, so that a copy that only differs in its macros is cheap (see
@@ -228,6 +230,9 @@ fn make_unit(
         }
     }
     for (did, d) in parsed.decls.iter().enumerate() {
+        if did != 0 && d.kind.is_scope() {
+            positions.entry(d.span.file).or_default().scopes.push(did as DeclId);
+        }
         if did == 0 || d.name.is_empty() || d.has(dvi_syntax::ast::dflags::FROM_MACRO) {
             continue;
         }
@@ -425,23 +430,33 @@ impl Analysis {
         // ad-hoc unit exists): which library files are compiled does not depend on what is open.
         let own = |u: &Unit| u.kind != UnitKind::AdHoc && !u.library;
         let mut defined: FxHashSet<SmolStr> = self.units.iter().flatten().filter(|u| own(u)).flat_map(|u| definitions(u)).collect();
-        // Library units in the order a full build adds them.
+        // Library units in the order a full build adds them (and as a set, to ask).
         let mut kept: Vec<UnitId> = Vec::new();
+        let mut kept_set: FxHashSet<UnitId> = FxHashSet::default();
         let mut changed = false;
+        // The files the units in use start from; the old library units by their file; the
+        // design elements the units in use refer to (each unit's references read once).
+        let mut roots: FxHashSet<FileId> = self.units.iter().flatten().filter(|u| own(u)).map(|u| u.root).collect();
+        let mut old_by_root: FxHashMap<FileId, Vec<UnitId>> = FxHashMap::default();
+        for o in &old {
+            old_by_root.entry(self.unit(*o).root).or_default().push(*o);
+        }
+        let mut wanted: FxHashSet<SmolStr> = FxHashSet::default();
+        let mut to_scan: Vec<UnitId> = self.units.iter().flatten().filter(|u| own(u)).map(|u| u.id).collect();
         // One round per level of the hierarchy found in libraries; it ends when a round adds
         // nothing (the bound only guards against a loop).
         for _round in 0..256 {
             if progress.is_some_and(|p| p.is_cancelled()) {
                 return;
             }
-            let mut missing: FxHashSet<SmolStr> = FxHashSet::default();
-            for u in self.units.iter().flatten().filter(|u| own(u) || kept.contains(&u.id)) {
-                for r in &u.parsed.refs {
-                    if r.kind == RefKind::Definition && !defined.contains(&r.segs[0].name) {
-                        missing.insert(r.segs[0].name.clone());
+            for uid in std::mem::take(&mut to_scan) {
+                for r in &self.unit(uid).parsed.refs {
+                    if r.kind == RefKind::Definition {
+                        wanted.insert(r.segs[0].name.clone());
                     }
                 }
             }
+            let missing: FxHashSet<SmolStr> = wanted.iter().filter(|n| !defined.contains(*n)).cloned().collect();
             if missing.is_empty() {
                 break;
             }
@@ -467,7 +482,7 @@ impl Analysis {
             let mut added = false;
             for (p, inv_idx) in new_files {
                 let id = self.vfs.file_id(&p);
-                if self.units.iter().flatten().any(|u| u.root == id && (own(u) || kept.contains(&u.id))) {
+                if roots.contains(&id) {
                     continue;
                 }
                 // The macro state after the library unit added before it, else after the
@@ -479,9 +494,9 @@ impl Analysis {
                     .find(|u| u.invocation == inv_idx)
                     .map(|u| u.macros_after.clone())
                     .unwrap_or_else(|| self.invocation_macros(inv_idx));
-                let reuse = old.iter().copied().find(|o| {
+                let reuse = old_by_root.get(&id).into_iter().flatten().copied().find(|o| {
                     let u = self.unit(*o);
-                    !kept.contains(o) && u.root == id && u.invocation == inv_idx && u.macros_before.same_definitions(&macros)
+                    !kept_set.contains(o) && u.invocation == inv_idx && u.macros_before.same_definitions(&macros)
                 });
                 let uid = match reuse {
                     Some(o) => o,
@@ -497,6 +512,9 @@ impl Analysis {
                     }
                 };
                 kept.push(uid);
+                kept_set.insert(uid);
+                roots.insert(id);
+                to_scan.push(uid);
                 defined.extend(definitions(self.unit(uid)));
                 added = true;
             }
@@ -505,7 +523,7 @@ impl Analysis {
             }
         }
         for o in old {
-            if !kept.contains(&o) {
+            if !kept_set.contains(&o) {
                 self.units[o as usize] = None;
                 changed = true;
             }

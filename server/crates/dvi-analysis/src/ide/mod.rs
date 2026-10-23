@@ -20,6 +20,7 @@ use dvi_syntax::ast::{DeclId, RefId};
 use dvi_syntax::preproc::MacroDef;
 use dvi_syntax::{FileId, SourceProvider, Span};
 use lsp_types::{Location, Position, Range, Url};
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -88,6 +89,14 @@ impl Analysis {
     /// Units containing `file`: project units first (in compilation order), then the file's
     /// own ad-hoc unit, then other open files' units by path (not by when they were opened).
     pub fn units_for(&self, file: FileId) -> Vec<UnitId> {
+        // Most files are in project units only: their order is their ids' (a header that
+        // thousands of files include is asked for at every request).
+        let ids = self.units_of_file(file);
+        if ids.iter().all(|id| self.try_unit(*id).is_some_and(|u| u.kind == UnitKind::Project)) {
+            let mut v = ids.to_vec();
+            v.sort_unstable();
+            return v;
+        }
         let mut v: Vec<((u8, UnitId, PathBuf), UnitId)> = self
             .units_of_file(file)
             .iter()
@@ -193,13 +202,17 @@ impl Analysis {
     pub fn versioned_edit(&self, edits: Vec<(Span, String)>) -> Option<lsp_types::WorkspaceEdit> {
         use lsp_types::{DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, TextDocumentEdit, TextEdit};
         let mut by_file: Vec<(FileId, Vec<OneOf<TextEdit, lsp_types::AnnotatedTextEdit>>)> = Vec::new();
+        let mut index: FxHashMap<FileId, usize> = FxHashMap::default();
         for (span, text) in edits {
             let range = self.to_location(span)?.range;
             let e = OneOf::Left(TextEdit::new(range, text));
-            match by_file.iter_mut().find(|(f, _)| *f == span.file) {
-                Some((_, v)) => v.push(e),
-                None => by_file.push((span.file, vec![e])),
-            }
+            // Files in the order of their first edit, found by a map (a rename can touch
+            // thousands).
+            let k = *index.entry(span.file).or_insert_with(|| {
+                by_file.push((span.file, Vec::new()));
+                by_file.len() - 1
+            });
+            by_file[k].1.push(e);
         }
         let docs = by_file
             .into_iter()

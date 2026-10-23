@@ -2,7 +2,7 @@
 
 use dvi_syntax::SourceProvider;
 use super::{Hit, Target};
-use crate::world::{Analysis, DeclRef, UnitKind};
+use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, RefKind};
 use dvi_syntax::{FileId, Span, TokKind, Token};
 use lsp_types::{Location, SymbolKind, TypeHierarchyItem, WorkspaceEdit};
@@ -119,40 +119,49 @@ impl Analysis {
         let Some(hit) = self.hit_at(file, off) else { return Vec::new() };
         match self.target_of(&hit) {
             Some(Target::Decl(r)) => self.decl_references(r, include_decl),
-            Some(Target::Macro(m)) => {
-                let mut out = Vec::new();
-                if include_decl {
-                    out.push(m.name_span);
-                }
-                let mut seen = FxHashSet::default();
-                for u in self.units.iter().flatten() {
-                    if self.cancelled() {
-                        break;
-                    }
-                    for mu in &u.macro_uses {
-                        if mu.name == m.name && mu.def.as_ref().is_some_and(|d| d.name_span == m.name_span) && seen.insert(mu.name_span) {
-                            out.push(macro_name(mu.name_span));
-                        }
-                    }
-                }
-                out.extend(self.macro_uses_in_bodies(&m.name).into_iter().filter(|s| seen.insert(*s)).map(macro_name));
-                // `ifdef NAME and friends; where it is not defined yet (`ifndef GUARD), when it
-                // has no other definition.
-                let unique = self.unique_macro(&m.name).is_some_and(|d| d.name_span == m.name_span);
-                for u in self.units.iter().flatten() {
-                    if self.cancelled() {
-                        break;
-                    }
-                    for mn in &u.macro_names {
-                        if mn.name == m.name && mn.def.as_ref().map_or(unique, |d| d.name_span == m.name_span) && seen.insert(mn.span) {
-                            out.push(mn.span);
-                        }
-                    }
-                }
-                out
-            }
+            Some(Target::Macro(m)) => self.macro_spans(&m, include_decl, None),
             _ => Vec::new(),
         }
+    }
+
+    /// Where the macro `m` is used, defined and tested (`ifdef`): in the whole project, or in
+    /// `only` that file (highlights: its own units, not every unit's uses).
+    fn macro_spans(&self, m: &dvi_syntax::preproc::MacroDef, include_decl: bool, only: Option<FileId>) -> Vec<Span> {
+        let here = |s: &Span| only.is_none_or(|f| s.file == f);
+        let units: Vec<UnitId> = match only {
+            Some(f) => self.units_for(f),
+            None => self.units.iter().flatten().map(|u| u.id).collect(),
+        };
+        let mut out = Vec::new();
+        if include_decl && here(&m.name_span) {
+            out.push(m.name_span);
+        }
+        let mut seen = FxHashSet::default();
+        for &uid in &units {
+            if self.cancelled() {
+                break;
+            }
+            for mu in &self.unit(uid).macro_uses {
+                if here(&mu.name_span) && mu.name == m.name && mu.def.as_ref().is_some_and(|d| d.name_span == m.name_span) && seen.insert(mu.name_span) {
+                    out.push(macro_name(mu.name_span));
+                }
+            }
+        }
+        out.extend(self.macro_uses_in_bodies(&m.name).into_iter().filter(|s| here(s) && seen.insert(*s)).map(macro_name));
+        // `ifdef NAME and friends; where it is not defined yet (`ifndef GUARD), when it
+        // has no other definition.
+        let unique = self.unique_macro(&m.name).is_some_and(|d| d.name_span == m.name_span);
+        for &uid in &units {
+            if self.cancelled() {
+                break;
+            }
+            for mn in &self.unit(uid).macro_names {
+                if here(&mn.span) && mn.name == m.name && mn.def.as_ref().map_or(unique, |d| d.name_span == m.name_span) && seen.insert(mn.span) {
+                    out.push(mn.span);
+                }
+            }
+        }
+        out
     }
 
     /// `` `NAME `` in the bodies and default arguments of macro definitions: they refer to
@@ -373,7 +382,7 @@ impl Analysis {
                 }
                 out
             }
-            Some(Target::Macro(_)) => self.reference_spans(file, off, true).into_iter().filter(|s| s.file == file).collect(),
+            Some(Target::Macro(m)) => self.macro_spans(&m, true, Some(file)),
             _ => vec![hit.span()],
         }
     }

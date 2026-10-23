@@ -2436,3 +2436,37 @@ fn bounds_keep_real_include_chains_and_constraint_braces() {
     let errors: Vec<&str> = u.diags.iter().map(|d| d.message.as_str()).collect();
     assert_eq!(errors.len(), 1, "{errors:?}");
 }
+
+#[test]
+fn macro_highlights_stay_in_their_file() {
+    // The macro is defined in a header and used in two files: highlights in a.sv are a.sv's
+    // uses and its `ifdef, references are all of them.
+    let defs = "`define W 8\n";
+    let a_sv = "`include \"defs.svh\"\nmodule a;\n  logic [`W-1:0] x;\n`ifdef W\n  logic [`W:0] y;\n`endif\nendmodule\n";
+    let b_sv = "`include \"defs.svh\"\nmodule b;\n  logic [`W-1:0] z;\nendmodule\n";
+    let files = [("defs.svh", defs), ("a.sv", a_sv), ("b.sv", b_sv)];
+    let (a, root) = project("macrohighlight", &files);
+    let fa = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let off = (a_sv.find("`W-1").unwrap() + 1) as u32;
+    let spans = a.document_highlights(fa, off);
+    assert_eq!(spans.len(), 3, "{spans:?}");
+    assert!(spans.iter().all(|s| s.file == fa), "{spans:?}");
+    let refs = a.references(fa, off, true);
+    assert_eq!(refs.len(), 5, "{refs:?}");
+}
+
+#[test]
+fn completion_stops_at_its_item_limit() {
+    let mut text = String::new();
+    for i in 0..3500 {
+        text.push_str(&format!("module cell_{i}(input logic a); endmodule\n"));
+    }
+    text.push_str("module top;\n  cel\nendmodule\n");
+    let files = [("cells.sv", text.as_str())];
+    let (a, root) = project("completionlimit", &files);
+    let f = a.vfs.lookup(&root.join("cells.sv")).unwrap();
+    let off = (text.find("  cel\n").unwrap() + 5) as u32;
+    let items = a.completions(f, off);
+    assert_eq!(items.len(), 3000);
+    assert!(items.iter().all(|c| c.label.starts_with("cel")), "{:?}", items.iter().take(5).map(|c| &c.label).collect::<Vec<_>>());
+}

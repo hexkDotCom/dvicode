@@ -214,6 +214,9 @@ impl Analysis {
             // Through `::` only static items and types make sense; keep all, VS Code filters.
             if seen.insert(md.name.clone()) {
                 out.push(self.decl_completion(m));
+                if out.len() >= MAX_ITEMS {
+                    return out;
+                }
             }
         }
         let cd = self.decl(container);
@@ -319,9 +322,10 @@ impl Analysis {
         let u = self.unit(ctx.unit);
         let mut cur = Some(ctx.scope);
         let mut design_ctx = false;
+        // Items are built only while there is room (they carry signatures and snippets).
         let push = |this: &Analysis, r: DeclRef, out: &mut Vec<CompletionItem>, seen: &mut FxHashSet<SmolStr>| {
             let d = this.decl(r);
-            if d.name.is_empty() || d.has(dflags::OUT_OF_BLOCK) || d.has(dflags::FROM_MACRO) && d.kind == DeclKind::Generate {
+            if out.len() >= MAX_ITEMS || d.name.is_empty() || d.has(dflags::OUT_OF_BLOCK) || d.has(dflags::FROM_MACRO) && d.kind == DeclKind::Generate {
                 return;
             }
             if !starts_like(&d.name, prefix) || !seen.insert(d.name.clone()) {
@@ -358,7 +362,7 @@ impl Analysis {
                     }
                 }
             }
-            if out.len() > MAX_ITEMS {
+            if out.len() >= MAX_ITEMS {
                 return out;
             }
             cur = d.parent;
@@ -379,6 +383,9 @@ impl Analysis {
             }
         }
         for (name, v) in &self.global.definitions {
+            if out.len() >= MAX_ITEMS {
+                break;
+            }
             let Some(r) = v.first() else { continue };
             if !starts_like(name, prefix) || !seen.insert(name.clone()) {
                 continue;
@@ -397,7 +404,7 @@ impl Analysis {
             }
         }
         for k in KEYWORDS {
-            if starts_like(k, prefix) && seen.insert(SmolStr::new(k)) {
+            if out.len() < MAX_ITEMS && starts_like(k, prefix) && seen.insert(SmolStr::new(k)) {
                 out.push(CompletionItem { label: k.to_string(), kind: Some(CompletionItemKind::KEYWORD), ..Default::default() });
             }
         }

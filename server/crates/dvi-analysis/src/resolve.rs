@@ -147,7 +147,10 @@ impl Analysis {
             RefKind::Package => return self.package_next(unit, chain, idx),
             RefKind::ImportItem if idx == 0 => return self.package_next(unit, chain, idx),
             RefKind::Definition => {
-                if let Some(d) = self.instance_definitions().get(&(unit, seg.span)) {
+                // The project-wide choice of copies only matters for a name defined more than
+                // once: a unique module does not build it.
+                let several = self.global.definitions.get(name).is_some_and(|v| v.len() > 1);
+                if let Some(d) = several.then(|| self.instance_definitions().get(&(unit, seg.span))).flatten() {
                     return Some(*d);
                 }
                 if let Some(d) = self.definition(unit, name) {
@@ -733,12 +736,12 @@ impl Analysis {
         let u = self.unit(unit);
         let mut best = ParsedUnit::ROOT;
         let mut best_len = u32::MAX;
-        for (i, d) in u.parsed.decls.iter().enumerate() {
-            if i == 0 || !d.kind.is_scope() || d.span.file != file {
-                continue;
-            }
+        // The scopes of this file only, not every declaration of the unit (a header in a
+        // large package).
+        for &i in u.positions.get(&file).map(|p| p.scopes.as_slice()).unwrap_or(&[]) {
+            let d = u.parsed.decl(i);
             if d.span.start <= off && off <= d.span.end && d.span.len() <= best_len {
-                best = i as DeclId;
+                best = i;
                 best_len = d.span.len();
             }
         }
