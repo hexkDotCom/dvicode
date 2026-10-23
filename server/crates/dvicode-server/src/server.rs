@@ -731,6 +731,12 @@ impl Server {
     /// the result of a running full build.
     fn note_change(&mut self, id: FileId) {
         self.drop_deferred(&[], Some(id));
+        self.compile_again(id);
+    }
+
+    /// Has the units of `id` compiled again, as after an edit of it (its text is the same:
+    /// requests about positions in it stay valid).
+    fn compile_again(&mut self, id: FileId) {
         self.number_edit(id);
         self.pending.insert(id);
         self.pending_since.get_or_insert_with(Instant::now);
@@ -1060,6 +1066,22 @@ impl Server {
                 }
                 let id =self.vfs.set_overlay_versioned(&path, Arc::from(p.text_document.text), Some(p.text_document.version));
                 self.open.insert(id, p.text_document.uri);
+                if self.analysis.units_of_file(id).is_empty() {
+                    // A new header not saved yet, or one opened while an update that looked for
+                    // it ran: the files whose `include found no such file are compiled again.
+                    let name = path.file_name();
+                    let roots: Vec<FileId> = self
+                        .analysis
+                        .units
+                        .iter()
+                        .flatten()
+                        .filter(|u| u.includes.iter().any(|i| i.resolved.is_none() && std::path::Path::new(&i.path_text).file_name() == name))
+                        .map(|u| u.root)
+                        .collect();
+                    for r in roots {
+                        self.compile_again(r);
+                    }
+                }
                 self.note_change(id);
                 // Make the file available right away.
                 self.flush_pending();

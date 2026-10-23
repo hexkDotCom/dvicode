@@ -1533,3 +1533,17 @@ fn library_files_are_found_as_the_update_reads_them() {
 }
 
 const TOP_LIB: &str = "module top;\nendmodule\n";
+
+#[test]
+fn a_header_opened_before_it_is_saved_is_found_by_the_files_that_include_it() {
+    let top_text = "module top;\n`include \"h.svh\"\n  new_t v;\nendmodule\n";
+    let root = project("unsavedheader", &[("top.sv", top_text)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let top = uri(&root, "top.sv");
+    let p = c.wait_problems(&top, |p| !p.diagnostics.is_empty());
+    assert!(codes(&p).contains(&"INCLUDE_NOT_FOUND".to_string()), "{:?}", codes(&p));
+    // Created in the editor, not on disk yet.
+    c.open(&uri(&root, "h.svh"), 1, "  typedef int new_t;\n");
+    c.wait_problems(&top, |p| p.diagnostics.is_empty());
+    c.shutdown();
+}
