@@ -10,16 +10,17 @@ pub fn has_wildcard(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
-/// No file or folder name is longer (255 UTF-16 units or bytes on common file systems): a
-/// longer pattern component is matched as written, which keeps the work linear.
-const MAX_NAME: usize = 1024;
+/// Characters of the longest pattern component matched as a pattern (one with classes is
+/// longer than the names it matches); a longer one is matched as written. Matching costs
+/// about its length times the name's, for every name in a folder.
+const MAX_PATTERN: usize = 4096;
 
 /// A character class (`[ab]`) in some path component: a `[` closed later in the component.
 /// Only the first `[` needs a look: when it is not closed, no later one is.
 pub fn has_class(s: &str) -> bool {
     s.split(['/', '\\']).any(|c| {
         let p: Vec<char> = c.chars().collect();
-        p.len() <= MAX_NAME && p.iter().position(|&x| x == '[').is_some_and(|i| class_at(&p, i, ' ').is_some())
+        p.len() <= MAX_PATTERN && p.iter().position(|&x| x == '[').is_some_and(|i| class_at(&p, i, ' ').is_some())
     })
 }
 
@@ -54,15 +55,18 @@ fn class_at(p: &[char], i: usize, c: char) -> Option<(bool, usize)> {
 
 /// Matches one path component against a pattern with `*`, `?` and `[...]`.
 pub fn match_component(pat: &str, s: &str) -> bool {
-    if pat.len() > MAX_NAME {
+    let p: Vec<char> = pat.chars().collect();
+    if p.len() > MAX_PATTERN {
         return pat == s;
     }
-    let p: Vec<char> = pat.chars().collect();
     let t: Vec<char> = s.chars().collect();
+    // A `[` with no `]` after it is an ordinary character, known at once rather than by a
+    // look to the end at every try.
+    let last_close = p.iter().rposition(|&c| c == ']');
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star, mut mark) = (None::<usize>, 0usize);
     while ti < t.len() {
-        let class = (pi < p.len() && p[pi] == '[').then(|| class_at(&p, pi, t[ti])).flatten();
+        let class = (pi < p.len() && p[pi] == '[' && last_close.is_some_and(|l| l > pi + 1)).then(|| class_at(&p, pi, t[ti])).flatten();
         if let Some((true, next)) = class {
             pi = next;
             ti += 1;
@@ -252,6 +256,11 @@ mod tests {
         let open = "[".repeat(1 << 20);
         assert!(!has_class(&open));
         assert!(!match_component(&format!("{open}*"), "a"));
+        let unclosed = format!("*{}", "[".repeat(4000));
+        assert!(!match_component(&unclosed, &"[".repeat(255)));
+        // Long class patterns still match: a SHA-512 name.
+        let sha = format!("{}.sv", "[0-9a-f]".repeat(128));
+        assert!(has_class(&sha) && match_component(&sha, &format!("{}.sv", "a".repeat(128))));
         assert!(has_class("a[]x[y]") && !has_class("a[]b") && has_class("x[!ab]"));
         assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
     }
