@@ -286,10 +286,12 @@ impl Analysis {
         if v.len() < 2 || !self.nearest_wins(from) {
             return v.first().copied().into_iter().collect();
         }
-        let here = self.path(self.unit(from).root);
+        // The number of leading path parts in common (no file-table lookups: this runs for
+        // every use of a package that auto-configuration found in several copies).
+        let here = &self.unit(from).path_key;
         let mut ranked: Vec<(usize, DeclRef)> = v
             .iter()
-            .map(|r| (here.components().zip(self.path(self.unit(r.unit).root).components()).take_while(|(a, b)| a == b).count(), *r))
+            .map(|r| (here.iter().zip(self.unit(r.unit).path_key.iter()).take_while(|(a, b)| a == b).count(), *r))
             .collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0));
         ranked.into_iter().map(|(_, r)| r).collect()

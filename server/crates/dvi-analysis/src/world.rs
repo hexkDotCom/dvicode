@@ -70,6 +70,9 @@ pub struct Unit {
     pub parse_ms: u128,
     /// A `-y`/`-v` library file, compiled because it provides a missing design element.
     pub library: bool,
+    /// Hash of each leading part of the root file's path (`/a`, `/a/b`, ...): how near two
+    /// units are is the number of leading hashes they share, without asking for paths.
+    pub path_key: Arc<[u64]>,
 }
 
 /// A file's text as an analysis snapshot saw it. Positions in the snapshot are converted with
@@ -268,7 +271,20 @@ fn make_unit(
         sources: Arc::new(sources),
         parse_ms: t0.elapsed().as_millis(),
         library: false,
+        path_key: path_key(&src.path(root)),
     }
+}
+
+/// See [`Unit::path_key`].
+fn path_key(p: &Path) -> Arc<[u64]> {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    p.components()
+        .map(|c| {
+            c.hash(&mut h);
+            h.finish()
+        })
+        .collect()
 }
 
 /// Hash of a unit's declarations that other files can refer to.
