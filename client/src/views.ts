@@ -359,7 +359,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       return;
     }
     const s: ViewState = {
-      connected: this.conn.client() !== undefined,
+      connected: this.conn.client()?.isRunning() === true,
       error: this.error,
       scope: this.scopeText(),
       filter: this.filter,
@@ -530,11 +530,23 @@ function openCommand(conn: Conn, uri: string | null, line: number, character: nu
 }
 
 /**
+ * An authority as compared: host names ignore case, and "Open Folder on the Server" writes
+ * `ssh+user%40host` where the settings give `ssh+user@host`.
+ */
+export function canonAuthority(a: string): string {
+  try {
+    return decodeURIComponent(a).toLowerCase();
+  } catch {
+    return a.toLowerCase();
+  }
+}
+
+/**
  * A key to compare document URIs: VS Code may give the same document's authority in another case
  * (`dvicode://wsl+ubuntu/...` for `wsl+Ubuntu`), and Windows paths ignore case.
  */
 export function uriKey(u: vscode.Uri): string {
-  const key = `${u.scheme}://${u.authority.toLowerCase()}${u.path}`;
+  const key = `${u.scheme}://${canonAuthority(u.authority)}${u.path}`;
   // Windows paths ignore case (drives and network shares); a WSL folder's Linux path does not.
   const wsl = /^wsl(\.localhost|\$)$/i.test(u.authority);
   return u.scheme === 'file' && !wsl && process.platform === 'win32' ? key.toLowerCase() : key;
@@ -1066,7 +1078,7 @@ export class Views implements vscode.Disposable {
     }
     const m = this.conn.mapper();
     try {
-      return m !== undefined && m.toClient(m.toServer(uri)).authority.toLowerCase() === uri.authority.toLowerCase();
+      return m !== undefined && canonAuthority(m.toClient(m.toServer(uri)).authority) === canonAuthority(uri.authority);
     } catch {
       return false;
     }

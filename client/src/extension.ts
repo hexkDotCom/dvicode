@@ -32,6 +32,9 @@ let client: LanguageClient | undefined;
 let launch: Launch | undefined;
 let starting: Promise<LanguageClient> | undefined;
 let restarting: Promise<void> | undefined;
+/** The client a start is starting, before it is `client`; and which start is the latest. */
+let pendingClient: LanguageClient | undefined;
+let startGeneration = 0;
 /** serverSettingsKey() of the last start, and of the last restart offered. */
 let startedWith: string | undefined;
 let offeredFor: string | undefined;
@@ -86,6 +89,7 @@ function serverSettingsChange(key: string, timeoutMs: number): Promise<boolean> 
 }
 
 async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient> {
+  const generation = ++startGeneration;
   statusItem.text = '$(sync~spin) DVICode';
   statusItem.tooltip = 'Starting the DVICode language server';
   statusItem.show();
@@ -143,7 +147,14 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     }
   });
   c.onNotification('dvicode/internalError', (e: InternalError) => reporter.onInternalError(e));
+  pendingClient = c;
   await c.start();
+  if (generation !== startGeneration) {
+    // A restart gave up on this start (a server that never answered) and began another.
+    void c.stop(2000).catch(() => undefined);
+    throw new Error('superseded by a restart');
+  }
+  pendingClient = undefined;
   // What this engine's views support (an engine at a custom path or remote may be older).
   const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number } } | undefined;
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.objects', (experimental?.dvicode?.verificationObjects ?? 0) >= 1);
@@ -182,9 +193,12 @@ function ensureClient(ctx: vscode.ExtensionContext): Promise<LanguageClient> {
     return Promise.resolve(client);
   }
   if (!starting) {
-    starting = startClient(ctx).finally(() => {
-      starting = undefined;
+    const p: Promise<LanguageClient> = startClient(ctx).finally(() => {
+      if (starting === p) {
+        starting = undefined;
+      }
     });
+    starting = p;
   }
   return starting;
 }
@@ -219,9 +233,16 @@ async function stopClient(c: LanguageClient): Promise<void> {
 function restart(ctx: vscode.ExtensionContext): Promise<void> {
   // One restart at a time; a second request while one runs joins it.
   restarting ??= (async () => {
-    await starting?.catch(() => undefined);
-    const c = client;
+    // A start in progress is waited for, but not forever: a server that accepts the
+    // connection and never answers would hold it.
+    if (starting) {
+      await Promise.race([starting.catch(() => undefined), new Promise((r) => setTimeout(r, 15000))]);
+    }
+    const c = client ?? pendingClient;
     client = undefined;
+    pendingClient = undefined;
+    starting = undefined;
+    startGeneration++;
     if (c) {
       await stopClient(c);
     }
@@ -248,6 +269,9 @@ function offerRestart(ctx: vscode.ExtensionContext): void {
     return;
   }
   const key = serverSettingsKey();
+  if (key === startedWith) {
+    offeredFor = undefined;
+  }
   if (startedWith === undefined || key === startedWith || key === offeredFor) {
     return;
   }
@@ -323,7 +347,8 @@ async function selectBuildConfig(): Promise<void> {
   ];
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Build configuration' });
   if (pick) {
-    await vscode.workspace.getConfiguration('dvicode').update('buildFile', pick.value, vscode.ConfigurationTarget.Workspace);
+    const target = vscode.workspace.workspaceFolders?.length ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration('dvicode').update('buildFile', pick.value, target);
   }
 }
 
@@ -332,8 +357,22 @@ async function selectDesignTop(): Promise<void> {
     return;
   }
   const tops = await client.sendRequest<string[]>('dvicode/designTops');
-  const items = [{ label: '$(sparkle) Automatic', value: undefined as string | undefined }, ...tops.map((t) => ({ label: t, value: t as string | undefined }))];
-  const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Top of the design hierarchy (any module name works)' });
+  type Item = vscode.QuickPickItem & { value: string | undefined };
+  const items: Item[] = [{ label: '$(sparkle) Automatic', value: undefined }, ...tops.map((t) => ({ label: t, value: t }))];
+  // The candidates are listed; any other module name can be typed.
+  const qp = vscode.window.createQuickPick<Item>();
+  qp.items = items;
+  qp.placeholder = 'Top of the design hierarchy (or type any module name)';
+  const pick = await new Promise<{ value: string | undefined } | undefined>((resolve) => {
+    qp.onDidAccept(() => {
+      const typed = qp.value.trim();
+      resolve(qp.activeItems[0] ?? (typed ? { value: typed } : undefined));
+      qp.hide();
+    });
+    qp.onDidHide(() => resolve(undefined));
+    qp.show();
+  });
+  qp.dispose();
   if (pick) {
     views.design.top = pick.value;
     void views.design.refresh().then(() => views.followAgain(views.design as never));

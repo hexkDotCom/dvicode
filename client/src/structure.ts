@@ -2,7 +2,7 @@
 // (`dvicode/structure`), with a filter, following the cursor.
 
 import * as vscode from 'vscode';
-import { Conn, uriKey } from './views';
+import { Conn, canonAuthority, uriKey } from './views';
 import { StructNode, innermostAt } from './viewmodel';
 
 /** `dvicode/structure`. */
@@ -179,6 +179,7 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
 
   private setSync(on: boolean): void {
     this.sync = on;
+    clearTimeout(this.followTimer);
     this.save();
     if (on) {
       void this.follow();
@@ -205,7 +206,7 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
     const u = ed.document.uri;
     try {
       // A dvicode:// document of another host is not this engine's.
-      if (u.scheme === 'dvicode' && m.toClient(m.toServer(u)).authority.toLowerCase() !== u.authority.toLowerCase()) {
+      if (u.scheme === 'dvicode' && canonAuthority(m.toClient(m.toServer(u)).authority) !== canonAuthority(u.authority)) {
         return undefined;
       }
       if (u.scheme !== 'file' && u.scheme !== 'dvicode') {
@@ -331,7 +332,7 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
   private async follow(): Promise<void> {
     const ed = vscode.window.activeTextEditor;
     const d = this.document();
-    if (!ed || !d || !this.result || d.uri !== this.uri || !this.view.visible) {
+    if (!this.sync || !ed || !d || !this.result || d.uri !== this.uri || !this.view.visible) {
       return;
     }
     const pos = ed.selection.active;

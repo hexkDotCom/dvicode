@@ -86,6 +86,14 @@ function serverArgs(cfg: Cfg): string[] {
   return ['--stdio', '--log-level', cfg.logLevel, ...cfg.extraArgs];
 }
 
+/** An argument as the platform's shell (cmd.exe or sh) reads it: `R&D` or `$HOME` literally. */
+function shellArg(s: string): string {
+  if (process.platform === 'win32') {
+    return /[\s&|<>^()%!"]/.test(s) ? `"${s.replace(/"/g, '')}"` : s;
+  }
+  return /^[\w./=:+@%-]+$/.test(s) ? s : shQuote(s);
+}
+
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
@@ -206,7 +214,8 @@ function tcpStream(address: string, token: string): () => Promise<StreamInfo> {
   return () =>
     new Promise((resolve, reject) => {
       const i = address.lastIndexOf(':');
-      const host = i > 0 ? address.slice(0, i) : '127.0.0.1';
+      // `[::1]:7777`: the brackets only delimit an IPv6 address.
+      const host = i > 0 ? address.slice(0, i).replace(/^\[(.*)\]$/, '$1') : '127.0.0.1';
       const port = Number(i >= 0 ? address.slice(i + 1) : address);
       const socket = net.connect({ host, port }, () => {
         if (token) {
@@ -317,16 +326,25 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
           });
       return { mode, serverOptions: exe, mapper, target: `ssh ${sshHost}`, authority };
     }
-    case 'tcp':
-      return {
-        mode,
-        serverOptions: tcpStream(tcpAddress, cfg.tcpToken),
-        mapper: makeMapperFor(cfg, undefined, remoteAuthority),
-        target: `tcp ${tcpAddress}`,
-        authority: remoteAuthority ?? `tcp+${tcpAddress}`,
-      };
+    case 'tcp': {
+      const authority = remoteAuthority ?? `tcp+${tcpAddress}`;
+      // An engine on another machine: its files outside dvicode.pathMappings and the workspace
+      // folders (UVM under /opt) open as dvicode:// files, as over SSH. One on this machine
+      // sees the same files as the editor.
+      const host = tcpAddress.slice(0, Math.max(0, tcpAddress.lastIndexOf(':'))).replace(/^\[(.*)\]$/, '$1');
+      const local = ['', '127.0.0.1', 'localhost', '::1'].includes(host.toLowerCase());
+      const mapper =
+        remoteAuthority || local
+          ? makeMapperFor(cfg, undefined, remoteAuthority)
+          : makeMapper({
+              mappings: cfg.pathMappings,
+              fallbackAuthority: authority,
+              localRoots: (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file').map((f) => f.uri.fsPath),
+            });
+      return { mode, serverOptions: tcpStream(tcpAddress, cfg.tcpToken), mapper, target: `tcp ${tcpAddress}`, authority };
+    }
     case 'custom': {
-      const serverCmd = [cfg.path || 'dvicode-server', ...serverArgs(cfg)].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
+      const serverCmd = [cfg.path || 'dvicode-server', ...serverArgs(cfg)].map(shellArg).join(' ');
       const cmd = (cfg.launchCommand || '${SERVER_CMD}').replace('${SERVER_CMD}', serverCmd);
       const exe: Executable = { command: cmd, options: { shell: true } };
       return { mode, serverOptions: exe, mapper: makeMapperFor(cfg, undefined, remoteAuthority), target: `custom: ${cmd}` };

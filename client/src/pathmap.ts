@@ -154,7 +154,9 @@ export function makeMapper(opts: MapperOptions): Mapper {
       }
       if (opts.wslDistro !== undefined) {
         const d = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
-        if (d && isWin) {
+        // Under /mnt as a drive path, unless the workspace is opened through \\wsl.localhost:
+        // replies must name the documents the editor has open.
+        if (d && isWin && !opts.wslHost) {
           return vscode.Uri.file(`${d[1]}:${d[2] || '/'}`);
         }
         return vscode.Uri.from({ scheme: 'file', authority: opts.wslHost || 'wsl.localhost', path: `/${opts.wslDistro}${p}` });

@@ -14,7 +14,7 @@ test.describe('Language configuration', () => {
     for (const t of ['  if (a) begin', '  begin : named', 'class c extends b;', '  virtual function void build_phase(uvm_phase phase);', 'module top (input logic clk);', '  fork', '  case (s)']) {
       assert.ok(inc.test(t), t);
     }
-    for (const t of ['  extern function void f();', '  pure virtual task t();', '  virtual interface bus_if vif;', '  function void f(); endfunction', '  if (a) begin x = 1; end', '  int x;']) {
+    for (const t of ['  extern function void f();', '  pure virtual task t();', '  virtual interface bus_if vif;', '  function void f(); endfunction', '  if (a) begin x = 1; end', '  case (s) 0: x = 0; default: x = 1; endcase', '  int x;']) {
       assert.ok(!inc.test(t), t);
     }
     assert.ok(new RegExp(cfg.indentationRules.decreaseIndentPattern).test('  endfunction'));

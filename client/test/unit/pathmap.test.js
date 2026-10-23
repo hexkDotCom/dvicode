@@ -94,6 +94,8 @@ test.describe('WSL, \\\\wsl$ and \\\\wsl.localhost folders', () => {
       assert.equal(m.toServer(vscode.Uri.file(`\\\\${host}\\Ubuntu\\home\\me\\p\\b.sv`)), 'file:///home/me/p/b.sv');
       // The distribution root.
       assert.equal(m.toServer(vscode.Uri.from({ scheme: 'file', authority: host, path: '/Ubuntu' })), 'file:///');
+      // A folder under /mnt opened through this host keeps its spelling, not the drive's.
+      both(win, m, vscode.Uri.from({ scheme: 'file', authority: host, path: '/Ubuntu/mnt/c/proj/a.sv' }), 'file:///mnt/c/proj/a.sv');
     });
   }
   test.it('defaults to wsl.localhost', () => {
