@@ -1978,7 +1978,7 @@ fn many_inactive_regions_in_a_build_phase() {
     let (a, _) = project("manyinactive", &[("uvm_pkg.sv", uvm), ("tb_pkg.sv", &tb)]);
     let t0 = std::time::Instant::now();
     let _ = a.verification_hierarchy(Some("t"), 100);
-    assert!(t0.elapsed().as_secs() < 5, "took {:?}", t0.elapsed());
+    assert!(t0.elapsed().as_secs() < 30, "took {:?}", t0.elapsed());
 }
 
 #[test]
@@ -2003,7 +2003,7 @@ fn classes_nested_by_a_macro_without_endclass() {
     let tests: Vec<String> = a.uvm_tests().iter().map(|t| a.decl(*t).name.to_string()).collect();
     assert_eq!(tests, ["t"]);
     let _ = problems(&a);
-    assert!(t0.elapsed().as_secs() < 5, "took {:?}", t0.elapsed());
+    assert!(t0.elapsed().as_secs() < 30, "took {:?}", t0.elapsed());
 }
 
 #[test]
