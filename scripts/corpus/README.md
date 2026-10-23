@@ -199,6 +199,25 @@ from what they were with the import. Refused renames (outside the workspace, a n
 inside a macro body or built by token pasting) and missing quick fixes are notes.
 `<configuration>.writes.txt` lists both. `--renames N` (default 40), `--seed S`.
 
+## Latency
+
+`latency.py` measures what an editor waits for, on one configuration and one file: it starts
+`dvicode-server --stdio`, waits for the first build, opens the file, times hover, completion
+and semantic tokens, then types a line before the file's last `endmodule`/`endclass`/
+`endpackage` one character every `--interval` ms (100) with a completion request after each,
+and adds a declaration. It prints one JSON line: the first build, each request's time, the
+completion times while typing (p50, p95, max), when the problems of the last version arrived,
+when the project's problems settled after the declaration (no problems for `--settle` ms), and
+the engine's memory (Linux). The typed line names something undeclared, so that every version
+has a problem to report. `LATENCY_DEBUG=1` traces the messages; `--log FILE` keeps the
+engine's log (`LATENCY_LOG_LEVEL=debug` for more).
+
+```bash
+python3 scripts/corpus/latency.py --server ~/.cache/dvicode-target/release/dvicode-server \
+  --manifest scripts/corpus/manifest.json --only '^opentitan-auto$' \
+  --file hw/ip/i3c/rtl/i3c_reg_top.sv --json latency.jsonl
+```
+
 ## Baseline and compare
 
 `run.sh compare` compares `$CORPUS/results` with [baseline.json](baseline.json) and exits 1
