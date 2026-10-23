@@ -2307,3 +2307,23 @@ fn nettypes_declare_types() {
     let (a, _) = project("nettype", &files);
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }
+
+#[test]
+fn completion_in_a_file_included_inside_a_module() {
+    // body.svh is included inside m: completion there sees m's names, after the function the
+    // header declares and closes too.
+    let body = "function int f(); return 1; endfunction\nassign local_signal = loc;\n";
+    let files = [("top.sv", "module m;\n  int local_signal;\n  `include \"body.svh\"\nendmodule\n"), ("body.svh", body)];
+    let (a, root) = project("fragcomplete", &files);
+    let f = a.vfs.lookup(&root.join("body.svh")).unwrap();
+    let off = (body.find("= loc").unwrap() + 5) as u32;
+    let names: Vec<String> = a.completions(f, off).into_iter().map(|c| c.label).collect();
+    assert!(names.iter().any(|n| n == "local_signal"), "{names:?}");
+    // The nearest name before the cursor is inside a function that has ended.
+    let body = "function int g();\n  int t;\n  t = 1;\n  return t;\nendfunction\nassign local_signal = ";
+    let files = [("top.sv", "module m;\n  int local_signal;\n  `include \"body.svh\"\nendmodule\n"), ("body.svh", body)];
+    let (a, root) = project("fragcomplete2", &files);
+    let f = a.vfs.lookup(&root.join("body.svh")).unwrap();
+    let names: Vec<String> = a.completions(f, body.len() as u32).into_iter().map(|c| c.label).collect();
+    assert!(names.iter().any(|n| n == "local_signal") && !names.iter().any(|n| n == "t"), "{names:?}");
+}

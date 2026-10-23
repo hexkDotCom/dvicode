@@ -733,7 +733,31 @@ impl Analysis {
                 best_len = d.span.len();
             }
         }
+        if best == ParsedUnit::ROOT {
+            // A file included inside a scope (`include "body.svh"` in a module): the scope's
+            // extent is in the includer. The names written in this file know their scope: take
+            // the nearest one's, leaving the scopes of this file that end before `off`.
+            if let Some(s) = self.included_scope_at(unit, file, off) {
+                return s;
+            }
+        }
         best
+    }
+
+    fn included_scope_at(&self, unit: UnitId, file: dvi_syntax::FileId, off: u32) -> Option<DeclId> {
+        let u = self.unit(unit);
+        let refs = &u.positions.get(&file)?.refs;
+        let k = refs.partition_point(|(s, _, _)| s.start <= off);
+        let (_, rid, _) = refs.get(k.checked_sub(1)?).or_else(|| refs.get(k))?;
+        let mut s = u.parsed.reference(*rid).scope;
+        loop {
+            let d = u.parsed.decl(s);
+            let inside = d.span.file != file || (d.span.start <= off && off <= d.span.end);
+            if inside || s == ParsedUnit::ROOT {
+                return Some(s);
+            }
+            s = d.parent?;
+        }
     }
 }
 
