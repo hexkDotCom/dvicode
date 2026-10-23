@@ -234,10 +234,16 @@ fn make_unit(
     let mut parsed = parser::parse(&pp.tokens, root);
     mark_encrypted(&mut parsed, &pp.protected);
     let mut positions: FxHashMap<FileId, FilePositions> = FxHashMap::default();
-    let mut names: FxHashMap<SmolStr, Vec<(RefId, u16)>> = FxHashMap::default();
+    let mut names: FxHashMap<SmolStr, Vec<(RefId, u16)>> = FxHashMap::with_capacity_and_hasher(parsed.refs.len() / 4, Default::default());
     for (rid, r) in parsed.refs.iter().enumerate() {
         for (si, s) in r.segs.iter().enumerate() {
-            names.entry(s.name.clone()).or_default().push((rid as RefId, si as u16));
+            // Most names come again: no copy of the name for those.
+            match names.get_mut(&s.name) {
+                Some(v) => v.push((rid as RefId, si as u16)),
+                None => {
+                    names.insert(s.name.clone(), vec![(rid as RefId, si as u16)]);
+                }
+            }
             if !s.from_macro {
                 positions.entry(s.span.file).or_default().refs.push((s.span, rid as RefId, si as u16));
             }
@@ -253,8 +259,14 @@ fn make_unit(
         positions.entry(d.name_span.file).or_default().decls.push(did as DeclId);
     }
     for p in positions.values_mut() {
-        p.refs.sort_by_key(|(s, _, _)| (s.start, s.end));
-        p.decls.sort_by_key(|d| parsed.decls[*d as usize].name_span.start);
+        // Usually in order already (they are pushed as parsed): checked first. The full key
+        // gives the order a stable sort by position would.
+        if !p.refs.is_sorted_by_key(|(s, r, i)| (s.start, s.end, *r, *i)) {
+            p.refs.sort_unstable_by_key(|(s, r, i)| (s.start, s.end, *r, *i));
+        }
+        if !p.decls.is_sorted_by_key(|d| (parsed.decls[*d as usize].name_span.start, *d)) {
+            p.decls.sort_unstable_by_key(|d| (parsed.decls[*d as usize].name_span.start, *d));
+        }
     }
     let sources = pp
         .sources

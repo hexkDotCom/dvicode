@@ -19,8 +19,11 @@ const PUNCTS: &[&str] = &[
 ];
 
 pub fn lex(text: &str, file: FileId) -> Vec<Token> {
-    let mut lx = Lexer { src: text.as_bytes(), text, pos: 0, file, out: Vec::new(), in_macro_str: false };
+    // About one token per six bytes of source: room for them at once, rather than copying a
+    // growing vector of a large file over and over.
+    let mut lx = Lexer { src: text.as_bytes(), text, pos: 0, file, out: Vec::with_capacity(text.len() / 6 + 16), in_macro_str: false, long: Default::default() };
     lx.run();
+    lx.out.shrink_to_fit();
     lx.out
 }
 
@@ -32,6 +35,9 @@ struct Lexer<'a> {
     out: Vec<Token>,
     /// Between `` `" `` and the closing `` `" `` of a macro body on one logical line.
     in_macro_str: bool,
+    /// Identifiers too long to be stored inline, once each: the others share the string (as
+    /// the long names of a register model come again and again).
+    long: rustc_hash::FxHashMap<&'a str, SmolStr>,
 }
 
 #[inline]
@@ -47,6 +53,15 @@ fn is_ident_char(c: u8) -> bool {
 impl<'a> Lexer<'a> {
     fn peek(&self, n: usize) -> u8 {
         *self.src.get(self.pos + n).unwrap_or(&0)
+    }
+
+    /// The text of an identifier: shared with the earlier ones of the same name when it is
+    /// too long to be stored inline.
+    fn ident(&mut self, s: &'a str) -> SmolStr {
+        if s.len() <= 23 {
+            return SmolStr::new(s);
+        }
+        self.long.entry(s).or_insert_with(|| SmolStr::new(s)).clone()
     }
 
     fn push(&mut self, kind: TokKind, start: usize, text: SmolStr, fl: u8) {
@@ -127,7 +142,8 @@ impl<'a> Lexer<'a> {
             }
             let s = self.slice(start);
             let kind = if is_keyword(s) { TokKind::Keyword } else { TokKind::Ident };
-            self.push(kind, start, SmolStr::new(s), fl);
+            let text = self.ident(s);
+            self.push(kind, start, text, fl);
             return;
         }
         if c >= 0x80 {

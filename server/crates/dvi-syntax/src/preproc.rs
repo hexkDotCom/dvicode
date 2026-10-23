@@ -255,6 +255,11 @@ pub fn preprocess(
         work: Default::default(),
     };
     pp.enter_file(root);
+    // The root file's tokens are most of the output: room for them at once.
+    if let Some(f) = pp.frames.last() {
+        let n = f.toks.len();
+        pp.res.tokens.reserve(n);
+    }
     pp.run();
     let mut res = pp.res;
     for i in std::mem::take(&mut res.after_protected) {

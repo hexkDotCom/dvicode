@@ -17,7 +17,8 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         toks: tokens,
         pos: 0,
         eof: Token::eof(eof_span),
-        u: ParsedUnit::default(),
+        // About one reference per four tokens and a declaration per twenty: room for them.
+        u: ParsedUnit { refs: Vec::with_capacity(tokens.len() / 4), decls: Vec::with_capacity(tokens.len() / 20 + 1), ..Default::default() },
         scopes: Vec::new(),
         end_stack: Vec::new(),
         genblk: Vec::new(),
@@ -48,6 +49,9 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
     p.genblk.push(0);
     p.items(None);
     let mut u = p.u;
+    // What was reserved and not used is not kept as long as the unit.
+    u.refs.shrink_to_fit();
+    u.decls.shrink_to_fit();
     u.build_index();
     u
 }
