@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2 (preview)
+
+A maintenance release: no change to the extension's behaviour.
+
+- **Verifiable packages**: the packages of a release carry build provenance attestations,
+  which say that the release workflow built them from that release's tag. Check one with
+  `gh attestation verify dvicode-0.3.2.vsix -R hexkDotCom/dvicode --signer-workflow
+  hexkDotCom/dvicode/.github/workflows/release.yml --source-ref refs/tags/v0.3.2`. Open VSX
+  now receives the very packages of the GitHub release, checked against those attestations,
+  instead of a second build.
+- The README explains the remote TCP engine's token, tunnelling it over SSH, and what
+  Restricted Mode allows for `dvicode://` folders.
+- The release and CI workflows run on current GitHub Actions (Node 24) and are tested on
+  Ubuntu 26.04.
+
 ## 0.3.1 (preview)
 
 **Responsiveness**
