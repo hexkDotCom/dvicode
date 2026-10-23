@@ -197,6 +197,7 @@ def main():
     ap.add_argument("--wait", type=int, default=120, help="s to wait for the problems of a version")
     ap.add_argument("--json", help="write the measurements here too")
     ap.add_argument("--log", help="the engine's log file")
+    ap.add_argument("--perf", help="record a perf profile (Linux) of the typing and the declaration into this file")
     a = ap.parse_args()
 
     env = {}
@@ -262,6 +263,11 @@ def main():
     out["completion_ms"], res = timed(srv, "textDocument/completion", {"textDocument": tdoc, "position": hover_pos})
     out["tokens_ms"], _ = timed(srv, "textDocument/semanticTokens/full", {"textDocument": tdoc})
 
+    prof = None
+    if a.perf:
+        prof = subprocess.Popen(["perf", "record", "-q", "-F", "999", "-g", "-p", str(srv.p.pid), "-o", a.perf],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)  # perf attaches
     # Typing: the line goes in empty, then one character at a time.
     version += 1
     srv.notify("textDocument/didChange", {"textDocument": {"uri": doc, "version": version},
@@ -326,6 +332,9 @@ def main():
     out["decl_project_problems_ms"] = round((last - t_decl) * 1000)
     out["decl_files_published"] = len(files)
     out["rss_end_mb"] = srv.rss_mb()
+    if prof:
+        prof.send_signal(2)
+        prof.wait(timeout=60)
 
     srv.request("shutdown", None)
     srv.notify("exit", None)
