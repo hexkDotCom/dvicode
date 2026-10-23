@@ -13,6 +13,7 @@ fn project(name: &str, files: &[(&str, &str)]) -> (Analysis, PathBuf) {
     std::fs::create_dir_all(root.join(".dvicode")).unwrap();
     let mut build = String::new();
     for (f, text) in files {
+        std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
         std::fs::write(root.join(f), text).unwrap();
         if f.ends_with(".sv") {
             build.push_str(f);
@@ -322,4 +323,83 @@ fn skipped_code_uses_are_counted_again_only_where_an_edit_can_change_them() {
     assert!(c.hidden_seed.is_none());
     let (line, msg) = skipped_notice(&c, &root, "env_pkg.sv").unwrap();
     assert!(line == 2 && msg.contains("3 uses"), "{line} {msg}");
+}
+
+/// Every project file's problems, by file name.
+fn all_problems(a: &Analysis) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = a
+        .project_files()
+        .into_iter()
+        .flat_map(|f| {
+            let name = a.path(f).file_name().unwrap().to_string_lossy().to_string();
+            a.file_diagnostics(f).into_iter().map(move |d| (name.clone(), d.message))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Auto-configures `files`, warms the skipped-code counts, makes `edit` (file, new text) as
+/// the server does (reusing other files' counts when nothing they see changed), and checks
+/// that every file's problems are those of a full build of the new texts. Returns whether
+/// the edit changed what other files see.
+fn edit_like_the_server(name: &str, files: &[(&str, &str)], edited: (&str, &str)) -> bool {
+    let (_, root) = project(name, files);
+    std::fs::remove_file(root.join(".dvicode/default.build")).unwrap();
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let before = all_problems(&a);
+    let f = edit(&a, &root, edited.0, edited.1);
+    let mut b = a.update_with(&[f], &dvi_project::Progress::new()).unwrap();
+    let changed = b.interface_changed(&a);
+    if !changed {
+        b.reuse_hidden_uses(&a);
+    }
+    let full = Analysis::build(a.vfs.clone(), a.setup.clone());
+    assert_eq!(all_problems(&b), all_problems(&full), "before the edit: {before:?}");
+    changed
+}
+
+#[test]
+fn connections_that_pick_another_copy_change_what_other_files_see() {
+    // Two copies of D (no build file); the named connection picks the one with port x, whose
+    // removed region may declare `secret`.
+    let files = [
+        ("a/d.sv", "module D(input logic x);\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("b/d.sv", "module D(input logic y);\nendmodule\n"),
+        ("top.sv", "module top;\n  D d(.x());\nendmodule\n"),
+        ("observer.sv", "module observer;\n  initial $display(top.d.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifaceconn", &files, ("top.sv", "module top;\n  D d(.y());\nendmodule\n")));
+}
+
+#[test]
+fn a_removed_region_moving_out_of_a_function_changes_what_other_files_see() {
+    let files = [
+        ("p.sv", "package p;\nfunction void f();\n// pad here\n`ifdef NEVER\nint secret;\n`endif\nendfunction\nendpackage\n"),
+        ("use.sv", "module m;\n  initial $display(p::secret);\nendmodule\n"),
+    ];
+    let swapped = "package p;\nfunction void f();\nendfunction\n`ifdef NEVER\nint secret;\n`endif\n// pad here\nendpackage\n";
+    assert!(edit_like_the_server("ifaceregion", &files, ("p.sv", swapped)));
+}
+
+#[test]
+fn a_bind_to_another_target_changes_what_other_files_see() {
+    let files = [
+        ("k.sv", "module K;\n`ifdef NEVER\n  logic secret;\n`endif\nendmodule\n"),
+        ("mn.sv", "module M;\nendmodule\nmodule N;\nendmodule\n"),
+        ("bind.sv", "module binds;\nendmodule\nbind M K b();\n"),
+        ("observer.sv", "module observer;\n  M m();\n  initial $display(m.b.secret);\nendmodule\n"),
+    ];
+    assert!(edit_like_the_server("ifacebind", &files, ("bind.sv", "module binds;\nendmodule\nbind N K b();\n")));
+}
+
+#[test]
+fn an_edit_inside_a_body_keeps_other_files_counts() {
+    let files = [
+        ("p.sv", "package p;\n`ifdef NEVER\nint secret;\n`endif\nendpackage\n"),
+        ("use.sv", "module m;\n  initial $display(p::secret);\nendmodule\n"),
+        ("other.sv", "module other;\n  initial begin\n  end\nendmodule\n"),
+    ];
+    assert!(!edit_like_the_server("ifacebody", &files, ("other.sv", "module other;\n  initial begin\n    $display(p::secret);\n  end\nendmodule\n")));
 }

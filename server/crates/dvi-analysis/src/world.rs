@@ -286,7 +286,25 @@ fn make_unit(
     }
 }
 
-/// Hash of a unit's declarations that other files can refer to.
+/// What library discovery reads of a unit: the design elements it defines at the top level, and
+/// those it instantiates, in order of first use.
+fn library_names(u: &Unit) -> (Vec<&SmolStr>, Vec<&SmolStr>) {
+    let defined = u
+        .parsed
+        .decl(ParsedUnit::ROOT)
+        .children
+        .iter()
+        .map(|c| u.parsed.decl(*c))
+        .filter(|d| d.kind.is_definition() && !d.name.is_empty() && !d.has(dvi_syntax::ast::dflags::OUT_OF_BLOCK))
+        .map(|d| &d.name)
+        .collect();
+    let mut seen = FxHashSet::default();
+    let used = u.parsed.refs.iter().filter(|r| r.kind == RefKind::Definition).map(|r| &r.segs[0].name).filter(|n| seen.insert(*n)).collect();
+    (defined, used)
+}
+
+/// Hash of what other files can see of a unit: its declarations (outside bodies), the connections
+/// and binds that decide what instances are, and where its removed regions are in its scopes.
 fn interface_fingerprint(u: &Unit) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
@@ -317,6 +335,28 @@ fn interface_fingerprint(u: &Unit) -> u64 {
             (i.pkg.as_str(), i.item.as_deref()).hash(&mut h);
         }
         d.exports.len().hash(&mut h);
+    }
+    // The ports and parameters each instance connects by name: without a build file they pick
+    // the copy of a design element defined twice, which other files reach through the instance.
+    for r in &u.parsed.refs {
+        if let RefKind::Port { inst } | RefKind::Param { inst } = r.kind {
+            (u.parsed.decl(inst).name.as_str(), r.segs.first().map(|s| s.name.as_str())).hash(&mut h);
+        }
+    }
+    // `bind`: which design element gets which instance.
+    for (target, inst) in &u.parsed.binds {
+        let d = u.parsed.decl(*inst);
+        (target.as_str(), d.name.as_str(), d.ty.as_ref().map(|t| t.text.as_str())).hash(&mut h);
+    }
+    // The scopes each region removed by `ifdef` is in (not its position): whether it may hide
+    // members of a package or class that other files use.
+    for s in &u.inactive {
+        let mut cur = u.parsed.decl(ParsedUnit::ROOT);
+        while let Some(c) = cur.children.iter().map(|c| u.parsed.decl(*c)).find(|c| c.span.file == s.file && c.span.start <= s.start && s.end <= c.span.end) {
+            (c.name.as_str(), c.kind as u8).hash(&mut h);
+            cur = c;
+        }
+        0xffu8.hash(&mut h);
     }
     h.finish()
 }
@@ -745,11 +785,36 @@ impl Analysis {
             next.units[id] = Some(Arc::new(u));
         }
         next.reindex();
-        next.update_library_units(Some(progress));
+        // Which library files are compiled depends only on what the build's units define and
+        // instantiate, and on the macros they leave behind: an edit inside a body changes none
+        // of that, and looking for every missing design element in every library folder again
+        // costs more than the edit itself. (New files in library folders start a build.)
+        if !next.library_inputs_same(self) {
+            next.update_library_units(Some(progress));
+        }
         if progress.is_cancelled() {
             return None;
         }
         Some(next)
+    }
+
+    /// Whether every unit compiled again since `old` defines and instantiates the same design
+    /// elements (by name, in order) and leaves the same macros behind as before, and no unit
+    /// came or went (ad-hoc units aside, which library files do not depend on).
+    fn library_inputs_same(&self, old: &Analysis) -> bool {
+        let n = self.units.len().max(old.units.len());
+        (0..n).all(|i| match (self.units.get(i).and_then(|u| u.as_ref()), old.units.get(i).and_then(|u| u.as_ref())) {
+            (Some(a), Some(b)) if Arc::ptr_eq(a, b) => true,
+            (Some(a), Some(b)) if a.kind == UnitKind::AdHoc && b.kind == UnitKind::AdHoc => true,
+            (Some(a), Some(b)) => {
+                a.library == b.library
+                    && a.invocation == b.invocation
+                    && library_names(a) == library_names(b)
+                    && a.macros_after.same_definitions(&b.macros_after)
+            }
+            (None, None) => true,
+            (Some(a), None) | (None, Some(a)) => a.kind == UnitKind::AdHoc,
+        })
     }
 
     /// Preprocesses `u` again, reading what this snapshot reads (the text pinned for it).
