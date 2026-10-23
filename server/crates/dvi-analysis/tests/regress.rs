@@ -2242,7 +2242,7 @@ fn named_connections_name_ports_and_parameters_only() {
     let (a, _) = project("namedconn", &files);
     let p = problems(&a);
     assert_eq!(p.len(), 2, "{p:?}");
-    assert!(p.iter().any(|m| m.contains("Parameter 'L'")) && p.iter().any(|m| m.contains("Port 'internal_signal'")), "{p:?}");
+    assert!(p.iter().any(|m| m.contains("'L' is a localparam")) && p.iter().any(|m| m.contains("Port 'internal_signal'") && m.contains("a variable inside it")), "{p:?}");
 }
 
 #[test]
@@ -2343,4 +2343,14 @@ fn for_loops_with_qualified_types_and_long_generate_chains() {
         .join()
         .expect("no stack overflow");
     assert_eq!(u, 0);
+}
+
+#[test]
+fn nettypes_declare_types() {
+    let files = [
+        ("p.sv", "package rp;\n  typedef struct { real v; } s_t;\n  function automatic s_t res(input s_t d[]); return d[0]; endfunction\nendpackage\npackage p;\n  nettype rp::s_t wire_t with rp::res;\n  nettype real plain_t;\nendpackage\n"),
+        ("m.sv", "module m;\n  p::wire_t a;\n  p::plain_t b;\n  if (type(a) == type(p::wire_t)) begin : g end\nendmodule\n"),
+    ];
+    let (a, _) = project("nettype", &files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
 }

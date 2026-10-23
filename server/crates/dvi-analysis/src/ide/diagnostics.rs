@@ -174,7 +174,13 @@ impl Analysis {
                             // ciphertext.
                             if md.kind.is_definition() && !md.has(dflags::ENCRYPTED) {
                                 let what = if matches!(chain.kind, RefKind::Port { .. }) { "Port" } else { "Parameter" };
-                                out.push(Diag::error(*span, "NON_EXISTING_PORT", format!("NON_EXISTING_PORT: {what} '{name}' is not declared in {} '{}'", md.kind.label(), md.name)));
+                                // A member of that name that a connection cannot reach: say what it is.
+                                let msg = match self.member_of(m, name).map(|x| self.decl(x).kind) {
+                                    Some(DeclKind::LocalParam) => format!("NON_EXISTING_PORT: '{name}' is a localparam of {} '{}', which cannot be overridden", md.kind.label(), md.name),
+                                    Some(k) => format!("NON_EXISTING_PORT: {what} '{name}' is not declared in {} '{}' ('{name}' is a {} inside it)", md.kind.label(), md.name, k.label()),
+                                    None => format!("NON_EXISTING_PORT: {what} '{name}' is not declared in {} '{}'", md.kind.label(), md.name),
+                                };
+                                out.push(Diag::error(*span, "NON_EXISTING_PORT", msg));
                             }
                         }
                     }

@@ -512,7 +512,8 @@ impl<'t> Parser<'t> {
             "export" => self.export_item(),
             "typedef" => self.typedef(),
             "parameter" | "localparam" => self.param_decl(),
-            "specparam" | "defparam" | "timeunit" | "timeprecision" | "alias" | "nettype" => {
+            "nettype" => self.nettype(),
+            "specparam" | "defparam" | "timeunit" | "timeprecision" | "alias" => {
                 self.bump();
                 self.scan_until_semi(RefKind::Loose);
             }
@@ -1361,6 +1362,31 @@ impl<'t> Parser<'t> {
             self.error(sp, "Expected type name");
             self.scan_until_semi(RefKind::Loose);
         }
+    }
+
+    /// `nettype data_type name [with resolve_fn];`: a type, like a typedef.
+    fn nettype(&mut self) {
+        let start = self.tok().span;
+        self.bump();
+        let ty = self.parse_type(true, RefKind::Type).map(|ti| {
+            self.scan_params(ti.params);
+            ti.tref
+        });
+        if !self.at_ident() {
+            self.scan_until_semi(RefKind::Loose);
+            return;
+        }
+        let n = self.tok().clone();
+        self.bump();
+        let id = self.new_decl(DeclKind::Typedef, Some(&n), start);
+        self.u.decls[id as usize].detail = ty.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+        self.u.decls[id as usize].ty = ty;
+        if self.eat_kw("with") {
+            self.scan_until_semi(RefKind::Loose);
+        } else {
+            self.expect_p(";");
+        }
+        self.finish(id);
     }
 
     fn param_decl(&mut self) {
