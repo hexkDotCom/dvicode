@@ -2551,8 +2551,10 @@ fn an_edit_is_local_to_a_line_only_when_nothing_else_changed() {
     let old = "a;\n  x = 1;\nb;\n";
     // The line changed, the others not: where it starts, and both versions.
     assert_eq!(line_local_edit(old, "a;\n  x = 12;\nb;\n", 1), Some((3, "  x = 1;", "  x = 12;")));
-    assert_eq!(line_local_edit(old, "a;\n  x = pr\nb;\n", 1), Some((3, "  x = 1;", "  x = pr")));
-    assert_eq!(line_local_edit(old, "a;\n\nb;\n", 1), Some((3, "  x = 1;", "")));
+    assert_eq!(line_local_edit(old, "a;\n  x = f(y);\nb;\n", 1), Some((3, "  x = 1;", "  x = f(y);")));
+    // A `;` more or less may end a scope's statement on the line.
+    assert_eq!(line_local_edit(old, "a;\n  x = pr\nb;\n", 1), None);
+    assert_eq!(line_local_edit(old, "a;\n\nb;\n", 1), None);
     // The first and the last line.
     assert_eq!(line_local_edit(old, "ab;\n  x = 1;\nb;\n", 0), Some((0, "a;", "ab;")));
     assert_eq!(line_local_edit("a;\nb;", "a;\nbc;", 1), Some((3, "b;", "bc;")));

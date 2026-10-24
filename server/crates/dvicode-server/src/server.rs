@@ -1488,7 +1488,9 @@ impl Server {
         let file = self.file_of_request(&req.params)?;
         // A build under way, or done and waiting for the edits to be replayed on it, may
         // replace what the snapshot in use says.
-        if self.building || self.built.is_some() || !self.dirty.contains_key(&file) || self.dirty.keys().any(|g| *g != file && self.related(false, Some(file), *g)) {
+        // Edits of any other file may change what this one is compiled with (the macros an
+        // earlier file leaves behind), as may a build.
+        if self.building || self.built.is_some() || !self.dirty.contains_key(&file) || self.dirty.len() > 1 {
             return None;
         }
         let p: Position = serde_json::from_value(req.params.get("position")?.clone()).ok()?;

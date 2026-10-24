@@ -493,10 +493,12 @@ impl Analysis {
     pub fn signature_help_with_line(&self, file: FileId, line_start: u32, line: &str) -> Option<SignatureHelp> {
         let text = self.file_text(file)?;
         // The 4000 bytes before the cursor, as `signature_help` reads.
-        let start = (line_start as usize).saturating_sub(4000usize.saturating_sub(line.len()));
+        let start = (line_start as usize).saturating_sub(4000);
         let start = (start..line_start as usize).find(|i| text.is_char_boundary(*i)).unwrap_or(line_start as usize);
         let window = format!("{}{line}", text.get(start..line_start as usize)?);
-        self.signature_help_in(file, &window, line_start)
+        let cut = window.len().saturating_sub(4000);
+        let cut = (cut..window.len()).find(|i| window.is_char_boundary(*i)).unwrap_or(window.len());
+        self.signature_help_in(file, &window[cut..], line_start)
     }
 
     /// Signature help for the text `window` that ends at the cursor, in the scope at `off`.
@@ -635,6 +637,11 @@ pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32
     if structural(lo) || structural(ln) {
         return None;
     }
+    // A `;` more or less may end a statement a scope is made of (a loop's) on this line.
+    let ends = |l: &str| lex(l, 0).iter().filter(|t| t.is_punct(";")).count();
+    if ends(lo) != ends(ln) {
+        return None;
+    }
     Some((os as u32, lo, ln))
 }
 
@@ -647,6 +654,11 @@ impl Analysis {
         let &unit = self.units_for(file).first()?;
         let u = self.unit(unit);
         if u.kind != crate::world::UnitKind::Project {
+            return None;
+        }
+        // Inside the arguments of a macro call begun on an earlier line: what the line says is
+        // read through the macro, which may open or close scopes.
+        if u.macro_uses.iter().any(|m| m.call_span.file == file && m.call_span.start < start && m.call_span.end > start) {
             return None;
         }
         let scope = self.scope_at(unit, file, start);
