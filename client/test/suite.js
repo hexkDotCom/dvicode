@@ -392,6 +392,24 @@ async function run() {
     return `${push} || ${addr}`;
   });
 
+  await test('config_db: hover and go to definition from a get to its set', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const doc = await open('tb/demo_env_pkg.sv');
+    const line = lineOf(doc, 'uvm_config_db #(demo_cfg)::get');
+    const text = doc.lineAt(line.line).text;
+    const onGet = new vscode.Position(line.line, text.indexOf('::get') + 3);
+    const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', doc.uri, onGet);
+    const md = hovers.map((h) => h.contents.map((c) => (typeof c === 'string' ? c : c.value)).join('\n')).join('\n');
+    if (!md.includes('Candidate providers** (1)') || !md.includes('::set(this, "agent*", "cfg", cfg)')) throw new Error(md);
+    const onField = new vscode.Position(line.line, text.indexOf('"cfg"') + 2);
+    const defs = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', doc.uri, onField);
+    const at = defs.map((d) => `${(d.uri || d.targetUri).path.split('/').pop()}:${(d.range || d.targetRange).start.line + 1}`).join(' ');
+    const setLine = lineOf(doc, '::set(this, "agent*"').line + 1;
+    if (at !== `demo_env_pkg.sv:${setLine}`) throw new Error(`definition: ${at}`);
+    return `${md.split('\n')[0]} -> ${at}`;
+  });
+
   await test('views: follow the editor', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

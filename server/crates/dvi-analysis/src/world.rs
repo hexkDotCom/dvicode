@@ -182,6 +182,10 @@ pub struct Analysis {
     /// Out-of-block method and constraint bodies (`function C::f()`) by name, for finding a
     /// prototype's implementation (`Analysis::implementation_of`).
     pub out_of_block: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
+    /// The `uvm_config_db` calls of the project (`Analysis::config_index`), and where the
+    /// configured test places component classes (`Analysis::config_places`).
+    pub config_calls: Arc<std::sync::OnceLock<Arc<crate::ide::configdb::ConfigIndex>>>,
+    pub config_places_cache: Arc<std::sync::OnceLock<Arc<crate::ide::configdb::Places>>>,
     /// The class each factory name registers (`class_by_factory_name`), as asked.
     pub factory_names: Arc<std::sync::Mutex<FxHashMap<SmolStr, Option<DeclRef>>>>,
     /// The `-y`/`-v` library units in the order they are compiled (after the build's own
@@ -488,6 +492,8 @@ impl Analysis {
             hidden_seed: None,
             instance_defs: Arc::default(),
             out_of_block: Arc::default(),
+            config_calls: Arc::default(),
+            config_places_cache: Arc::default(),
             factory_names: Arc::default(),
             library_order: Arc::default(),
             cancel: None,
@@ -789,6 +795,8 @@ impl Analysis {
         self.file_units = Arc::new(fu);
         self.instance_defs = Arc::default();
         self.out_of_block = Arc::default();
+        self.config_calls = Arc::default();
+        self.config_places_cache = Arc::default();
         self.factory_names = Arc::default();
     }
 
@@ -876,6 +884,8 @@ impl Analysis {
         next.hidden_seed = None;
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
+        next.config_calls = Arc::default();
+        next.config_places_cache = Arc::default();
         next.factory_names = Arc::default();
         // Preprocess the edited units in parallel with the macros they started with: that is
         // their result unless a file before them now leaves different macros behind.
@@ -1186,6 +1196,8 @@ impl Analysis {
         next.hidden_seed = None;
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
+        next.config_calls = Arc::default();
+        next.config_places_cache = Arc::default();
         next.factory_names = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
@@ -1214,6 +1226,8 @@ impl Analysis {
         next.hidden_seed = None;
         next.instance_defs = Arc::default();
         next.out_of_block = Arc::default();
+        next.config_calls = Arc::default();
+        next.config_places_cache = Arc::default();
         next.factory_names = Arc::default();
         for id in ids {
             next.units[id as usize] = None;

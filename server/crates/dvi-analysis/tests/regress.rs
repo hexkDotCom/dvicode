@@ -3367,6 +3367,100 @@ fn assertions_and_coverage_of_a_signal_are_found_through_helpers_ports_and_argum
     assert_eq!((d.target.name.as_str(), d.target.kind.as_str()), ("data", "port of dut"));
 }
 
+const CONFIG_UVM: &str = r#"
+package uvm_pkg;
+  class uvm_object; endclass
+  class uvm_component extends uvm_object; function new(string name, uvm_component parent); endfunction endclass
+  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_agent extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_root extends uvm_component; static function uvm_root get(); return null; endfunction endclass
+  class uvm_config_db #(type T = int);
+    static function void set(uvm_component cntxt, string inst_name, string field_name, T value); endfunction
+    static function bit get(uvm_component cntxt, string inst_name, string field_name, inout T value); return 0; endfunction
+  endclass
+endpackage
+"#;
+
+const CONFIG_TB: &str = r#"
+package tb_pkg;
+  import uvm_pkg::*;
+  class base_cfg extends uvm_object; endclass
+  class my_cfg extends base_cfg; endclass
+  class my_agent extends uvm_agent;
+    my_cfg cfg; base_cfg bcfg; int depth;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      void'(uvm_config_db #(my_cfg)::get(this, "", "cfg", cfg)); // G1
+      void'(uvm_config_db #(base_cfg)::get(this, "", "cfg", bcfg)); // G2
+      void'(uvm_config_db #(int)::get(this, "", "depth", depth)); // G3
+      void'(uvm_config_db #(int)::get(get_parent(), "", "depth", depth)); // G4
+    endfunction
+  endclass
+  class my_env extends uvm_env;
+    my_agent agt, other;
+    my_cfg cfg;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      agt = my_agent::type_id::create("agt", this);
+      other = my_agent::type_id::create("other", this);
+      uvm_config_db #(my_cfg)::set(this, "agt", "cfg", cfg); // S1
+      uvm_config_db #(my_cfg)::set(this, "*", "cfg", cfg); // S2
+      uvm_config_db #(my_cfg)::set(this, "agt", "*", cfg); // S3
+      uvm_config_db #(my_cfg)::set(this, "/ag.*/", "cfg", cfg); // S4
+    endfunction
+  endclass
+  class my_test extends uvm_test;
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      env = my_env::type_id::create("env", this);
+      uvm_config_db #(int)::set(this, "env.ag?", "depth", 4); // S5
+      uvm_config_db #(int)::set(null, "/uvm_test_top\..*/", "depth", 5); // S6
+      uvm_config_db #(int)::set(uvm_root::get(), "uvm_test_top.env.+", "depth", 6); // S7
+      uvm_config_db #(int)::set(.cntxt(this), .inst_name("env.other"), .field_name("depth"), .value(7)); // S8
+    endfunction
+  endclass
+endpackage
+"#;
+
+#[test]
+fn config_db_sets_are_matched_to_gets_as_uvm_does() {
+    use dvi_analysis::ide::configdb::{glob_match, scope_of, Status};
+    assert!(glob_match("uvm_test_top.env.*", "uvm_test_top.env.agt.drv"), "* crosses dots");
+    assert!(glob_match("a?c", "abc") && !glob_match("a?c", "ac"));
+    assert!(glob_match("env.+", "env.x") && !glob_match("env.+", "env."));
+    assert!(!glob_match("env", "env.agt"), "anchored");
+    assert_eq!((scope_of("", "x"), scope_of("top", ""), scope_of("top", "a")), ("x".into(), "top".into(), "top.a".into()));
+    let (a, _) = project("configdb", &[("uvm_pkg.sv", CONFIG_UVM), ("tb_pkg.sv", CONFIG_TB)]);
+    let idx = a.config_index();
+    let call = |tag: &str| {
+        let line = CONFIG_TB.lines().position(|l| l.ends_with(&format!("// {tag}"))).unwrap() as u32;
+        idx.calls.iter().find(|c| a.to_range(c.method).unwrap().start.line == line).unwrap_or_else(|| panic!("{tag}"))
+    };
+    let st = |s: &str, g: &str| {
+        let p = a.config_pair(call(s), call(g));
+        (p.field, p.ty, p.scope)
+    };
+    use Status::*;
+    assert_eq!(st("S1", "G1"), (Match, Match, Match));
+    assert_eq!(a.config_pair(call("S1"), call("G1")).precedence, Some(998), "during build, set from a context at depth 2");
+    assert_eq!(st("S2", "G1"), (Match, Match, Match));
+    assert_eq!(st("S3", "G1").0, Mismatch, "a field of \"*\" provides no field \"cfg\"");
+    assert_eq!(st("S4", "G1").2, Mismatch, "after a context, /.../ is no regular expression");
+    assert_eq!(st("S1", "G2").1, Mismatch, "a set of the derived class does not satisfy a get of the base");
+    assert_eq!(st("S5", "G3"), (Match, Match, Match), "env.ag? matches env.agt");
+    assert_eq!(st("S6", "G3").2, Unknown, "a regular expression is not evaluated");
+    assert_eq!(st("S7", "G3").2, Match, "the root context and +");
+    assert_eq!(st("S8", "G3").2, Match, "named arguments; one of the two places of my_agent");
+    assert_eq!(st("S5", "G4").2, Unknown, "get_parent() is not placed");
+    assert_eq!(call("S8").inst.as_deref(), Some("env.other"));
+    // Completion of field names inside a field string, same type first.
+    let items = a.config_field_completions("      void'(uvm_config_db #(int)::get(this, \"\", \"de").unwrap();
+    assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()[..2], ["depth", "*"]);
+    assert!(a.config_field_completions("uvm_config_db #(int)::get(this, \"de").is_none(), "not the field argument");
+}
+
 const CHECKS_EDGES: &str = r#"
 `define BOTH(s) assert property (@(posedge clk) s); cover property (@(posedge clk) s);
 package pk; bit q; endpackage

@@ -42,6 +42,9 @@ currently in preview.
 - **Assertions and Coverage**: right-click a signal or field to see the assertions, covers and
   coverpoints that use it (as the checked value, a clock or a reset), through named
   properties, port connections and `bind`s, and covergroup `sample()` arguments.
+- **uvm_config_db**: hover a `get` to see the `set` calls that can provide it (field, type
+  and scope matched as UVM 1.2 matches them, through the test's component hierarchy), and a
+  `set` for the `get` calls it reaches; go to definition from a field name to its sets.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.

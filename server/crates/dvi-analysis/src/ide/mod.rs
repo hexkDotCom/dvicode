@@ -4,6 +4,7 @@ pub mod actions;
 pub mod calls;
 pub mod checks;
 pub mod completion;
+pub mod configdb;
 pub mod diagnostics;
 pub mod factory;
 pub mod filter;

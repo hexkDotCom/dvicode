@@ -9,6 +9,10 @@ use dvi_syntax::{FileId, SourceProvider, Span};
 impl Analysis {
     /// Markdown hover text and the span it applies to.
     pub fn hover(&self, file: FileId, off: u32) -> Option<(String, Span)> {
+        // A `uvm_config_db` get or set: what provides it, or what it reaches.
+        if let Some(h) = self.config_hover(file, off) {
+            return Some(h);
+        }
         let hit = self.hit_at(file, off)?;
         let span = hit.span();
         let target = self.target_of(&hit)?;

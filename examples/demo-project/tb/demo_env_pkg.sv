@@ -33,11 +33,14 @@ package demo_env_pkg;
     demo_driver  drv;
     demo_monitor mon;
     uvm_sequencer #(uvm_object) sqr;
+    demo_cfg     cfg;
     function new(string name, uvm_component parent);
       super.new(name, parent);
     endfunction
     function void build_phase(uvm_phase phase);
       super.build_phase(phase);
+      // Set by the environment (hover `get` to see where).
+      void'(uvm_config_db #(demo_cfg)::get(this, "", "cfg", cfg));
       mon = demo_monitor::type_id::create("mon", this);
       // A passive agent only monitors.
       if (get_is_active() == UVM_ACTIVE) begin

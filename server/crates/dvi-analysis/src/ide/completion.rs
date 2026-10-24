@@ -75,6 +75,10 @@ impl Analysis {
     }
 
     fn completions_in(&self, ctx: &Ctx, file: FileId) -> Vec<CompletionItem> {
+        // Inside the field string of a `uvm_config_db` call: the fields of the project.
+        if let Some(items) = self.config_field_completions(&ctx.line) {
+            return items;
+        }
         let toks = lex(&ctx.line, file);
         // Partial identifier being typed.
         let mut end = toks.len();

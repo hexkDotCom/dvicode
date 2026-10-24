@@ -54,6 +54,12 @@ pub struct HierNode {
 /// A component of the UVM verification hierarchy (or, with `TreeQuery::objects`, an object).
 #[derive(Serialize, Debug, Clone, Default)]
 pub struct VerifNode {
+    /// Its path is the one UVM gives it (no computed name on the way).
+    #[serde(skip)]
+    pub path_known: bool,
+    /// Its class.
+    #[serde(skip)]
+    pub class_decl: Option<DeclRef>,
     /// Instance name: the string given to `create`/`new` (`uvm_test_top` for the test), or
     /// the variable when the name is computed.
     pub name: String,
@@ -1338,6 +1344,8 @@ impl Analysis {
             let pin = pin_below(Some(q.reveal.as_slice()), &key);
             let matched = if q.target.is_some() { w.hit("uvm_test_top", "", "", &d.name) } else { w.matched(&[("uvm_test_top", '.'), (&d.name, '.')]) };
             let mut node = VerifNode {
+                path_known: true,
+                class_decl: Some(t),
                 name: "uvm_test_top".into(),
                 path: "uvm_test_top".into(),
                 class: d.name.to_string(),
@@ -1750,6 +1758,8 @@ impl Analysis {
             };
             let declared = child.requested.filter(|r| Some(self.decl_key(*r)) != child.class.map(|c| self.decl_key(c))).map(|r| self.decl(r).name.to_string());
             let mut node = VerifNode {
+                path_known: child.path_known,
+                class_decl: child.class,
                 name: child.name.clone(),
                 path: child.path.clone(),
                 class: class_name,

@@ -29,6 +29,9 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Assertions and Coverage**: right-click a signal or field to see the assertions, covers and
   coverpoints that use it (as the checked value, a clock or a reset), through named
   properties, port connections and `bind`s, and covergroup `sample()` arguments.
+- **uvm_config_db**: hover a `get` to see the `set` calls that can provide it (field, type
+  and scope matched as UVM 1.2 matches them, through the test's component hierarchy), and a
+  `set` for the `get` calls it reaches; go to definition from a field name to its sets.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".

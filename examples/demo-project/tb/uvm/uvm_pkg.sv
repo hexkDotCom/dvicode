@@ -56,6 +56,9 @@ package uvm_pkg;
   class uvm_config_db #(type T = int);
     static function void set(uvm_component cntxt, string inst_name, string field_name, T value);
     endfunction
+    static function bit get(uvm_component cntxt, string inst_name, string field_name, inout T value);
+      return 0;
+    endfunction
   endclass
 
   class uvm_test extends uvm_component;

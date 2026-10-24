@@ -11,6 +11,10 @@ use std::sync::Arc;
 
 impl Analysis {
     pub fn goto_definition(&self, file: FileId, off: u32) -> Vec<Location> {
+        // A `uvm_config_db` get's field string: the sets that can provide it.
+        if let Some(v) = self.config_definition(file, off) {
+            return v;
+        }
         let Some(t) = self.target_at(file, off) else { return Vec::new() };
         match t {
             Target::Decl(r) => {
@@ -112,6 +116,10 @@ impl Analysis {
 
     /// Every location referring to the declaration at the cursor.
     pub fn references(&self, file: FileId, off: u32, include_decl: bool) -> Vec<Location> {
+        // A `uvm_config_db` field string: every get and set of that field.
+        if let Some(v) = self.config_references(file, off) {
+            return v;
+        }
         self.with_lookup_memo(|| self.references_inner(file, off, include_decl))
     }
 

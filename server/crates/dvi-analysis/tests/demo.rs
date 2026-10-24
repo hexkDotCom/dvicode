@@ -164,7 +164,7 @@ fn verification_hierarchy() {
     let env = &root.children[0];
     assert_eq!((env.kind.as_str(), env.path.as_str()), ("env", "uvm_test_top.env"));
     assert!(env.uri.as_deref().unwrap().ends_with("tb/demo_env_pkg.sv"));
-    assert_eq!(env.line + 1, 171);
+    assert_eq!(env.line + 1, 174);
     let kinds: Vec<&str> = env.children[0].children.iter().map(|c| c.kind.as_str()).collect();
     assert_eq!(kinds, vec!["monitor", "driver", "sequencer"]);
     // Another test, picked explicitly: inherits the base test's build_phase.
