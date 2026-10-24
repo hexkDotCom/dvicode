@@ -137,6 +137,10 @@ impl Analysis {
     /// The semantic problems of `file` in unit `uid`; `hidden` gets, for each name not checked
     /// because code that may declare it is removed by `` `ifdef `` (no build file), that code.
     fn semantic_check(&self, uid: UnitId, file: FileId, hidden: &mut Vec<Span>) -> Vec<Diag> {
+        self.with_lookup_memo(|| self.semantic_check_inner(uid, file, hidden))
+    }
+
+    fn semantic_check_inner(&self, uid: UnitId, file: FileId, hidden: &mut Vec<Span>) -> Vec<Diag> {
         let u = self.unit(uid);
         let Some(pos) = u.positions.get(&file) else { return Vec::new() };
         let mut out = Vec::new();
@@ -157,8 +161,9 @@ impl Analysis {
             if chain.segs[0].name == "local" {
                 continue;
             }
-            let first = self.resolve_ref(uid, *rid, 0);
-            let Some(mut cur) = first else {
+            // Every segment, resolved once (`a.b.c`: `a` once, not three times).
+            let segs = if chain.segs.len() > 1 { self.resolve_segments(uid, *rid) } else { vec![self.resolve_ref(uid, *rid, 0)] };
+            let Some(mut cur) = segs[0] else {
                 if BUILTIN_NAMES.contains(&seg0.name.as_str()) {
                     continue;
                 }
@@ -234,7 +239,7 @@ impl Analysis {
             // Member checks along the chain.
             for i in 1..chain.segs.len() {
                 let seg = &chain.segs[i];
-                match self.resolve_ref(uid, *rid, i) {
+                match segs[i] {
                     Some(r) => cur = r,
                     None => {
                         if seg.from_macro || seg.called && CLASS_BUILTINS.contains(&seg.name.as_str()) {
