@@ -104,6 +104,9 @@ pub fn expand_bounded(pattern: &Path) -> (Vec<PathBuf>, bool) {
 }
 
 fn expand_steps(pattern: &Path, steps: usize) -> (Vec<PathBuf>, bool) {
+    if crate::netpath::blocked(pattern).is_some() {
+        return (Vec::new(), true);
+    }
     let mut comps: Vec<String> = pattern.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
     // `**/**` is `**`.
     comps.dedup_by(|a, b| a == "**" && b == "**");

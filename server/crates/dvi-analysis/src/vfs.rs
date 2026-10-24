@@ -64,6 +64,10 @@ enum DirListing {
 
 impl DirListing {
     fn read(dir: &Path) -> DirListing {
+        // A network host that is not allowed: as if it were not there (`dvi_project::netpath`).
+        if dvi_project::netpath::blocked(dir).is_some() {
+            return DirListing::Missing;
+        }
         let rd = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirListing::Missing,
@@ -286,12 +290,17 @@ impl Vfs {
                 }
                 (g.paths[id as usize].clone(), e.version)
             };
-            // Regular files only: reading a FIFO named as a source would block.
-            let meta = std::fs::metadata(&path).map_err(|e| {
+            // Regular files only: reading a FIFO named as a source would block. Nothing on a
+            // network host that is not allowed: not even its metadata.
+            let blocked = dvi_project::netpath::blocked(&path);
+            if let Some(host) = &blocked {
+                log::warn!("not reading {}: the network host {host} is not allowed (security.allowedUNCHosts)", path.display());
+            }
+            let meta = if blocked.is_some() { Err(()) } else { Ok(()) }.and_then(|()| std::fs::metadata(&path).map_err(|e| {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     log::warn!("cannot read {}: {e}", path.display());
                 }
-            });
+            }));
             let bytes = meta.ok().filter(|m| m.is_file()).and_then(|_| match std::fs::read(&path) {
                 Ok(b) => Some(b),
                 Err(e) => {

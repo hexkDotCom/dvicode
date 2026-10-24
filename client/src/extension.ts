@@ -60,11 +60,16 @@ const SV_SELECTOR = [
 function settingsForServer(): object {
   const c = vscode.workspace.getConfiguration('dvicode');
   const maxProblems = c.get<number>('maxProblems', 1000);
+  // The network hosts (\\host\share) the engine may read, as VS Code allows them: a project
+  // naming another host could make Windows sign in to it. `null`: VS Code does not restrict.
+  const sec = vscode.workspace.getConfiguration('security');
+  const uncHosts = sec.get<boolean>('restrictUNCAccess', true) ? sec.get<string[]>('allowedUNCHosts', []) : null;
   return {
     buildFile: c.get<string>('buildFile', '') || null,
     env: c.get<Record<string, string>>('env', {}),
     uvmHome: c.get<string>('uvmHome', '') || null,
     maxProblems,
+    uncHosts,
   };
 }
 

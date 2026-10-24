@@ -333,6 +333,17 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         .clone()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
+    // The network hosts paths may name (VS Code's `security.allowedUNCHosts`, when it restricts
+    // them): read here only, not with the settings that change, as the editor sends it once.
+    let unc_hosts: Option<Vec<String>> = params
+        .initialization_options
+        .as_ref()
+        .and_then(|v| v.get("uncHosts"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if let Some(h) = &unc_hosts {
+        log::info!("network hosts allowed: {h:?}");
+    }
+    dvi_project::netpath::set_allowed_hosts(unc_hosts);
     let progress = params.capabilities.window.as_ref().and_then(|w| w.work_done_progress).unwrap_or(false);
     let watched_files = params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files.as_ref());
     let watch_inputs = watched_files.and_then(|d| d.dynamic_registration).unwrap_or(false);

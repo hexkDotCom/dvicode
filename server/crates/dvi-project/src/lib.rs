@@ -7,6 +7,7 @@
 mod auto;
 mod glob;
 mod jinja;
+pub mod netpath;
 mod progress;
 mod simlog;
 
@@ -175,6 +176,9 @@ pub(crate) const MAX_SOURCE: u64 = 2 << 30;
 /// never end) of at most `limit` bytes.
 pub(crate) fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Error, ErrorKind, Read};
+    if let Some(host) = netpath::blocked(path) {
+        return Err(Error::new(ErrorKind::PermissionDenied, format!("the network host {host} is not among your allowed hosts (security.allowedUNCHosts)")));
+    }
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
         return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
@@ -1186,7 +1190,8 @@ impl Builder {
             for d in &s.defines {
                 self.add_define(d);
             }
-            let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).collect();
+            // A log written elsewhere may name network hosts: those not allowed are left out.
+            let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).filter(|p| netpath::blocked(p).is_none()).collect();
             for f in &s.included {
                 if let Some(parent) = self.abs(f, &dir).parent() {
                     if !incdirs.iter().any(|d| d == parent) {
@@ -1194,8 +1199,8 @@ impl Builder {
                     }
                 }
             }
-            let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f)).collect();
-            let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).collect();
+            let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f) && netpath::blocked(f).is_none()).collect();
+            let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).filter(|p| netpath::blocked(p).is_none()).collect();
             // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
             let included: Vec<PathBuf> = s.included.iter().map(|f| self.abs(f, &dir)).collect();
             let sources: Vec<PathBuf> = files.iter().chain(lib_files.iter()).chain(included.iter()).cloned().collect();
@@ -1253,6 +1258,9 @@ No command line found in the log: no defines from it.");
     fn add_incdir(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
+        if !self.reachable(file, line, &abs) {
+            return;
+        }
         let (found, complete) = if glob::is_pattern(&e, &abs) { glob::expand_bounded(&abs) } else { (Vec::new(), true) };
         let found: Vec<PathBuf> = found.into_iter().filter(|d| d.is_dir()).collect();
         if !complete {
@@ -1280,6 +1288,9 @@ No command line found in the log: no defines from it.");
     fn add_file(&mut self, file: &Path, line: u32, p: &str, base: &Path) {
         let Some(e) = self.expand(p, true) else { return self.undefined(file, line, p) };
         let abs = self.abs(&e, base);
+        if !self.reachable(file, line, &abs) {
+            return;
+        }
         let (mut found, complete) = if glob::is_pattern(&e, &abs) { glob::expand_bounded(&abs) } else { (Vec::new(), true) };
         if !complete {
             self.stopped_glob(file, line, &abs);
@@ -1344,10 +1355,25 @@ No command line found in the log: no defines from it.");
 
     fn resolve(&mut self, file: &Path, line: u32, p: &str, base: &Path) -> Option<PathBuf> {
         match self.expand(p, true) {
-            Some(e) => Some(self.abs(&e, base)),
+            Some(e) => {
+                let abs = self.abs(&e, base);
+                self.reachable(file, line, &abs).then_some(abs)
+            }
             None => {
                 self.undefined(file, line, p);
                 None
+            }
+        }
+    }
+
+    /// Whether `path` may be read: not a network path to a host that is not allowed (see
+    /// [`netpath`]); one that is gets a problem.
+    fn reachable(&mut self, file: &Path, line: u32, path: &Path) -> bool {
+        match netpath::blocked(path) {
+            None => true,
+            Some(host) => {
+                self.problem(file, line, format!("{} is on the network host {host}, which is not among your allowed hosts (security.allowedUNCHosts): it is not read", path.display()));
+                false
             }
         }
     }

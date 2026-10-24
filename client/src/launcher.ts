@@ -65,7 +65,9 @@ const LOG_LEVELS = ['error', 'warn', 'info', 'debug', 'trace'];
 
 /** The settings that decide where and how the server runs, to tell when they change. */
 export function serverSettingsKey(): string {
-  return JSON.stringify(readCfg());
+  // The engine reads the allowed network hosts when it starts.
+  const sec = vscode.workspace.getConfiguration('security');
+  return JSON.stringify([readCfg(), sec.get('restrictUNCAccess', true), sec.get('allowedUNCHosts', [])]);
 }
 
 /** `dvicode://wsl+Ubuntu/...` or `dvicode://ssh+host/...` folders say where they live. */
