@@ -383,19 +383,16 @@ impl Vfs {
     }
 }
 
-/// Paths that differ in case only, by their lowercase form (Windows and macOS, whose file
-/// systems usually ignore case).
+/// Paths that differ in case only, by their lowercase form, where file systems usually ignore
+/// case (Windows, macOS, Windows drives under WSL).
 fn fold(p: &Path) -> Option<PathBuf> {
-    cfg!(any(windows, target_os = "macos")).then(|| PathBuf::from(p.to_string_lossy().to_lowercase()))
+    fsx::ignores_case(p).then(|| PathBuf::from(p.to_string_lossy().to_lowercase()))
 }
 
 /// Two spellings of one existing file: `Defs.svh` and `defs.svh` where the folder ignores
 /// case. A folder that does not (a case-sensitive one) has two files, kept apart.
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (fsx::canonicalize(a), fsx::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
+    fsx::same_file(a, b)
 }
 
 impl Inner {

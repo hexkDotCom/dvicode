@@ -6,7 +6,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn project(name: &str, files: &[(&str, &str)]) -> (Analysis, PathBuf) {
-    let root = std::env::temp_dir().join(format!("dvicode-regress-{name}-{}", std::process::id()));
+    project_in(&std::env::temp_dir(), name, files)
+}
+
+fn project_in(base: &std::path::Path, name: &str, files: &[(&str, &str)]) -> (Analysis, PathBuf) {
+    let root = base.join(format!("dvicode-regress-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join(".dvicode")).unwrap();
     let mut build = String::new();
@@ -2354,6 +2358,34 @@ fn an_include_and_the_editor_spelling_a_file_differently_share_it() {
     let f = a.vfs.set_overlay(&root.join("Defs.svh"), Arc::from("`define NOT_READY 1\n"));
     let a2 = a.update(&[f]);
     assert_eq!(codes(&a2, "top.sv"), vec!["UNDECLARED_IDENTIFIER"]);
+}
+
+/// Under WSL, a Windows drive (`/mnt/c`), where case does not matter either: the same as
+/// [`an_include_and_the_editor_spelling_a_file_differently_share_it`].
+#[cfg(target_os = "linux")]
+#[test]
+fn spellings_of_one_file_on_a_windows_drive_under_wsl_share_it() {
+    let Some(base) = ["/mnt/c/Users/Public", "/mnt/c/Windows/Temp", "/mnt/c/tmp"].iter().map(std::path::Path::new).find(|d| {
+        let probe = d.join(format!("dvicode-probe-{}", std::process::id()));
+        let ok = std::fs::write(&probe, "").is_ok() && std::fs::metadata(d.join(format!("DVICODE-PROBE-{}", std::process::id()))).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        ok
+    }) else {
+        eprintln!("skipped: no Windows drive that ignores case here");
+        return;
+    };
+    let (a, root) = project_in(base, "wslcase", &[("Defs.svh", "`define READY 1
+"), ("top.sv", "`include \"defs.svh\"
+`ifndef READY
+module m; initial undeclared_q = 1; endmodule
+`endif
+")]);
+    assert!(codes(&a, "top.sv").is_empty(), "{:?}", codes(&a, "top.sv"));
+    let f = a.vfs.set_overlay(&root.join("Defs.svh"), Arc::from("`define NOT_READY 1
+"));
+    let a2 = a.update(&[f]);
+    assert_eq!(codes(&a2, "top.sv"), vec!["UNDECLARED_IDENTIFIER"]);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[cfg(windows)]

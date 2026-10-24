@@ -78,6 +78,30 @@ pub struct BuildConfig {
     /// Every file the build reads or looked for (build file, argument files, compile logs):
     /// a change to one of them, whatever its name, means building again.
     pub inputs: Vec<PathBuf>,
+    /// Each input as it was just before the build read it (the same order).
+    pub stamps: Vec<Stamp>,
+}
+
+/// What a file looked like: its size and time of change; `None` when it was not there.
+pub type Stamp = Option<(u64, Option<std::time::SystemTime>)>;
+
+pub fn stamp(path: &Path) -> Stamp {
+    fsx::metadata(path).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+impl BuildConfig {
+    /// Records a file the build reads (or would, once it exists), before it is read.
+    pub fn add_input(&mut self, path: &Path) {
+        if !self.inputs.iter().any(|p| p == path) {
+            self.inputs.push(path.to_path_buf());
+            self.stamps.push(stamp(path));
+        }
+    }
+
+    /// The inputs that changed since the build read them (before anything watched them).
+    pub fn changed_inputs(&self) -> Vec<&Path> {
+        self.inputs.iter().zip(&self.stamps).filter(|(p, s)| stamp(p) != **s).map(|(p, _)| p.as_path()).collect()
+    }
 }
 
 /// An argument file a build reads, and what it is read with.
@@ -159,8 +183,10 @@ pub fn load_auto(root: &Path, env: &FxHashMap<String, String>) -> BuildConfig {
 /// [`load_auto`], reporting on (and cancelled through) `progress`.
 pub fn load_auto_with(root: &Path, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
     // What .gitignore leaves out decides the files: a change to it (or a new one) builds again.
-    let inputs = vec![root.join(".gitignore")];
-    BuildConfig { root: root.to_path_buf(), build_file: None, invocations: vec![auto_config_with(root, env, progress)], inputs, ..Default::default() }
+    let mut cfg = BuildConfig { root: root.to_path_buf(), build_file: None, ..Default::default() };
+    cfg.add_input(&root.join(".gitignore"));
+    cfg.invocations = vec![auto_config_with(root, env, progress)];
+    cfg
 }
 
 pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>) -> BuildConfig {
@@ -420,8 +446,8 @@ impl Builder {
 
     /// Records a file the build reads (or would, once it exists).
     fn input(&mut self, path: &Path) {
-        if !self.inspecting && !self.cfg.inputs.iter().any(|p| p == path) {
-            self.cfg.inputs.push(path.to_path_buf());
+        if !self.inspecting {
+            self.cfg.add_input(path);
         }
     }
 
@@ -505,11 +531,11 @@ impl Builder {
         let root = self.cfg.root.clone();
         let env = self.env.clone();
         let inspecting = self.inspecting;
+        if !inspecting && self.cfg.invocations.iter().any(|i| i.auto) {
+            self.cfg.add_input(&root.join(".gitignore"));
+        }
         for inv in &mut self.cfg.invocations {
             if inv.auto && !inspecting && !progress.is_cancelled() {
-                if !self.cfg.inputs.contains(&root.join(".gitignore")) {
-                    self.cfg.inputs.push(root.join(".gitignore"));
-                }
                 let a = auto_config_with(&root, &env, progress);
                 let mut files = a.files;
                 files.extend(std::mem::take(&mut inv.files));
@@ -1658,6 +1684,27 @@ fn split_words(text: &str) -> Vec<Word> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_input_changed_after_the_build_read_it_is_found() {
+        let dir = std::env::temp_dir().join(format!("dvicode_stamps_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.sv"), "").unwrap();
+        std::fs::write(dir.join("list.f"), "a.sv
+").unwrap();
+        let cfg = parse_build(&dir, &dir.join("x.build"), "-f list.f
+-f later.f
+", &FxHashMap::default());
+        assert!(cfg.changed_inputs().is_empty(), "{:?}", cfg.changed_inputs());
+        // Rewritten, and one that was missing created, before anything watched them.
+        std::fs::write(dir.join("list.f"), "a.sv
+b.sv
+").unwrap();
+        std::fs::write(dir.join("later.f"), "").unwrap();
+        assert_eq!(cfg.changed_inputs(), vec![dir.join("list.f").as_path(), dir.join("later.f").as_path()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_directives() {

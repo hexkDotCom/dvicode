@@ -96,7 +96,7 @@ fn same_name(a: &Path, b: &Path) -> bool {
 }
 
 pub fn same_file(a: &Path, b: &Path) -> bool {
-    a == b || (same_name(a, b) && fsx::canonicalize(a).ok().is_some_and(|c| fsx::canonicalize(b).ok() == Some(c)))
+    a == b || (same_name(a, b) && fsx::same_file(a, b))
 }
 
 pub fn inspect(path: &Path, text: &str, cx: &Context, env: &FxHashMap<String, String>) -> Inspection {

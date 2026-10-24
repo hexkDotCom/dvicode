@@ -215,6 +215,34 @@ pub fn canonicalize(p: impl AsRef<Path>) -> Result<PathBuf> {
     std::fs::canonicalize(p)
 }
 
+/// Whether the folder of `path` usually ignores case: on Windows and macOS, and Windows
+/// drives under WSL (`/mnt/c/...`). Two spellings there may be one file ([`same_file`] tells).
+pub fn ignores_case(path: &Path) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        return true;
+    }
+    let b = path.as_os_str().as_encoded_bytes();
+    cfg!(target_os = "linux") && b.len() >= 7 && b.starts_with(b"/mnt/") && b[5].is_ascii_alphabetic() && b[6] == b'/'
+}
+
+/// Whether two paths name one existing file: through links, `..`, or another case where case
+/// is ignored.
+pub fn same_file(a: impl AsRef<Path>, b: impl AsRef<Path>) -> bool {
+    let (a, b) = (a.as_ref(), b.as_ref());
+    #[cfg(unix)]
+    {
+        // A canonical path keeps the case it was written in on a drive under WSL; the file
+        // itself does not change.
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (metadata(a), metadata(b)) {
+            if x.ino() != 0 && x.dev() == y.dev() && x.ino() == y.ino() {
+                return true;
+            }
+        }
+    }
+    matches!((canonicalize(a), canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

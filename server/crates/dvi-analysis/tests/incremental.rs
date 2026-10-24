@@ -216,6 +216,34 @@ fn library_units_follow_the_instances_that_need_them() {
 }
 
 #[test]
+fn library_units_keep_their_compile_order_after_an_update() {
+    let root = std::env::temp_dir().join(format!("dvicode-incr-liborder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    std::fs::write(root.join("lib/a_mod.v"), "`define A_DONE\nmodule a_mod;\nendmodule\n").unwrap();
+    std::fs::write(root.join("lib/b_mod.v"), "module b_mod;\nendmodule\n").unwrap();
+    std::fs::write(root.join("top.sv"), "module top;\n  a_mod ua();\nendmodule\n").unwrap();
+    std::fs::write(root.join("x.sv"), "`ifndef A_DONE\nmodule x; initial undeclared_q = 1; endmodule\n`endif\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-y lib\n+libext+.v\ntop.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    // b_mod.v now comes first; a_mod.v, compiled after it with the same macros, is kept from
+    // before (with the older id).
+    let top = edit(&a, &root, "top.sv", "module top;\n  b_mod ub();\n  a_mod ua();\nendmodule\n");
+    let b = a.update(&[top]);
+    let full = Analysis::build(b.vfs.clone(), b.setup.clone());
+    let order = |x: &Analysis| x.library_order.iter().map(|u| x.path(x.unit(*u).root).file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>();
+    assert_eq!(order(&b), vec!["b_mod.v", "a_mod.v"]);
+    assert_eq!(order(&b), order(&full));
+    // A file outside the build sees the macros at the end of the build: after a_mod.v.
+    let x = b.vfs.file_id(&root.join("x.sv"));
+    for s in [b.add_adhoc(x), full.add_adhoc(x)] {
+        assert!(s.file_diagnostics(x).is_empty(), "{:?}", s.file_diagnostics(x).iter().map(|d| &d.message).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn a_cancelled_update_gives_no_snapshot() {
     let (a, root) = project("cancelled", &[("defs.svh", DEFS), ("a.sv", A), ("b.sv", B)]);
     let defs = edit(&a, &root, "defs.svh", "`define W 16\n");

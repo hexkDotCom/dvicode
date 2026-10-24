@@ -184,6 +184,9 @@ pub struct Analysis {
     pub out_of_block: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
     /// The class each factory name registers (`class_by_factory_name`), as asked.
     pub factory_names: Arc<std::sync::Mutex<FxHashMap<SmolStr, Option<DeclRef>>>>,
+    /// The `-y`/`-v` library units in the order they are compiled (after the build's own
+    /// files): the order a full build and every update give them, whatever their ids.
+    pub library_order: Arc<Vec<UnitId>>,
     /// Set by the server on the copy that answers a request: when the request is cancelled,
     /// searches over the whole project stop early (see `Analysis::cancelled`).
     pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -486,6 +489,7 @@ impl Analysis {
             instance_defs: Arc::default(),
             out_of_block: Arc::default(),
             factory_names: Arc::default(),
+            library_order: Arc::default(),
             cancel: None,
             pin: None,
         };
@@ -631,6 +635,10 @@ impl Analysis {
                 changed = true;
             }
         }
+        if *self.library_order != kept {
+            self.library_order = Arc::new(kept);
+            changed = true;
+        }
         if changed {
             self.reindex();
         }
@@ -647,15 +655,16 @@ impl Analysis {
             .unwrap_or_else(|| self.setup.initial_macros.get(inv).cloned().unwrap_or_default())
     }
 
-    /// Macro table at the end of an invocation.
+    /// Macro table at the end of an invocation: after its last library unit compiled, if any,
+    /// else after its own files.
     pub fn last_macros(&self, inv: usize) -> MacroTable {
-        self.units
+        self.library_order
             .iter()
-            .flatten()
-            .filter(|u| u.kind == UnitKind::Project && u.invocation == inv)
-            .last()
+            .rev()
+            .filter_map(|id| self.units.get(*id as usize).and_then(|u| u.as_deref()))
+            .find(|u| u.invocation == inv)
             .map(|u| u.macros_after.clone())
-            .unwrap_or_else(|| self.setup.initial_macros.get(inv).cloned().unwrap_or_default())
+            .unwrap_or_else(|| self.invocation_macros(inv))
     }
 
     /// Rebuilds the global index and the file-to-unit map.
@@ -714,16 +723,17 @@ impl Analysis {
                 g.macros.entry(n.clone()).or_default().push(m.clone());
             }
         }
-        // Prefer project units, in compilation order, then library units, over ad-hoc ones
-        // for the same name. Library and ad-hoc units come in the order they were needed or
-        // opened, which depends on the editing session: order them by path.
+        // Prefer project units, in compilation order, then library units, in theirs, over
+        // ad-hoc ones for the same name. Ad-hoc units come in the order they were opened, which
+        // depends on the editing session: order them by path.
         let units = &self.units;
+        let lib_pos: FxHashMap<UnitId, u32> = self.library_order.iter().enumerate().map(|(i, id)| (*id, i as u32)).collect();
         let order: FxHashMap<UnitId, (u8, u32, PathBuf)> = units
             .iter()
             .flatten()
             .map(|u| {
                 let key = match u.kind {
-                    UnitKind::Project if u.library => (1, 0, self.vfs.path(u.root)),
+                    UnitKind::Project if u.library => (1, lib_pos.get(&u.id).copied().unwrap_or(u32::MAX), self.vfs.path(u.root)),
                     UnitKind::Project => (0, u.id, PathBuf::new()),
                     UnitKind::Builtin => (2, u.id, PathBuf::new()),
                     UnitKind::AdHoc => (3, 0, self.vfs.path(u.root)),

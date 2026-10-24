@@ -758,9 +758,14 @@ impl Server {
             }
             return;
         };
-        // A file it reads changed while it ran (before anything watched it): build again.
+        // A file it reads changed while it ran: build again. Told by the client, or seen on
+        // disk for a file nothing watched yet (an argument file of the first build).
         let changed = std::mem::take(&mut self.changed_while_building);
-        if changed.iter().any(|c| a.setup.config.inputs.iter().any(|p| build_docs::same_file(p, c))) {
+        let unwatched = a.setup.config.changed_inputs().into_iter().filter(|p| !is_log(p)).map(|p| p.display().to_string()).collect::<Vec<_>>();
+        if !unwatched.is_empty() {
+            log::info!("build again: changed while the build read them: {}", unwatched.join(", "));
+        }
+        if !unwatched.is_empty() || changed.iter().any(|c| a.setup.config.inputs.iter().any(|p| build_docs::same_file(p, c))) {
             self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
         }
         // A running update started from the snapshot this replaces (or from an older build).
@@ -2058,7 +2063,7 @@ fn is_log(p: &std::path::Path) -> bool {
 /// the same path ignoring case, also once the file is deleted.
 fn same_input(input: &std::path::Path, p: &std::path::Path) -> bool {
     let folded = |x: &std::path::Path| x.to_string_lossy().to_lowercase();
-    input == p || build_docs::same_file(input, p) || (cfg!(any(windows, target_os = "macos")) && folded(input) == folded(p))
+    input == p || build_docs::same_file(input, p) || (dvi_project::fsx::ignores_case(input) && folded(input) == folded(p))
 }
 
 /// A folder as an absolute glob pattern for a client without relative patterns: forward
