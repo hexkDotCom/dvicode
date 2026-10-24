@@ -159,6 +159,15 @@ struct Updated {
     recompiled: Vec<FileId>,
 }
 
+/// See [`Server::line_local`]: the place of the cursor in the snapshot in use, and the editor's
+/// text of its line before it.
+struct LineLocal {
+    file: FileId,
+    off: u32,
+    line_start: u32,
+    line: String,
+}
+
 /// A request that waits for edits to be analysed (see `Server::spawn`).
 struct Deferred {
     id: RequestId,
@@ -1460,6 +1469,44 @@ impl Server {
 
     /// The document a request is about (`textDocument.uri`, or the `uri` of a call or type
     /// hierarchy item), when the server knows it.
+    /// For completion and signature help on a file with edits the snapshot in use does not have
+    /// yet: when they are all on the cursor's line, inside a subroutine or block, and that line
+    /// opens or closes nothing (`dvi_analysis::ide::completion::line_local_edit`), the answer
+    /// comes at once from that snapshot with the editor's line, rather than after the update
+    /// (which for a unit of megabytes takes longer than the pause between two keys). Edits of
+    /// other files compiled with it, or a build under way, make it wait as usual.
+    fn line_local(&self, req: &Request) -> Option<LineLocal> {
+        let file = self.file_of_request(&req.params)?;
+        if self.building || !self.dirty.contains_key(&file) || self.dirty.keys().any(|g| *g != file && self.related(false, Some(file), *g)) {
+            return None;
+        }
+        let p: Position = serde_json::from_value(req.params.get("position")?.clone()).ok()?;
+        let old = self.analysis.file_text(file)?;
+        let new = self.vfs.text(file)?;
+        let (line_start, lo, ln) = dvi_analysis::ide::completion::line_local_edit(&old, &new, p.line)?;
+        // The cursor's column (UTF-16) in the editor's line, and the same place, or the end, in
+        // the snapshot's line.
+        let mut col = ln.len();
+        let mut units = 0u32;
+        for (i, c) in ln.char_indices() {
+            if units >= p.character {
+                col = i;
+                break;
+            }
+            units += c.len_utf16() as u32;
+        }
+        let mut at = col.min(lo.len());
+        while !lo.is_char_boundary(at) {
+            at -= 1;
+        }
+        let off = line_start + at as u32;
+        if !self.analysis.in_body(file, off) {
+            return None;
+        }
+        log::debug!("{}: answered from revision {} with the editor's line {}", req.method, self.analysis.revision, p.line + 1);
+        Some(LineLocal { file, off, line_start, line: ln[..col].to_string() })
+    }
+
     fn file_of_request(&self, params: &Value) -> Option<FileId> {
         let uri = params.get("textDocument").or_else(|| params.get("item")).and_then(|t| t.get("uri")).and_then(|u| u.as_str());
         uri.and_then(|u| Url::parse(u).ok()).and_then(|u| self.analysis.file_of_url(&u))
@@ -1504,17 +1551,26 @@ impl Server {
                     range: a.to_range(span),
                 }))
             }),
-            "textDocument/completion" => self.spawn(req, |a, p: CompletionParams| {
-                let tp = p.text_document_position;
-                let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
-                let items = a.completions(f, off);
-                Ok(Some(CompletionResponse::List(CompletionList { is_incomplete: items.len() >= 3000, items })))
-            }),
-            "textDocument/signatureHelp" => self.spawn(req, |a, p: SignatureHelpParams| {
-                let tp = p.text_document_position_params;
-                let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
-                Ok(a.signature_help(f, off))
-            }),
+            "textDocument/completion" => match self.line_local(&req) {
+                Some(l) => self.spawn_now(req, move |a, _: CompletionParams| {
+                    let items = a.completions_with_line(l.file, l.off, &l.line);
+                    Ok(Some(CompletionResponse::List(CompletionList { is_incomplete: items.len() >= 3000, items })))
+                }),
+                None => self.spawn(req, |a, p: CompletionParams| {
+                    let tp = p.text_document_position;
+                    let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
+                    let items = a.completions(f, off);
+                    Ok(Some(CompletionResponse::List(CompletionList { is_incomplete: items.len() >= 3000, items })))
+                }),
+            },
+            "textDocument/signatureHelp" => match self.line_local(&req) {
+                Some(l) => self.spawn_now(req, move |a, _: SignatureHelpParams| Ok(a.signature_help_with_line(l.file, l.line_start, &l.line))),
+                None => self.spawn(req, |a, p: SignatureHelpParams| {
+                    let tp = p.text_document_position_params;
+                    let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
+                    Ok(a.signature_help(f, off))
+                }),
+            },
             "textDocument/definition" | "textDocument/declaration" => self.spawn(req, |a, p: GotoDefinitionParams| {
                 let tp = p.text_document_position_params;
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };

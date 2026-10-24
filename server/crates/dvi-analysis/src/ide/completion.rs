@@ -62,6 +62,19 @@ impl Analysis {
 
     pub fn completions(&self, file: FileId, off: u32) -> Vec<CompletionItem> {
         let Some(ctx) = self.completion_ctx(file, off) else { return Vec::new() };
+        self.completions_in(&ctx, file)
+    }
+
+    /// [`Analysis::completions`] at `off` in this snapshot's text, with `line` as the text of the
+    /// line before the cursor: the editor's, newer than this snapshot, while an update of edits
+    /// on that line only is under way (`Analysis::line_local_scope`).
+    pub fn completions_with_line(&self, file: FileId, off: u32, line: &str) -> Vec<CompletionItem> {
+        let Some(&unit) = self.units_for(file).first() else { return Vec::new() };
+        let ctx = Ctx { unit, scope: self.scope_at(unit, file, off), line: line.to_string() };
+        self.completions_in(&ctx, file)
+    }
+
+    fn completions_in(&self, ctx: &Ctx, file: FileId) -> Vec<CompletionItem> {
         let toks = lex(&ctx.line, file);
         // Partial identifier being typed.
         let mut end = toks.len();
@@ -81,10 +94,10 @@ impl Analysis {
         let toks = &toks[..end];
         if let Some(last) = toks.last() {
             if (last.is_punct(".") || last.is_punct("::")) && last.span.end as usize == ctx.line.trim_end_matches(prefix.as_str()).len() {
-                return self.member_completions(&ctx, toks, &prefix);
+                return self.member_completions(ctx, toks, &prefix);
             }
         }
-        self.scope_completions(&ctx, &prefix, file)
+        self.scope_completions(ctx, &prefix, file)
     }
 
     fn macro_completions(&self) -> Vec<CompletionItem> {
@@ -471,6 +484,22 @@ impl Analysis {
         let start = (off as usize).saturating_sub(4000);
         let start = (start..off as usize).find(|i| text.is_char_boundary(*i)).unwrap_or(off as usize);
         let window = text.get(start..off as usize)?;
+        self.signature_help_in(file, window, off)
+    }
+
+    /// [`Analysis::signature_help`] with `line` as the text of the line before the cursor (see
+    /// [`Analysis::completions_with_line`]); `line_start` is where that line starts in this
+    /// snapshot's text.
+    pub fn signature_help_with_line(&self, file: FileId, line_start: u32, line: &str) -> Option<SignatureHelp> {
+        let text = self.file_text(file)?;
+        let start = (line_start as usize).saturating_sub(4000);
+        let start = (start..line_start as usize).find(|i| text.is_char_boundary(*i)).unwrap_or(line_start as usize);
+        let window = format!("{}{line}", text.get(start..line_start as usize)?);
+        self.signature_help_in(file, &window, line_start)
+    }
+
+    /// Signature help for the text `window` that ends at the cursor, in the scope at `off`.
+    fn signature_help_in(&self, file: FileId, window: &str, off: u32) -> Option<SignatureHelp> {
         let toks = lex(window, file);
         // Find the unmatched '(' and count commas at its depth.
         let mut depth = 0i32;
@@ -551,6 +580,63 @@ impl Analysis {
             .collect();
         let doc = self.doc_comment(d.name_span.file, if d.span.file == d.name_span.file { d.span.start } else { d.name_span.start });
         Some(make_sig(d.name.to_string(), params, commas, doc))
+    }
+}
+
+/// Where the editor's text `new` differs from a snapshot's text `old` only on line `line` (both
+/// have it), and the two versions of that line can change nothing but themselves: no keyword
+/// that opens or closes a scope, no directive, no block comment, string or line continuation.
+/// Returns where the line starts in `old` (the same in `new`), and the line in `old` and in
+/// `new`, without its end.
+pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32, &'a str, &'a str)> {
+    let start = |t: &str| -> Option<usize> {
+        if line == 0 {
+            return Some(0);
+        }
+        t.match_indices('\n').nth(line as usize - 1).map(|(i, _)| i + 1)
+    };
+    let (os, ns) = (start(old)?, start(new)?);
+    if os != ns || old.as_bytes()[..os] != new.as_bytes()[..ns] {
+        return None;
+    }
+    let end = |t: &str, s: usize| t[s..].find('\n').map_or(t.len(), |i| s + i);
+    let (oe, ne) = (end(old, os), end(new, ns));
+    if old.as_bytes()[oe..] != new.as_bytes()[ne..] {
+        return None;
+    }
+    let (lo, ln) = (&old[os..oe], &new[ns..ne]);
+    let structural = |l: &str| {
+        let l = l.trim_end_matches('\r');
+        l.contains("/*") || l.contains("*/") || l.contains('"') || l.ends_with('\\') || l.contains('`') || {
+            lex(l, 0).iter().any(|t| {
+                t.kind == TokKind::Keyword
+                    && matches!(
+                        t.text.as_str(),
+                        "begin" | "end" | "fork" | "join" | "join_any" | "join_none" | "function" | "endfunction" | "task" | "endtask"
+                            | "class" | "endclass" | "module" | "endmodule" | "package" | "endpackage" | "interface" | "endinterface"
+                            | "program" | "endprogram" | "generate" | "endgenerate" | "case" | "casex" | "casez" | "endcase"
+                            | "randcase" | "covergroup" | "endgroup" | "property" | "endproperty" | "sequence" | "endsequence"
+                            | "constraint" | "clocking" | "endclocking" | "checker" | "endchecker" | "config" | "endconfig"
+                            | "specify" | "endspecify" | "primitive" | "endprimitive" | "table" | "endtable" | "foreach" | "for"
+                            | "extern" | "import" | "export" | "typedef" | "let"
+                    )
+            })
+        }
+    };
+    if structural(lo) || structural(ln) {
+        return None;
+    }
+    Some((os as u32, lo, ln))
+}
+
+impl Analysis {
+    /// Whether the scope at `off` of `file` is a subroutine or a block, where an edit on one
+    /// line (see [`line_local_edit`]) changes nothing a completion there sees but that line.
+    pub fn in_body(&self, file: FileId, off: u32) -> bool {
+        let Some(&unit) = self.units_for(file).first() else { return false };
+        let scope = self.scope_at(unit, file, off);
+        scope != dvi_syntax::ast::ParsedUnit::ROOT
+            && matches!(self.unit(unit).parsed.decl(scope).kind, DeclKind::Function | DeclKind::Task | DeclKind::Block)
     }
 }
 

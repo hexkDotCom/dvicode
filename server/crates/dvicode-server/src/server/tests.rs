@@ -1713,3 +1713,65 @@ fn a_saved_then_closed_file_keeps_the_saved_text() {
     assert_eq!((found(&mut c, "new_name"), found(&mut c, "old_name")), (1, 0));
     c.shutdown();
 }
+
+const BODY: &str = "module top;\n  int alpha_count;\n  function void g(int first, int second);\n  endfunction\n  function void f();\n    int beta_local;\n    \n  endfunction\nendmodule\n";
+
+/// `BODY` with line 6 (the empty one in `f`) replaced by `line`.
+fn body_with(line: &str) -> String {
+    BODY.replacen("    \n  endfunction", &format!("{line}\n  endfunction"), 1)
+}
+
+#[test]
+fn typing_on_one_line_of_a_body_is_answered_without_waiting_for_the_update() {
+    let root = project("linelocal", &[("top.sv", BODY)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, BODY);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    // Updates stop at the gate from now on.
+    gate.close();
+    c.change(&top, 2, &body_with("    alpha_count = be"));
+    let r = c.send_request("textDocument/completion", json!({ "textDocument": { "uri": top }, "position": { "line": 6, "character": 20 } }));
+    let r = c.reply(&r, Duration::from_secs(5)).expect("answered while the update waits");
+    let items = r.result.unwrap_or(Value::Null);
+    let labels: Vec<&str> = items["items"].as_array().map(|v| v.iter().filter_map(|i| i["label"].as_str()).collect()).unwrap_or_default();
+    // The local of `f`: the scope is the one of the cursor.
+    assert!(labels.contains(&"beta_local"), "{labels:?}");
+    // Signature help on the same line, two edits later.
+    c.change(&top, 3, &body_with("    g(1"));
+    c.change(&top, 4, &body_with("    g(1, "));
+    let s = c.send_request("textDocument/signatureHelp", json!({ "textDocument": { "uri": top }, "position": { "line": 6, "character": 9 } }));
+    let s = c.reply(&s, Duration::from_secs(5)).expect("answered while the update waits");
+    let s = s.result.unwrap_or(Value::Null);
+    assert_eq!(s["activeParameter"], 1, "{s}");
+    assert!(s["signatures"][0]["label"].as_str().unwrap_or("").contains("second"), "{s}");
+    // A new line is not an edit of one line: that one waits for its update.
+    c.change(&top, 5, &body_with("    g(1, 2);\n    alp"));
+    let w = c.send_request("textDocument/completion", json!({ "textDocument": { "uri": top }, "position": { "line": 7, "character": 7 } }));
+    assert!(c.reply(&w, Duration::from_millis(300)).is_none(), "answered before its edit was analysed");
+    gate.open();
+    assert!(c.reply(&w, WAIT).is_some_and(|r| r.error.is_none()));
+    c.shutdown();
+}
+
+#[test]
+fn a_line_that_opens_a_scope_waits_for_its_update() {
+    let root = project("linelocalscope", &[("top.sv", BODY)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, BODY);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    gate.close();
+    c.change(&top, 2, &body_with("    begin int gamma; gam"));
+    let w = c.send_request("textDocument/completion", json!({ "textDocument": { "uri": top }, "position": { "line": 6, "character": 24 } }));
+    assert!(c.reply(&w, Duration::from_millis(300)).is_none(), "answered before its edit was analysed");
+    gate.open();
+    assert!(c.reply(&w, WAIT).is_some_and(|r| r.error.is_none()));
+    c.shutdown();
+}

@@ -2544,3 +2544,28 @@ fn macro_definitions_compare_as_their_signatures_and_bodies() {
         }
     }
 }
+
+#[test]
+fn an_edit_is_local_to_a_line_only_when_nothing_else_changed() {
+    use dvi_analysis::ide::completion::line_local_edit;
+    let old = "a\n  x = 1;\nb\n";
+    // The line changed, the others not: where it starts, and both versions.
+    assert_eq!(line_local_edit(old, "a\n  x = 12;\nb\n", 1), Some((2, "  x = 1;", "  x = 12;")));
+    assert_eq!(line_local_edit(old, "a\n\nb\n", 1), Some((2, "  x = 1;", "")));
+    // The first and the last line.
+    assert_eq!(line_local_edit(old, "ab\n  x = 1;\nb\n", 0), Some((0, "a", "ab")));
+    assert_eq!(line_local_edit("a\nb", "a\nbc", 1), Some((2, "b", "bc")));
+    // Another line changed too, a line added or removed, a line that is not there.
+    assert_eq!(line_local_edit(old, "A\n  x = 12;\nb\n", 1), None);
+    assert_eq!(line_local_edit(old, "a\n  x = 1;\n  y\nb\n", 1), None);
+    assert_eq!(line_local_edit(old, "a\nb\n", 1), None);
+    assert_eq!(line_local_edit(old, old, 9), None);
+    // CRLF: the line is without its end.
+    assert_eq!(line_local_edit("a\r\nx\r\n", "a\r\nxy\r\n", 1), Some((3, "x\r", "xy\r")));
+    // Lines that open or close a scope, or change how later text is read.
+    for l in ["  begin", "  end", "  for (int i = 0; i < 2; i++)", "  x = \"a", "  /* x", "  y */", "  `define Q", "  x = 1; \\", "  endfunction"] {
+        assert_eq!(line_local_edit(old, &format!("a\n{l}\nb\n"), 1), None, "{l}");
+    }
+    // A keyword inside a longer name is not one.
+    assert!(line_local_edit(old, "a\n  x = begin_count;\nb\n", 1).is_some());
+}
