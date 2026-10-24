@@ -22,7 +22,7 @@ thread_local! {
     static TYPEDEF_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// While [`Analysis::with_lookup_memo`] runs on this thread: the lexical lookups made so
     /// far, by unit and scope, then by name.
-    static LOOKUP_MEMO: std::cell::RefCell<Option<LookupMemo>> = const { std::cell::RefCell::new(None) };
+    static LOOKUP_MEMO: std::cell::RefCell<Option<(usize, LookupMemo)>> = const { std::cell::RefCell::new(None) };
 }
 
 type LookupMemo = FxHashMap<(UnitId, DeclId), FxHashMap<SmolStr, Option<DeclRef>>>;
@@ -254,9 +254,10 @@ impl Analysis {
                 }
             }
         }
+        // Kept for this snapshot only (by its address while it runs).
         let outermost = LOOKUP_MEMO.with(|m| {
             let mut m = m.borrow_mut();
-            m.is_none().then(|| *m = Some(LookupMemo::default())).is_some()
+            m.is_none().then(|| *m = Some((self as *const Analysis as usize, LookupMemo::default()))).is_some()
         });
         let _reset = Reset(outermost);
         f()
@@ -264,14 +265,20 @@ impl Analysis {
 
     /// Lexical lookup of `name` from `scope`, then compilation-unit and global names.
     pub fn lookup(&self, unit: UnitId, scope: DeclId, name: &str) -> Option<DeclRef> {
-        let known = LOOKUP_MEMO.with(|m| m.borrow().as_ref().map(|m| m.get(&(unit, scope)).and_then(|n| n.get(name).copied())));
+        // Not inside a base class's or typedef's resolution, whose depth limits can change the
+        // answer; not for another snapshot than the memo's.
+        if BASE_DEPTH.with(|d| d.get()) > 0 || TYPEDEF_DEPTH.with(|d| d.get()) > 0 {
+            return self.lookup_uncached(unit, scope, name);
+        }
+        let me = self as *const Analysis as usize;
+        let known = LOOKUP_MEMO.with(|m| m.borrow().as_ref().filter(|(o, _)| *o == me).map(|(_, m)| m.get(&(unit, scope)).and_then(|n| n.get(name).copied())));
         match known {
             None => self.lookup_uncached(unit, scope, name),
             Some(Some(r)) => r,
             Some(None) => {
                 let r = self.lookup_uncached(unit, scope, name);
                 LOOKUP_MEMO.with(|m| {
-                    if let Some(m) = m.borrow_mut().as_mut() {
+                    if let Some((_, m)) = m.borrow_mut().as_mut() {
                         m.entry((unit, scope)).or_default().insert(SmolStr::new(name), r);
                     }
                 });

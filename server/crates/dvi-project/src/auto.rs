@@ -184,9 +184,11 @@ struct FileFacts {
     uses: FxHashSet<String>,
     defines: usize,
     items: usize,
-    /// Statements or processes outside any design element, package or class (`initial`,
-    /// `always`, `assign`): a piece of a module body, written to be included in one.
+    /// Processes outside any design element, package or class (`initial`, `always`): a piece
+    /// of a module body, written to be included in one.
     fragment: bool,
+    /// The files it includes outside any `ifdef (other than its own include guard).
+    unconditional_includes: Vec<String>,
 }
 
 /// The include directories that `` `include "dir/name.svh" `` operands in `sources` need, given
@@ -223,23 +225,65 @@ pub(crate) fn include_bases(sources: &[PathBuf], included: &[PathBuf]) -> Vec<Pa
 
 fn scan(text: &str) -> FileFacts {
     let toks = lex(text, 0);
-    let mut f = FileFacts { includes: Vec::new(), include_paths: Vec::new(), bare_includes: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0, fragment: false };
+    let mut f = FileFacts {
+        includes: Vec::new(),
+        include_paths: Vec::new(),
+        bare_includes: Vec::new(),
+        packages: Vec::new(),
+        uses: FxHashSet::default(),
+        defines: 0,
+        items: 0,
+        fragment: false,
+        unconditional_includes: Vec::new(),
+    };
     // How deep in design elements, packages and classes; the body of a `define is skipped.
     let mut depth = 0usize;
     let mut in_define = false;
+    // A `define that opens or closes a scope makes the depth unknown: no fragment then.
+    let mut scopes_in_macros = false;
+    // The open `ifdef/`ifndef, each whether it is an include guard (`ifndef X `define X).
+    let mut conds: Vec<bool> = Vec::new();
     for (i, t) in toks.iter().enumerate() {
         if in_define && t.nl_before() {
             in_define = false;
         }
-        if !in_define && t.kind == TokKind::Keyword {
-            let prev = i.checked_sub(1).map(|j| toks[j].text.as_str());
+        if t.kind == TokKind::Keyword {
+            let prev = i.checked_sub(1).map(|j| &toks[j]);
+            let prev_text = prev.map(|p| p.text.as_str());
+            let opens = match t.text.as_str() {
+                // Not `typedef class c;` nor the `interface` of `interface class`, a `virtual
+                // interface` type or an interface port.
+                "class" => prev_text != Some("typedef"),
+                "interface" => {
+                    !toks.get(i + 1).is_some_and(|n| n.text == "class" || n.is_punct("."))
+                        && !prev.is_some_and(|p| p.text == "virtual" || p.is_punct("(") || p.is_punct(","))
+                }
+                "module" | "macromodule" | "program" | "package" | "checker" => prev_text != Some("extern"),
+                _ => false,
+            };
+            let closes = matches!(t.text.as_str(), "endmodule" | "endinterface" | "endprogram" | "endpackage" | "endchecker" | "endclass");
+            if in_define {
+                scopes_in_macros |= opens || closes;
+            } else if opens {
+                depth += 1;
+            } else if closes {
+                depth = depth.saturating_sub(1);
+            } else if depth == 0 && matches!(t.text.as_str(), "initial" | "always" | "always_comb" | "always_ff" | "always_latch" | "final") {
+                f.fragment = true;
+            }
+        }
+        if t.kind == TokKind::Directive && !in_define {
             match t.text.as_str() {
-                // Not `typedef class c;` nor the `interface` of `interface class`.
-                "class" if prev != Some("typedef") => depth += 1,
-                "interface" if toks.get(i + 1).is_some_and(|n| n.text == "class") => {}
-                "module" | "macromodule" | "interface" | "program" | "package" | "checker" if prev != Some("extern") => depth += 1,
-                "endmodule" | "endinterface" | "endprogram" | "endpackage" | "endchecker" | "endclass" => depth = depth.saturating_sub(1),
-                "initial" | "always" | "always_comb" | "always_ff" | "always_latch" | "final" | "assign" if depth == 0 => f.fragment = true,
+                "ifdef" | "ifndef" => {
+                    let name = toks.get(i + 1).map(|n| n.text.as_str());
+                    let guard = t.text == "ifndef"
+                        && toks.get(i + 2).is_some_and(|d| d.kind == TokKind::Directive && d.text == "define")
+                        && toks.get(i + 3).map(|n| n.text.as_str()) == name;
+                    conds.push(guard);
+                }
+                "endif" => {
+                    conds.pop();
+                }
                 _ => {}
             }
         }
@@ -248,6 +292,9 @@ fn scan(text: &str) -> FileFacts {
                 if let Some(n) = toks.get(i + 1).filter(|n| n.kind == TokKind::String) {
                     let p = n.text.trim_matches('"');
                     let base = p.rsplit(['/', '\\']).next().unwrap_or(p);
+                    if conds.iter().all(|guard| *guard) {
+                        f.unconditional_includes.push(base.to_string());
+                    }
                     f.includes.push(base.to_string());
                     if base.len() < p.len() {
                         f.include_paths.push(p.replace('\\', "/"));
@@ -261,7 +308,9 @@ fn scan(text: &str) -> FileFacts {
                 in_define = true;
             }
             TokKind::Keyword if t.text == "package" => {
-                if let Some(n) = toks.get(i + 1).filter(|n| n.kind == TokKind::Ident) {
+                // `package automatic p;`
+                let at = if toks.get(i + 1).is_some_and(|n| n.text == "automatic" || n.text == "static") { i + 2 } else { i + 1 };
+                if let Some(n) = toks.get(at).filter(|n| n.kind == TokKind::Ident) {
                     f.packages.push(n.text.to_string());
                 }
                 f.items += 1;
@@ -272,6 +321,9 @@ fn scan(text: &str) -> FileFacts {
             }
             _ => {}
         }
+    }
+    if scopes_in_macros {
+        f.fragment = false;
     }
     f
 }
@@ -357,16 +409,17 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
             included_names.insert(name.to_string());
         }
     }
+    let unconditionally_included: FxHashSet<&String> = facts.iter().flat_map(|(_, f)| f.unconditional_includes.iter()).collect();
     // Top files.
     let tops: Vec<usize> = facts
         .iter()
         .enumerate()
         .filter(|(_, (p, f))| {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            // A source file that declares a package is compiled on its own even when files
-            // include it: those includes are often in an `ifdef of another flow (an include
-            // guard keeps an active one from declaring it twice).
-            !is_header(p) && (!included_names.contains(&name) && !included_files.contains(p) || !f.packages.is_empty())
+            // A source file that declares a package is compiled on its own when every include
+            // of it is in an `ifdef (of another flow, often): included where the include is
+            // active, it is compiled there, in that file's context.
+            !is_header(p) && (!included_names.contains(&name) && !included_files.contains(p) || !f.packages.is_empty() && !unconditionally_included.contains(&name))
         })
         // A piece of a module body is compiled only where it is included, like a header.
         .filter(|(_, (p, f))| {
@@ -544,10 +597,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn includes_inside_an_ifdef_are_conditional_but_not_inside_the_include_guard() {
+        let f = scan("`ifndef A_SV\n`define A_SV\n`include \"p.sv\"\n`ifdef FLOW\n`include \"q.sv\"\n`endif\n`endif\npackage automatic r;\nendpackage\n");
+        assert_eq!(f.unconditional_includes, vec!["p.sv".to_string()]);
+        assert_eq!(f.includes, vec!["p.sv".to_string(), "q.sv".to_string()]);
+        assert_eq!(f.packages, vec!["r".to_string()]);
+    }
+
+    #[test]
     fn a_piece_of_a_module_body_is_a_fragment() {
         let frag = |t: &str| scan(t).fragment;
         assert!(frag("import p::*;\nlogic failed;\ninitial begin\n  failed = 0;\nend\n"));
-        assert!(frag("assign a = b;\n"));
+        assert!(frag("always @(posedge clk) x <= 1;\n"));
+        assert!(frag("virtual interface bus vif;\ninitial vif = null;\n"));
+        // Not: a procedural assign in a compilation-unit task, scopes opened by macros.
+        assert!(!frag("reg r;\ntask t;\n  assign r = 1;\nendtask\n"));
+        assert!(!frag("`define BEGIN module m;\n`BEGIN\n  initial x = 1;\nendmodule\n"));
+        assert!(!frag("module m(interface bus, input clk);\n  initial x = 1;\nendmodule\nmodule n; initial y = 1; endmodule\n"));
         assert!(!frag("module m;\n  initial x = 1;\n  assign a = b;\nendmodule\n"));
         assert!(!frag("typedef class c;\nclass c;\n  task run; endtask\nendclass\n"));
         assert!(!frag("interface class ic;\nendclass\nmodule m; always_comb x = 1; endmodule\n"));
