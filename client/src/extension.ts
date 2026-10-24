@@ -70,6 +70,7 @@ function settingsForServer(): object {
     uvmHome: c.get<string>('uvmHome', '') || null,
     maxProblems,
     uncHosts,
+    inlayHints: c.get<Record<string, boolean>>('inlayHints', {}),
   };
 }
 

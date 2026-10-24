@@ -405,6 +405,25 @@ fn semantic_token_changes_rebuild_the_full_answer() {
 }
 
 #[test]
+fn inlay_hints_follow_their_settings_without_a_rebuild() {
+    let m = "module c(input logic clk, input logic d);\nendmodule\nmodule m;\n  logic k, v;\n  c u(k, v);\nendmodule\n";
+    let root = project("hints", &[("m.sv", m)]);
+    let (mut c, init) = Client::start(&root, Value::Null);
+    assert_eq!(init["capabilities"]["inlayHintProvider"], true, "{init}");
+    let uri = uri(&root, "m.sv");
+    c.open(&uri, 1, m);
+    let range = json!({ "start": { "line": 0, "character": 0 }, "end": { "line": 6, "character": 0 } });
+    let labels = |c: &mut Client| -> Vec<String> {
+        let r = c.request_ok("textDocument/inlayHint", json!({ "textDocument": { "uri": uri }, "range": range }));
+        r.as_array().unwrap().iter().map(|h| h["label"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(labels(&mut c), ["clk:", "d:"]);
+    c.notify("workspace/didChangeConfiguration", json!({ "settings": { "dvicode": { "inlayHints": { "ports": false } } } }));
+    assert!(labels(&mut c).is_empty());
+    c.shutdown();
+}
+
+#[test]
 fn closing_a_file_outside_the_build_clears_its_problems() {
     let root = project("adhoc", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

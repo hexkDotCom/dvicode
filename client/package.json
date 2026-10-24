@@ -303,6 +303,21 @@
           "default": "",
           "description": "UVM library location on the server (used by -uvm and auto-configuration when $UVM_HOME is not set)."
         },
+        "dvicode.inlayHints.ports": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the port names of positional port connections (`u_fifo (clk, rst_n, ...)`) as inlay hints. Inlay hints as a whole follow `#editor.inlayHints.enabled#`."
+        },
+        "dvicode.inlayHints.parameters": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the parameter names of positional parameter values (`#(8, 4)`) as inlay hints."
+        },
+        "dvicode.inlayHints.arguments": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the argument names of positional arguments in function and task calls with two arguments or more as inlay hints. An argument that is just the argument's own name gets none."
+        },
         "dvicode.maxProblems": {
           "type": "integer",
           "minimum": 0,

@@ -5,6 +5,7 @@ mod build_docs;
 use crate::{crash, fs, util};
 use build_docs::{BuildDoc, Inspected};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use dvi_analysis::ide::hints::HintKinds;
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
 use dvi_analysis::{Analysis, Pin, ProjectSetup, UnitKind, Vfs};
@@ -101,6 +102,7 @@ fn capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
         document_link_provider: Some(DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
             legend: SemanticTokensLegend { token_types: TOKEN_TYPES.to_vec(), token_modifiers: TOKEN_MODIFIERS.to_vec() },
             full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
@@ -122,6 +124,14 @@ struct PubState {
     /// File -> sequence number of the newest job that covers it.
     latest: FxHashMap<Url, u64>,
     next: u64,
+}
+
+/// `dvicode.inlayHints` in the settings `v` (the `dvicode` section): each kind on unless set
+/// to `false`.
+fn hint_kinds_of(v: &Value) -> HintKinds {
+    let h = v.get("inlayHints");
+    let on = |k: &str| h.and_then(|h| h.get(k)).and_then(Value::as_bool).unwrap_or(true);
+    HintKinds { ports: on("ports"), parameters: on("parameters"), arguments: on("arguments") }
 }
 
 /// The semantic tokens last answered for each file: answered again for the same snapshot,
@@ -276,6 +286,10 @@ struct Server {
     analysis: Arc<Analysis>,
     root: Option<PathBuf>,
     settings: Settings,
+    /// Which inlay hints to give (`dvicode.inlayHints`): no build depends on them.
+    hint_kinds: HintKinds,
+    /// The client can be asked to request inlay hints again.
+    hint_refresh: bool,
     open: FxHashMap<FileId, Url>,
     pending: FxHashSet<FileId>,
     pending_since: Option<Instant>,
@@ -402,6 +416,8 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let watched_files = params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files.as_ref());
     let watch_inputs = watched_files.and_then(|d| d.dynamic_registration).unwrap_or(false);
     let relative_patterns = watched_files.and_then(|d| d.relative_pattern_support).unwrap_or(false);
+    let hint_kinds = params.initialization_options.as_ref().map(hint_kinds_of).unwrap_or_default();
+    let hint_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false);
     log::info!("workspace root: {:?}; settings: {:?}", root, settings);
     let vfs = Arc::new(Vfs::new());
     let empty_setup = Arc::new(ProjectSetup::new(root.as_deref().unwrap_or(std::path::Path::new("/")), Default::default(), Default::default()));
@@ -423,6 +439,8 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         analysis,
         root,
         settings,
+        hint_kinds,
+        hint_refresh,
         open: FxHashMap::default(),
         pending: FxHashSet::default(),
         pending_since: None,
@@ -1387,6 +1405,13 @@ impl Server {
             "workspace/didChangeConfiguration" => {
                 let Ok(p) = serde_json::from_value::<DidChangeConfigurationParams>(n.params) else { return };
                 let v = p.settings.get("dvicode").cloned().unwrap_or(p.settings);
+                let kinds = hint_kinds_of(&v);
+                if kinds != self.hint_kinds {
+                    self.hint_kinds = kinds;
+                    if self.hint_refresh {
+                        self.request_client("workspace/inlayHint/refresh", Value::Null);
+                    }
+                }
                 if let Ok(s) = serde_json::from_value::<Settings>(v) {
                     // The client sends its configuration once at start-up too.
                     if s != self.settings {
@@ -1723,6 +1748,31 @@ impl Server {
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 a.rename(f, off, &p.new_name).map(Some)
             }),
+            "textDocument/inlayHint" => {
+                let kinds = self.hint_kinds;
+                self.spawn(req, move |a, p: InlayHintParams| {
+                    let Some((f, start)) = pos(a, &p.text_document.uri, p.range.start) else { return Ok(None) };
+                    let end = a.offset_at(f, p.range.end).unwrap_or(start);
+                    let hints: Vec<InlayHint> = a
+                        .inlay_hints(f, start, end, kinds)
+                        .into_iter()
+                        .filter_map(|h| {
+                            let at = a.to_range(dvi_syntax::Span::new(f, h.offset, h.offset))?.start;
+                            Some(InlayHint {
+                                position: at,
+                                label: InlayHintLabel::String(h.label),
+                                kind: Some(InlayHintKind::PARAMETER),
+                                text_edits: None,
+                                tooltip: None,
+                                padding_left: Some(false),
+                                padding_right: Some(true),
+                                data: None,
+                            })
+                        })
+                        .collect();
+                    Ok(Some(hints))
+                })
+            }
             "textDocument/semanticTokens/full" => {
                 let results = self.token_results.clone();
                 self.spawn(req, move |a, p: SemanticTokensParams| {

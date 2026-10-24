@@ -2749,6 +2749,32 @@ fn connection_selects_with_macros_iterators_parameters_bind_and_defparam() {
 }
 
 #[test]
+fn inlay_hints_name_positional_ports_parameters_and_arguments() {
+    use dvi_analysis::ide::hints::HintKinds;
+    let t = concat!(
+        "module c #(parameter int W = 1, parameter int D = 2) (input logic clk, input logic [W-1:0] din, output logic dout);\nendmodule\n",
+        "module top;\n",
+        "  logic clk, x, y, z;\n",
+        "  c #(8, 4) u1 (clk, x, y), u2 (.clk(clk), .din(x), .dout(z));\n",
+        "  function automatic int add(int a, int b); return a + b; endfunction\n",
+        "  initial begin z = add(1, x); z = add(a_val(), b); end\n",
+        "  function automatic int a_val(); return 0; endfunction\n",
+        "  int b;\n",
+        "endmodule\n",
+    );
+    let (a, root) = project("hints", &[("top.sv", t)]);
+    let f = a.vfs.lookup(&root.join("top.sv")).unwrap();
+    let show = |kinds: HintKinds| -> Vec<String> {
+        a.inlay_hints(f, 0, t.len() as u32, kinds).into_iter().map(|h| format!("{}{}", h.label, &t[h.offset as usize..].split(|c: char| c == ',' || c == ')').next().unwrap())).collect()
+    };
+    assert_eq!(show(HintKinds::default()), ["W:8", "D:4", "din:x", "dout:y", "a:1", "b:x", "a:a_val("], "clk is not hinted: it is the port's own name; b neither");
+    assert_eq!(show(HintKinds { ports: false, parameters: true, arguments: false }), ["W:8", "D:4"]);
+    // Only the part asked for.
+    let line4 = t.find("  c #(8").unwrap() as u32;
+    assert_eq!(a.inlay_hints(f, line4, line4 + 12, HintKinds::default()).len(), 2);
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

@@ -6,6 +6,7 @@ pub mod completion;
 pub mod diagnostics;
 pub mod factory;
 pub mod filter;
+pub mod hints;
 pub mod hover;
 pub mod loops;
 pub mod nav;
