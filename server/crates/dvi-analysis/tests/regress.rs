@@ -2671,6 +2671,28 @@ endmodule
 }
 
 #[test]
+fn enum_constants_of_a_file_of_declarations_are_seen_by_the_files_after_it() {
+    // A header listed as a source declares the enum outside any scope: its constants are
+    // names of the compilation unit, like its typedef.
+    let root = std::env::temp_dir().join(format!("dvicode-regress-unitenum-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    std::fs::write(root.join("defs.svh"), "parameter W = 3;\ntypedef enum logic [W-1:0] { S_IDLE = 0, S_RUN = 1 } st_e;\n").unwrap();
+    std::fs::write(root.join("m.sv"), "module m;\n  st_e s;\n  logic busy;\n  always_comb case (s) S_IDLE: ; default: ; endcase\n  assign busy = (s == S_RUN);\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "defs.svh\nm.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn foreach_in_the_constraint_set_of_an_implication_declares_its_loop_variable() {
+    let t = "class s_cfg; rand bit tiny; endclass\nclass cfg;\n  rand s_cfg surf[4];\n  rand bit mode;\n  extern constraint a_c;\n  constraint b_c { mode -> { foreach (surf[j]) { surf[j].tiny == 1'b1; } } }\n  constraint c_c { mode -> mode -> { foreach (surf[k]) surf[k].tiny == 1'b0; } }\nendclass\nconstraint cfg::a_c {\n  mode -> {\n    foreach (surf[i]) {\n      surf[i].tiny == 1'b1;\n    }\n  }\n}\n";
+    let (a, _) = project("implforeach", &[("c.sv", t)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

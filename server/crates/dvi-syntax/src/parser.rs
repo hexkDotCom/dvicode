@@ -68,10 +68,12 @@ struct Stop {
     eq: bool,
     /// A net or data type keyword at depth 0 (a declaration after a missing `;`).
     decl: bool,
+    /// `-> {` at depth 0: the constraint set an implication applies.
+    implies: bool,
 }
 
-const STOP_NONE: Stop = Stop { comma: false, colon: false, lbrace: false, iff: false, eq: false, decl: false };
-const STOP_COMMA: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: false, decl: false };
+const STOP_NONE: Stop = Stop { comma: false, colon: false, lbrace: false, iff: false, eq: false, decl: false, implies: false };
+const STOP_COMMA: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: false, decl: false, implies: false };
 
 const ARRAY_ITER_METHODS: &[&str] = &[
     "find", "find_index", "find_first", "find_first_index", "find_last", "find_last_index", "min",
@@ -2283,7 +2285,13 @@ impl<'t> Parser<'t> {
         if self.at_kw("unique") {
             self.bump();
         }
-        self.scan_expr(STOP_NONE, RefKind::Expr);
+        self.scan_expr(Stop { implies: true, ..STOP_NONE }, RefKind::Expr);
+        // `cond -> { ... }`: a constraint set, whose `foreach` declare their loop variables.
+        if self.at_p("->") && self.nth(1).is_punct("{") {
+            self.bump();
+            self.constraint_block();
+            return;
+        }
         self.eat_p(";");
     }
 
@@ -2431,7 +2439,7 @@ impl<'t> Parser<'t> {
                 let k = if is_cross { DeclKind::Cross } else { DeclKind::Coverpoint };
                 self.new_decl(k, Some(l), start)
             });
-            let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false, decl: false };
+            let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false, decl: false, implies: false };
             loop {
                 if self.at_p("{") {
                     // `coverpoint {a, b}`: a concatenation, not the bins block.
@@ -2839,9 +2847,9 @@ impl<'t> Parser<'t> {
             if self.eat_kw("default") {
                 self.eat_p(":");
             } else {
-                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false, decl: false }, RefKind::Expr);
+                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false, decl: false, implies: false }, RefKind::Expr);
                 while self.eat_p(",") {
-                    self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false }, RefKind::Expr);
+                    self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false, implies: false }, RefKind::Expr);
                 }
                 self.expect_p(":");
             }
@@ -3292,7 +3300,7 @@ impl<'t> Parser<'t> {
     /// The assignments of `assign`: an undeclared name on the left of one is an implicit net
     /// (IEEE 1800 6.10), one on the right is a use of a name that must be declared.
     fn cont_assign_list(&mut self) {
-        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true, decl: true };
+        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true, decl: true, implies: false };
         loop {
             self.scan_expr(LHS, RefKind::Loose);
             if self.eat_p("=") {
@@ -3435,6 +3443,7 @@ impl<'t> Parser<'t> {
                             ":" if stop.colon => return,
                             "{" if stop.lbrace => return,
                             "=" if stop.eq => return,
+                            "->" if stop.implies && self.nth(1).is_punct("{") => return,
                             _ => {}
                         }
                     } else if p == ";" {

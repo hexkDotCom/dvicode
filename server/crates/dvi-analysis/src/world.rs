@@ -728,6 +728,20 @@ impl Analysis {
                     g.unit_items.entry(d.name.clone()).or_default().push(r);
                 }
             }
+            // The constants of an enum declared outside any scope are names of the compilation
+            // unit too (`typedef enum {IDLE, RUN} st_e;` in a file of its own).
+            for (i, d) in u.parsed.decls.iter().enumerate() {
+                if d.kind != DeclKind::EnumMember || d.name.is_empty() {
+                    continue;
+                }
+                let mut p = d.parent;
+                while let Some(x) = p.filter(|x| matches!(u.parsed.decl(*x).kind, DeclKind::EnumType | DeclKind::Typedef)) {
+                    p = u.parsed.decl(x).parent;
+                }
+                if p == Some(ParsedUnit::ROOT) && d.parent != Some(ParsedUnit::ROOT) {
+                    g.unit_items.entry(d.name.clone()).or_default().push(DeclRef { unit: u.id, decl: i as DeclId });
+                }
+            }
             for (i, d) in u.parsed.decls.iter().enumerate() {
                 if matches!(d.kind, DeclKind::Class | DeclKind::InterfaceClass) {
                     let bases = d.extends.iter().chain(d.implements.iter());
