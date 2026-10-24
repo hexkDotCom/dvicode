@@ -2809,7 +2809,8 @@ fn inherited_methods_are_offered_with_their_signatures_and_pure_ones_implemented
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(sorted, [("build".into(), false), ("check".into(), true), ("new".into(), false), ("report".into(), false), ("run".into(), false), ("size".into(), true)], "{names:?}");
-    let text = |n: &str| a.override_text(a.overridable_methods(class).into_iter().find(|o| a.decl(o.method).name == n).unwrap().method, "  ", false).unwrap();
+    let text = |n: &str| a.override_text(&a.overridable_methods(class).into_iter().find(|o| a.decl(o.method).name == n).unwrap(), "  ", "
+", false).unwrap();
     assert_eq!(text("run"), "virtual task run();\nendtask", "an empty base body: no super call");
     assert_eq!(text("report"), "virtual function void report(string s);\n  super.report(s);\nendfunction", "the body outside the class counts");
     assert_eq!(text("new"), "function new(string name = \"\");\n  super.new(name);\nendfunction");
@@ -2858,6 +2859,51 @@ fn inlay_hints_stay_off_where_the_binding_is_uncertain() {
     // macro; `count` but no empty label; `data` for `DATA` (names are case-sensitive), `b` past
     // the attribute; `size` and `depth` for `super.new`.
     assert_eq!(got, ["size:1", "depth:2", "A:3", "B:4", "count:2", "data:DATA", "b:(* keep = 1"], "{got:?}");
+}
+
+#[test]
+fn overrides_follow_the_class_chain_and_its_parameters() {
+    let t = concat!(
+        "virtual class a_c;\n",
+        "  pure virtual function void f();\n",
+        "  virtual function string g(string s = \" void \"); return s; endfunction\n",
+        "  function new(int n = 0); endfunction\n",
+        "endclass\n",
+        // `f` implemented without repeating `virtual`; no constructor of its own.
+        "class b_c extends a_c;\n  function void f(); $display(1); endfunction\nendclass\n",
+        "interface class i_c;\n  pure virtual function void f();\n  pure virtual function void h();\nendclass\n",
+        "class c_c extends b_c implements i_c;\n  int k;\nendclass\n",
+        "virtual class sub #(type T = int);\n  pure virtual function void write(T t);\nendclass\n",
+        "class item; endclass\n",
+        "class cov extends sub #(item); endclass\n",
+    );
+    let (a, _) = project("overrides2", &[("c.sv", t)]);
+    let class = |name: &str| {
+        let u = a.unit(a.units_for(a.project_files()[0])[0]);
+        let d = u.parsed.decls.iter().position(|d| d.name == name).unwrap();
+        dvi_analysis::DeclRef { unit: u.id, decl: d as u32 }
+    };
+    let c = class("c_c");
+    let os = a.overridable_methods(c);
+    let get = |n: &str| os.iter().find(|o| o.name == n).unwrap().clone();
+    // `f` is b_c's (still virtual, not pure); the interface's `f` is defined by b_c; `h` is not.
+    assert!(!get("f").pure && a.decl(get("f").owner).name == "b_c");
+    assert!(get("h").pure);
+    let text = |o: &dvi_analysis::ide::overrides::Overridable| a.override_text(o, "  ", "\n", false).unwrap();
+    assert_eq!(text(&get("f")), "function void f();\n  super.f();\nendfunction");
+    assert_eq!(text(&get("g")), "virtual function string g(string s = \" void \");\n  return super.g(s);\nendfunction", "returns a value");
+    // b_c has no constructor: an implicit one, not a_c's.
+    assert_eq!(text(&get("new")), "function new();\n  super.new();\nendfunction");
+    let r = a.implement_pure_methods(a.project_files()[0], t.find("  int k;").unwrap() as u32).unwrap();
+    assert_eq!(r.title, "Implement pure virtual method h");
+    // A type parameter as the derived class binds it; a one-line class gets the definition.
+    let cov = class("cov");
+    let w = a.overridable_methods(cov).into_iter().find(|o| a.decl(o.method).name == "write").unwrap();
+    assert_eq!(text(&w), "virtual function void write(item t);\nendfunction");
+    let r = a.implement_pure_methods(a.project_files()[0], t.find("class cov").unwrap() as u32 + 3).unwrap();
+    let (span, ins) = &r.edits[0];
+    assert_eq!(span.start as usize, t.rfind("endclass").unwrap());
+    assert!(ins.starts_with('\n') && ins.contains("virtual function void write(item t);"), "{ins:?}");
 }
 
 #[test]

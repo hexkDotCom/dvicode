@@ -1849,7 +1849,8 @@ impl Server {
             // Links are for build files only (`on_build_doc_request`).
             "textDocument/documentLink" => self.send(Message::Response(Response::new_ok(req.id, Value::Null))),
             "textDocument/codeAction" => self.spawn(req, |a, p: CodeActionParams| {
-                let wants = |kind: &str| p.context.only.as_ref().is_none_or(|o| o.iter().any(|k| kind.starts_with(k.as_str())));
+                // Kinds form a dotted hierarchy: `refactor` asks for `refactor.rewrite`, not `refactor.re`.
+                let wants = |kind: &str| p.context.only.as_ref().is_none_or(|o| o.iter().any(|k| k.as_str().is_empty() || kind == k.as_str() || kind.starts_with(&format!("{}.", k.as_str()))));
                 let Some((f, start)) = pos(a, &p.text_document.uri, p.range.start) else { return Ok(None) };
                 let end = a.offset_at(f, p.range.end).unwrap_or(start);
                 let fixes = if wants("quickfix") { a.quick_fixes(f, start, end) } else { Vec::new() };
