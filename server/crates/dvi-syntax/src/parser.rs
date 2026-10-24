@@ -3302,7 +3302,27 @@ impl<'t> Parser<'t> {
     fn cont_assign_list(&mut self) {
         const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true, decl: true, implies: false };
         loop {
+            let (start, first_left) = (self.pos, self.u.refs.len());
             self.scan_expr(LHS, RefKind::Loose);
+            // Names in the selects of the left side (`a[idx]`) are uses: only the nets
+            // assigned may be implicit.
+            let mut selects: Vec<(u32, u32)> = Vec::new();
+            let mut open: Vec<u32> = Vec::new();
+            for t in &self.toks[start..self.pos] {
+                if t.is_punct("[") {
+                    open.push(t.span.start);
+                } else if t.is_punct("]") {
+                    if let Some(s) = open.pop() {
+                        selects.push((s, t.span.end));
+                    }
+                }
+            }
+            for r in &mut self.u.refs[first_left..] {
+                let at = r.segs[0].span.start;
+                if r.segs.len() == 1 && r.kind == RefKind::Loose && selects.iter().any(|(s, e)| *s < at && at < *e) {
+                    r.kind = RefKind::Expr;
+                }
+            }
             if self.eat_p("=") {
                 let first = self.u.refs.len();
                 self.scan_expr(Stop { comma: true, decl: true, ..STOP_NONE }, RefKind::Expr);

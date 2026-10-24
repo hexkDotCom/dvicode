@@ -140,7 +140,7 @@ impl Analysis {
         let u = self.unit(uid);
         let Some(pos) = u.positions.get(&file) else { return Vec::new() };
         let mut out = Vec::new();
-        let mut implicit: Option<FxHashSet<(DeclId, SmolStr)>> = None;
+        let mut implicit: Option<FxHashMap<SmolStr, Vec<DeclId>>> = None;
         for (span, rid, si) in &pos.refs {
             if *si != 0 {
                 continue;
@@ -204,9 +204,25 @@ impl Analysis {
                             if chain.segs.len() > 1 {
                                 continue;
                             }
-                            let set = implicit.get_or_insert_with(|| self.implicit_net_names(uid));
-                            if set.contains(&(design, name.clone())) {
-                                continue;
+                            // Declared in this scope or one around it, up to the design element.
+                            let owners = implicit.get_or_insert_with(|| self.implicit_net_names(uid));
+                            if let Some(scopes) = owners.get(name) {
+                                let u = self.unit(uid);
+                                let mut cur = Some(chain.scope);
+                                let mut found = false;
+                                while let Some(s) = cur {
+                                    if scopes.contains(&s) {
+                                        found = true;
+                                        break;
+                                    }
+                                    if s == design {
+                                        break;
+                                    }
+                                    cur = u.parsed.decl(s).parent;
+                                }
+                                if found {
+                                    continue;
+                                }
                             }
                         }
                         out.push(Diag::error(*span, "UNDECLARED_IDENTIFIER", format!("UNDECLARED_IDENTIFIER: '{name}' is not declared")));
@@ -513,18 +529,29 @@ impl Analysis {
         None
     }
 
-    /// Names used in port connections and assignments of each design element, which may be
-    /// implicitly declared nets.
-    fn implicit_net_names(&self, uid: UnitId) -> FxHashSet<(DeclId, SmolStr)> {
+    /// Names used in port connections and assignments, which may be implicitly declared nets,
+    /// and the scopes that declare them: the generate block they are in (IEEE 1800 6.10), else
+    /// the design element.
+    fn implicit_net_names(&self, uid: UnitId) -> FxHashMap<SmolStr, Vec<DeclId>> {
         let u = self.unit(uid);
-        let mut set = FxHashSet::default();
+        let mut map: FxHashMap<SmolStr, Vec<DeclId>> = FxHashMap::default();
         for r in &u.parsed.refs {
-            if r.kind == RefKind::Loose {
-                if let Some(d) = self.design_scope(uid, r.scope) {
-                    set.insert((d, r.segs[0].name.clone()));
+            if r.kind != RefKind::Loose {
+                continue;
+            }
+            let Some(design) = self.design_scope(uid, r.scope) else { continue };
+            let mut owner = r.scope;
+            while owner != design && u.parsed.decl(owner).kind != DeclKind::Generate {
+                match u.parsed.decl(owner).parent {
+                    Some(p) => owner = p,
+                    None => break,
                 }
             }
+            let v = map.entry(r.segs[0].name.clone()).or_default();
+            if !v.contains(&owner) {
+                v.push(owner);
+            }
         }
-        set
+        map
     }
 }

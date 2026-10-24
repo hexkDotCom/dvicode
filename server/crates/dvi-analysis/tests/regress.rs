@@ -2693,6 +2693,16 @@ fn foreach_in_the_constraint_set_of_an_implication_declares_its_loop_variable() 
 }
 
 #[test]
+fn implicit_nets_are_only_the_names_assigned_in_their_own_generate_block() {
+    // `idx` selects on the left: a use, not a net. `w` is implicit in `g` only.
+    let t = "module m(input logic a);\n  logic [3:0] v;\n  assign v[idx] = a;\n  if (1) begin : g\n    assign w = a;\n    assign x = w;\n  end\n  assign y = w;\n  assign top_net = a;\n  assign z = top_net;\nendmodule\n";
+    let (a, _) = project("implicitscope", &[("m.sv", t)]);
+    let mut p = problems(&a);
+    p.sort();
+    assert_eq!(p, ["m.sv: UNDECLARED_IDENTIFIER: 'idx' is not declared", "m.sv: UNDECLARED_IDENTIFIER: 'w' is not declared"], "{p:?}");
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);
