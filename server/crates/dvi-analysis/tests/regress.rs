@@ -2562,6 +2562,8 @@ fn an_edit_is_local_to_a_line_only_when_nothing_else_changed() {
     // use on an earlier line (an alias of a call) may reach into it.
     assert_eq!(line_local_edit("a;\n  if (f) t(); else\n  t();\n", "a;\n  if (f) t(); loo\n  t();\n", 1), None);
     assert_eq!(line_local_edit("a;\n  `ALIAS(\n    KEEP) inn;\n", "a;\n  `ALIAS(\n    SWAP) inn;\n", 2), None);
+    // A macro call closed before the line (`uvm_info over several lines, no `;`) is not open.
+    assert!(line_local_edit("a;\n  `uvm_info(\"T\",\n    $sformatf(\"%0d\", n), UVM_LOW)\n  x = pr\n", "a;\n  `uvm_info(\"T\",\n    $sformatf(\"%0d\", n), UVM_LOW)\n  x = pro\n", 3).is_some());
     assert_eq!(line_local_edit("a;\nb;", "a;\nbc;", 1), Some((3, "b;", "bc;")));
     // Another line changed too, a line added or removed, a line that is not there.
     assert_eq!(line_local_edit(old, "A;\n  x = 12;\nb;\n", 1), None);

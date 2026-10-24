@@ -647,12 +647,39 @@ pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32
     if shape(lo) != shape(ln) {
         return None;
     }
-    // Nor may the statement the line goes on with have a macro use on an earlier line: its
-    // arguments may reach into the line (through an alias too) and open or close scopes.
-    let back = &old[os.saturating_sub(4096)..os];
-    match back.rfind(';') {
-        Some(i) if !back[i..].contains('`') => {}
-        _ => return None,
+    // Nor may the line be inside the arguments of a macro call begun on an earlier line of its
+    // statement (written through an alias too): they may open or close scopes.
+    let mut from = os.saturating_sub(4096);
+    while !old.is_char_boundary(from) {
+        from += 1;
+    }
+    let back = &old.as_bytes()[from..os];
+    let Some(stmt) = back.iter().rposition(|c| *c == b';') else { return None };
+    let mut i = stmt;
+    while let Some(k) = back[i..].iter().position(|c| *c == b'`') {
+        let mut j = i + k + 1;
+        while j < back.len() && (back[j].is_ascii_alphanumeric() || back[j] == b'_') {
+            j += 1;
+        }
+        while j < back.len() && back[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j < back.len() && back[j] == b'(' {
+            let mut depth = 0usize;
+            let close = back[j..].iter().position(|c| {
+                match c {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            });
+            match close {
+                Some(c) => j += c + 1,
+                None => return None,
+            }
+        }
+        i = j;
     }
     Some((os as u32, lo, ln))
 }
