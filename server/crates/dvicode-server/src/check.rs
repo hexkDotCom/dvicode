@@ -106,7 +106,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--registers" | "--regtree" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--registers" | "--regtree" | "--checks" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -457,6 +457,31 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                     }
                     for c in a.outgoing_calls(r) {
                         println!("  -> {} ({}) at {}", c.to.name, c.to.detail.unwrap_or_default(), c.from_ranges.iter().map(|r| (r.start.line + 1).to_string()).collect::<Vec<_>>().join(","));
+                    }
+                }
+                "--checks" => {
+                    // The assertions and coverage of the declaration there, as a tree.
+                    let t0 = std::time::Instant::now();
+                    let r = a.checks_at(f, off);
+                    let ms = t0.elapsed().as_millis();
+                    match r {
+                        None => println!("no searchable declaration"),
+                        Some(r) => {
+                            fn show(h: &dvi_analysis::ide::checks::CheckHit, depth: usize) {
+                                let line = h.line.map_or(String::new(), |l| format!(":{}", l + 1));
+                                let file = h.uri.as_deref().and_then(|u| u.rsplit('/').next()).unwrap_or("");
+                                let notes = if h.notes.is_empty() { String::new() } else { format!(" ({})", h.notes.join("; ")) };
+                                println!("{}{} {} [{}] {}{} | {}{}", "  ".repeat(depth), h.group, h.kind, h.roles.join(","), h.label.as_deref().unwrap_or("-"), notes, file, line);
+                                println!("{}    {}", "  ".repeat(depth), h.detail);
+                                for c in &h.children {
+                                    show(c, depth + 1);
+                                }
+                            }
+                            println!("{} ({}): {} hits, {} ms, limits {:?}, notes {:?}", r.target.name, r.target.kind, r.hits.len(), ms, r.limits, r.notes);
+                            for h in &r.hits {
+                                show(h, 1);
+                            }
+                        }
                     }
                 }
                 "--hover" => {

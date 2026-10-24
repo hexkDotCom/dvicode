@@ -598,6 +598,30 @@
         "title": "Go to Class",
         "category": "DVICode",
         "icon": "$(symbol-class)"
+      },
+      {
+        "command": "dvicode.showChecks",
+        "title": "Show Assertions and Coverage",
+        "category": "DVICode",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "dvicode.checks.refresh",
+        "title": "Refresh (Assertions and Coverage)",
+        "category": "DVICode",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dvicode.checks.valuesOnly",
+        "title": "Hide Clock and Reset Uses",
+        "category": "DVICode",
+        "icon": "$(watch)"
+      },
+      {
+        "command": "dvicode.checks.allRoles",
+        "title": "Show Clock and Reset Uses",
+        "category": "DVICode",
+        "icon": "$(eye)"
       }
     ],
     "menus": {
@@ -611,6 +635,11 @@
           "command": "dvicode.showIncludingFiles",
           "when": "editorLangId == systemverilog",
           "group": "navigation@91"
+        },
+        {
+          "command": "dvicode.showChecks",
+          "when": "editorLangId == systemverilog && dvicode.engine.checks",
+          "group": "navigation@92"
         }
       ],
       "view/title": [
@@ -790,6 +819,21 @@
           "group": "navigation@9"
         },
         {
+          "command": "dvicode.checks.valuesOnly",
+          "when": "view == dvicode.checks && !dvicode.checks.valuesOnly",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.checks.allRoles",
+          "when": "view == dvicode.checks && dvicode.checks.valuesOnly",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.checks.refresh",
+          "when": "view == dvicode.checks",
+          "group": "navigation@9"
+        },
+        {
           "command": "dvicode.selectUvmTest",
           "when": "view == dvicode.verificationHierarchy",
           "group": "navigation@9"
@@ -862,6 +906,22 @@
         {
           "command": "dvicode.registers.openClass",
           "when": "false"
+        },
+        {
+          "command": "dvicode.showChecks",
+          "when": "editorLangId == systemverilog && dvicode.engine.checks"
+        },
+        {
+          "command": "dvicode.checks.refresh",
+          "when": "dvicode.engine.checks"
+        },
+        {
+          "command": "dvicode.checks.valuesOnly",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.checks.allRoles",
+          "when": "false"
         }
       ]
     },
@@ -892,6 +952,11 @@
           "id": "dvicode.registerModel",
           "name": "Register Model",
           "when": "dvicode.engine.registers"
+        },
+        {
+          "id": "dvicode.checks",
+          "name": "Assertions and Coverage",
+          "when": "dvicode.engine.checks"
         },
         {
           "id": "dvicode.structure",

@@ -26,6 +26,9 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
   selects where you landed).
 - **Register Model**: the maps, registers, addresses and fields a UVM register block's
   `build()` creates, read from its construction code, with search by address.
+- **Assertions and Coverage**: right-click a signal or field to see the assertions, covers and
+  coverpoints that use it (as the checked value, a clock or a reset), through named
+  properties, port connections and `bind`s, and covergroup `sample()` arguments.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".

@@ -42,7 +42,7 @@ const LOOK_BACK: usize = 20_000;
 
 /// The names a list's items bind, in order; an empty name keeps a slot that gets no hint (an
 /// unnamed DPI argument).
-type Slots = Arc<Vec<String>>;
+pub(crate) type Slots = Arc<Vec<String>>;
 
 impl Analysis {
     /// The hints for the part of `file` from `start` to `end`.
@@ -151,7 +151,7 @@ impl Analysis {
     /// The parameters positional values set, in order, and the port slots of a design element.
     /// Parameters: those of its `#(...)` header that are not local, or without a header, those
     /// of its body. Ports: none when a port slot is not a plain name (`module m({a, b}, c)`).
-    fn header_slots(&self, def: DeclRef) -> (Slots, Slots) {
+    pub(crate) fn header_slots(&self, def: DeclRef) -> (Slots, Slots) {
         let u = self.unit(def.unit);
         let d = u.parsed.decl(def.decl);
         let kids: Vec<_> = d.children.iter().map(|c| u.parsed.decl(*c)).collect();
@@ -194,7 +194,7 @@ fn first_semicolon(src: &str) -> Option<usize> {
 /// (`(first, end)`, end excluded; empty for an empty item), and the index after its `)`.
 /// Attributes `(* ... *)` and nested groups (an inline constraint's `{ a; b; }`) are inside
 /// items; a `;` outside them ends the search (an unclosed list names nothing).
-fn list(toks: &[Token], open: usize) -> (Vec<(usize, usize)>, usize) {
+pub(crate) fn list(toks: &[Token], open: usize) -> (Vec<(usize, usize)>, usize) {
     let mut items = Vec::new();
     let mut depth = 0usize;
     let mut first = open + 1;
@@ -225,7 +225,7 @@ fn list(toks: &[Token], open: usize) -> (Vec<(usize, usize)>, usize) {
 }
 
 /// The index after the bracket group opening at `toks[open]`.
-fn skip(toks: &[Token], open: usize) -> usize {
+pub(crate) fn skip(toks: &[Token], open: usize) -> usize {
     let mut depth = 0usize;
     for (i, t) in toks.iter().enumerate().skip(open) {
         if t.is_punct("[") || t.is_punct("(") || t.is_punct("{") {

@@ -28,6 +28,7 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         too_deep: false,
         port_index: None,
         attr_open: (0, 0),
+        label: None,
     };
     p.u.decls.push(Decl {
         kind: DeclKind::Unit,
@@ -103,6 +104,8 @@ struct Parser<'t> {
     /// Tokens in which no attribute in an expression closes before the second: a `(*` there
     /// opens none (each is not looked past again; the parser may come back before the first).
     attr_open: (usize, usize),
+    /// The label of the assertion about to be parsed (`a1: assert ...`).
+    label: Option<Token>,
 }
 
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
@@ -545,6 +548,7 @@ impl<'t> Parser<'t> {
                     self.bump();
                     if self.tok().kind == TokKind::Keyword && matches!(self.tok().text.as_str(), "assert" | "assume" | "cover" | "restrict") {
                         // A named assertion can be referenced hierarchically (`$assertoff(0, top.a1)`).
+                        self.label = Some(label.clone());
                         let id = self.new_decl(DeclKind::Block, Some(&label), label.span);
                         self.item();
                         self.finish(id);
@@ -675,14 +679,24 @@ impl<'t> Parser<'t> {
                     self.scan_until_semi(RefKind::Loose);
                 }
             }
-            "clocking" => self.clocking(t.span),
+            "clocking" => self.clocking(t.span, false),
             "default" | "global" if self.nth(1).is_kw("clocking") => {
                 self.bump();
-                self.clocking(t.span);
+                self.clocking(t.span, t.text == "default");
             }
             "default" => {
                 self.bump();
-                self.scan_until_semi(RefKind::Loose);
+                if self.at_kw("disable") && self.nth(1).is_kw("iff") {
+                    self.bump();
+                    self.bump();
+                    let r = self.refs_len();
+                    self.scan_until_semi(RefKind::Loose);
+                    let scope = self.scope();
+                    let parts = vec![(VerifRole::Reset, r, self.refs_len())];
+                    self.u.verif.push(VerifItem { kind: VerifKind::DefaultDisable, form: VerifForm::None, label: None, start: t.span, end: self.prev_span(), scope, decl: None, parts });
+                } else {
+                    self.scan_until_semi(RefKind::Loose);
+                }
             }
             "modport" => self.modport(),
             "genvar" => {
@@ -2468,12 +2482,16 @@ impl<'t> Parser<'t> {
             self.arg_list(DeclKind::Argument);
         }
         if self.at_p("@") || self.at_p("@@") {
+            let ev = self.tok().span;
             self.bump();
+            let r = self.refs_len();
             if self.at_p("(") {
                 self.paren_group(RefKind::Loose);
             } else {
                 self.scan_expr(STOP_NONE, RefKind::Loose);
             }
+            let end = self.prev_span();
+            self.u.verif.push(VerifItem { kind: VerifKind::CovergroupEvent, form: VerifForm::None, label: None, start: ev, end, scope: id, decl: None, parts: vec![(VerifRole::Clock, r, self.refs_len())] });
         } else if self.at_kw("with") {
             self.bump();
             self.eat_kw("function");
@@ -2481,7 +2499,13 @@ impl<'t> Parser<'t> {
                 self.bump(); // sample
             }
             if self.at_p("(") {
+                let first = self.u.decls.len();
                 self.arg_list(DeclKind::Argument);
+                for d in &mut self.u.decls[first..] {
+                    if d.kind == DeclKind::Argument {
+                        d.flags |= dflags::SAMPLE_ARG;
+                    }
+                }
             }
         }
         self.expect_p(";");
@@ -2523,6 +2547,7 @@ impl<'t> Parser<'t> {
                 self.new_decl(k, Some(l), start)
             });
             let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false, decl: false, implies: false };
+            let items = self.refs_len();
             loop {
                 if self.at_p("{") {
                     // `coverpoint {a, b}`: a concatenation, not the bins block.
@@ -2541,14 +2566,26 @@ impl<'t> Parser<'t> {
                 }
                 break;
             }
+            let mut parts = vec![(if is_cross { VerifRole::CrossItem } else { VerifRole::Checked }, items, self.refs_len())];
             if self.eat_kw("iff") && self.at_p("(") {
+                let r = self.refs_len();
                 self.paren_group(RefKind::Expr);
+                parts.push((VerifRole::Gate, r, self.refs_len()));
             }
             if let Some(id) = id {
                 self.push_scope(id);
             }
             if self.at_p("{") {
-                self.bins_block();
+                // The bins, without `option.*` settings and functions.
+                let r = self.refs_len();
+                let skipped = self.bins_block();
+                let mut from = r;
+                for (a, b) in skipped.into_iter().chain([(self.refs_len(), self.refs_len())]) {
+                    if a > from {
+                        parts.push((VerifRole::Bins, from, a));
+                    }
+                    from = b;
+                }
             } else {
                 self.eat_p(";");
             }
@@ -2556,6 +2593,10 @@ impl<'t> Parser<'t> {
                 self.pop_scope();
                 self.finish(id);
             }
+            let end = self.prev_span();
+            let scope = self.scope();
+            let kind = if is_cross { VerifKind::Cross } else { VerifKind::Coverpoint };
+            self.u.verif.push(VerifItem { kind, form: VerifForm::None, label: label.map(|l| l.text), start, end, scope, decl: id, parts });
             return;
         }
         if self.at_kw("function") {
@@ -2566,12 +2607,17 @@ impl<'t> Parser<'t> {
         self.scan_until_semi(RefKind::Loose);
     }
 
-    fn bins_block(&mut self) {
+    /// The bins of a coverpoint or cross; the reference ranges of what is not a bin (`option.*`
+    /// settings, functions).
+    fn bins_block(&mut self) -> Vec<(RefId, RefId)> {
+        let mut skipped = Vec::new();
         self.bump(); // {
         while !self.at_eof() && !self.at_p("}") {
             let before = self.pos;
+            let r = self.refs_len();
             self.eat_kw("wildcard");
-            if matches!(self.tok().text.as_str(), "bins" | "illegal_bins" | "ignore_bins") {
+            let bin = matches!(self.tok().text.as_str(), "bins" | "illegal_bins" | "ignore_bins");
+            if bin {
                 self.bump();
                 if self.at_ident() {
                     self.bump(); // bin name
@@ -2584,14 +2630,19 @@ impl<'t> Parser<'t> {
             } else if self.at_kw("function") {
                 let sp = self.tok().span;
                 self.subroutine(0, sp);
+                skipped.push((r, self.refs_len()));
                 continue;
             }
             self.scan_until_semi(RefKind::Loose);
             if self.pos == before {
                 self.bump();
             }
+            if !bin {
+                skipped.push((r, self.refs_len()));
+            }
         }
         self.eat_p("}");
+        skipped
     }
 
     fn assertion_decl(&mut self, kind: DeclKind, end: &'static str) {
@@ -2614,6 +2665,26 @@ impl<'t> Parser<'t> {
             let s = self.tok().span;
             self.data_decl(DeclKind::Variable, 0, s);
         }
+        // The body by part: a leading clocking event, `disable iff (...)`, then the rest.
+        let mut parts = Vec::new();
+        if self.at_p("@") || self.at_p("@@") {
+            self.bump();
+            let r = self.refs_len();
+            if self.at_p("(") {
+                self.paren_group(RefKind::Loose);
+            } else if self.at_ident() {
+                self.chain(RefKind::Loose);
+            }
+            parts.push((VerifRole::Clock, r, self.refs_len()));
+        }
+        if self.at_kw("disable") && self.nth(1).is_kw("iff") {
+            self.bump();
+            self.bump();
+            let r = self.refs_len();
+            self.paren_group(RefKind::Loose);
+            parts.push((VerifRole::Reset, r, self.refs_len()));
+        }
+        let r = self.refs_len();
         while !self.at_eof() && !self.at_kw(end) {
             let t = self.tok();
             if t.kind == TokKind::Keyword && is_end_kw(&t.text) && t.text != end {
@@ -2624,6 +2695,10 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
         }
+        parts.push((VerifRole::Checked, r, self.refs_len()));
+        let body = if kind == DeclKind::Property { VerifKind::PropertyBody } else { VerifKind::SequenceBody };
+        let last = self.prev_span();
+        self.u.verif.push(VerifItem { kind: body, form: VerifForm::None, label: Some(n.text.clone()), start, end: last, scope: id, decl: Some(id), parts });
         if self.eat_kw(end) {
             self.end_label();
         }
@@ -2631,7 +2706,8 @@ impl<'t> Parser<'t> {
         self.finish(id);
     }
 
-    fn clocking(&mut self, start: Span) {
+    /// A clocking block (`default`: the default clocking of its scope).
+    fn clocking(&mut self, start: Span, default: bool) {
         self.bump(); // clocking
         let name = if self.at_ident() {
             let n = self.tok().clone();
@@ -2648,12 +2724,18 @@ impl<'t> Parser<'t> {
             return;
         }
         let id = self.new_decl(DeclKind::ClockingBlock, name.as_ref(), start);
+        let scope = self.scope();
         self.push_scope(id);
         if self.eat_p("@") {
+            let r = self.refs_len();
             if self.at_p("(") {
                 self.paren_group(RefKind::Expr);
             } else {
                 self.scan_expr(STOP_NONE, RefKind::Expr);
+            }
+            if default {
+                let parts = vec![(VerifRole::Clock, r, self.refs_len())];
+                self.u.verif.push(VerifItem { kind: VerifKind::DefaultClocking, form: VerifForm::None, label: None, start, end: self.prev_span(), scope, decl: Some(id), parts });
             }
         }
         self.eat_p(";");
@@ -3044,6 +3126,9 @@ impl<'t> Parser<'t> {
             TokKind::Ident => {
                 if self.nth(1).is_punct(":") && !self.nth(2).is_punct(":") && !self.nth(2).is_punct("=") {
                     // Statement label.
+                    if self.nth(2).kind == TokKind::Keyword && matches!(self.nth(2).text.as_str(), "assert" | "assume" | "cover" | "restrict" | "expect") {
+                        self.label = Some(t.clone());
+                    }
                     self.bump();
                     self.bump();
                     self.stmt();
@@ -3159,17 +3244,50 @@ impl<'t> Parser<'t> {
                 }
             }
             "assert" | "assume" | "cover" | "restrict" | "expect" => {
+                let label = self.label.take();
+                let start = label.as_ref().map_or(t.span, |l| l.span);
                 self.bump();
+                let (mut concurrent, mut deferred, mut sequence) = (false, false, false);
                 while matches!(self.tok().text.as_str(), "property" | "sequence" | "final") && self.tok().kind == TokKind::Keyword {
+                    match self.tok().text.as_str() {
+                        "final" => deferred = true,
+                        "sequence" => {
+                            sequence = true;
+                            concurrent = true;
+                        }
+                        _ => concurrent = true,
+                    }
                     self.bump();
                 }
                 if self.at_p("#") {
+                    deferred = true;
                     self.bump();
                     self.bump();
                 }
+                let kind = match t.text.as_str() {
+                    "assert" => VerifKind::Assert,
+                    "assume" => VerifKind::Assume,
+                    "cover" if sequence => VerifKind::CoverSequence,
+                    "cover" => VerifKind::Cover,
+                    "restrict" => VerifKind::Restrict,
+                    _ => VerifKind::Expect,
+                };
+                // `expect` takes a property like a concurrent assertion.
+                let concurrent = concurrent || kind == VerifKind::Expect;
+                let form = if concurrent {
+                    VerifForm::Concurrent
+                } else if deferred {
+                    VerifForm::Deferred
+                } else {
+                    VerifForm::Immediate
+                };
+                let mut parts = Vec::new();
                 if self.at_p("(") {
-                    self.paren_group(RefKind::Loose);
+                    parts = self.verif_spec(concurrent);
                 }
+                let end = self.prev_span();
+                let scope = self.scope();
+                self.u.verif.push(VerifItem { kind, form, label: label.map(|l| l.text), start, end, scope, decl: None, parts });
                 self.action_block();
             }
             "typedef" => self.typedef(),
@@ -3461,6 +3579,46 @@ impl<'t> Parser<'t> {
         if !self.eat_p("(") {
             return;
         }
+        self.group_rest(kind);
+    }
+
+    /// The number of references so far (the next one's id).
+    fn refs_len(&self) -> RefId {
+        self.u.refs.len() as RefId
+    }
+
+    /// The parenthesized property or expression of an assertion, by part: a leading clocking
+    /// event and `disable iff (...)` (concurrent ones), then what is checked.
+    fn verif_spec(&mut self, concurrent: bool) -> Vec<(VerifRole, RefId, RefId)> {
+        let mut parts = Vec::new();
+        if !self.eat_p("(") {
+            return parts;
+        }
+        if concurrent && (self.at_p("@") || self.at_p("@@")) {
+            self.bump();
+            let r = self.refs_len();
+            if self.at_p("(") {
+                self.paren_group(RefKind::Loose);
+            } else if self.at_ident() {
+                self.chain(RefKind::Loose);
+            }
+            parts.push((VerifRole::Clock, r, self.refs_len()));
+        }
+        if concurrent && self.at_kw("disable") && self.nth(1).is_kw("iff") {
+            self.bump();
+            self.bump();
+            let r = self.refs_len();
+            self.paren_group(RefKind::Loose);
+            parts.push((VerifRole::Reset, r, self.refs_len()));
+        }
+        let r = self.refs_len();
+        self.group_rest(RefKind::Loose);
+        parts.push((VerifRole::Checked, r, self.refs_len()));
+        parts
+    }
+
+    /// The rest of a parenthesized group whose `(` is behind, up to and with its `)`.
+    fn group_rest(&mut self, kind: RefKind) {
         loop {
             self.scan_expr(STOP_NONE, kind);
             if self.eat_p(")") {

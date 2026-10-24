@@ -5,6 +5,7 @@
 +define+DEMO_WIDTH=16
 rtl/demo_pkg.sv
 rtl/fifo.sv
+rtl/fifo_sva.sv
 rtl/top.sv
 $TB/tb_pkg.sv
 $TB/tb_top.sv

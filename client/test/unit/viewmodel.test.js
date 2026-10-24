@@ -197,3 +197,35 @@ test.describe('register model texts', () => {
     assert.match(vm.registerTooltip({ name: 'en', kind: 'field', volatile: true, access: 'RC' }, ['top', 'bus', 'r', 'en']), /Access: `RC`\n\nVolatile\./);
   });
 });
+
+test.describe('assertions and coverage texts', () => {
+  const hit = (o) => ({ kind: 'assert', group: 'checks', roles: ['checked'], detail: '', line: 9, children: [], ...o });
+  test.it('name results without a label by what and where they are', () => {
+    assert.equal(vm.checkLabel(hit({ label: 'a_req' })), 'a_req');
+    assert.equal(vm.checkLabel(hit({ form: 'concurrent' })), 'assert property (line 10)');
+    assert.equal(vm.checkLabel(hit({ form: 'immediate' })), 'assert (line 10)');
+    assert.equal(vm.checkLabel(hit({ kind: 'cover sequence', form: 'concurrent' })), 'cover sequence (line 10)');
+  });
+  test.it('describe the form and the roles that are not the checked value', () => {
+    assert.equal(vm.checkDescription(hit({ form: 'concurrent' })), undefined);
+    assert.equal(vm.checkDescription(hit({ form: 'deferred', roles: ['checked', 'clock'] })), 'deferred · clock');
+    assert.equal(vm.checkDescription(hit({ kind: 'port', group: 'connections', roles: ['connection'], notes: ['connected in an expression'] })), 'connected in an expression');
+    assert.match(vm.checkTooltip(hit({ label: 'a', detail: 'a: assert property (x)', roles: ['checked', 'reset'] })), /```systemverilog\na: assert property \(x\)\n```\n\nAs: checked, reset/);
+  });
+  test.it('hide clock and reset uses, and connections left empty', () => {
+    const tree = [
+      hit({ label: 'a', roles: ['clock'] }),
+      hit({ label: 'b', roles: ['clock', 'checked'] }),
+      hit({ kind: 'port', group: 'connections', roles: ['connection'], children: [hit({ label: 'c', roles: ['reset'] })] }),
+      hit({ kind: 'port', group: 'connections', roles: ['connection'], label: 'p', children: [hit({ label: 'd' })] }),
+      hit({ kind: 'property', group: 'helpers', label: 'unused', children: [] }),
+    ];
+    assert.deepEqual(vm.valuesOnly(tree).map((h) => h.label), ['b', 'p', 'unused']);
+  });
+  test.it('say why nothing is shown or what limited the search', () => {
+    assert.equal(vm.checksMessage('req', 0, [], []), "No assertion or coverage uses 'req' in this build configuration.");
+    assert.equal(vm.checksMessage('req', 3, ['candidates'], []), 'Search incomplete: too many names to look at.');
+    assert.equal(vm.checksMessage('req', 3, [], ['not followed: bind to an instance path (dut.u)']), 'Not followed: bind to an instance path (dut.u).');
+    assert.equal(vm.checksMessage('req', 3, [], []), undefined);
+  });
+});

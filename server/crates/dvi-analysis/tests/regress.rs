@@ -3210,6 +3210,163 @@ fn register_model_edge_cases_are_bounded_and_follow_uvm() {
     assert!(bus.truncated && t.truncated);
 }
 
+const CHECKS_SRC: &str = r#"`define CHECK(name, prop) name: assert property (@(posedge clk) prop);
+module chk(input logic clk, rst_n, req, ack);
+  property p_handshake;
+    @(posedge clk) disable iff (!rst_n) req |-> ##[1:3] ack;
+  endproperty
+  a_handshake: assert property (p_handshake);
+  c_req: cover property (@(posedge clk) req);
+endmodule
+
+module dut(input logic clk, rst_n, input logic req, output logic ack, input logic [7:0] data);
+  logic busy;
+  logic [3:0] bus;
+  logic [1:0] idx;
+  logic dbg;
+  default clocking cb @(posedge clk); endclocking
+  default disable iff (!rst_n);
+  a_busy: assert property (busy |-> !req) else $error("req while busy %0d", req, dbg);
+  assert property (@(posedge clk) req |=> busy);
+  always_comb begin
+    a_imm: assert (!(req && ack)) else $display("req %0d", req);
+  end
+  initial assert final (data != 0);
+  `CHECK(a_mac, req |-> ##1 ack)
+  covergroup cg_data @(posedge clk);
+    cp_data: coverpoint data iff (rst_n) {
+      bins low = {[0:127]};
+      bins high = {[128:255]};
+      option.weight = req;
+    }
+    coverpoint req;
+    x_req_data: cross cp_data, req iff (!busy);
+  endgroup
+  sequence s_req;
+    req ##1 ack;
+  endsequence
+  property p_unused;
+    @(posedge clk) req;
+  endproperty
+  chk u_chk (.clk, .rst_n(rst_n), .req(req), .ack(ack));
+  chk u_pos (clk, rst_n, req, ack);
+  chk u_star (.*);
+  chk u_expr (.clk(clk), .rst_n(rst_n), .req(req & busy), .ack(ack));
+  chk u_idx (.clk(clk), .rst_n(rst_n), .req(bus[idx]), .ack(ack));
+endmodule
+
+module top;
+  bind dut chk u_bound (.clk(clk), .rst_n(rst_n), .req(req), .ack(ack));
+endmodule
+
+class tx;
+  rand bit [7:0] addr;
+endclass
+
+class cov;
+  tx tr;
+  covergroup cg_tr;
+    cp_addr: coverpoint tr.addr;
+  endgroup
+  covergroup cg_arg with function sample(bit [7:0] a);
+    cp_a: coverpoint a;
+  endgroup
+  function new();
+    cg_tr = new();
+    cg_arg = new();
+  endfunction
+  function void sample_it();
+    cg_arg.sample(tr.addr);
+  endfunction
+endclass
+"#;
+
+#[test]
+fn assertions_and_coverage_of_a_signal_are_found_through_helpers_ports_and_arguments() {
+    let (a, root) = project("checksof", &[("a.sv", CHECKS_SRC)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    // The first `needle` after the first `after`.
+    let at = |after: &str, needle: &str| -> u32 {
+        let base = CHECKS_SRC.find(after).unwrap();
+        (base + CHECKS_SRC[base..].find(needle).unwrap()) as u32
+    };
+    fn render(h: &dvi_analysis::ide::checks::CheckHit, depth: usize, out: &mut Vec<String>) {
+        let label = h.label.clone().unwrap_or_else(|| format!("line {}", h.line.unwrap_or(0) + 1));
+        let notes = if h.notes.is_empty() { String::new() } else { format!(" ({})", h.notes.join("; ")) };
+        out.push(format!("{}{} {} [{}] {}{}", "  ".repeat(depth), h.group, h.kind, h.roles.join(","), label, notes));
+        for c in &h.children {
+            render(c, depth + 1, out);
+        }
+    }
+    let show = |off: u32| -> Vec<String> {
+        let r = a.checks_at(f, off).expect("a searchable declaration");
+        assert!(r.limits.is_empty(), "{:?}", r.limits);
+        let mut out = Vec::new();
+        for h in &r.hits {
+            render(h, 0, &mut out);
+        }
+        out
+    };
+    let dut = "module dut(";
+    let port_chain = |port: &str, role: &str| -> Vec<String> {
+        ["u_chk", "u_pos", "u_star (.*)", "u_expr (connected in an expression)", "u_bound (bind)"]
+            .iter()
+            .flat_map(|u| [format!("connections port [connection] {port} of {u}"), format!("  covers cover [{role}] c_req"), format!("  helpers property [{role}] p_handshake"), format!("    checks assert [checked] a_handshake")])
+            .collect()
+    };
+    let mut req = vec![
+        "checks assert [checked] a_busy",
+        "checks assert [checked] line 18",
+        "checks assert [checked] a_imm",
+        "checks assert [checked] a_mac",
+        "coverage coverpoint [checked] coverpoint of cg_data",
+        "coverage cross [cross item] x_req_data",
+        "helpers sequence [checked] s_req (declaration only: no assertion uses it)",
+        "helpers property [checked] p_unused (declaration only: no assertion uses it)",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    req.extend(port_chain("req", "checked"));
+    assert_eq!(show(at(dut, "req")), req, "the action block's `req` and `option.weight = req` are not uses; `bus[idx]` is no connection of req");
+    let top = |off: u32| show(off).into_iter().filter(|l| !l.starts_with(' ')).collect::<Vec<_>>();
+    assert_eq!(
+        top(at(dut, "rst_n")),
+        [
+            "checks default disable [reset] line 16 (applies to 3 concurrent assertions without their own disable iff)",
+            "coverage coverpoint [gate] cp_data",
+            "connections port [connection] rst_n of u_chk",
+            "connections port [connection] rst_n of u_pos",
+            "connections port [connection] rst_n of u_star (.*)",
+            "connections port [connection] rst_n of u_expr",
+            "connections port [connection] rst_n of u_idx",
+            "connections port [connection] rst_n of u_bound (bind)",
+        ]
+    );
+    assert_eq!(
+        top(at(dut, "clk"))[..5],
+        [
+            "checks default clocking [clock] line 15 (applies to 1 concurrent assertion without their own clock)",
+            "checks assert [clock] line 18",
+            "checks assert [clock] a_mac",
+            "coverage covergroup event [clock] covergroup event of cg_data",
+            "helpers property [clock] p_unused (declaration only: no assertion uses it)",
+        ]
+    );
+    assert_eq!(show(at(dut, "data")), ["checks assert [checked] line 22", "coverage coverpoint [checked] cp_data", "  coverage cross [cross item] x_req_data"]);
+    assert!(show(at("logic dbg", "dbg")).is_empty(), "only in an action block");
+    assert_eq!(show(at("class tx", "addr")), ["coverage coverpoint [checked] cp_addr", "connections argument [argument] a of cg_arg.sample()", "  coverage coverpoint [checked] cp_a"]);
+    assert_eq!(show(at("module chk(", "req")), ["covers cover [checked] c_req", "helpers property [checked] p_handshake", "  checks assert [checked] a_handshake"]);
+    // Forms, details and the macro call.
+    let r = a.checks_at(f, at(dut, "req")).unwrap();
+    let find = |label: &str| r.hits.iter().find(|h| h.label.as_deref() == Some(label)).unwrap();
+    assert_eq!((find("a_busy").form, find("a_imm").form), (Some("concurrent"), Some("immediate")));
+    assert_eq!(find("a_mac").detail, "`CHECK(a_mac, req |-> ##1 ack)");
+    let d = a.checks_at(f, at(dut, "data")).unwrap();
+    assert_eq!(d.hits[0].form, Some("deferred"));
+    assert_eq!((d.target.name.as_str(), d.target.kind.as_str()), ("data", "port of dut"));
+}
+
 #[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";

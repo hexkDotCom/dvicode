@@ -491,3 +491,104 @@ export function registerTooltip(n: RegInfo, path: string[]): string {
   }
   return lines.join('\n\n');
 }
+
+/** A result of `dvicode/checksOf`: an assertion, cover, coverage item, helper or connection. */
+export interface CheckInfo {
+  /** `assert`, `cover`, `coverpoint`, `property`, `port`, `argument`... */
+  kind: string;
+  /** `checks`, `covers`, `coverage`, `helpers` or `connections`. */
+  group: string;
+  form?: string;
+  /** `checked`, `clock`, `reset`, `gate`, `bins`, `cross item`, `connection`, `argument`. */
+  roles: string[];
+  label?: string;
+  detail: string;
+  line: number | null;
+  notes?: string[];
+  children: CheckInfo[];
+}
+
+/** The groups of the Assertions and Coverage view, in order, with their titles. */
+export const CHECK_GROUPS: [string, string][] = [
+  ['checks', 'Assertions'],
+  ['covers', 'Covers'],
+  ['coverage', 'Coverage'],
+  ['helpers', 'Properties and sequences'],
+  ['connections', 'Through ports and arguments'],
+];
+
+/** The label of a result: its name, else what it is and where. */
+export function checkLabel(h: CheckInfo): string {
+  if (h.label) {
+    return h.label;
+  }
+  const what = h.form === 'concurrent' && !h.kind.includes('sequence') && ['assert', 'assume', 'cover', 'restrict'].includes(h.kind) ? `${h.kind} property` : h.kind;
+  return h.line !== null ? `${what} (line ${h.line + 1})` : what;
+}
+
+/** The description of a result: its form when not concurrent, and what the target is there
+ * when it is not the checked value. */
+export function checkDescription(h: CheckInfo): string | undefined {
+  const parts: string[] = [];
+  if (h.form === 'immediate' || h.form === 'deferred') {
+    parts.push(h.form);
+  }
+  const roles = h.roles.filter((r) => r !== 'checked' && r !== 'connection' && r !== 'argument');
+  if (roles.length) {
+    parts.push(roles.join(', '));
+  }
+  if (h.notes?.length) {
+    parts.push(h.notes.join('; '));
+  }
+  return parts.join(' · ') || undefined;
+}
+
+/** The tooltip of a result (Markdown). */
+export function checkTooltip(h: CheckInfo): string {
+  const lines = [`**${checkLabel(h)}** ${h.kind}${h.form ? ` (${h.form})` : ''}`];
+  if (h.detail) {
+    lines.push('```systemverilog\n' + h.detail + '\n```');
+  }
+  lines.push(`As: ${h.roles.join(', ')}`);
+  for (const n of h.notes ?? []) {
+    lines.push(n.charAt(0).toUpperCase() + n.slice(1) + '.');
+  }
+  return lines.join('\n\n');
+}
+
+/** Without what uses the target only as a clock or a reset ("values only"): a result goes when
+ * all its roles are those; a connection goes when nothing is left under it. */
+export function valuesOnly<H extends CheckInfo>(hits: H[]): H[] {
+  const out: H[] = [];
+  for (const h of hits) {
+    const children = valuesOnly(h.children as H[]);
+    const timing = h.roles.length > 0 && h.roles.every((r) => r === 'clock' || r === 'reset');
+    if (h.group === 'connections' || h.group === 'helpers') {
+      if (children.length || (h.group === 'helpers' && !timing && !h.children.length)) {
+        out.push({ ...h, children });
+      }
+    } else if (!timing) {
+      out.push({ ...h, children });
+    }
+  }
+  return out;
+}
+
+/** The view's message for a result: nothing found, or what limited the search. */
+export function checksMessage(name: string, hits: number, limits: string[], notes: string[]): string | undefined {
+  const why: Record<string, string> = { candidates: 'too many names to look at', hits: 'too many results', depth: 'connections followed only 3 levels deep', cancelled: 'the search was cancelled' };
+  const limited = limits.map((l) => why[l] ?? l);
+  const parts: string[] = [];
+  if (!hits) {
+    parts.push(`No assertion or coverage uses '${name}' in this build configuration.`);
+  }
+  if (limited.length) {
+    parts.push(`Search incomplete: ${limited.join(', ')}.`);
+  }
+  if (notes.length) {
+    const shown = notes.slice(0, 3).join('; ');
+    const more = notes.length > 3 ? `; and ${notes.length - 3} more` : '';
+    parts.push(`${shown.charAt(0).toUpperCase()}${shown.slice(1)}${more}.`);
+  }
+  return parts.join(' ') || undefined;
+}

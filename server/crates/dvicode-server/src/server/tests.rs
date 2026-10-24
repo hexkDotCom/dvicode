@@ -475,6 +475,28 @@ endclass
 }
 
 #[test]
+fn assertions_and_coverage_of_a_signal_are_asked_by_position() {
+    let m = "module m(input logic clk, input logic req);
+  a_req: assert property (@(posedge clk) req);
+  logic unused;
+endmodule
+";
+    let root = project("checksof", &[("m.sv", m)]);
+    let (mut c, init) = Client::start(&root, Value::Null);
+    assert_eq!(init["capabilities"]["experimental"]["dvicode"]["checks"], 1, "{init}");
+    let uri = uri(&root, "m.sv");
+    let r = c.request_ok("dvicode/checksOf", json!({ "textDocument": { "uri": uri }, "position": at(m, "req)") }));
+    assert_eq!(r["target"]["name"], "req", "{r}");
+    assert_eq!((r["hits"][0]["label"].as_str(), r["hits"][0]["roles"][0].as_str(), r["hits"][0]["group"].as_str()), (Some("a_req"), Some("checked"), Some("checks")), "{r}");
+    assert_eq!(r["limits"], json!([]));
+    let none = c.request_ok("dvicode/checksOf", json!({ "textDocument": { "uri": uri }, "position": at(m, "unused") }));
+    assert_eq!(none["hits"], json!([]), "a declaration with no use: an empty result");
+    let nothing = c.request_ok("dvicode/checksOf", json!({ "textDocument": { "uri": uri }, "position": at(m, "endmodule") }));
+    assert!(nothing.is_null(), "no declaration there");
+    c.shutdown();
+}
+
+#[test]
 fn closing_a_file_outside_the_build_clears_its_problems() {
     let root = project("adhoc", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

@@ -111,7 +111,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1 } })),
         ..Default::default()
     }
 }
@@ -1938,6 +1938,14 @@ impl Server {
                     Ok(json!({ "revision": a.revision, "top": top, "hits": a.registers_at(&model, addr), "cut": model.cut }))
                 })
             }
+            // The assertions and coverage of the declaration at a position (null: none there).
+            "dvicode/checksOf" => self.spawn_project(req, |a, p: LocateParams| {
+                let Some((f, off)) = pos(a, &p.text_document.uri, p.position) else { return Ok(Value::Null) };
+                Ok(match a.checks_at(f, off) {
+                    Some(r) => json!({ "revision": a.revision, "target": r.target, "hits": r.hits, "limits": r.limits, "notes": r.notes }),
+                    None => Value::Null,
+                })
+            }),
             "dvicode/locate" => self.spawn_project(req, |a, p: LocateParams| {
                 let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
                 Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))

@@ -53,4 +53,20 @@ package tb_pkg;
       end
     endtask
   endclass
+
+  // Coverage of the items driven: what samples `addr` (Show Assertions and Coverage).
+  class item_coverage;
+    covergroup cg_addr with function sample(bit [7:0] a);
+      cp_addr: coverpoint a {
+        bins low  = {[0:49]};
+        bins high = {[50:99]};
+      }
+    endgroup
+    function new();
+      cg_addr = new();
+    endfunction
+    function void sample(my_item it);
+      cg_addr.sample(it.addr);
+    endfunction
+  endclass
 endpackage

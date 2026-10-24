@@ -181,6 +181,8 @@ pub mod dflags {
     pub const PARAM_PORT: u32 = 1 << 24;
     /// A `localparam type` (its kind is `TypeParam` like an overridable one).
     pub const LOCAL_PARAM: u32 = 1 << 25;
+    /// A formal of a covergroup's `with function sample(...)` (not of its constructor).
+    pub const SAMPLE_ARG: u32 = 1 << 26;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +330,76 @@ pub struct ParsedUnit {
     /// `bind target ... inst (...)`: the target (a module name, or an instance path such as
     /// `dut.u_core`) and the instance.
     pub binds: Vec<(SmolStr, DeclId)>,
+    /// Assertions, coverage items and default clocking, with the references in each part, in
+    /// source order.
+    pub verif: Vec<VerifItem>,
+}
+
+/// What a verification construct is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifKind {
+    Assert,
+    Assume,
+    Cover,
+    Restrict,
+    Expect,
+    CoverSequence,
+    Coverpoint,
+    Cross,
+    /// A covergroup's sampling event (`covergroup cg @(posedge clk)`).
+    CovergroupEvent,
+    DefaultClocking,
+    DefaultDisable,
+    /// The body of a `property` or `sequence` declaration (`decl` is the declaration).
+    PropertyBody,
+    SequenceBody,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifForm {
+    /// `assert property`, `cover sequence`...
+    Concurrent,
+    /// `assert (...)` in procedural code.
+    Immediate,
+    /// `assert #0 (...)`, `assert final (...)`.
+    Deferred,
+    /// Not an assertion (coverage, defaults).
+    None,
+}
+
+/// What a reference is used for in a construct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifRole {
+    /// The property or expression checked, the value a coverpoint samples.
+    Checked,
+    /// A clocking event.
+    Clock,
+    /// `disable iff (...)`.
+    Reset,
+    /// An `iff (...)` guard.
+    Gate,
+    /// Bins values, `binsof`, `with` filters.
+    Bins,
+    /// What a cross crosses.
+    CrossItem,
+}
+
+/// An assertion, a coverage item or a default (clocking, disable).
+#[derive(Clone, Debug)]
+pub struct VerifItem {
+    pub kind: VerifKind,
+    pub form: VerifForm,
+    /// Its label (`a_req: assert property ...`, `cp_addr: coverpoint ...`).
+    pub label: Option<SmolStr>,
+    /// Its first token (the label's, or the keyword's) and its last.
+    pub start: Span,
+    pub end: Span,
+    /// The scope it is in (the covergroup, for coverage items).
+    pub scope: DeclId,
+    /// The coverpoint or cross declaration (labelled ones only).
+    pub decl: Option<DeclId>,
+    /// The references of each part: `refs[first..end]`.
+    pub parts: Vec<(VerifRole, RefId, RefId)>,
 }
 
 impl ParsedUnit {

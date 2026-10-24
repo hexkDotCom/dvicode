@@ -355,6 +355,43 @@ async function run() {
     return nodes.join(' | ');
   });
 
+  await test('assertions and coverage view: through a bind and a covergroup argument', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const v = api.checks();
+    const lines = () => {
+      const out = [];
+      const walk = (nodes, depth) => {
+        for (const n of nodes) {
+          const item = v.getTreeItem(n);
+          out.push(`${'  '.repeat(depth)}${item.label}${item.description ? ` (${item.description})` : ''}`);
+          walk(v.getChildren(n), depth + 1);
+        }
+      };
+      walk(v.getChildren(), 0);
+      return out.join(' | ');
+    };
+    const ask = async (file, needle) => {
+      const doc = await open(file);
+      const ed = await vscode.window.showTextDocument(doc);
+      const p = lineOf(doc, needle).translate(0, needle.lastIndexOf(' ') + 1);
+      ed.selection = new vscode.Selection(p, p);
+      await vscode.commands.executeCommand('dvicode.showChecks');
+      return lines();
+    };
+    const push = await ask('rtl/fifo.sv', 'input  logic         push');
+    const wantPush = 'Through ports and arguments (1) |   push of u_sva (bind) |     p_no_overflow |       a_no_overflow';
+    if (push !== wantPush) throw new Error(`push: ${push}; message '${v.view.message}'`);
+    if (!v.view.description.startsWith('push (port of fifo)')) throw new Error(`description: ${v.view.description}`);
+    const full = await ask('rtl/fifo.sv', 'output logic         full');
+    const wantFull = 'Through ports and arguments (1) |   full of u_sva (bind) |     c_full |     p_no_overflow |       a_no_overflow';
+    if (full !== wantFull) throw new Error(`full: ${full}`);
+    const addr = await ask('tb/tb_pkg.sv', 'rand bit [7:0] addr');
+    const wantAddr = 'Through ports and arguments (1) |   a of cg_addr.sample() |     cp_addr';
+    if (addr !== wantAddr) throw new Error(`addr: ${addr}`);
+    return `${push} || ${addr}`;
+  });
+
   await test('views: follow the editor', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

@@ -39,6 +39,9 @@ currently in preview.
   from each base class and which methods override.
 - **Register Model**: the maps, registers, addresses and fields a UVM register block's
   `build()` creates, read from its construction code, with search by address.
+- **Assertions and Coverage**: right-click a signal or field to see the assertions, covers and
+  coverpoints that use it (as the checked value, a clock or a reset), through named
+  properties, port connections and `bind`s, and covergroup `sample()` arguments.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.
