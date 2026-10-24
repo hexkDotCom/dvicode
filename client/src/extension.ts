@@ -275,6 +275,11 @@ function restart(ctx: vscode.ExtensionContext): Promise<void> {
     pendingClient = undefined;
     starting = undefined;
     startGeneration++;
+    // The stopped state of a dropped client no longer reaches them: the views' results are
+    // marked out of date here (the new engine counts its revisions anew).
+    structure.reset();
+    checks.reset();
+    drivers.reset();
     if (c) {
       await stopClient(c);
     }

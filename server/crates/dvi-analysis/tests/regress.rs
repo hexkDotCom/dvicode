@@ -3996,10 +3996,100 @@ fn drivers_and_loads_through_implicit_connections_macros_and_classes() {
         "named, `.*` and `.o` connections; the fourth level is past the depth limit"
     );
     assert_eq!(show(tb, "c", true).0, ["connections connection of u_x line 14 (module not found: not followed)", "writes blocking line 15 in initial"], "the macro's assignment");
-    assert_eq!(show(tb, "c", false), (vec!["connections i of u_g (input) line 12".to_string(), "  reads read line 3 @u_g".into(), "connections connection of u_x line 14 (module not found: not followed)".into()], vec![], bind.clone()), "in a generate block; the `.i` of m2 is no read of m3's port");
+    assert_eq!(show(tb, "c", false), (vec!["connections i of g.u_g (input) line 12".to_string(), "  reads read line 3 @g.u_g".into(), "connections connection of u_x line 14 (module not found: not followed)".into()], vec![], bind.clone()), "in a generate block; the `.i` of m2 is no read of m3's port");
     assert_eq!(show("output logic r", "r", true).0, ["writes blocking line 16 in task"]);
     let field = vec!["a class field: the sites are those of every object of the class".to_string()];
     assert_eq!(show("int f", "f", true), (vec!["writes blocking line 21 in function".to_string(), "writes blocking line 25 in initial".into()], vec![], field.clone()));
     assert_eq!(show("int f", "f", false), (vec!["reads argument of $display line 25".to_string()], vec![], field));
     assert_eq!(show("obj h", "h", true).0, ["writes blocking line 25 in initial"], "`h.f = 2` writes the object's field, not the handle");
+}
+
+#[test]
+fn drivers_and_loads_review_cases() {
+    let cases: &[(&str, &[(&str, &str, bool)])] = &[
+        ("module m;\n  string text;\n  int fd, count;\n  initial count = $fgets(text, fd);\nendmodule\n", &[("int fd", "fd", true), ("int fd", "fd", false), ("string text", "text", true)]),
+        ("module m;\n  int x;\n  task bump(inout int v);\n    v = v + 1;\n  endtask\n  initial bump(x);\nendmodule\n", &[("int x", "x", true), ("int x", "x", false)]),
+        ("class C;\n  task get(output int v);\n    v = 1;\n  endtask\nendclass\nmodule m;\n  C c;\n  int x;\n  initial begin\n    c = new;\n    c.get(x);\n  end\nendmodule\n", &[("int x", "x", true), ("int x", "x", false)]),
+        ("module child(output logic y);\n  initial y = 1;\nendmodule\nmodule top;\n  wire [1:0] q;\n  child u[1:0](.y(q));\nendmodule\n", &[("wire [1:0] q", "q", true), ("wire [1:0] q", "q", false)]),
+        ("module child(output wire [1:0] y);\n  assign y = 2'b00;\nendmodule\nmodule top;\n  wire a, b;\n  child u(.y({a, b}));\nendmodule\n", &[("wire a", "a", true), ("wire a", "a", false)]),
+        ("module m;\n  int i, x, y;\n  initial begin\n    for (i = 0; i < 4; i++) ;\n    x = y++;\n    for (int j = 0; j < 2; j += 1) ;\n  end\nendmodule\n", &[("int i", "i", true), ("int i", "i", false), ("int i", "y", true), ("int j", "j", true)]),
+        ("`define SET_BIT(a, i) a[i] = 1'b1\nmodule m;\n  logic [7:0] bus;\n  int index;\n  initial `SET_BIT(bus, index);\nendmodule\n", &[("int index", "index", true), ("int index", "index", false), ("logic [7:0] bus", "bus", true)]),
+        ("module m(input a, b, output wire y, z, w);\n  and g0(y, a, b), g1(z, a, b);\n  and #1 g2(w, a, b);\nendmodule\n", &[("output wire y", "z", true), ("output wire y", "w", true), ("output wire y", "z", false)]),
+        ("module m(q);\n  output wire q;\nendmodule\n", &[("output wire q", "q", false)]),
+        ("module child(output logic y);\n  initial y = 1;\nendmodule\nmodule top;\n  wire q;\n  if (1) begin : g1\n    child u(.y(q));\n  end\n  if (1) begin : g2\n    child u(.y(q));\n  end\nendmodule\n", &[("wire q", "q", true)]),
+    ];
+    let mut got = Vec::new();
+    for (i, (src, queries)) in cases.iter().enumerate() {
+        let (a, root) = project(&format!("drvrev{i}"), &[("a.sv", src)]);
+        let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+        for (after, name, writes) in queries.iter() {
+            let (lines, limits, notes) = access_lines(&a, f, word_at(src, after, name), *writes);
+            assert!(limits.is_empty() && notes.is_empty(), "{limits:?} {notes:?}");
+            got.push(format!("{i} {name} {}: {}", if *writes { "writes" } else { "reads" }, lines.join(" | ")));
+        }
+    }
+    assert_eq!(
+        got,
+        [
+            "0 fd writes: ",
+            "0 fd reads: reads argument of $fgets line 4",
+            "0 text writes: writes argument of $fgets line 4",
+            "1 x writes: writes argument of bump line 6",
+            "1 x reads: reads argument of bump line 6",
+            "2 x writes: writes argument of get line 11",
+            "2 x reads: ",
+            "3 q writes: connections y of u (output) line 6 |   writes blocking line 2 in initial @u",
+            "3 q reads: ",
+            "4 a writes: connections y of u (output) line 6 (connected in an expression: not followed)",
+            "4 a reads: ",
+            "5 i writes: writes blocking line 4 in initial | writes increment line 4 in initial",
+            "5 i reads: reads read line 4 in initial | reads increment line 4 in initial",
+            "5 y writes: writes increment line 5 in initial",
+            "5 j writes: writes compound line 6 in initial | writes variable initializer line 6 in initial",
+            "6 index writes: ",
+            "6 index reads: reads read line 5 in initial",
+            "6 bus writes: writes blocking line 5 in initial",
+            "7 z writes: writes gate output line 2",
+            "7 w writes: writes gate output line 3",
+            "7 z reads: ",
+            "8 q reads: ",
+            "9 q writes: connections y of g1.u (output) line 7 |   writes blocking line 2 in initial @g1.u | connections y of g2.u (output) line 10 |   writes blocking line 2 in initial @g2.u",
+        ],
+        "$fgets writes only its first argument; an inout actual is read and written; a method call's output argument; an array of instances; \
+         a concatenation on an output port; for headers and nested increments; a macro's index; later gates and delays; a non-ANSI header; generate scopes in paths"
+    );
+}
+
+#[test]
+fn drivers_and_loads_scale_linearly_and_survive_malformed_nesting() {
+    let n = 20_000;
+    let mut calls = String::from("module m;\n  logic s;\n  function void consume(input logic v); endfunction\n");
+    for i in 0..n {
+        calls.push_str(&format!("  logic v{i};\n"));
+    }
+    calls.push_str("  initial begin\n");
+    for _ in 0..n {
+        calls.push_str("    consume(s);\n");
+    }
+    calls.push_str("  end\nendmodule\n");
+    let mut cat = String::from("module c;\n  logic [19999:0] bus;\n  initial {");
+    cat.push_str(&(0..n).map(|i| format!("bus[{i}]")).collect::<Vec<_>>().join(", "));
+    cat.push_str("} = '0;\nendmodule\n");
+    let deep = 5_000;
+    let nested = format!("module d(input p); endmodule\nmodule e;\n  logic s;\n  d u(.p({}s{}));\nendmodule\n", ".a(".repeat(deep), ")".repeat(deep));
+    // Instances found through an index, lists cached; the left side classified in one pass
+    // (20,000 names in a concatenation); a 5,000-deep `.a(` nest climbed with a bound.
+    let (a, root) = project("drvscale", &[("a.sv", &calls), ("b.sv", &cat), ("c.sv", &nested)]);
+    let fa = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let (l, lim, _) = access_lines(&a, fa, word_at(&calls, "logic s", "s"), true);
+    assert!(l.is_empty() && lim.is_empty(), "{lim:?}");
+    let (_, lim, _) = access_lines(&a, fa, word_at(&calls, "logic s", "s"), false);
+    assert_eq!(lim, ["sites"]);
+    let fb = a.vfs.lookup(&root.join("b.sv")).unwrap();
+    let (l, lim, _) = access_lines(&a, fb, word_at(&cat, "logic [19999:0]", "bus"), true);
+    assert!(l.len() == 2000 && l.iter().all(|x| x == "writes blocking line 3 in initial"), "each name of the concatenation is a write: {}", l.len());
+    assert_eq!(lim, ["sites"]);
+    let fc = a.vfs.lookup(&root.join("c.sv")).unwrap();
+    let (l, _, _) = access_lines(&a, fc, word_at(&nested, "logic s", "s"), false);
+    assert_eq!(l.len(), 1);
 }

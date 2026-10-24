@@ -3491,18 +3491,23 @@ impl<'t> Parser<'t> {
                         })
                     };
                     decl_ty = Some(ty.clone());
+                    let mut declared = None;
                     if self.at_ident() {
                         let n = self.tok().clone();
                         self.bump();
                         let id = self.new_decl(DeclKind::Variable, Some(&n), n.span);
                         self.u.decls[id as usize].ty = ty;
                         self.finish(id);
+                        declared = Some((id, n.span));
                     }
                     if self.eat_p("=") {
                         self.scan_expr(STOP_COMMA, RefKind::Expr);
+                        if let Some((id, at)) = declared {
+                            self.push_access(AccessKind::VarInit, at, Vec::new(), Some(id));
+                        }
                     }
                 } else {
-                    self.scan_expr(STOP_COMMA, RefKind::Expr);
+                    self.assignment_or_expr(STOP_COMMA, RefKind::Expr);
                 }
                 if !self.eat_p(",") {
                     break;
@@ -3512,7 +3517,7 @@ impl<'t> Parser<'t> {
             self.scan_expr(STOP_NONE, RefKind::Expr);
             self.eat_p(";");
             loop {
-                self.scan_expr(STOP_COMMA, RefKind::Expr);
+                self.assignment_or_expr(STOP_COMMA, RefKind::Expr);
                 if !self.eat_p(",") {
                     break;
                 }
@@ -3538,25 +3543,7 @@ impl<'t> Parser<'t> {
     // ----------------------------------------------------------------- expressions
 
     fn expr_stmt(&mut self, kind: RefKind) {
-        let (start, from, r0) = (self.tok().span, self.pos, self.refs_len());
-        let pre = self.at_p("++") || self.at_p("--");
-        self.scan_expr(Stop { assign: true, ..STOP_NONE }, kind);
-        let (to, r1) = (self.pos, self.refs_len());
-        let op = self.tok().clone();
-        if op.kind == TokKind::Punct && matches!(op.text.as_str(), "=" | "<=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "<<<=" | ">>>=") {
-            let targets = self.lhs_targets(from, to, r0, r1);
-            self.bump();
-            self.scan_expr(STOP_NONE, kind);
-            let access = match op.text.as_str() {
-                "=" => AccessKind::Blocking,
-                "<=" => AccessKind::NonBlocking,
-                _ => AccessKind::Compound,
-            };
-            self.push_access(access, start, targets, None);
-        } else if pre || (to > from && (self.toks[to - 1].is_punct("++") || self.toks[to - 1].is_punct("--"))) {
-            let targets = self.lhs_targets(from, to, r0, r1);
-            self.push_access(AccessKind::IncDec, start, targets, None);
-        }
+        self.assignment_or_expr(STOP_NONE, kind);
         if self.eat_p(";") {
             return;
         }
@@ -3666,28 +3653,113 @@ impl<'t> Parser<'t> {
     /// The references `r0..r1` made from the left side `toks[from..to]` that it writes: those
     /// not inside its brackets or parentheses (indexes, call arguments: read).
     fn lhs_targets(&self, from: usize, to: usize, r0: RefId, r1: RefId) -> Vec<RefId> {
-        let mut inner: Vec<Span> = Vec::new();
-        let mut open: Vec<Span> = Vec::new();
+        // The bracket depth of each name token, in token order (a macro's tokens too: its
+        // brackets count), matched to the references by their first segment's span.
+        let mut depth_at: rustc_hash::FxHashMap<(FileId, u32), std::collections::VecDeque<i32>> = rustc_hash::FxHashMap::default();
+        let mut depth = 0i32;
         for t in &self.toks[from..to.min(self.toks.len())] {
-            if !t.is_real() {
-                continue;
-            }
             if t.is_punct("[") || t.is_punct("(") {
-                open.push(t.span);
+                depth += 1;
             } else if t.is_punct("]") || t.is_punct(")") {
-                if let Some(o) = open.pop() {
-                    if o.file == t.span.file {
-                        inner.push(Span::new(o.file, o.start, t.span.end));
-                    }
-                }
+                depth -= 1;
+            } else if t.kind == TokKind::Ident {
+                depth_at.entry((t.span.file, t.span.start)).or_default().push_back(depth);
             }
         }
         (r0..r1)
             .filter(|&r| {
                 let sp = self.u.refs[r as usize].segs.first().map(|s| s.span).unwrap_or_default();
-                !inner.iter().any(|i| i.file == sp.file && i.start <= sp.start && sp.end <= i.end)
+                depth_at.get_mut(&(sp.file, sp.start)).and_then(|q| q.pop_front()).unwrap_or(0) <= 0
             })
             .collect()
+    }
+
+    /// `++`/`--` inside `toks[from..to]` (a right side): an increment access of its operand,
+    /// one of the references `r0..r1`.
+    fn nested_incdec(&mut self, from: usize, to: usize, r0: RefId, r1: RefId) {
+        let to = to.min(self.toks.len());
+        for j in from..to {
+            let t = &self.toks[j];
+            if !(t.is_punct("++") || t.is_punct("--")) {
+                continue;
+            }
+            let postfix = j > from && {
+                let p = &self.toks[j - 1];
+                p.kind == TokKind::Ident || p.is_punct("]")
+            };
+            // The first token of the operand's name chain (`a.b[i]`).
+            let first = if postfix {
+                let mut k = j - 1;
+                loop {
+                    if self.toks[k].is_punct("]") {
+                        let mut d = 0i32;
+                        while k > from {
+                            if self.toks[k].is_punct("]") {
+                                d += 1;
+                            } else if self.toks[k].is_punct("[") {
+                                d -= 1;
+                                if d == 0 {
+                                    break;
+                                }
+                            }
+                            k -= 1;
+                        }
+                        if k == from {
+                            break None;
+                        }
+                        k -= 1;
+                        continue;
+                    }
+                    if self.toks[k].kind != TokKind::Ident {
+                        break None;
+                    }
+                    if k >= from + 2 && self.toks[k - 1].is_punct(".") {
+                        k -= 2;
+                        continue;
+                    }
+                    break Some(k);
+                }
+            } else {
+                Some(j + 1).filter(|&k| k < to && self.toks[k].kind == TokKind::Ident)
+            };
+            let Some(first) = first else { continue };
+            let sp = self.toks[first].span;
+            let target = (r0..r1).find(|&r| self.u.refs[r as usize].segs.first().is_some_and(|s| s.span == sp));
+            if let Some(r) = target {
+                let start = self.toks[j.min(first)].span;
+                let scope = self.scope();
+                let process = self.process;
+                let end = self.toks[j.max(first)].span;
+                self.u.accesses.push(Access { kind: AccessKind::IncDec, process, start, end, scope, targets: vec![r], decl: None });
+            }
+        }
+    }
+
+    /// An expression that may be an assignment (`a = b`, `a += 1`, `a++`, a statement or a
+    /// `for` header's part), stopping at `stop`'s tokens: records its access.
+    fn assignment_or_expr(&mut self, stop: Stop, kind: RefKind) {
+        let (start, from, r0) = (self.tok().span, self.pos, self.refs_len());
+        let pre = self.at_p("++") || self.at_p("--");
+        self.scan_expr(Stop { assign: true, ..stop }, kind);
+        let (to, r1) = (self.pos, self.refs_len());
+        let op = self.tok().clone();
+        if op.kind == TokKind::Punct && matches!(op.text.as_str(), "=" | "<=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "<<<=" | ">>>=") {
+            let targets = self.lhs_targets(from, to, r0, r1);
+            self.bump();
+            let (rhs, q0) = (self.pos, self.refs_len());
+            self.scan_expr(stop, kind);
+            let access = match op.text.as_str() {
+                "=" => AccessKind::Blocking,
+                "<=" => AccessKind::NonBlocking,
+                _ => AccessKind::Compound,
+            };
+            self.push_access(access, start, targets, None);
+            let (end, q1) = (self.pos, self.refs_len());
+            self.nested_incdec(rhs, end, q0, q1);
+        } else if pre || (to > from && (self.toks[to - 1].is_punct("++") || self.toks[to - 1].is_punct("--"))) {
+            let targets = self.lhs_targets(from, to, r0, r1);
+            self.push_access(AccessKind::IncDec, start, targets, None);
+        }
     }
 
     /// Records an access ending at the token before the current one.

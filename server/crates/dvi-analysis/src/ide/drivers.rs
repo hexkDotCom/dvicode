@@ -9,8 +9,8 @@
 //! starts at a port also goes up to every instantiation of its module, one branch each; a search
 //! that went down through an instance never comes back up another one.
 
-use super::checks::{enclosing_open, Occ};
-use super::instances::{conn_list, ItemKind};
+use super::checks::Occ;
+use super::instances::{conn_list, ConnList, ItemKind};
 use super::Target;
 use crate::world::{Analysis, DeclRef, UnitId};
 use dvi_syntax::ast::{dflags, AccessKind, DeclId, DeclKind, PortDir, ProcessKind, RefId};
@@ -62,14 +62,60 @@ pub struct AccessSite {
     pub notes: Vec<String>,
 }
 
-/// System tasks and functions whose arguments (from this position) they write.
-fn system_writes(name: &str) -> Option<usize> {
-    Some(match name {
-        "$sscanf" | "$fscanf" => 2,
-        "$value$plusargs" | "$readmemh" | "$readmemb" => 1,
-        "$cast" | "$fgets" | "$fread" => 0,
-        _ => return None,
-    })
+/// Whether a system task or function writes its argument `k` (the others are read).
+fn system_writes(name: &str, k: usize) -> bool {
+    match name {
+        "$sscanf" | "$fscanf" => k >= 2,
+        "$value$plusargs" | "$readmemh" | "$readmemb" => k == 1,
+        "$cast" | "$fgets" | "$fread" | "$swrite" | "$swriteb" | "$swriteh" | "$swriteo" | "$sformat" => k == 0,
+        _ => false,
+    }
+}
+
+/// The `(` around token `i`, through a concatenation's braces (not through an index's `[`:
+/// what is inside one is read).
+fn enclosing_paren(toks: &[Token], i: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        let t = &toks[k];
+        if t.is_punct(")") || t.is_punct("]") || t.is_punct("}") {
+            depth += 1;
+        } else if t.is_punct("(") || t.is_punct("[") || t.is_punct("{") || t.is_punct("'{") {
+            if depth == 0 {
+                if t.is_punct("(") {
+                    return Some(k);
+                }
+                if t.is_punct("[") {
+                    return None;
+                }
+                continue;
+            }
+            depth -= 1;
+        } else if t.is_punct(";") || i - k > 2000 {
+            return None;
+        }
+    }
+    None
+}
+
+/// The first token of the module item or statement token `i` is in, after a block label and
+/// attributes.
+fn item_start(toks: &[Token], i: usize) -> usize {
+    let mut k = statement_start(toks, i);
+    loop {
+        if toks.get(k).is_some_and(|t| t.is_punct(":")) && toks.get(k + 1).is_some_and(|t| t.kind == TokKind::Ident) {
+            k += 2;
+        } else if toks.get(k).is_some_and(|t| t.is_punct("(*")) {
+            while k < i && !toks[k].is_punct("*)") {
+                k += 1;
+            }
+            k += 1;
+        } else {
+            return k;
+        }
+    }
 }
 
 fn kind_name(k: AccessKind) -> &'static str {
@@ -111,6 +157,12 @@ struct Walk<'a> {
     /// Per unit: the access each written reference belongs to.
     targets: FxHashMap<UnitId, Arc<FxHashMap<RefId, usize>>>,
     tokens: FxHashMap<FileId, Option<Arc<Vec<Token>>>>,
+    /// Per unit: its instances by the start of their name.
+    instances: FxHashMap<UnitId, Arc<FxHashMap<(FileId, u32), DeclId>>>,
+    /// Connection and argument lists by their file and `(` token.
+    lists: FxHashMap<(FileId, usize), Option<Arc<ConnList>>>,
+    /// The instances of each definition (built when a search first goes up).
+    by_definition: Option<Arc<FxHashMap<(u32, u32), Vec<DeclRef>>>>,
     /// (declaration, instance path) on the current path.
     path: Vec<((u32, u32), String)>,
 }
@@ -124,7 +176,7 @@ impl Analysis {
             if !matches!(self.decl(target).kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port | DeclKind::Field | DeclKind::Argument) {
                 return None;
             }
-            let mut w = Walk { a: self, writes, candidates: 0, sites: 0, hops: 0, limits: Vec::new(), notes: Vec::new(), targets: FxHashMap::default(), tokens: FxHashMap::default(), path: Vec::new() };
+            let mut w = Walk { a: self, writes, candidates: 0, sites: 0, hops: 0, limits: Vec::new(), notes: Vec::new(), targets: FxHashMap::default(), tokens: FxHashMap::default(), instances: FxHashMap::default(), lists: FxHashMap::default(), by_definition: None, path: Vec::new() };
             let sites = w.search(target, "", None, None, 0);
             let d = self.decl(target);
             // `bind` instances in the target's module.
@@ -195,7 +247,7 @@ impl Walk<'_> {
 
     fn site(&mut self, kind: &'static str, group: &'static str, at: Span, ctx: &str) -> AccessSite {
         self.sites += 1;
-        if self.sites > MAX_SITES {
+        if self.sites >= MAX_SITES {
             self.limit("sites");
         }
         let (uri, line, character) = self.location(at);
@@ -280,6 +332,76 @@ impl Walk<'_> {
         out
     }
 
+    /// The instances of every definition, by the definition's key (none when cancelled).
+    fn definitions(&mut self) -> Option<Arc<FxHashMap<(u32, u32), Vec<DeclRef>>>> {
+        if let Some(m) = &self.by_definition {
+            return Some(m.clone());
+        }
+        let a = self.a;
+        let mut m: FxHashMap<(u32, u32), Vec<DeclRef>> = FxHashMap::default();
+        let mut n = 0usize;
+        for u in a.units.iter().flatten() {
+            for (i, x) in u.parsed.decls.iter().enumerate() {
+                if x.kind != DeclKind::Instance {
+                    continue;
+                }
+                n += 1;
+                if n % 1024 == 0 && self.stopped() {
+                    return None;
+                }
+                let r = DeclRef { unit: u.id, decl: i as DeclId };
+                if let Some(t) = a.type_of(r).filter(|t| a.decl(*t).kind.is_definition()) {
+                    m.entry(a.decl_key(a.canonical(t))).or_default().push(r);
+                }
+            }
+        }
+        let m = Arc::new(m);
+        self.by_definition = Some(m.clone());
+        Some(m)
+    }
+
+    /// Instance `inst`'s name with the generate blocks it is in (`g1.u`).
+    fn inst_path(&self, inst: DeclRef) -> String {
+        let p = &self.a.unit(inst.unit).parsed;
+        let mut names = vec![p.decl(inst.decl).name.to_string()];
+        let mut cur = p.decl(inst.decl).parent;
+        while let Some(c) = cur {
+            let d = p.decl(c);
+            if d.kind != DeclKind::Generate {
+                break;
+            }
+            names.push(d.name.to_string());
+            cur = d.parent;
+        }
+        names.reverse();
+        names.join(".")
+    }
+
+    /// The instance whose name starts at `at` in unit `unit`.
+    fn instance_named(&mut self, unit: UnitId, at: Span) -> Option<DeclRef> {
+        let a = self.a;
+        let m = self
+            .instances
+            .entry(unit)
+            .or_insert_with(|| {
+                let mut m = FxHashMap::default();
+                for (i, d) in a.unit(unit).parsed.decls.iter().enumerate() {
+                    if d.kind == DeclKind::Instance {
+                        m.insert((d.name_span.file, d.name_span.start), i as DeclId);
+                    }
+                }
+                Arc::new(m)
+            })
+            .clone();
+        m.get(&(at.file, at.start)).map(|&decl| DeclRef { unit, decl }).filter(|r| a.decl(*r).name_span == at)
+    }
+
+    /// The list opening at `toks[open]` (cached).
+    fn list_at(&mut self, toks: &[Token], open: usize) -> Option<Arc<ConnList>> {
+        let key = (toks[open].span.file, open);
+        self.lists.entry(key).or_insert_with(|| conn_list(toks, open).map(Arc::new)).clone()
+    }
+
     /// `.*` instances in the target's module that connect it (by its name, where the instance
     /// is), to a port of the same name that carries the search on.
     fn dot_star(&mut self, target: DeclRef, ctx: &str, skip: Option<DeclRef>, depth: usize) -> Vec<AccessSite> {
@@ -342,28 +464,21 @@ impl Walk<'_> {
     fn up(&mut self, def: DeclRef, port: &str, ctx: &str, depth: usize) -> Vec<AccessSite> {
         let a = self.a;
         let dk = a.decl_key(a.canonical(def));
+        let Some(index) = self.definitions() else { return Vec::new() };
         let mut insts: Vec<DeclRef> = Vec::new();
         let mut seen: FxHashSet<(FileId, u32)> = FxHashSet::default();
         let mut bound = false;
-        'units: for u in a.units.iter().flatten() {
-            for (i, x) in u.parsed.decls.iter().enumerate() {
-                if x.kind != DeclKind::Instance {
-                    continue;
-                }
-                let r = DeclRef { unit: u.id, decl: i as DeclId };
-                if !a.type_of(r).is_some_and(|t| a.decl_key(a.canonical(t)) == dk) {
-                    continue;
-                }
-                if x.has(dflags::BOUND) {
-                    bound = true;
-                    continue;
-                }
-                if seen.insert((x.name_span.file, x.name_span.start)) {
-                    insts.push(r);
-                    if insts.len() > MAX_PARENTS {
-                        self.limit("instances");
-                        break 'units;
-                    }
+        for &r in index.get(&dk).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let x = a.decl(r);
+            if x.has(dflags::BOUND) {
+                bound = true;
+                continue;
+            }
+            if seen.insert((x.name_span.file, x.name_span.start)) {
+                insts.push(r);
+                if insts.len() > MAX_PARENTS {
+                    self.limit("instances");
+                    break;
                 }
             }
         }
@@ -382,7 +497,7 @@ impl Walk<'_> {
             }
             let d = a.decl(inst);
             let parent = d.parent.and_then(|p| super::checks::definition_of_pub(&a.unit(inst.unit).parsed, p)).map(|p| a.unit(inst.unit).parsed.decl(p).name.to_string()).unwrap_or_default();
-            let name = d.name.to_string();
+            let name = self.inst_path(inst);
             let mut node = self.site("instance", "connections", d.name_span, ctx);
             node.label = format!("{port} of {name} in {parent}");
             match self.actual_of(inst, def, port) {
@@ -471,7 +586,7 @@ impl Walk<'_> {
         let toks = self.file_tokens(o.span.file)?;
         let at = toks.partition_point(|t| t.span.start < o.span.start);
         // Inside parentheses: an instance connection, a gate terminal, or a call argument.
-        if let Some(open) = enclosing_open(&toks, at) {
+        if let Some(open) = enclosing_paren(&toks, at) {
             if let Some(s) = self.in_parens(&toks, open, at, o, target, ctx, skip, depth) {
                 return s;
             }
@@ -520,42 +635,31 @@ impl Walk<'_> {
     #[allow(clippy::too_many_arguments)]
     fn in_parens(&mut self, toks: &Arc<Vec<Token>>, open: usize, at: usize, o: Occ, target: DeclRef, ctx: &str, skip: Option<DeclRef>, depth: usize) -> Option<Option<AccessSite>> {
         let a = self.a;
+        // `.name(expr)` binding a port or formal (after `(` or `,`, not a method call
+        // `obj.name(...)`): the list is the one around it.
+        let mut open = open;
+        for _ in 0..64 {
+            let named = open >= 3 && toks[open - 1].kind == TokKind::Ident && toks[open - 2].is_punct(".") && (toks[open - 3].is_punct("(") || toks[open - 3].is_punct(","));
+            if !named {
+                break;
+            }
+            open = enclosing_paren(toks, open - 2)?;
+        }
         let callee = toks.get(open.checked_sub(1)?)?;
-        // `.name(expr)`: the list is the one around it.
-        if callee.kind == TokKind::Ident && open >= 2 && toks[open - 2].is_punct(".") {
-            let outer = enclosing_open(toks, open - 2)?;
-            return self.in_parens(toks, outer, at, o, target, ctx, skip, depth);
+        let first = item_start(toks, open);
+        let head = &toks[first];
+        // The port list in a design element's header: no access.
+        if head.kind == TokKind::Keyword && matches!(head.text.as_str(), "module" | "macromodule" | "interface" | "program" | "checker") {
+            return Some(None);
         }
         // The item the reference is in, and its index (commas at depth 1).
-        let l = conn_list(toks, open)?;
+        let l = self.list_at(toks, open)?;
         let (k, item) = l.items.iter().enumerate().find(|(_, i)| i.first <= at && at < i.end.max(i.first + 1))?;
-        // A gate: `and g (o, a, b)` (with an optional name, delay and strength).
-        let mut g = open - 1;
-        if toks[g].kind == TokKind::Ident {
-            g = g.checked_sub(1)?;
-        }
-        if toks[g].is_punct(")") {
-            // `#(1)` or a strength before the name.
-            let mut d = 0;
-            loop {
-                if toks[g].is_punct(")") {
-                    d += 1;
-                } else if toks[g].is_punct("(") {
-                    d -= 1;
-                    if d == 0 {
-                        break;
-                    }
-                }
-                g = g.checked_sub(1)?;
-            }
-            g = g.checked_sub(1)?;
-            if toks[g].is_punct("#") {
-                g = g.checked_sub(1)?;
-            }
-        }
-        if toks[g].kind == TokKind::Keyword {
+        let item = item.clone();
+        // A gate: `and g0 (o, a, b), g1 (...);` (with optional names, delays and strengths).
+        if head.kind == TokKind::Keyword {
             let n = l.items.len();
-            let role = match toks[g].text.as_str() {
+            let role = match head.text.as_str() {
                 "and" | "nand" | "or" | "nor" | "xor" | "xnor" => Some(if k == 0 { "gate output" } else { "gate input" }),
                 "buf" | "not" => Some(if k + 1 < n { "gate output" } else { "gate input" }),
                 "bufif0" | "bufif1" | "notif0" | "notif1" | "nmos" | "pmos" | "rnmos" | "rpmos" | "cmos" | "rcmos" => Some(if k == 0 { "gate output" } else { "gate input" }),
@@ -563,7 +667,10 @@ impl Walk<'_> {
                 "tran" | "rtran" | "tranif0" | "tranif1" | "rtranif0" | "rtranif1" => Some(if k < 2 { "switch terminal" } else { "gate input" }),
                 _ => None,
             };
-            if let Some(role) = role {
+            // Not a delay's or strength's parentheses: the list after an instance name or the
+            // keyword's own list.
+            let terminals = callee.kind == TokKind::Ident || callee.is_punct("]") || (open == first + 1);
+            if let (Some(role), true) = (role, terminals) {
                 let write = role == "gate output";
                 let show = match role {
                     "switch terminal" => true,
@@ -577,13 +684,29 @@ impl Walk<'_> {
                 return Some(show.then(|| self.site(role, group, o.span, ctx)));
             }
         }
-        // An instance's connection: the instance named just before `(`.
-        if callee.kind == TokKind::Ident {
-            let u = a.unit(o.unit);
-            let inst = u.parsed.decls.iter().position(|d| d.kind == DeclKind::Instance && d.name_span == callee.span).map(|i| DeclRef { unit: o.unit, decl: i as DeclId });
-            if let Some(inst) = inst {
+        // An instance's connection: the instance named before `(`, after its dimensions.
+        let mut c = open - 1;
+        let mut steps = 0;
+        while toks[c].is_punct("]") && steps < 16 {
+            let mut d = 0i32;
+            loop {
+                if toks[c].is_punct("]") {
+                    d += 1;
+                } else if toks[c].is_punct("[") {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                c = c.checked_sub(1)?;
+            }
+            c = c.checked_sub(1)?;
+            steps += 1;
+        }
+        if toks[c].kind == TokKind::Ident {
+            if let Some(inst) = self.instance_named(o.unit, toks[c].span) {
                 if a.decl(inst).has(dflags::BOUND) {
-                    self.note(format!("`bind` instance {} is not followed", callee.text));
+                    self.note(format!("`bind` instance {} is not followed", toks[c].text));
                     return Some(None);
                 }
                 if Some(inst) == skip {
@@ -592,10 +715,11 @@ impl Walk<'_> {
                 return Some(self.connection(toks, inst, &l, k, item.body, item.end, at, o, target, ctx, depth));
             }
         }
-        // A call's argument.
+        // A call's argument.        // A call's argument.
         let _ = target;
-        let (writes_here, unresolved) = if callee.kind == TokKind::SysIdent {
-            (system_writes(&callee.text).is_some_and(|from| k >= from), false)
+        let (written, read) = if callee.kind == TokKind::SysIdent {
+            let w = system_writes(&callee.text, k);
+            (w, !w)
         } else if callee.kind == TokKind::Ident {
             let u = a.unit(o.unit);
             let pos = u.positions.get(&callee.span.file)?;
@@ -609,16 +733,20 @@ impl Walk<'_> {
                         ItemKind::Named { name, .. } => formals.iter().find(|f| f.name == name.as_str()).copied(),
                         _ => formals.get(k).copied(),
                     };
-                    (formal.is_some_and(|f| matches!(f.dir, Some(PortDir::Output) | Some(PortDir::Inout) | Some(PortDir::Ref))), false)
+                    // An inout or ref actual is read and written.
+                    match formal.and_then(|f| f.dir) {
+                        Some(PortDir::Output) => (true, false),
+                        Some(PortDir::Inout) | Some(PortDir::Ref) => (true, true),
+                        _ => (false, true),
+                    }
                 }
                 None => return None,
             }
         } else {
             return None;
         };
-        let _ = unresolved;
-        if writes_here == self.writes {
-            let mut s = self.site("argument", if writes_here { "writes" } else { "reads" }, o.span, ctx);
+        if (self.writes && written) || (!self.writes && read) {
+            let mut s = self.site("argument", if self.writes { "writes" } else { "reads" }, o.span, ctx);
             s.label = format!("argument of {}", callee.text);
             return Some(Some(s));
         }
@@ -704,7 +832,7 @@ impl Walk<'_> {
             self.limit("connections");
             return None;
         }
-        let inst_name = a.decl(inst).name.to_string();
+        let inst_name = self.inst_path(inst);
         let dir_name = match dir {
             Some(PortDir::Output) => "output",
             Some(PortDir::Inout) => "inout",
