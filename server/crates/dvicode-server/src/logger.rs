@@ -45,6 +45,12 @@ pub fn file() -> Option<&'static std::path::Path> {
 }
 
 pub fn init(level: log::LevelFilter, file: Option<&str>) {
+    // Not on a network host: the hosts allowed are not known yet (see `dvi_project::netpath`).
+    let remote = file.and_then(|f| dvi_project::netpath::host(std::path::Path::new(f))).filter(|h| h != "wsl.localhost" && h != "wsl$");
+    if let Some(h) = &remote {
+        eprintln!("not logging to a file on the network host {h}: logging here instead");
+    }
+    let file = file.filter(|_| remote.is_none());
     if let Some(f) = file {
         let _ = FILE.set(std::fs::canonicalize(f).unwrap_or_else(|_| f.into()));
     }

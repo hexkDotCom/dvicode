@@ -678,6 +678,8 @@ impl Server {
         self.building = true;
         self.changed_during_build.clear();
         self.changed_while_building.clear();
+        // Folders may have become links since the last build.
+        dvi_project::fsx::forget();
         self.build_generation += 1;
         let generation = self.build_generation;
         let progress = Arc::new(Progress::new());

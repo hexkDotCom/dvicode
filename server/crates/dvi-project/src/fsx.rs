@@ -10,27 +10,37 @@ use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
-/// Folders known to lead to no host that is not allowed, through no link on the way (`true`), or
-/// to lead to one (`false`). Cleared when the allowed hosts change.
-static FOLDERS: RwLock<Option<FxHashMap<PathBuf, bool>>> = RwLock::new(None);
+/// What is known of folders on the way to paths: cleared at each build and when the allowed
+/// hosts change.
+static FOLDERS: RwLock<Option<FxHashMap<PathBuf, Seen>>> = RwLock::new(None);
 
-/// Links followed from one path at most (a longer chain is taken as leading somewhere blocked).
-const MAX_LINKS: usize = 8;
+#[derive(Clone)]
+enum Seen {
+    /// Not a link.
+    Plain,
+    /// A link (symbolic link or junction) to this absolute path.
+    Link(PathBuf),
+    /// A link that cannot be read: it may lead anywhere.
+    Unknown,
+}
 
-/// Forgets what is known of folders (the allowed hosts changed).
+/// Links followed from one path at most: as many as Windows follows.
+const MAX_LINKS: usize = 63;
+
+/// Forgets what is known of folders: a build starts, or the allowed hosts changed.
 pub fn forget() {
     *FOLDERS.write().unwrap() = None;
 }
 
 /// The host a path leads to that is not allowed: written in it, or the target of a link on the
-/// way (an empty name when only a link leads there).
+/// way (an empty name when only a link leads there, or a link that cannot be read).
 pub fn blocked(path: impl AsRef<Path>) -> Option<String> {
     blocked_within(path.as_ref(), MAX_LINKS, true)
 }
 
 /// Whether reaching `path` may sign in to a network host that is not allowed. Links are looked
-/// at only on Windows, where a link to `\\host\share` is followed by the system; `leaf`: the
-/// path itself too, not only its folders.
+/// at only on Windows, where a link to `\\host\share` is followed by the system; `leaf`: the path
+/// itself too, not only its folders.
 fn blocked_within(path: &Path, links: usize, leaf: bool) -> Option<String> {
     if let Some(h) = netpath::blocked(path) {
         return Some(h);
@@ -38,61 +48,91 @@ fn blocked_within(path: &Path, links: usize, leaf: bool) -> Option<String> {
     if !cfg!(windows) || !netpath::restricted() {
         return None;
     }
-    let n = path.components().count();
+    // As Windows reads it: `..` taken away by name, before any link is followed.
+    let path = lexical(path);
+    let parts: Vec<Component> = path.components().collect();
     let mut cur = PathBuf::new();
-    for (i, c) in path.components().enumerate() {
+    for (i, c) in parts.iter().enumerate() {
         cur.push(c);
-        if matches!(c, Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir) {
+        if !matches!(c, Component::Normal(_)) {
             continue;
         }
-        let last = i + 1 == n;
+        let last = i + 1 == parts.len();
         if last && !leaf {
             break;
         }
-        if !last {
-            if let Some(known) = FOLDERS.read().unwrap().as_ref().and_then(|m| m.get(&cur).copied()) {
-                if !known {
-                    return Some(String::new());
+        let known = if last { None } else { FOLDERS.read().unwrap().as_ref().and_then(|m| m.get(&cur).cloned()) };
+        let seen = match known {
+            Some(s) => s,
+            None => {
+                let Some(s) = look(&cur) else {
+                    // Not there: nothing to follow (and nothing to remember, it may come).
+                    continue;
+                };
+                if !last {
+                    FOLDERS.write().unwrap().get_or_insert_with(FxHashMap::default).insert(cur.clone(), s.clone());
                 }
-                continue;
+                s
             }
-        }
-        let bad = link_target(&cur).and_then(|t| if links == 0 { Some(String::new()) } else { blocked_within(&t, links - 1, true) });
-        if !last {
-            FOLDERS.write().unwrap().get_or_insert_with(FxHashMap::default).insert(cur.clone(), bad.is_none());
-        }
-        if bad.is_some() {
-            return bad;
+        };
+        match seen {
+            Seen::Plain => {}
+            Seen::Unknown => return Some(String::new()),
+            Seen::Link(_) if links == 0 => return Some(String::new()),
+            Seen::Link(target) => {
+                // The system goes on from where the link leads: its target, then the rest.
+                let mut next = target;
+                next.extend(&parts[i + 1..]);
+                return blocked_within(&next, links - 1, leaf);
+            }
         }
     }
     None
 }
 
-/// Where `path` leads when it is a link (a symbolic link or a junction), as an absolute path.
-fn link_target(path: &Path) -> Option<PathBuf> {
-    let m = std::fs::symlink_metadata(path).ok()?;
-    is_link(&m).then(|| std::fs::read_link(path).ok()).flatten().map(|t| if t.is_absolute() || netpath::host(&t).is_some() { t } else { path.parent().unwrap_or(Path::new("")).join(t) })
+/// A path looked at without following it: `None` when there is nothing there.
+fn look(path: &Path) -> Option<Seen> {
+    let m = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => return None,
+        // Cannot be looked at, so cannot be known not to lead elsewhere.
+        Err(_) => return Some(Seen::Unknown),
+    };
+    // Symbolic links, junctions and the other reparse points that name another path (not, for
+    // instance, files kept in the cloud).
+    if !m.file_type().is_symlink() {
+        return Some(Seen::Plain);
+    }
+    Some(match std::fs::read_link(path) {
+        Ok(t) if t.is_absolute() || netpath::host(&t).is_some() => Seen::Link(t),
+        Ok(t) => Seen::Link(path.parent().unwrap_or(Path::new("")).join(t)),
+        Err(_) => Seen::Unknown,
+    })
 }
 
-fn is_link(m: &Metadata) -> bool {
-    m.file_type().is_symlink() || is_reparse_point(m)
-}
-
-#[cfg(windows)]
-fn is_reparse_point(m: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    // FILE_ATTRIBUTE_REPARSE_POINT: junctions, and others (cloud files) that lead nowhere else.
-    m.file_attributes() & 0x400 != 0
-}
-
-#[cfg(not(windows))]
-fn is_reparse_point(_: &Metadata) -> bool {
-    false
+/// `path` with `.` and `..` taken away by name, as Windows does before it follows links (not in
+/// a verbatim `\\?\` path, which it takes as written).
+fn lexical(path: &Path) -> PathBuf {
+    if path.as_os_str().to_string_lossy().starts_with(r"\\?\") {
+        return path.to_path_buf();
+    }
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(out.components().next_back(), Some(Component::Normal(_))) => {
+                out.pop();
+            }
+            Component::ParentDir if out.has_root() => {}
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn denied(path: &Path, host: String) -> Error {
     if host.is_empty() {
-        Error::new(ErrorKind::PermissionDenied, format!("{} leads to a network host that is not allowed (security.allowedUNCHosts)", path.display()))
+        Error::new(ErrorKind::PermissionDenied, format!("{} may lead to a network host that is not allowed (security.allowedUNCHosts): through a link that leads there or that cannot be read", path.display()))
     } else {
         Error::new(ErrorKind::PermissionDenied, format!("the network host {host} is not among your allowed hosts (security.allowedUNCHosts)"))
     }
@@ -113,7 +153,7 @@ pub fn metadata(p: impl AsRef<Path>) -> Result<Metadata> {
         return std::fs::metadata(p);
     }
     let m = std::fs::symlink_metadata(p)?;
-    if !is_link(&m) {
+    if !m.file_type().is_symlink() {
         return Ok(m);
     }
     gate(p)?;
@@ -198,10 +238,23 @@ mod tests {
         assert!(!exists(r"\\.\UNC\attacker\share\x.sv"));
         assert!(read_dir(r"\\?\unc\attacker\share").is_err());
         assert_eq!(blocked_within(Path::new(r"\\attacker\share\x.sv"), MAX_LINKS, false).as_deref(), Some("attacker"));
-        // A remembered folder that leads to a host is blocked without being looked at again.
-        FOLDERS.write().unwrap().get_or_insert_with(FxHashMap::default).insert(dir.join("j"), false);
-        assert!(!is_file(dir.join("j/a.sv")));
-        assert!(read(dir.join("j/a.sv")).is_err());
+        assert!(is_file(dir.join(r"j\..\real\a.sv")), "`..` by name, as Windows reads it");
+        // Links as remembered (making symbolic links needs a privilege): the rest of the path
+        // goes on from the target, through chains of links; one that cannot be read leads
+        // anywhere.
+        {
+            let mut g = FOLDERS.write().unwrap();
+            let m = g.get_or_insert_with(FxHashMap::default);
+            m.insert(dir.join("to_host"), Seen::Link(PathBuf::from(r"\\attacker\share")));
+            m.insert(dir.join("chain"), Seen::Link(dir.join("to_host")));
+            m.insert(dir.join("to_real"), Seen::Link(dir.join("real")));
+            m.insert(dir.join("unknown"), Seen::Unknown);
+        }
+        assert_eq!(blocked(dir.join(r"to_host\a.sv")).as_deref(), Some("attacker"));
+        assert_eq!(blocked(dir.join(r"chain\a.sv")).as_deref(), Some("attacker"));
+        assert_eq!(blocked(dir.join(r"unknown\a.sv")).as_deref(), Some(""));
+        assert!(read(dir.join(r"chain\a.sv")).is_err_and(|e| e.kind() == ErrorKind::PermissionDenied));
+        assert_eq!(blocked(dir.join(r"to_real\a.sv")), None);
         netpath::set_allowed_hosts(None);
         assert!(FOLDERS.read().unwrap().is_none(), "forgotten when the hosts change");
         let _ = std::fs::remove_dir_all(&dir);

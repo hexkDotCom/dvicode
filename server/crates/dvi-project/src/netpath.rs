@@ -46,14 +46,26 @@ pub fn host(path: &Path) -> Option<String> {
 /// The host of `path` when it is a network path to a host that is not allowed (it must not be
 /// read, listed or looked at).
 pub fn blocked(path: &Path) -> Option<String> {
-    let host = host(path)?;
+    let allowed = ALLOWED.read().unwrap();
+    let list = allowed.as_ref()?;
+    let Some(host) = host(path) else { return device_namespace(path) };
     // WSL's own file system is this machine.
     if host == "wsl.localhost" || host == "wsl$" {
         return None;
     }
-    let allowed = ALLOWED.read().unwrap();
-    let list = allowed.as_ref()?;
     (!list.iter().any(|h| *h == host)).then_some(host)
+}
+
+/// The name of a namespace of devices other than drives that `path` is in: one may reach a
+/// network host too (`\\?\GLOBALROOT\Device\Mup\host\share`), so none is read while hosts are
+/// restricted.
+fn device_namespace(path: &Path) -> Option<String> {
+    let Some(Component::Prefix(p)) = path.components().next() else { return None };
+    match p.kind() {
+        Prefix::Verbatim(n) => Some(n.to_string_lossy().to_lowercase()),
+        Prefix::DeviceNS(n) if !(n.len() == 2 && n.to_string_lossy().ends_with(':')) => Some(n.to_string_lossy().to_lowercase()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +90,10 @@ mod tests {
         assert_eq!(blocked(Path::new(r"\\attacker\share\x.svh")).as_deref(), Some("attacker"));
         assert_eq!(blocked(Path::new(r"\\wsl.localhost\Ubuntu\home\x.sv")), None);
         assert_eq!(blocked(Path::new(r"C:\work\x.sv")), None);
+        assert_eq!(blocked(Path::new(r"\\?\C:\work\x.sv")), None);
+        assert_eq!(blocked(Path::new(r"\\.\C:\work\x.sv")), None);
+        assert_eq!(blocked(Path::new(r"\\?\GLOBALROOT\Device\Mup\attacker\share\x.sv")).as_deref(), Some("globalroot"));
+        assert_eq!(blocked(Path::new(r"\\.\pipe\x")).as_deref(), Some("pipe"));
         // A build file naming a host that is not allowed: a problem, and nothing read there.
         let dir = std::env::temp_dir().join(format!("dvicode-netpath-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -27,6 +27,7 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         expr_depth: 0,
         too_deep: false,
         port_index: None,
+        attr_open_until: 0,
     };
     p.u.decls.push(Decl {
         kind: DeclKind::Unit,
@@ -97,6 +98,9 @@ struct Parser<'t> {
     /// The ports (or arguments) of the scope whose body declarations are being matched to
     /// its header, by name: looked up once per declaration, not by a scan of the scope.
     port_index: Option<(DeclId, DeclKind, rustc_hash::FxHashMap<SmolStr, DeclId>)>,
+    /// No attribute in an expression closes before this token: a `(*` before it opens none
+    /// (each is not looked past again).
+    attr_open_until: usize,
 }
 
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
@@ -448,6 +452,10 @@ impl<'t> Parser<'t> {
     /// An attribute inside an expression, at `(*`. Only one closed before the next `;` is
     /// skipped: `@(*)` is no attribute, and one left open does not take the statements after it.
     fn skip_expr_attribute(&mut self) {
+        if self.pos < self.attr_open_until {
+            self.bump();
+            return;
+        }
         let mut k = 1;
         loop {
             let t = self.nth(k);
@@ -455,6 +463,7 @@ impl<'t> Parser<'t> {
                 break;
             }
             if t.kind == TokKind::Eof || t.is_punct(";") || self.pos + k >= self.toks.len() {
+                self.attr_open_until = self.pos + k;
                 self.bump();
                 return;
             }
@@ -466,13 +475,36 @@ impl<'t> Parser<'t> {
     }
 
     /// At a net or data type keyword that begins a declaration: not a cast (`int'(a)`), nor the
-    /// type operator (`type(a) == type(b)`) or a signing of an expression.
+    /// type operator in an expression (`type(a) == type(b)`, unlike `type(a) b;`) or a signing.
     fn at_declaration(&self) -> bool {
         let t = self.tok();
-        t.kind == TokKind::Keyword
-            && (is_net_type_kw(&t.text) || is_builtin_type_kw(&t.text))
-            && !matches!(&*t.text, "type" | "signed" | "unsigned")
-            && !self.nth(1).is_punct("'")
+        if t.kind != TokKind::Keyword || !(is_net_type_kw(&t.text) || is_builtin_type_kw(&t.text)) || self.nth(1).is_punct("'") {
+            return false;
+        }
+        match &*t.text {
+            "signed" | "unsigned" => false,
+            "type" => {
+                // A name after the closing parenthesis declares it.
+                let mut depth = 0usize;
+                let mut k = 1;
+                loop {
+                    let t = self.nth(k);
+                    if t.kind == TokKind::Eof || t.is_punct(";") || self.pos + k >= self.toks.len() {
+                        return false;
+                    }
+                    if t.is_punct("(") {
+                        depth += 1;
+                    } else if t.is_punct(")") {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return matches!(self.nth(k + 1).kind, TokKind::Ident);
+                        }
+                    }
+                    k += 1;
+                }
+            }
+            _ => true,
+        }
     }
 
     /// One item, guarded like statements: generate blocks nest items in items.

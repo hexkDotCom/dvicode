@@ -2625,9 +2625,9 @@ endmodule
 
 #[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
-    let t = "module m;\n  assign a = 0\n  wire b;\n  assign c = b;\nendmodule\n";
+    let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);
     let p = problems(&a);
-    assert!(p.iter().any(|m| m.contains("Expected ';'")), "{p:?}");
-    assert!(!p.iter().any(|m| m.contains("'b' is not declared")), "{p:?}");
+    assert_eq!(p.iter().filter(|m| m.contains("Expected ';'")).count(), 2, "{p:?}");
+    assert!(!p.iter().any(|m| m.contains("'b' is not declared") || m.contains("'e' is not declared")), "{p:?}");
 }
