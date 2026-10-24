@@ -3092,21 +3092,38 @@ class lone extends uvm_reg_block;
 endclass
 class edge_block extends uvm_reg_block;
   rand r32 arr[4:7];
-  rand r32 odd[2];
-  rand r64 wide, packed_w;
+  rand r32 odd[2], odd2[4], arr2[2:3];
+  rand r64 wide, packed_w, w2;
   rand helper_reg h, unbuilt;
   rand two_maps tm;
   rand lone ln;
-  uvm_reg_map m, fifo_map;
+  uvm_reg_map m, fifo_map, fifo2;
   function new(string name = "edge_block"); super.new(name); endfunction
   function void scratch();
     uvm_reg_map m = create_map("scratch", 'h7000, 4, UVM_LITTLE_ENDIAN);
+  endfunction
+  function void scratch2();
+    uvm_reg_map m;
+    m = create_map("scratch2", 'h7100, 4, UVM_LITTLE_ENDIAN);
   endfunction
   virtual function void build();
     m = create_map("bus", 'h1000, 4, UVM_LITTLE_ENDIAN);
     default_map = m;
     fifo_map = create_map("fifo", 'h2000, 4, UVM_LITTLE_FIFO);
+    fifo2 = create_map("maybe_fifo", 'h3000, 4, USE_FIFO ? UVM_LITTLE_FIFO : UVM_LITTLE_ENDIAN);
     scratch();
+    scratch2();
+    m.add_submap(m, 'h0);
+    foreach (this.arr2[i]) begin
+      arr2[i] = r32::type_id::create("arr2");
+      m.add_reg(arr2[i], 'h60 + i * 4);
+    end
+    for (int i = 4; i > 0; i = i - 2 + 1) begin
+      odd2[i] = r32::type_id::create("odd2");
+      m.add_reg(odd2[i], 'h50);
+    end
+    w2 = new("w2");
+    fifo2.add_reg(w2, 'h20);
     foreach (arr[i]) begin
       arr[i] = r32::type_id::create($sformatf("arr%0d", i));
       m.add_reg(arr[i], i * 4);
@@ -3149,7 +3166,7 @@ fn register_model_edge_cases_are_bounded_and_follow_uvm() {
     let (tree, _) = a.register_tree(&model, 1000);
     let show = |n: &dvi_analysis::ide::registers::RegNode| -> Vec<String> { n.children.iter().map(|c| format!("{} {}", c.name, c.address.clone().unwrap_or_default())).collect() };
     let maps: Vec<&str> = tree.children.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(maps, ["bus", "fifo", "scratch"], "the helper's local map is its own, not the member `m`");
+    assert_eq!(maps, ["bus", "fifo", "maybe_fifo", "scratch", "scratch2"], "the helpers' local maps are their own, not the member `m`");
     let bus = &tree.children[0];
     assert_eq!(
         show(bus),
@@ -3159,6 +3176,9 @@ fn register_model_edge_cases_are_bounded_and_follow_uvm() {
             "arr[6] 0x1018",
             "arr[7] 0x101c",
             "odd[*] 0x1040",
+            "odd2[*] 0x1050",
+            "arr2 0x1068",
+            "arr2 0x106c",
             "wide 0x1080–0x1084",
             "h 0x1090",
             "unbuilt 0x1094",
@@ -3169,6 +3189,7 @@ fn register_model_edge_cases_are_bounded_and_follow_uvm() {
         "foreach follows [4:7]; `i * 2 < 4` is not unrolled; a package constant defined by itself is not constant"
     );
     assert_eq!(show(&tree.children[1]), ["packed_w 0x2020"], "a FIFO map puts every word at the same address");
+    assert_eq!(show(&tree.children[2]), ["w2 0x3020–0x3024"], "an endianness that is not a FIFO name is not FIFO");
     // Fields: a helper's member survives; a string argument's value; unbuilt: none; no overflow.
     let reg = |name: &str| bus.children.iter().find(|c| c.name == name).unwrap().register.unwrap();
     let f: Vec<String> = a.register_fields(&model, reg("h")).iter().map(|f| format!("{} {:?} {:?}", f.name, f.access, f.notes)).collect();

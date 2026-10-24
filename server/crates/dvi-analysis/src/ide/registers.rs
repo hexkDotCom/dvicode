@@ -146,6 +146,8 @@ pub struct Field {
 /// A register model as its top block builds it.
 #[derive(Clone, Debug, Default)]
 pub struct Model {
+    /// Maps of each block mounted in each map: `(parent map, block)` → count.
+    pub mounts: FxHashMap<(usize, usize), usize>,
     pub blocks: Vec<Block>,
     pub regs: Vec<Reg>,
     pub maps: Vec<Map>,
@@ -322,6 +324,15 @@ impl Analysis {
         let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default() };
         it.m.blocks.push(Block { name: self.decl(top).name.to_string(), class: top, maps: Vec::new(), default_map: None, regs: Vec::new(), at: None, notes: Vec::new(), vars: FxHashMap::default() });
         it.build_block(0, top, &[], &[], 0);
+        let mut mounts: FxHashMap<(usize, usize), usize> = FxHashMap::default();
+        for (mi, m) in it.m.maps.iter().enumerate() {
+            for e in &m.entries {
+                if let Entry::Sub { map, .. } = e {
+                    *mounts.entry((mi, it.m.maps[*map].block)).or_default() += 1;
+                }
+            }
+        }
+        it.m.mounts = mounts;
         it.m
     }
 
@@ -670,7 +681,7 @@ fn address_text(model: &Model, top: usize, lo: u128, hi: u128) -> String {
 fn mounted_name(model: &Model, parent: usize, child: usize) -> String {
     let block = model.maps[child].block;
     let name = &model.blocks[block].name;
-    let same = model.maps[parent].entries.iter().filter(|e| matches!(e, Entry::Sub { map, .. } if model.maps[*map].block == block)).count();
+    let same = model.mounts.get(&(parent, block)).copied().unwrap_or(0);
     if same > 1 {
         format!("{name} ({})", model.maps[child].name)
     } else {
@@ -916,25 +927,26 @@ impl<'a> Interp<'a> {
         let [init, cond, step] = parts[..] else { return None };
         let eq = init.iter().position(|x| x.is_punct("="))?;
         let var = init[..eq].last().filter(|x| x.is_ident())?.text.to_string();
-        let start = self.eval(&init[eq + 1..], m, env, this).num()? as i128;
+        let start = i128::try_from(self.eval(&init[eq + 1..], m, env, this).num()?).ok()?;
         // The condition: `var OP limit`.
         let [v, op, limit @ ..] = cond else { return None };
         if v.text != var.as_str() || limit.is_empty() {
             return None;
         }
-        let limit = self.eval(limit, m, env, this).num()? as i128;
+        let limit = i128::try_from(self.eval(limit, m, env, this).num()?).ok()?;
         // The step.
         let is_var = |x: &Token| x.text == var.as_str();
         let delta: i128 = match step {
             [a, b] if is_var(a) && b.is_punct("++") || a.is_punct("++") && is_var(b) => 1,
             [a, b] if is_var(a) && b.is_punct("--") || a.is_punct("--") && is_var(b) => -1,
-            [a, o, c @ ..] if is_var(a) && (o.is_punct("+=") || o.is_punct("-=")) => {
-                let c = self.eval(c, m, env, this).num()? as i128;
-                if o.is_punct("+=") { c } else { -c }
+            // The step is one constant token: `i = i - 2 + 1` is not `i - (2 + 1)`.
+            [a, o, c] if is_var(a) && (o.is_punct("+=") || o.is_punct("-=")) => {
+                let c = i128::try_from(self.eval(std::slice::from_ref(c), m, env, this).num()?).ok()?;
+                if o.is_punct("+=") { c } else { c.checked_neg()? }
             }
-            [a, e, b, o, c @ ..] if is_var(a) && e.is_punct("=") && is_var(b) && (o.is_punct("+") || o.is_punct("-")) => {
-                let c = self.eval(c, m, env, this).num()? as i128;
-                if o.is_punct("+") { c } else { -c }
+            [a, e, b, o, c] if is_var(a) && e.is_punct("=") && is_var(b) && (o.is_punct("+") || o.is_punct("-")) => {
+                let c = i128::try_from(self.eval(std::slice::from_ref(c), m, env, this).num()?).ok()?;
+                if o.is_punct("+") { c } else { c.checked_neg()? }
             }
             _ => return None,
         };
@@ -973,7 +985,8 @@ impl<'a> Interp<'a> {
             return None;
         }
         let name = header[..open].last().filter(|x| x.is_ident())?.text.to_string();
-        if open == 1 {
+        let own = open == 1 || open == 3 && header[0].is_kw("this") && header[1].is_punct(".");
+        if own {
             if let Some(vals) = self.declared_indexes(&name, m, env, this) {
                 return (vals.len() as u128 <= MAX_ITERATIONS).then_some((var, vals));
             }
@@ -998,7 +1011,10 @@ impl<'a> Interp<'a> {
             return None;
         }
         let close = skip_group(&toks, k + 1);
-        let inner = &toks[k + 2..close.checked_sub(1)?];
+        if close < k + 3 || !toks.get(close - 1).is_some_and(|t| t.is_punct("]")) {
+            return None;
+        }
+        let inner = &toks[k + 2..close - 1];
         let range = match top_level(inner, ":") {
             Some(c) => {
                 let l = self.eval(&inner[..c], m, env, this).num()?;
@@ -1035,6 +1051,17 @@ impl<'a> Interp<'a> {
             let target = assigned_name(lhs, self, m, env, this);
             if let Some(target) = target {
                 self.assign(&target, rhs, m, env, this, depth, conditional, s[0].span);
+            }
+            return;
+        }
+        // A declaration without a value (`uvm_reg_map m;`, `int unsigned i, j;`): locals.
+        let decl_tok = |x: &Token| matches!(x.kind, TokKind::Ident | TokKind::Keyword | TokKind::Number) || ["[", "]", ":", ",", "::"].iter().any(|p| x.is_punct(p));
+        if s.len() >= 2 && s.iter().all(decl_tok) && s[0].kind != TokKind::Number && s.last().is_some_and(|x| x.is_ident()) {
+            for (i, x) in s.iter().enumerate() {
+                let next = s.get(i + 1);
+                if i > 0 && x.is_ident() && next.is_none_or(|n| n.is_punct(",") || n.is_punct("[")) {
+                    env.locals.insert(x.text.to_string(), Handle::Val(Val::Unknown(x.text.to_string())));
+                }
             }
             return;
         }
@@ -1285,7 +1312,7 @@ impl<'a> Interp<'a> {
                     n_bytes: get(2).unwrap_or(Val::Unknown("n_bytes".into())),
                     byte_addressing: get(4).unwrap_or(Val::Num(1)),
                     fifo: match get(3) {
-                        Some(Val::Unknown(t)) => t.contains("FIFO"),
+                        Some(Val::Unknown(t)) => matches!(t.trim_start_matches("uvm_pkg::"), "UVM_LITTLE_FIFO" | "UVM_BIG_FIFO"),
                         // `uvm_endianness_e`: UVM_LITTLE_FIFO = 3, UVM_BIG_FIFO = 4.
                         Some(Val::Num(v)) => v == 3 || v == 4,
                         _ => false,
@@ -1465,6 +1492,19 @@ impl<'a> Interp<'a> {
             (Obj::Map(mi), "add_submap") => {
                 let Some(Obj::Map(child)) = bind_obj(handles, ADD_SUBMAP, 0) else { return };
                 let offset = bind(args, ADD_SUBMAP, 1).unwrap_or(Val::Unknown("offset".into()));
+                // UVM refuses a map that already has a parent; a map in its own chain would loop.
+                let mut up = Some(mi);
+                let mut steps = 0;
+                while let Some(x) = up {
+                    if x == child || steps > 64 {
+                        return;
+                    }
+                    up = self.m.maps[x].parent.as_ref().map(|p| p.0);
+                    steps += 1;
+                }
+                if self.m.maps[child].parent.is_some() {
+                    return;
+                }
                 self.m.maps[child].parent = Some((mi, offset.clone()));
                 self.m.maps[mi].entries.push(Entry::Sub { map: child, offset, at });
             }

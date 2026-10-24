@@ -2181,7 +2181,7 @@ fn view_tree(a: &Analysis, p: TreeParams, models: &RegisterModels) -> Value {
                 return json!({ "revision": a.revision, "roots": [], "blocks": names(&blocks), "tops": names(&tops) });
             };
             // The whole tree is filtered first, then cut to the node limit (keeping `reveal`).
-            let (tree, _) = a.register_tree(&model, usize::MAX);
+            let (tree, _) = a.register_tree(&model, 1_000_000);
             let mut matches = 0;
             let mut roots: Vec<dvi_analysis::ide::registers::RegNode> = match &q.filter {
                 Some(f) => dvi_analysis::ide::registers::prune(tree, f, &mut matches).into_iter().collect(),

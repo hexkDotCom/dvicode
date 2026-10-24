@@ -1192,11 +1192,26 @@ export class Views implements vscode.Disposable {
       }
       hit = pick.hit;
     }
+    // The model may have changed while the pick was open: the register must still be there.
+    if (r.hits.length > 1 || v.latest > r.revision) {
+      const again = await c.sendRequest<RegisterHits | null>('dvicode/registerAt', { top: v.top ?? null, address }).catch(() => null);
+      const same = again?.hits.find((h) => namesKey(h.path) === namesKey(hit.path) && h.address === hit.address);
+      if (!again || !same) {
+        void vscode.window.showInformationMessage(`DVICode: the register model changed; search for ${address.trim()} again.`);
+        return;
+      }
+      r = again;
+    }
     await vscode.commands.executeCommand('dvicode.registerModel.focus');
     // The tree shown must be of the model searched: the same top and revision.
-    if (!v.size || v.shownRevision < r.revision || (v.last?.top ?? null) !== r.top) {
+    if (!v.size || v.shownRevision !== r.revision || (v.last?.top ?? null) !== r.top) {
       await v.refresh();
     }
+    if (await v.selectExact(hit.path)) {
+      return;
+    }
+    // Beyond the node limit: fetched again with the register in it.
+    await v.refresh(hit.path);
     if (await v.selectExact(hit.path)) {
       return;
     }
@@ -1206,16 +1221,13 @@ export class Views implements vscode.Disposable {
       const pick = await vscode.window.showInformationMessage(`DVICode: ${name} (${hit.address}) is hidden by the filter '${v.filter}'.`, clear);
       if (pick === clear) {
         await vscode.commands.executeCommand('dvicode.registers.clearFilter');
+        await v.refresh(hit.path);
         await v.selectExact(hit.path);
       }
       return;
     }
-    // Beyond the node limit: fetched again with the register in it.
-    await v.refresh(hit.path);
-    if (!(await v.selectExact(hit.path))) {
-      await v.select(hit.path);
-      void vscode.window.showInformationMessage(`DVICode: ${name} (${hit.address}) is not in the view.`);
-    }
+    await v.select(hit.path);
+    void vscode.window.showInformationMessage(`DVICode: ${name} (${hit.address}) is not in the view.`);
   }
 
   /** After the tree of a view that follows the editor changed (filter, top, test). */
