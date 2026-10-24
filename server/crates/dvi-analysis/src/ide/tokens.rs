@@ -1,9 +1,10 @@
 //! Semantic highlighting and folding.
 
 use crate::world::{Analysis, DeclRef};
-use dvi_syntax::ast::{dflags, Decl, DeclKind};
+use dvi_syntax::ast::{dflags, Decl, DeclKind, RefId};
 use dvi_syntax::{FileId, Span};
 use lsp_types::{FoldingRange, FoldingRangeKind, SemanticToken, SemanticTokenModifier, SemanticTokenType};
+use rustc_hash::FxHashMap;
 
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::NAMESPACE,      // 0 package
@@ -81,6 +82,10 @@ fn classify(a: &Analysis, r: DeclRef) -> Option<(u32, u32)> {
 impl Analysis {
     /// Semantic tokens of a file, already delta-encoded.
     pub fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
+        self.with_lookup_memo(|| self.semantic_tokens_inner(file))
+    }
+
+    fn semantic_tokens_inner(&self, file: FileId) -> Vec<SemanticToken> {
         let Some(text) = self.file_text(file) else { return Vec::new() };
         let Some(li) = self.file_lines(file) else { return Vec::new() };
         let mut raw: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // line, col, len, type, mods
@@ -117,8 +122,15 @@ impl Analysis {
                     push_span(u.parsed.decl(*did).name_span, t, m | MOD_DECL, &mut raw);
                 }
             }
+            // A chain is resolved once for all its segments (`a.b.c`: `a` once, not three times).
+            let mut chains: FxHashMap<RefId, Vec<Option<DeclRef>>> = FxHashMap::default();
             for (span, rid, seg) in &pos.refs {
-                if let Some(r) = self.resolve_ref(uid, *rid, *seg as usize) {
+                let r = if u.parsed.reference(*rid).segs.len() == 1 {
+                    self.resolve_ref(uid, *rid, 0)
+                } else {
+                    chains.entry(*rid).or_insert_with(|| self.resolve_segments(uid, *rid)).get(*seg as usize).copied().flatten()
+                };
+                if let Some(r) = r {
                     if let Some((t, m)) = classify(self, r) {
                         push_span(*span, t, m, &mut raw);
                     }

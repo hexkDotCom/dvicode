@@ -20,7 +20,12 @@ thread_local! {
     static BASE_MEMO: std::cell::RefCell<FxHashMap<(DeclRef, usize), Option<DeclRef>>> = std::cell::RefCell::default();
     /// How many `follow_typedef` calls are on this thread's stack.
     static TYPEDEF_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// While [`Analysis::with_lookup_memo`] runs on this thread: the lexical lookups made so
+    /// far, by unit and scope, then by name.
+    static LOOKUP_MEMO: std::cell::RefCell<Option<LookupMemo>> = const { std::cell::RefCell::new(None) };
 }
+
+type LookupMemo = FxHashMap<(UnitId, DeclId), FxHashMap<SmolStr, Option<DeclRef>>>;
 
 /// Limits nested `follow_typedef` calls: `typedef T::X T;` resolves `T::X` through `T` itself,
 /// and its own loop's limit cannot stop a recursion that happens inside the loop.
@@ -90,6 +95,24 @@ impl Analysis {
         let u = self.unit(unit);
         let chain = u.parsed.reference(rid);
         self.resolve_chain(unit, chain, upto)
+    }
+
+    /// Every segment of a reference chain, resolved in turn: what [`Analysis::resolve_ref`]
+    /// gives for each, for the cost of the last one.
+    pub fn resolve_segments(&self, unit: UnitId, rid: RefId) -> Vec<Option<DeclRef>> {
+        let chain = self.unit(unit).parsed.reference(rid);
+        let n = chain.segs.len();
+        let mut out = vec![None; n];
+        let start = usize::from(n > 1 && chain.segs[0].name == "local" && chain.segs[1].sep == Sep::Scope);
+        let Some(mut cur) = self.resolve_first(unit, chain, start) else { return out };
+        out[start] = Some(cur);
+        for i in start + 1..n {
+            let seg = &chain.segs[i];
+            let Some(next) = self.resolve_member(cur, &seg.name, seg.sep, chain.segs[i - 1].selects) else { break };
+            cur = next;
+            out[i] = Some(cur);
+        }
+        out
     }
 
     pub fn resolve_chain(&self, unit: UnitId, chain: &RefChain, upto: usize) -> Option<DeclRef> {
@@ -219,8 +242,45 @@ impl Analysis {
         matches!(self.decl(c).kind, DeclKind::Class | DeclKind::InterfaceClass).then_some(c)
     }
 
+    /// Runs `f` with the lexical lookups it makes on this thread remembered: for a request
+    /// that resolves many names of one snapshot (the same name from the same scope walks the
+    /// same scopes, base classes and imports each time).
+    pub fn with_lookup_memo<R>(&self, f: impl FnOnce() -> R) -> R {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                if self.0 {
+                    LOOKUP_MEMO.with(|m| *m.borrow_mut() = None);
+                }
+            }
+        }
+        let outermost = LOOKUP_MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            m.is_none().then(|| *m = Some(LookupMemo::default())).is_some()
+        });
+        let _reset = Reset(outermost);
+        f()
+    }
+
     /// Lexical lookup of `name` from `scope`, then compilation-unit and global names.
     pub fn lookup(&self, unit: UnitId, scope: DeclId, name: &str) -> Option<DeclRef> {
+        let known = LOOKUP_MEMO.with(|m| m.borrow().as_ref().map(|m| m.get(&(unit, scope)).and_then(|n| n.get(name).copied())));
+        match known {
+            None => self.lookup_uncached(unit, scope, name),
+            Some(Some(r)) => r,
+            Some(None) => {
+                let r = self.lookup_uncached(unit, scope, name);
+                LOOKUP_MEMO.with(|m| {
+                    if let Some(m) = m.borrow_mut().as_mut() {
+                        m.entry((unit, scope)).or_default().insert(SmolStr::new(name), r);
+                    }
+                });
+                r
+            }
+        }
+    }
+
+    fn lookup_uncached(&self, unit: UnitId, scope: DeclId, name: &str) -> Option<DeclRef> {
         let u = self.unit(unit);
         let mut cur = Some(scope);
         let mut depth = 0;

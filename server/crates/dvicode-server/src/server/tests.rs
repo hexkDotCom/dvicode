@@ -371,6 +371,40 @@ fn requests_see_edits_made_just_before() {
 }
 
 #[test]
+fn semantic_token_changes_rebuild_the_full_answer() {
+    let root = project("tokdelta", &[("pkg.sv", PKG), ("top.sv", TOP)]);
+    let (mut c, init) = Client::start(&root, Value::Null);
+    assert_eq!(init["capabilities"]["semanticTokensProvider"]["full"]["delta"], true, "{init}");
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, TOP);
+    let doc = json!({ "textDocument": { "uri": top } });
+    let first = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    let again = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    assert_eq!(first["resultId"], again["resultId"], "one snapshot, one answer");
+    let same = c.request_ok("textDocument/semanticTokens/full/delta", json!({ "textDocument": { "uri": top }, "previousResultId": first["resultId"] }));
+    assert_eq!(same["edits"], json!([]), "{same}");
+    let edited = TOP.replace("  state_e s;", "  int fresh;
+  state_e s;
+  initial fresh = 2;");
+    c.change(&top, 2, &edited);
+    let delta = c.request_ok("textDocument/semanticTokens/full/delta", json!({ "textDocument": { "uri": top }, "previousResultId": first["resultId"] }));
+    let full = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    assert_eq!(delta["resultId"], full["resultId"], "{delta} {full}");
+    let mut data: Vec<Value> = first["data"].as_array().unwrap().clone();
+    let edits = delta["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 1, "{delta}");
+    let (start, del) = (edits[0]["start"].as_u64().unwrap() as usize, edits[0]["deleteCount"].as_u64().unwrap() as usize);
+    let ins = edits[0]["data"].as_array().cloned().unwrap_or_default();
+    assert!(ins.len() < full["data"].as_array().unwrap().len(), "only the changed part is sent");
+    data.splice(start..start + del, ins);
+    assert_eq!(Value::Array(data), full["data"]);
+    // A result the server does not know: the whole answer.
+    let unknown = c.request_ok("textDocument/semanticTokens/full/delta", json!({ "textDocument": { "uri": top }, "previousResultId": "nope" }));
+    assert_eq!(unknown["data"], full["data"]);
+    c.shutdown();
+}
+
+#[test]
 fn closing_a_file_outside_the_build_clears_its_problems() {
     let root = project("adhoc", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

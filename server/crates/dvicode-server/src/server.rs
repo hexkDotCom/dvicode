@@ -103,7 +103,7 @@ fn capabilities() -> ServerCapabilities {
         document_link_provider: Some(DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
             legend: SemanticTokensLegend { token_types: TOKEN_TYPES.to_vec(), token_modifiers: TOKEN_MODIFIERS.to_vec() },
-            full: Some(SemanticTokensFullOptions::Bool(true)),
+            full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
             range: None,
             work_done_progress_options: Default::default(),
         })),
@@ -122,6 +122,55 @@ struct PubState {
     /// File -> sequence number of the newest job that covers it.
     latest: FxHashMap<Url, u64>,
     next: u64,
+}
+
+/// The semantic tokens last answered for each file: answered again for the same snapshot,
+/// and what a `full/delta` answer for a later one tells the changes from.
+#[derive(Default)]
+struct TokenResults {
+    by_file: FxHashMap<FileId, TokenResult>,
+    next: u64,
+}
+
+struct TokenResult {
+    revision: u64,
+    id: String,
+    data: Arc<Vec<SemanticToken>>,
+}
+
+type Tokens = (String, Arc<Vec<SemanticToken>>);
+
+impl TokenResults {
+    /// The tokens of `f` in the snapshot of `a`, and those answered before for another
+    /// snapshot, if any.
+    fn get(results: &Mutex<TokenResults>, a: &Analysis, f: FileId) -> (Tokens, Option<Tokens>) {
+        let before = results.lock().unwrap().by_file.get(&f).map(|r| (r.revision, r.id.clone(), r.data.clone()));
+        if let Some((rev, id, data)) = &before {
+            if *rev == a.revision {
+                return ((id.clone(), data.clone()), None);
+            }
+        }
+        let data = Arc::new(a.semantic_tokens(f));
+        let mut g = results.lock().unwrap();
+        g.next += 1;
+        let id = g.next.to_string();
+        // Kept unless a newer snapshot's were kept meanwhile.
+        if g.by_file.get(&f).is_none_or(|r| r.revision < a.revision) {
+            g.by_file.insert(f, TokenResult { revision: a.revision, id: id.clone(), data: data.clone() });
+        }
+        ((id, data), before.map(|(_, id, data)| (id, data)))
+    }
+}
+
+/// The change from `old` to `new` as one edit of the client's array (five numbers a token):
+/// what comes between their common start and their common end. None when they are the same.
+fn token_edits(old: &[SemanticToken], new: &[SemanticToken]) -> Vec<SemanticTokensEdit> {
+    let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let end = old[start..].iter().rev().zip(new[start..].iter().rev()).take_while(|(a, b)| a == b).count();
+    if start == old.len() && start == new.len() {
+        return Vec::new();
+    }
+    vec![SemanticTokensEdit { start: (start * 5) as u32, delete_count: ((old.len() - start - end) * 5) as u32, data: Some(new[start..new.len() - end].to_vec()) }]
 }
 
 enum Event {
@@ -241,6 +290,7 @@ struct Server {
     /// The build file of the last full build announced (`None` before the first).
     announced_build_file: Option<Option<PathBuf>>,
     published: Arc<Mutex<PubState>>,
+    token_results: Arc<Mutex<TokenResults>>,
     next_id: i32,
     /// The client shows `$/progress` notifications.
     progress: bool,
@@ -384,6 +434,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         rebuild_at: None,
         announced_build_file: None,
         published: Arc::new(Mutex::new(PubState::default())),
+        token_results: Arc::default(),
         next_id: 1,
         progress,
         watch_inputs,
@@ -1243,6 +1294,7 @@ impl Server {
                 self.vfs.clear_overlay(&path);
                 if let Some(id) = self.vfs.lookup(&path) {
                     self.open.remove(&id);
+                    self.token_results.lock().unwrap().by_file.remove(&id);
                     // Back to the disk contents, also in the units of other open files that
                     // include it.
                     self.note_change(id);
@@ -1642,10 +1694,31 @@ impl Server {
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 a.rename(f, off, &p.new_name).map(Some)
             }),
-            "textDocument/semanticTokens/full" => self.spawn(req, |a, p: SemanticTokensParams| {
-                let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(None) };
-                Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: a.semantic_tokens(f) })))
-            }),
+            "textDocument/semanticTokens/full" => {
+                let results = self.token_results.clone();
+                self.spawn(req, move |a, p: SemanticTokensParams| {
+                    let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(None) };
+                    let ((id, data), _) = TokenResults::get(&results, a, f);
+                    Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: Some(id), data: data.to_vec() })))
+                })
+            }
+            "textDocument/semanticTokens/full/delta" => {
+                let results = self.token_results.clone();
+                self.spawn(req, move |a, p: SemanticTokensDeltaParams| {
+                    let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(None) };
+                    let ((id, data), before) = TokenResults::get(&results, a, f);
+                    // The changes from what the client has, when that is known.
+                    let base = match &before {
+                        Some((b, d)) if *b == p.previous_result_id => Some(d.as_slice()),
+                        None if id == p.previous_result_id => Some(data.as_slice()),
+                        _ => None,
+                    };
+                    Ok(Some(match base {
+                        Some(old) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta { result_id: Some(id.clone()), edits: token_edits(old, &data) }),
+                        None => SemanticTokensFullDeltaResult::Tokens(SemanticTokens { result_id: Some(id), data: data.to_vec() }),
+                    }))
+                })
+            }
             "textDocument/foldingRange" => self.spawn(req, |a, p: FoldingRangeParams| {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(None) };
                 Ok(Some(a.folding_ranges(f)))
