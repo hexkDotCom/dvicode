@@ -21,19 +21,113 @@ const PUNCTS: &[&str] = &[
 pub fn lex(text: &str, file: FileId) -> Vec<Token> {
     // About one token per six bytes of source: room for them at once, rather than copying a
     // growing vector of a large file over and over (bounded: a huge comment has no tokens).
-    let mut lx = Lexer {
-        src: text.as_bytes(),
-        text,
-        pos: 0,
-        file,
-        out: Vec::with_capacity((text.len() / 6).min(1 << 20)),
-        in_macro_str: false,
-        intern: text.len() > 1 << 16,
-        long: Default::default(),
-    };
+    let mut lx = Lexer::new(text, file, 0, (text.len() / 6).min(1 << 20));
     lx.run();
     shrink_if_wasteful(&mut lx.out);
     lx.out
+}
+
+/// The tokens of `new`, given those of `old` (the same file before an edit), as [`lex`] makes
+/// them: only the edited lines are lexed again, and the tokens after them are those of `old`,
+/// moved by the change in length.
+///
+/// The lexer carries one state from token to token, whether it is inside a macro body's
+/// `` `"...`" `` string, and each real newline (not one in a comment or a continued line)
+/// clears it. So lexing starts again at the first token after such a newline before the edit,
+/// and the old tokens are taken back at the first token after the edit that has such a
+/// newline before it, in both texts, and is the same token at the same place.
+pub fn relex(old_text: &str, old: &[Token], new: &str, file: FileId) -> Vec<Token> {
+    let (ob, nb) = (old_text.as_bytes(), new.as_bytes());
+    let prefix = ob.iter().zip(nb).take_while(|(a, b)| a == b).count();
+    if prefix == ob.len() && prefix == nb.len() {
+        return old.to_vec();
+    }
+    let room = ob.len().min(nb.len()) - prefix;
+    let suffix = ob.iter().rev().zip(nb.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+    let delta = nb.len() as i64 - ob.len() as i64;
+    // The first token to lex again: after a newline that clears the state, before the edit.
+    let mut k = old.partition_point(|t| (t.span.end as usize) <= prefix);
+    let floor = k.saturating_sub(4096);
+    loop {
+        if k == 0 {
+            break;
+        }
+        let gap_end = old.get(k).map_or(prefix, |t| (t.span.start as usize).min(prefix));
+        if clears_state(ob, old[k - 1].span.end as usize, gap_end) {
+            break;
+        }
+        k -= 1;
+        if k <= floor {
+            return lex(new, file);
+        }
+    }
+    let start = if k == 0 { 0 } else { old[k - 1].span.end as usize };
+    let mut lx = Lexer::new(new, file, start, 0);
+    lx.out.extend_from_slice(&old[..k]);
+    let mut fl = if k == 0 { flags::NL_BEFORE } else { 0 };
+    let edit_end = nb.len() - suffix;
+    loop {
+        let before = lx.out.len();
+        if !lx.step(&mut fl) {
+            break;
+        }
+        let t = &lx.out[before];
+        if (t.span.start as usize) < edit_end || !lx.cleared_before {
+            continue;
+        }
+        let at = (t.span.start as i64 - delta) as u32;
+        let j = old.partition_point(|o| o.span.start < at);
+        let Some(o) = old.get(j).filter(|o| o.span.start == at) else { continue };
+        let same = o.kind == t.kind && o.text == t.text && o.flags == t.flags && o.span.end - o.span.start == t.span.end - t.span.start;
+        if same && (j == 0 || clears_state(ob, old[j - 1].span.end as usize, o.span.start as usize)) {
+            lx.out.truncate(before);
+            lx.out.reserve(old.len() - j);
+            lx.out.extend(old[j..].iter().map(|o| {
+                let mut t = o.clone();
+                t.span.start = (t.span.start as i64 + delta) as u32;
+                t.span.end = (t.span.end as i64 + delta) as u32;
+                t
+            }));
+            break;
+        }
+    }
+    shrink_if_wasteful(&mut lx.out);
+    lx.out
+}
+
+/// Whether the text between two tokens holds a newline that clears the lexer's state: one
+/// outside comments and not continuing a line (see [`Lexer::step`]).
+fn clears_state(src: &[u8], from: usize, to: usize) -> bool {
+    let mut i = from;
+    while i < to {
+        match src[i] {
+            b'\n' => return true,
+            b'\\' if src.get(i + 1) == Some(&b'\n') => i += 2,
+            b'\\' if src.get(i + 1) == Some(&b'\r') && src.get(i + 2) == Some(&b'\n') => i += 3,
+            b'/' if src.get(i + 1) == Some(&b'/') => {
+                while i < src.len() && src[i] != b'\n' {
+                    i += 1;
+                }
+                // `// comment \` goes on to the next line.
+                let mut e = i;
+                while e > 0 && src[e - 1] == b'\r' {
+                    e -= 1;
+                }
+                if e > 0 && src[e - 1] == b'\\' && i < src.len() {
+                    i += 1;
+                }
+            }
+            b'/' if src.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < src.len() && !(src[i] == b'*' && src.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 /// Gives back what a vector reserved and did not use, when that is worth a copy.
@@ -57,6 +151,10 @@ struct Lexer<'a> {
     long: rustc_hash::FxHashMap<&'a str, SmolStr>,
     /// Large texts only: a short one (a request's line, a define) gains nothing from it.
     intern: bool,
+    /// A newline that clears `in_macro_str` came since the last token (or the text begins).
+    cleared: bool,
+    /// `cleared` as it was before the last token.
+    cleared_before: bool,
 }
 
 #[inline]
@@ -70,6 +168,21 @@ fn is_ident_char(c: u8) -> bool {
 }
 
 impl<'a> Lexer<'a> {
+    fn new(text: &'a str, file: FileId, pos: usize, capacity: usize) -> Lexer<'a> {
+        Lexer {
+            src: text.as_bytes(),
+            text,
+            pos,
+            file,
+            out: Vec::with_capacity(capacity),
+            in_macro_str: false,
+            intern: text.len() > 1 << 16,
+            long: Default::default(),
+            cleared: pos == 0,
+            cleared_before: false,
+        }
+    }
+
     fn peek(&self, n: usize) -> u8 {
         *self.src.get(self.pos + n).unwrap_or(&0)
     }
@@ -94,23 +207,30 @@ impl<'a> Lexer<'a> {
 
     fn run(&mut self) {
         let mut fl: u8 = flags::NL_BEFORE;
+        while self.step(&mut fl) {}
+    }
+
+    /// Lexes up to the next token, with `fl` the flags gathered for it so far; false at the
+    /// end of the text.
+    fn step(&mut self, fl: &mut u8) -> bool {
         while self.pos < self.src.len() {
             let c = self.peek(0);
             match c {
                 b'\n' => {
-                    fl |= flags::NL_BEFORE;
+                    *fl |= flags::NL_BEFORE;
                     self.in_macro_str = false;
+                    self.cleared = true;
                     self.pos += 1;
                     continue;
                 }
                 b' ' | b'\t' | b'\r' | 0x0b | 0x0c => {
-                    fl |= flags::WS_BEFORE;
+                    *fl |= flags::WS_BEFORE;
                     self.pos += 1;
                     continue;
                 }
                 b'\\' if self.peek(1) == b'\n' || (self.peek(1) == b'\r' && self.peek(2) == b'\n') => {
                     // Line continuation.
-                    fl |= flags::WS_BEFORE | flags::CONT_BEFORE;
+                    *fl |= flags::WS_BEFORE | flags::CONT_BEFORE;
                     self.pos += if self.peek(1) == b'\r' { 3 } else { 2 };
                     continue;
                 }
@@ -125,29 +245,33 @@ impl<'a> Lexer<'a> {
                     }
                     if e > 0 && self.src[e - 1] == b'\\' && self.pos < self.src.len() {
                         self.pos += 1;
-                        fl |= flags::CONT_BEFORE;
+                        *fl |= flags::CONT_BEFORE;
                     }
-                    fl |= flags::WS_BEFORE;
+                    *fl |= flags::WS_BEFORE;
                     continue;
                 }
                 b'/' if self.peek(1) == b'*' => {
                     self.pos += 2;
                     while self.pos < self.src.len() && !(self.peek(0) == b'*' && self.peek(1) == b'/') {
                         if self.peek(0) == b'\n' {
-                            fl |= flags::NL_BEFORE;
+                            *fl |= flags::NL_BEFORE;
                         }
                         self.pos += 1;
                     }
                     self.pos = (self.pos + 2).min(self.src.len());
-                    fl |= flags::WS_BEFORE;
+                    *fl |= flags::WS_BEFORE;
                     continue;
                 }
                 _ => {}
             }
             let start = self.pos;
-            self.lex_token(c, start, fl);
-            fl = 0;
+            self.cleared_before = self.cleared;
+            self.cleared = false;
+            self.lex_token(c, start, *fl);
+            *fl = 0;
+            return true;
         }
+        false
     }
 
     fn slice(&self, start: usize) -> &'a str {
@@ -411,6 +535,63 @@ mod tests {
         let toks = lex("a \\\n b\nc", 0);
         assert!(!toks[1].nl_before());
         assert!(toks[2].nl_before());
+    }
+
+    /// Random edits of text made of the pieces the lexer treats specially: each relexed text
+    /// gives the tokens of a full lex.
+    #[test]
+    fn relexing_an_edit_gives_the_tokens_of_a_full_lex() {
+        const PIECES: &[&str] = &[
+            "module m;\n", "  logic [7:0] a;\n", "/* block\n comment */", "// line comment\n", "// continued \\\n",
+            "`define S(x) `\"x is \\\"x\\\"`\" \\\n  + 1\n", "`\"", "\"str\\\"ing\"", "\"\"\"tri\nple\"\"\"", "8 'hFF", "4", " 'b10",
+            "\\esc$id ", "a``b", "@(*)", "(* attr *)", "\n", "\r\n", " ", "\t", "x = y;", "end", "/*", "*/", "\"", "\\", "\\\n", "é", "1.5e3", "10ns",
+        ];
+        let mut seed: u64 = 0x5eed_1234_abcd;
+        let mut rnd = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n.max(1)
+        };
+        for _ in 0..300 {
+            let mut text = String::new();
+            for _ in 0..rnd(80) {
+                text.push_str(PIECES[rnd(PIECES.len())]);
+            }
+            let mut toks = lex(&text, 3);
+            for _ in 0..20 {
+                // Delete a range and insert pieces, on character boundaries.
+                let bounds: Vec<usize> = (0..=text.len()).filter(|i| text.is_char_boundary(*i)).collect();
+                let a = bounds[rnd(bounds.len())];
+                let b = bounds[a.min(bounds.len() - 1)..].iter().copied().nth(rnd(8)).unwrap_or(text.len()).max(a);
+                let mut ins = String::new();
+                for _ in 0..rnd(4) {
+                    ins.push_str(PIECES[rnd(PIECES.len())]);
+                }
+                let new = format!("{}{}{}", &text[..a], ins, &text[b..]);
+                let re = relex(&text, &toks, &new, 3);
+                let full = lex(&new, 3);
+                assert_eq!(re, full, "old {text:?}\nnew {new:?}");
+                text = new;
+                toks = re;
+            }
+        }
+    }
+
+    /// `DVICODE_RELEX_BENCH=file cargo test --release -p dvi-syntax relex_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn relex_bench() {
+        let Ok(path) = std::env::var("DVICODE_RELEX_BENCH") else { return };
+        let text = std::fs::read_to_string(path).unwrap();
+        let t0 = std::time::Instant::now();
+        let toks = lex(&text, 0);
+        let full = t0.elapsed();
+        let at = text[..text.len() / 2].rfind('\n').unwrap() + 1;
+        let new = format!("{}    x = 1;\n{}", &text[..at], &text[at..]);
+        let t1 = std::time::Instant::now();
+        let re = relex(&text, &toks, &new, 0);
+        let part = t1.elapsed();
+        assert_eq!(re, lex(&new, 0));
+        println!("{} tokens: lex {full:?}, relex of a line {part:?}", toks.len());
     }
 
     #[test]

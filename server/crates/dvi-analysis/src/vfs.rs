@@ -10,7 +10,7 @@
 //! [`Vfs::invalidate`] forgets the directory of a changed file.
 
 use dvi_project::fsx;
-use dvi_syntax::lexer::lex;
+use dvi_syntax::lexer::{lex, relex};
 use dvi_syntax::preproc::normalize;
 use dvi_syntax::{FileId, LineIndex, SourceProvider, Token};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -383,6 +383,27 @@ impl Vfs {
     }
 }
 
+/// Texts smaller than this are lexed whole: it takes no time, and nothing has to be kept.
+const RELEX_MIN: usize = 32 << 10;
+
+/// The tokens of `text`: from those of an older text of the file when there is one, lexing
+/// only what changed (`DVICODE_CHECK_RELEX=1`: also lexes the whole text, and logs and uses
+/// that when the two differ).
+fn lex_from(base: Option<&(Arc<str>, Arc<Vec<Token>>)>, text: &str, id: FileId) -> Vec<Token> {
+    let Some((old, toks)) = base.filter(|(old, _)| old.len() >= RELEX_MIN && text.len() >= RELEX_MIN) else { return lex(text, id) };
+    let toks = relex(old, toks, text, id);
+    static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *CHECK.get_or_init(|| std::env::var_os("DVICODE_CHECK_RELEX").is_some_and(|v| v == "1")) {
+        let full = lex(text, id);
+        if full != toks {
+            let at = full.iter().zip(&toks).position(|(a, b)| a != b).unwrap_or(full.len().min(toks.len()));
+            log::error!("relex of file {id} differs from a full lex at token {at} of {}: {:?} / {:?}", full.len(), full.get(at), toks.get(at));
+            return full;
+        }
+    }
+    toks
+}
+
 /// Paths that differ in case only, by their lowercase form, where file systems usually ignore
 /// case (Windows, macOS, Windows drives under WSL).
 fn fold(p: &Path) -> Option<PathBuf> {
@@ -458,17 +479,18 @@ impl SourceProvider for Vfs {
     }
 
     fn source(&self, id: FileId) -> Option<(Arc<str>, Arc<Vec<Token>>)> {
-        {
+        // The tokens of an older text of the file, to lex only what changed since.
+        let base = {
             let g = self.inner.read().unwrap();
             let e = g.entries.get(id as usize)?;
-            if let Some((v, text, toks)) = &e.tokens {
-                if *v == e.version {
-                    return Some((text.clone(), toks.clone()));
-                }
+            match &e.tokens {
+                Some((v, text, toks)) if *v == e.version => return Some((text.clone(), toks.clone())),
+                Some((_, text, toks)) => Some((text.clone(), toks.clone())),
+                None => None,
             }
-        }
+        };
         let (text, version) = self.text_versioned(id)?;
-        let toks = Arc::new(lex(&text, id));
+        let toks = Arc::new(lex_from(base.as_ref(), &text, id));
         let mut g = self.inner.write().unwrap();
         let e = &mut g.entries[id as usize];
         if e.version == version {
@@ -575,7 +597,9 @@ impl SourceProvider for Reader<'_> {
         if let Some((t, toks)) = cache.get(&id).filter(|(t, _)| Arc::ptr_eq(t, &text)) {
             return Some((t.clone(), toks.clone()));
         }
-        let toks = Arc::new(lex(&text, id));
+        // From the store's tokens of the file: the editor's text is one edit or so further.
+        let base = self.vfs.source(id);
+        let toks = Arc::new(lex_from(base.as_ref(), &text, id));
         cache.insert(id, (text.clone(), toks.clone()));
         Some((text, toks))
     }
