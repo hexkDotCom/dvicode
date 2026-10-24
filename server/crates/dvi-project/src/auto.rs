@@ -361,9 +361,12 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
     let tops: Vec<usize> = facts
         .iter()
         .enumerate()
-        .filter(|(_, (p, _))| {
+        .filter(|(_, (p, f))| {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            !is_header(p) && !included_names.contains(&name) && !included_files.contains(p)
+            // A source file that declares a package is compiled on its own even when files
+            // include it: those includes are often in an `ifdef of another flow (an include
+            // guard keeps an active one from declaring it twice).
+            !is_header(p) && (!included_names.contains(&name) && !included_files.contains(p) || !f.packages.is_empty())
         })
         // A piece of a module body is compiled only where it is included, like a header.
         .filter(|(_, (p, f))| {
