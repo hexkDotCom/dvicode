@@ -184,6 +184,9 @@ struct FileFacts {
     uses: FxHashSet<String>,
     defines: usize,
     items: usize,
+    /// Statements or processes outside any design element, package or class (`initial`,
+    /// `always`, `assign`): a piece of a module body, written to be included in one.
+    fragment: bool,
 }
 
 /// The include directories that `` `include "dir/name.svh" `` operands in `sources` need, given
@@ -220,8 +223,26 @@ pub(crate) fn include_bases(sources: &[PathBuf], included: &[PathBuf]) -> Vec<Pa
 
 fn scan(text: &str) -> FileFacts {
     let toks = lex(text, 0);
-    let mut f = FileFacts { includes: Vec::new(), include_paths: Vec::new(), bare_includes: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0 };
+    let mut f = FileFacts { includes: Vec::new(), include_paths: Vec::new(), bare_includes: Vec::new(), packages: Vec::new(), uses: FxHashSet::default(), defines: 0, items: 0, fragment: false };
+    // How deep in design elements, packages and classes; the body of a `define is skipped.
+    let mut depth = 0usize;
+    let mut in_define = false;
     for (i, t) in toks.iter().enumerate() {
+        if in_define && t.nl_before() {
+            in_define = false;
+        }
+        if !in_define && t.kind == TokKind::Keyword {
+            let prev = i.checked_sub(1).map(|j| toks[j].text.as_str());
+            match t.text.as_str() {
+                // Not `typedef class c;` nor the `interface` of `interface class`.
+                "class" if prev != Some("typedef") => depth += 1,
+                "interface" if toks.get(i + 1).is_some_and(|n| n.text == "class") => {}
+                "module" | "macromodule" | "interface" | "program" | "package" | "checker" if prev != Some("extern") => depth += 1,
+                "endmodule" | "endinterface" | "endprogram" | "endpackage" | "endchecker" | "endclass" => depth = depth.saturating_sub(1),
+                "initial" | "always" | "always_comb" | "always_ff" | "always_latch" | "final" | "assign" if depth == 0 => f.fragment = true,
+                _ => {}
+            }
+        }
         match t.kind {
             TokKind::Directive if t.text == "include" => {
                 if let Some(n) = toks.get(i + 1).filter(|n| n.kind == TokKind::String) {
@@ -235,7 +256,10 @@ fn scan(text: &str) -> FileFacts {
                     }
                 }
             }
-            TokKind::Directive if t.text == "define" => f.defines += 1,
+            TokKind::Directive if t.text == "define" => {
+                f.defines += 1;
+                in_define = true;
+            }
             TokKind::Keyword if t.text == "package" => {
                 if let Some(n) = toks.get(i + 1).filter(|n| n.kind == TokKind::Ident) {
                     f.packages.push(n.text.to_string());
@@ -340,6 +364,13 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
         .filter(|(_, (p, _))| {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             !is_header(p) && !included_names.contains(&name) && !included_files.contains(p)
+        })
+        // A piece of a module body is compiled only where it is included, like a header.
+        .filter(|(_, (p, f))| {
+            if f.fragment {
+                log::debug!("auto-configuration: {} has statements outside any module: compiled only where it is included", p.display());
+            }
+            !f.fragment
         })
         .map(|(i, _)| i)
         .collect();
@@ -508,6 +539,18 @@ fn log_summary(facts: &[(PathBuf, FileFacts)], tops: &[usize], included: &FxHash
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_piece_of_a_module_body_is_a_fragment() {
+        let frag = |t: &str| scan(t).fragment;
+        assert!(frag("import p::*;\nlogic failed;\ninitial begin\n  failed = 0;\nend\n"));
+        assert!(frag("assign a = b;\n"));
+        assert!(!frag("module m;\n  initial x = 1;\n  assign a = b;\nendmodule\n"));
+        assert!(!frag("typedef class c;\nclass c;\n  task run; endtask\nendclass\n"));
+        assert!(!frag("interface class ic;\nendclass\nmodule m; always_comb x = 1; endmodule\n"));
+        assert!(!frag("`define GO initial \\n  x = 1;\npackage p; endpackage\n"));
+        assert!(!frag("package p;\n  class c; endclass\nendpackage\nprogram t; initial run(); endprogram\n"));
+    }
 
     #[test]
     fn gitignore_exceptions_and_character_classes() {
