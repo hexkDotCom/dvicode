@@ -497,6 +497,28 @@ endmodule
 }
 
 #[test]
+fn writes_and_reads_of_a_signal_are_asked_by_position() {
+    let m = "module m(input logic clk, output logic q);
+  logic d;
+  assign d = ~q;
+  always_ff @(posedge clk) q <= d;
+endmodule
+";
+    let root = project("accessesof", &[("m.sv", m)]);
+    let (mut c, init) = Client::start(&root, Value::Null);
+    assert_eq!(init["capabilities"]["experimental"]["dvicode"]["accesses"], 1, "{init}");
+    let uri = uri(&root, "m.sv");
+    let w = c.request_ok("dvicode/accessesOf", json!({ "textDocument": { "uri": uri }, "position": at(m, "d;"), "mode": "writes" }));
+    assert_eq!((w["target"]["name"].as_str(), w["mode"].as_str()), (Some("d"), Some("writes")), "{w}");
+    assert_eq!((w["sites"][0]["kind"].as_str(), w["sites"][0]["group"].as_str(), w["sites"][0]["line"].as_u64()), (Some("continuous"), Some("writes"), Some(2)), "{w}");
+    let r = c.request_ok("dvicode/accessesOf", json!({ "textDocument": { "uri": uri }, "position": at(m, "d;"), "mode": "reads" }));
+    assert_eq!((r["sites"][0]["kind"].as_str(), r["sites"][0]["process"].as_str(), r["sites"][0]["detail"].as_str()), (Some("read"), Some("always_ff"), Some("always_ff @(posedge clk) q <= d;")), "{r}");
+    let nothing = c.request_ok("dvicode/accessesOf", json!({ "textDocument": { "uri": uri }, "position": at(m, "endmodule"), "mode": "reads" }));
+    assert!(nothing.is_null(), "no signal there");
+    c.shutdown();
+}
+
+#[test]
 fn closing_a_file_outside_the_build_clears_its_problems() {
     let root = project("adhoc", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

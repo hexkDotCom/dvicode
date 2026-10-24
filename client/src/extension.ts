@@ -8,6 +8,7 @@ import { Mapper } from './pathmap';
 import { RemoteFs } from './remotefs';
 import { InternalError, LogChannel, Reporter } from './report';
 import { ChecksView } from './checks';
+import { DriversView } from './drivers';
 import { Structure } from './structure';
 import { VerificationHierarchy, Views, componentClassLocation, hierarchyPath } from './views';
 
@@ -48,6 +49,7 @@ let lastStatus: Status | undefined;
 let views: Views;
 let structure: Structure;
 let checks: ChecksView;
+let drivers: DriversView;
 
 const SV_SELECTOR = [
   { scheme: 'file', language: 'systemverilog' },
@@ -160,6 +162,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
       views.presentAll();
       structure.reset();
       checks.reset();
+      drivers.reset();
     }
   });
   c.onNotification('dvicode/internalError', (e: InternalError) => {
@@ -176,11 +179,12 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   }
   pendingClient = undefined;
   // What this engine's views support (an engine at a custom path or remote may be older).
-  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number; registers?: number; checks?: number } } | undefined;
+  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number; registers?: number; checks?: number; accesses?: number } } | undefined;
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.objects', (experimental?.dvicode?.verificationObjects ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.structure', (experimental?.dvicode?.structure ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.registers', (experimental?.dvicode?.registers ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.checks', (experimental?.dvicode?.checks ?? 0) >= 1);
+  void vscode.commands.executeCommand('setContext', 'dvicode.engine.accesses', (experimental?.dvicode?.accesses ?? 0) >= 1);
   c.onNotification('dvicode/status', (s: Status) => {
     lastStatus = s;
     if (s.build_error) {
@@ -203,6 +207,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     views.onRevision(r?.revision);
     structure.onRevision();
     checks.onRevision(r?.revision);
+    drivers.onRevision(r?.revision);
   });
   client = c;
   statusItem.text = '$(sync~spin) DVICode';
@@ -511,6 +516,8 @@ export interface DvicodeApi {
   structure(): Structure;
   /** The Assertions and Coverage view (tests). */
   checks(): ChecksView;
+  /** The Drivers and Loads view (tests). */
+  drivers(): DriversView;
   /** The last internal error the engine reported. */
   lastInternalError(): InternalError | undefined;
   /** The text DVICode: Report Issue fills in. */
@@ -541,10 +548,12 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   views = new Views(ctx, conn);
   structure = new Structure(ctx, conn);
   checks = new ChecksView(ctx, conn);
+  drivers = new DriversView(conn);
   ctx.subscriptions.push(
     views,
     structure,
     checks,
+    drivers,
     vscode.commands.registerCommand('dvicode.selectUvmTest', selectUvmTest),
     vscode.commands.registerCommand('dvicode.openComponentClass', async (item: unknown) => {
       const l = componentClassLocation(item, conn);
@@ -611,6 +620,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     views: () => views,
     structure: () => structure,
     checks: () => checks,
+    drivers: () => drivers,
     lastInternalError: () => reporter.last,
     issueBody: () => reporter.issueBody(),
   };

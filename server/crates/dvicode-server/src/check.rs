@@ -106,7 +106,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--registers" | "--regtree" | "--checks" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -480,6 +480,33 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                             println!("{} ({}): {} hits, {} ms, limits {:?}, notes {:?}", r.target.name, r.target.kind, r.hits.len(), ms, r.limits, r.notes);
                             for h in &r.hits {
                                 show(h, 1);
+                            }
+                        }
+                    }
+                }
+                "--drivers" | "--loads" => {
+                    // The writes or reads of the declaration there, as a tree.
+                    let t0 = std::time::Instant::now();
+                    let r = a.accesses_at(f, off, q == "--drivers");
+                    let ms = t0.elapsed().as_millis();
+                    match r {
+                        None => println!("no signal"),
+                        Some(r) => {
+                            fn show(s: &dvi_analysis::ide::drivers::AccessSite, depth: usize) {
+                                let line = s.line.map_or(String::new(), |l| format!(":{}", l + 1));
+                                let file = s.uri.as_deref().and_then(|u| u.rsplit('/').next()).unwrap_or("");
+                                let notes = if s.notes.is_empty() { String::new() } else { format!(" ({})", s.notes.join("; ")) };
+                                let process = s.process.map(|p| format!(" in {p}")).unwrap_or_default();
+                                let ctx = if s.context.is_empty() { String::new() } else { format!(" @{}", s.context) };
+                                println!("{}{} {}{process}{ctx}{notes} | {}{}", "  ".repeat(depth), s.group, s.label, file, line);
+                                println!("{}    {}", "  ".repeat(depth), s.detail);
+                                for c in &s.children {
+                                    show(c, depth + 1);
+                                }
+                            }
+                            println!("{} ({}) {}: {} sites, {} ms, limits {:?}, notes {:?}", r.target.name, r.target.kind, r.mode, r.sites.len(), ms, r.limits, r.notes);
+                            for s in &r.sites {
+                                show(s, 1);
                             }
                         }
                     }

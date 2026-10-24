@@ -29,6 +29,7 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         port_index: None,
         attr_open: (0, 0),
         label: None,
+        process: ProcessKind::None,
     };
     p.u.decls.push(Decl {
         kind: DeclKind::Unit,
@@ -71,10 +72,12 @@ struct Stop {
     decl: bool,
     /// `-> {` at depth 0: the constraint set an implication applies.
     implies: bool,
+    /// An assignment operator at depth 0 (`=`, `<=`, `+=`...): a statement's left side ends.
+    assign: bool,
 }
 
-const STOP_NONE: Stop = Stop { comma: false, colon: false, lbrace: false, iff: false, eq: false, decl: false, implies: false };
-const STOP_COMMA: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: false, decl: false, implies: false };
+const STOP_NONE: Stop = Stop { comma: false, colon: false, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false };
+const STOP_COMMA: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false };
 
 const ARRAY_ITER_METHODS: &[&str] = &[
     "find", "find_index", "find_first", "find_first_index", "find_last", "find_last_index", "min",
@@ -106,6 +109,8 @@ struct Parser<'t> {
     attr_open: (usize, usize),
     /// The label of the assertion about to be parsed (`a1: assert ...`).
     label: Option<Token>,
+    /// The process whose statements are being parsed.
+    process: ProcessKind,
 }
 
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
@@ -721,8 +726,21 @@ impl<'t> Parser<'t> {
             "case" => self.generate_case(),
             "begin" => self.generate_block(t.span),
             "always" | "always_comb" | "always_ff" | "always_latch" | "initial" | "final" => {
+                let kind = match t.text.as_str() {
+                    "always" => ProcessKind::Always,
+                    "always_comb" => ProcessKind::AlwaysComb,
+                    "always_ff" => ProcessKind::AlwaysFf,
+                    "always_latch" => ProcessKind::AlwaysLatch,
+                    "initial" => ProcessKind::Initial,
+                    _ => ProcessKind::Final,
+                };
+                let start = t.span;
                 self.bump();
+                let saved = std::mem::replace(&mut self.process, kind);
                 self.stmt();
+                self.process = saved;
+                let end = self.prev_span();
+                self.u.processes.push((kind, start, end));
             }
             "assign" => {
                 self.bump();
@@ -1912,6 +1930,10 @@ impl<'t> Parser<'t> {
             if self.eat_p("=") {
                 let from = self.pos;
                 self.scan_expr(STOP_COMMA, RefKind::Expr);
+                if matches!(self.u.decls[id as usize].kind, DeclKind::Variable | DeclKind::Net) {
+                    let access = if self.u.decls[id as usize].kind == DeclKind::Net { AccessKind::NetInit } else { AccessKind::VarInit };
+                    self.push_access(access, n.span, Vec::new(), Some(id));
+                }
                 if matches!(self.u.decls[id as usize].kind, DeclKind::Variable | DeclKind::Net) && fl & dflags::CONST != 0 {
                     self.u.decls[id as usize].detail = self.text_of(from, self.pos);
                 }
@@ -2546,7 +2568,7 @@ impl<'t> Parser<'t> {
                 let k = if is_cross { DeclKind::Cross } else { DeclKind::Coverpoint };
                 self.new_decl(k, Some(l), start)
             });
-            let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false, decl: false, implies: false };
+            let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false, decl: false, implies: false, assign: false };
             let items = self.refs_len();
             loop {
                 if self.at_p("{") {
@@ -3033,9 +3055,9 @@ impl<'t> Parser<'t> {
             if self.eat_kw("default") {
                 self.eat_p(":");
             } else {
-                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false, decl: false, implies: false }, RefKind::Expr);
+                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false }, RefKind::Expr);
                 while self.eat_p(",") {
-                    self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false, implies: false }, RefKind::Expr);
+                    self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false }, RefKind::Expr);
                 }
                 self.expect_p(":");
             }
@@ -3324,8 +3346,23 @@ impl<'t> Parser<'t> {
             }
             "randsequence" => self.skip_until_kw("endsequence"),
             "force" | "release" | "assign" | "deassign" => {
+                let start = t.span;
                 self.bump();
-                self.scan_until_semi(RefKind::Expr);
+                let (from, r0) = (self.pos, self.refs_len());
+                if matches!(t.text.as_str(), "force" | "assign") {
+                    self.scan_expr(Stop { eq: true, ..STOP_NONE }, RefKind::Expr);
+                    let (to, r1) = (self.pos, self.refs_len());
+                    let targets = self.lhs_targets(from, to, r0, r1);
+                    self.scan_until_semi(RefKind::Expr);
+                    let kind = if t.text == "force" { AccessKind::Force } else { AccessKind::ProceduralAssign };
+                    self.push_access(kind, start, targets, None);
+                } else {
+                    self.scan_until_semi(RefKind::Expr);
+                    let (to, r1) = (self.pos, self.refs_len());
+                    let targets = self.lhs_targets(from, to, r0, r1);
+                    let kind = if t.text == "release" { AccessKind::Release } else { AccessKind::Deassign };
+                    self.push_access(kind, start, targets, None);
+                }
             }
             "else" => {
                 self.error(t.span, "Unexpected 'else'");
@@ -3501,7 +3538,25 @@ impl<'t> Parser<'t> {
     // ----------------------------------------------------------------- expressions
 
     fn expr_stmt(&mut self, kind: RefKind) {
-        self.scan_expr(STOP_NONE, kind);
+        let (start, from, r0) = (self.tok().span, self.pos, self.refs_len());
+        let pre = self.at_p("++") || self.at_p("--");
+        self.scan_expr(Stop { assign: true, ..STOP_NONE }, kind);
+        let (to, r1) = (self.pos, self.refs_len());
+        let op = self.tok().clone();
+        if op.kind == TokKind::Punct && matches!(op.text.as_str(), "=" | "<=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "<<<=" | ">>>=") {
+            let targets = self.lhs_targets(from, to, r0, r1);
+            self.bump();
+            self.scan_expr(STOP_NONE, kind);
+            let access = match op.text.as_str() {
+                "=" => AccessKind::Blocking,
+                "<=" => AccessKind::NonBlocking,
+                _ => AccessKind::Compound,
+            };
+            self.push_access(access, start, targets, None);
+        } else if pre || (to > from && (self.toks[to - 1].is_punct("++") || self.toks[to - 1].is_punct("--"))) {
+            let targets = self.lhs_targets(from, to, r0, r1);
+            self.push_access(AccessKind::IncDec, start, targets, None);
+        }
         if self.eat_p(";") {
             return;
         }
@@ -3522,11 +3577,16 @@ impl<'t> Parser<'t> {
     /// The assignments of `assign`: an undeclared name on the left of one is an implicit net
     /// (IEEE 1800 6.10), one on the right is a use of a name that must be declared.
     fn cont_assign_list(&mut self) {
-        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true, decl: true, implies: false };
+        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true, decl: true, implies: false, assign: false };
         loop {
             let (start, first_left) = (self.pos, self.u.refs.len());
+            let first_tok = self.tok().span;
             self.scan_expr(LHS, RefKind::Loose);
             self.selects_are_uses(start, first_left);
+            let targets = self.lhs_targets(start, self.pos, first_left as RefId, self.refs_len());
+            if self.at_p("=") {
+                self.push_access(AccessKind::Continuous, first_tok, targets, None);
+            }
             if self.eat_p("=") {
                 let first = self.u.refs.len();
                 self.scan_expr(Stop { comma: true, decl: true, ..STOP_NONE }, RefKind::Expr);
@@ -3601,6 +3661,41 @@ impl<'t> Parser<'t> {
             return;
         }
         self.group_rest(kind);
+    }
+
+    /// The references `r0..r1` made from the left side `toks[from..to]` that it writes: those
+    /// not inside its brackets or parentheses (indexes, call arguments: read).
+    fn lhs_targets(&self, from: usize, to: usize, r0: RefId, r1: RefId) -> Vec<RefId> {
+        let mut inner: Vec<Span> = Vec::new();
+        let mut open: Vec<Span> = Vec::new();
+        for t in &self.toks[from..to.min(self.toks.len())] {
+            if !t.is_real() {
+                continue;
+            }
+            if t.is_punct("[") || t.is_punct("(") {
+                open.push(t.span);
+            } else if t.is_punct("]") || t.is_punct(")") {
+                if let Some(o) = open.pop() {
+                    if o.file == t.span.file {
+                        inner.push(Span::new(o.file, o.start, t.span.end));
+                    }
+                }
+            }
+        }
+        (r0..r1)
+            .filter(|&r| {
+                let sp = self.u.refs[r as usize].segs.first().map(|s| s.span).unwrap_or_default();
+                !inner.iter().any(|i| i.file == sp.file && i.start <= sp.start && sp.end <= i.end)
+            })
+            .collect()
+    }
+
+    /// Records an access ending at the token before the current one.
+    fn push_access(&mut self, kind: AccessKind, start: Span, targets: Vec<RefId>, decl: Option<DeclId>) {
+        let end = self.prev_span();
+        let scope = self.scope();
+        let process = self.process;
+        self.u.accesses.push(Access { kind, process, start, end, scope, targets, decl });
     }
 
     /// The number of references so far (the next one's id).
@@ -3743,6 +3838,7 @@ impl<'t> Parser<'t> {
                             ":" if stop.colon => return,
                             "{" if stop.lbrace => return,
                             "=" if stop.eq => return,
+                            "=" | "<=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "<<<=" | ">>>=" if stop.assign => return,
                             "->" if stop.implies && self.nth(1).is_punct("{") => return,
                             _ => {}
                         }

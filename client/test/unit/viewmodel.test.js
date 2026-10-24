@@ -230,3 +230,20 @@ test.describe('assertions and coverage texts', () => {
     assert.equal(vm.checksMessage('req', 3, [], []), undefined);
   });
 });
+
+test.describe('drivers and loads', () => {
+  const site = (o) => ({ kind: 'blocking', group: 'writes', label: 'blocking', detail: 'q = d;', line: 4, children: [], ...o });
+  test.it('labels a site by its line and a connection by its port', () => {
+    assert.equal(vm.accessLabel(site()), 'q = d;');
+    assert.equal(vm.accessLabel(site({ group: 'connections', kind: 'port', label: 'a of u_c (input)', detail: 'child u_c (.a(s));' })), 'a of u_c (input)');
+    assert.equal(vm.accessDescription(site({ process: 'always_ff', context: 'u_c' })), 'blocking · in always_ff · u_c');
+    assert.equal(vm.accessDescription(site({ group: 'connections', label: 'a of u_e (input)', notes: ['connected in an expression: not followed'] })), 'connected in an expression: not followed');
+    assert.ok(vm.accessTooltip(site({ context: 'u_c.u_l' })).includes('Through instances: u_c.u_l'));
+  });
+  test.it('says when nothing was found or the search stopped', () => {
+    assert.equal(vm.accessesMessage('q', 'writes', 0, [], []), "Nothing writes 'q' in this build configuration.");
+    assert.equal(vm.accessesMessage('q', 'reads', 0, [], []), "Nothing reads 'q' in this build configuration.");
+    assert.equal(vm.accessesMessage('q', 'reads', 2, ['depth'], ['`bind` instances in tb are not followed']), 'Search incomplete: connections followed only 3 levels deep. `bind` instances in tb are not followed.');
+    assert.equal(vm.accessesMessage('q', 'reads', 2, [], []), undefined);
+  });
+});

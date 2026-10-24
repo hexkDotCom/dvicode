@@ -333,6 +333,64 @@ pub struct ParsedUnit {
     /// Assertions, coverage items and default clocking, with the references in each part, in
     /// source order.
     pub verif: Vec<VerifItem>,
+    /// Assignments and the other constructs that write names, in source order.
+    pub accesses: Vec<Access>,
+    /// `always*`, `initial` and `final` processes: kind, first and last token, in source order.
+    pub processes: Vec<(ProcessKind, Span, Span)>,
+}
+
+/// What writes a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessKind {
+    /// `assign a = b;` (a module item).
+    Continuous,
+    /// `wire w = expr;`
+    NetInit,
+    /// `logic v = expr;`
+    VarInit,
+    /// `a = b` in procedural code.
+    Blocking,
+    /// `a <= b`.
+    NonBlocking,
+    /// `a += b` and the other compound operators: a read and a write.
+    Compound,
+    /// `a++`, `--a`: a read and a write.
+    IncDec,
+    /// `assign a = b;` in procedural code.
+    ProceduralAssign,
+    Force,
+    /// `release a;`: ends a `force` (no value written).
+    Release,
+    /// `deassign a;`: ends a procedural `assign`.
+    Deassign,
+}
+
+/// The process an access is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProcessKind {
+    /// A module item, or code outside a process (a task or function: see its scope).
+    #[default]
+    None,
+    Always,
+    AlwaysFf,
+    AlwaysComb,
+    AlwaysLatch,
+    Initial,
+    Final,
+}
+
+/// An assignment-like construct: the references it writes (indexes in its left side are not
+/// among them: they are read), or the declaration it initializes.
+#[derive(Clone, Debug)]
+pub struct Access {
+    pub kind: AccessKind,
+    pub process: ProcessKind,
+    /// Its first and last token.
+    pub start: Span,
+    pub end: Span,
+    pub scope: DeclId,
+    pub targets: Vec<RefId>,
+    pub decl: Option<DeclId>,
 }
 
 /// What a verification construct is.

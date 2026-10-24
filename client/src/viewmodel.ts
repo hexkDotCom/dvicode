@@ -596,3 +596,92 @@ export function checksMessage(name: string, hits: number, limits: string[], note
   }
   return parts.join(' ') || undefined;
 }
+
+/** A result of `dvicode/accessesOf`: a write, a read or a connection followed. */
+export interface AccessInfo {
+  /** `blocking`, `nonblocking`, `continuous`, `read`, `argument`, `gate output`, `port`... */
+  kind: string;
+  /** `writes`, `reads`, `control`, `connections` or `other`. */
+  group: string;
+  process?: string;
+  label: string;
+  detail: string;
+  /** The instances on the way (`u_core.u_fifo`). */
+  context?: string;
+  line: number | null;
+  notes?: string[];
+  children: AccessInfo[];
+}
+
+/** The groups of the Drivers and Loads view, in order, with their titles. */
+export const ACCESS_GROUPS: [string, string][] = [
+  ['writes', 'Writes'],
+  ['reads', 'Reads'],
+  ['control', 'Release and deassign'],
+  ['connections', 'Through ports'],
+  ['other', 'Aliases, clocking blocks and switches'],
+];
+
+/** The label of a result: a connection's port and instance, else its source line. */
+export function accessLabel(s: AccessInfo): string {
+  return s.group === 'connections' || !s.detail ? s.label : s.detail;
+}
+
+/** The description of a result: what it is, where, and its notes. */
+export function accessDescription(s: AccessInfo): string | undefined {
+  const parts: string[] = [];
+  if (s.group !== 'connections') {
+    parts.push(s.label);
+  }
+  if (s.process) {
+    parts.push(`in ${s.process}`);
+  }
+  if (s.context) {
+    parts.push(s.context);
+  }
+  if (s.notes?.length) {
+    parts.push(s.notes.join('; '));
+  }
+  return parts.join(' · ') || undefined;
+}
+
+/** The tooltip of a result (Markdown). */
+export function accessTooltip(s: AccessInfo): string {
+  const lines = [`**${s.label}**${s.process ? ` in ${s.process}` : ''}${s.line !== null ? ` (line ${s.line + 1})` : ''}`];
+  if (s.detail) {
+    lines.push('```systemverilog\n' + s.detail + '\n```');
+  }
+  if (s.context) {
+    lines.push(`Through instances: ${s.context}`);
+  }
+  for (const n of s.notes ?? []) {
+    lines.push(n.charAt(0).toUpperCase() + n.slice(1) + '.');
+  }
+  return lines.join('\n\n');
+}
+
+/** The view's message for a result: nothing found, or what limited the search. */
+export function accessesMessage(name: string, mode: string, sites: number, limits: string[], notes: string[]): string | undefined {
+  const why: Record<string, string> = {
+    candidates: 'too many names to look at',
+    sites: 'too many results',
+    connections: 'too many connections',
+    instances: 'too many instantiations',
+    depth: 'connections followed only 3 levels deep',
+    cancelled: 'the search was cancelled',
+  };
+  const limited = limits.map((l) => why[l] ?? l);
+  const parts: string[] = [];
+  if (!sites) {
+    parts.push(`Nothing ${mode === 'writes' ? 'writes' : 'reads'} '${name}' in this build configuration.`);
+  }
+  if (limited.length) {
+    parts.push(`Search incomplete: ${limited.join(', ')}.`);
+  }
+  if (notes.length) {
+    const shown = notes.slice(0, 3).join('; ');
+    const more = notes.length > 3 ? `; and ${notes.length - 3} more` : '';
+    parts.push(`${shown.charAt(0).toUpperCase()}${shown.slice(1)}${more}.`);
+  }
+  return parts.join(' ') || undefined;
+}

@@ -50,6 +50,11 @@ currently in preview.
   connected twice or ordered and named connections mixed.
 - **Factory override impact**: hover a `set_*_override*` call to see which components it
   changes in the test's modeled build, which it may change, and why others are not changed.
+- **Drivers and Loads**: right-click a signal or port and choose Show Drivers or Show Loads to
+  see where it is written (assignments, `force`, output arguments, gate outputs) or read,
+  following port connections down into instances and up to where its module is instantiated.
+  The places are found from the source, not by elaborating the design: interfaces, `alias`,
+  `bind` instances and connections through expressions are not followed.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.

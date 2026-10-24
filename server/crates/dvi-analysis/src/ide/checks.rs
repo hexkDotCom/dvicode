@@ -84,15 +84,69 @@ fn name_hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// A reference to the target.
+/// A reference to a declaration: the reference, its segment that names it, and that segment's
+/// span.
 #[derive(Clone, Copy)]
-struct Occ {
-    unit: UnitId,
-    rid: RefId,
-    span: Span,
+pub(crate) struct Occ {
+    pub unit: UnitId,
+    pub rid: RefId,
+    pub seg: u16,
+    pub span: Span,
     /// Made by a macro body: its span is the macro call's (classified, never followed through
     /// a port or an argument).
-    from_macro: bool,
+    pub from_macro: bool,
+}
+
+impl Analysis {
+    /// Every reference to `target` in the project (from macro bodies too), the units that
+    /// compile its file first; `candidates` counts the references resolved, up to `max`. The
+    /// reason it stopped early (`candidates`, `cancelled`), if it did.
+    pub(crate) fn find_occurrences(&self, target: DeclRef, candidates: &mut usize, max: usize) -> (Vec<Occ>, Option<&'static str>) {
+        let key = self.decl_key(self.canonical(target));
+        let name = self.decl(target).name.clone();
+        let mut out = Vec::new();
+        let mut seen: FxHashSet<(UnitId, RefId, u16)> = FxHashSet::default();
+        // A file compiled in many units repeats its references: a source span found to be a use
+        // is not resolved again in other units (in its own unit every time: one macro argument
+        // can be expanded twice).
+        let mut spans: FxHashMap<Span, (u8, bool, UnitId)> = FxHashMap::default();
+        let home = self.decl(target).name_span.file;
+        let mut units: Vec<&Arc<crate::world::Unit>> = self.units.iter().flatten().filter(|u| u.kind != UnitKind::Builtin).collect();
+        units.sort_by_key(|u| !u.files.contains(&home));
+        for u in units {
+            if self.cancelled() {
+                return (out, Some("cancelled"));
+            }
+            let Some(occ) = u.names.get(&name) else { continue };
+            for (rid, seg) in occ.iter() {
+                *candidates += 1;
+                if *candidates > max {
+                    return (out, Some("candidates"));
+                }
+                if *candidates % 1024 == 0 && self.cancelled() {
+                    return (out, Some("cancelled"));
+                }
+                let s = &u.parsed.reference(*rid).segs[*seg as usize];
+                let entry = if s.from_macro { None } else { spans.get(&s.span).copied() };
+                if let Some((tries, found, first)) = entry {
+                    if first != u.id && (found || tries >= 3) {
+                        *candidates -= 1;
+                        continue;
+                    }
+                }
+                let hit = self.resolve_ref(u.id, *rid, *seg as usize).is_some_and(|t| self.decl_key(self.canonical(t)) == key);
+                if !s.from_macro {
+                    let e = spans.entry(s.span).or_insert((0, false, u.id));
+                    e.0 = e.0.saturating_add(1);
+                    e.1 |= hit;
+                }
+                if hit && seen.insert((u.id, *rid, *seg)) {
+                    out.push(Occ { unit: u.id, rid: *rid, seg: *seg, span: s.span, from_macro: s.from_macro });
+                }
+            }
+        }
+        (out, None)
+    }
 }
 
 struct Search<'a> {
@@ -277,54 +331,9 @@ impl Search<'_> {
 
     /// Every reference to `target` in the project (from macro bodies too), within the budget.
     fn occurrences(&mut self, target: DeclRef) -> Vec<Occ> {
-        let a = self.a;
-        let key = a.decl_key(a.canonical(target));
-        let name = a.decl(target).name.clone();
-        let mut out = Vec::new();
-        let mut seen: FxHashSet<(UnitId, RefId, u16)> = FxHashSet::default();
-        // A file compiled in many units repeats its references: a source span found to be a use
-        // is not resolved again in other units.
-        let mut spans: FxHashMap<Span, (u8, bool, UnitId)> = FxHashMap::default();
-        // The units that compile the target's file first: its own uses are found before the
-        // budget can run out on far ones.
-        let home = a.decl(target).name_span.file;
-        let mut units: Vec<&Arc<crate::world::Unit>> = a.units.iter().flatten().filter(|u| u.kind != UnitKind::Builtin).collect();
-        units.sort_by_key(|u| !u.files.contains(&home));
-        for u in units {
-            if a.cancelled() {
-                self.limit("cancelled");
-                break;
-            }
-            let Some(occ) = u.names.get(&name) else { continue };
-            for (rid, seg) in occ.iter() {
-                self.candidates += 1;
-                if self.candidates > MAX_CANDIDATES {
-                    self.limit("candidates");
-                    return out;
-                }
-                if self.candidates % 1024 == 0 && a.cancelled() {
-                    self.limit("cancelled");
-                    return out;
-                }
-                let s = &u.parsed.reference(*rid).segs[*seg as usize];
-                // In one unit every time: one macro argument can be expanded in two assertions.
-                let entry = if s.from_macro { None } else { spans.get(&s.span).copied() };
-                if let Some((tries, found, first)) = entry {
-                    if first != u.id && (found || tries >= 3) {
-                        self.candidates -= 1;
-                        continue;
-                    }
-                }
-                let hit = a.resolve_ref(u.id, *rid, *seg as usize).is_some_and(|t| a.decl_key(a.canonical(t)) == key);
-                if !s.from_macro {
-                    let e = spans.entry(s.span).or_insert((0, false, u.id));
-                    e.0 = e.0.saturating_add(1);
-                    e.1 |= hit;
-                }
-                if hit && seen.insert((u.id, *rid, *seg)) {
-                    out.push(Occ { unit: u.id, rid: *rid, span: s.span, from_macro: s.from_macro });
-                }
-            }
+        let (out, limit) = self.a.find_occurrences(target, &mut self.candidates, MAX_CANDIDATES);
+        if let Some(l) = limit {
+            self.limit(l);
         }
         out
     }
@@ -867,6 +876,11 @@ impl Search<'_> {
 }
 
 /// The design element (module, interface, program, checker) declaration `id` is in.
+pub(crate) fn definition_of_pub(p: &dvi_syntax::ast::ParsedUnit, id: DeclId) -> Option<DeclId> {
+    definition_of(p, id)
+}
+
+/// The design element (module, interface, program, checker) declaration `id` is in.
 fn definition_of(p: &dvi_syntax::ast::ParsedUnit, id: DeclId) -> Option<DeclId> {
     let mut d = Some(id);
     let mut steps = 0;
@@ -996,7 +1010,7 @@ fn plain_expr(e: &[Token]) -> bool {
 }
 
 /// The `(` that token `i` is inside, within its statement.
-fn enclosing_open(toks: &[Token], i: usize) -> Option<usize> {
+pub(crate) fn enclosing_open(toks: &[Token], i: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut k = i;
     while k > 0 {

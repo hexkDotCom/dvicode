@@ -392,6 +392,39 @@ async function run() {
     return `${push} || ${addr}`;
   });
 
+  await test('drivers and loads view: through an output port and back', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const v = api.drivers();
+    const lines = () => {
+      const out = [];
+      const walk = (nodes, depth) => {
+        for (const n of nodes) {
+          const item = v.getTreeItem(n);
+          out.push(`${'  '.repeat(depth)}${item.label}${item.description ? ` (${item.description})` : ''}`);
+          walk(v.getChildren(n), depth + 1);
+        }
+      };
+      walk(v.getChildren(), 0);
+      return out.join(' | ');
+    };
+    const doc = await open('rtl/top.sv');
+    const ed = await vscode.window.showTextDocument(doc);
+    const p = lineOf(doc, 'logic   full, empty').translate(0, 'logic   '.length);
+    ed.selection = new vscode.Selection(p, p);
+    await vscode.commands.executeCommand('dvicode.showDrivers');
+    const drivers = lines();
+    const wantDrivers = 'Through ports (1) |   full of u_fifo (output) |     assign full  = (count == DEPTH); (continuous · u_fifo)';
+    if (drivers !== wantDrivers) throw new Error(`drivers: ${drivers}; message '${v.view.message}'`);
+    if (v.view.description !== 'drivers of full (variable)') throw new Error(`description: ${v.view.description}`);
+    // The view's button asks the other direction for the same signal.
+    await vscode.commands.executeCommand('dvicode.accesses.showLoads');
+    const loads = lines();
+    const wantLoads = 'Reads (1) |   BUSY: if (full) state <= DONE; (read · in always_ff)';
+    if (loads !== wantLoads) throw new Error(`loads: ${loads}; message '${v.view.message}'`);
+    return `${drivers} || ${loads}`;
+  });
+
   await test('config_db: hover and go to definition from a get to its set', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

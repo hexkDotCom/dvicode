@@ -111,7 +111,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1 } })),
         ..Default::default()
     }
 }
@@ -1947,6 +1947,19 @@ impl Server {
                     None => Value::Null,
                 })
             }),
+            // The writes or reads of the declaration at a position (null: no signal there).
+            "dvicode/accessesOf" => self.spawn_project(req, |a, p: AccessesParams| {
+                let Some((f, off)) = pos(a, &p.text_document.uri, p.position) else { return Ok(Value::Null) };
+                let writes = match p.mode.as_str() {
+                    "writes" => true,
+                    "reads" => false,
+                    m => return Err(format!("unknown mode {m}")),
+                };
+                Ok(match a.accesses_at(f, off, writes) {
+                    Some(r) => json!({ "revision": a.revision, "target": r.target, "mode": r.mode, "sites": r.sites, "limits": r.limits, "notes": r.notes }),
+                    None => Value::Null,
+                })
+            }),
             "dvicode/locate" => self.spawn_project(req, |a, p: LocateParams| {
                 let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
                 Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))
@@ -2109,6 +2122,15 @@ struct StructureParams {
 struct LocateParams {
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessesParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+    /// `writes` or `reads`.
+    mode: String,
 }
 
 /// The register model `top` builds in `a` (the default top when `None`), from `models` when

@@ -622,6 +622,36 @@
         "title": "Show Clock and Reset Uses",
         "category": "DVICode",
         "icon": "$(eye)"
+      },
+      {
+        "command": "dvicode.showDrivers",
+        "title": "Show Drivers",
+        "category": "DVICode",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dvicode.showLoads",
+        "title": "Show Loads",
+        "category": "DVICode",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "dvicode.accesses.refresh",
+        "title": "Refresh (Drivers and Loads)",
+        "category": "DVICode",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dvicode.accesses.showDrivers",
+        "title": "Show Drivers of This Signal",
+        "category": "DVICode",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dvicode.accesses.showLoads",
+        "title": "Show Loads of This Signal",
+        "category": "DVICode",
+        "icon": "$(eye)"
       }
     ],
     "menus": {
@@ -640,6 +670,16 @@
           "command": "dvicode.showChecks",
           "when": "editorLangId == systemverilog && dvicode.engine.checks",
           "group": "navigation@92"
+        },
+        {
+          "command": "dvicode.showDrivers",
+          "when": "editorLangId == systemverilog && dvicode.engine.accesses",
+          "group": "navigation@93"
+        },
+        {
+          "command": "dvicode.showLoads",
+          "when": "editorLangId == systemverilog && dvicode.engine.accesses",
+          "group": "navigation@94"
         }
       ],
       "view/title": [
@@ -834,6 +874,21 @@
           "group": "navigation@9"
         },
         {
+          "command": "dvicode.accesses.showLoads",
+          "when": "view == dvicode.accesses && dvicode.accesses.mode == writes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.accesses.showDrivers",
+          "when": "view == dvicode.accesses && dvicode.accesses.mode == reads",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.accesses.refresh",
+          "when": "view == dvicode.accesses",
+          "group": "navigation@9"
+        },
+        {
           "command": "dvicode.selectUvmTest",
           "when": "view == dvicode.verificationHierarchy",
           "group": "navigation@9"
@@ -922,6 +977,26 @@
         {
           "command": "dvicode.checks.allRoles",
           "when": "false"
+        },
+        {
+          "command": "dvicode.showDrivers",
+          "when": "editorLangId == systemverilog && dvicode.engine.accesses"
+        },
+        {
+          "command": "dvicode.showLoads",
+          "when": "editorLangId == systemverilog && dvicode.engine.accesses"
+        },
+        {
+          "command": "dvicode.accesses.refresh",
+          "when": "dvicode.engine.accesses"
+        },
+        {
+          "command": "dvicode.accesses.showDrivers",
+          "when": "false"
+        },
+        {
+          "command": "dvicode.accesses.showLoads",
+          "when": "false"
         }
       ]
     },
@@ -957,6 +1032,11 @@
           "id": "dvicode.checks",
           "name": "Assertions and Coverage",
           "when": "dvicode.engine.checks"
+        },
+        {
+          "id": "dvicode.accesses",
+          "name": "Drivers and Loads",
+          "when": "dvicode.engine.accesses"
         },
         {
           "id": "dvicode.structure",

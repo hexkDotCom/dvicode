@@ -3829,3 +3829,177 @@ fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() 
     assert_eq!(p.iter().filter(|m| m.contains("Expected ';'")).count(), 2, "{p:?}");
     assert!(!p.iter().any(|m| m.contains("'b' is not declared") || m.contains("'e' is not declared")), "{p:?}");
 }
+
+const DRIVERS_SRC: &str = r#"
+module child(input logic a, output logic y, inout wire z);
+  assign y = a;
+endmodule
+
+module leaf(input logic d, output logic q);
+  always_ff @(posedge d) q <= d;
+endmodule
+
+module top;
+  logic clk, s, t, u, v, w;
+  wire g;
+  logic [7:0] bus, idx;
+  int n;
+  string str;
+  logic p = 1'b0;
+  child u_c (.a(s), .y(t), .z());
+  child u_p (s, u, );
+  leaf u_l (.d(t), .q(v));
+  child u_e (.a(s & w), .y(w), .z());
+  and g1 (g, s, w);
+  assign s = clk;
+  task get(output int o);
+    o = 1;
+  endtask
+  always_comb bus[idx] = n;
+  initial begin
+    n++;
+    get(n);
+    void'($sscanf(str, "%d", n));
+    force w = 1'b1;
+    release w;
+    if (n <= 3) n += 2;
+  end
+endmodule
+"#;
+
+/// The sites of the declaration at `off`, one line each (children indented), and the limits and
+/// notes.
+fn access_lines(a: &Analysis, f: dvi_syntax::FileId, off: u32, writes: bool) -> (Vec<String>, Vec<&'static str>, Vec<String>) {
+    fn render(s: &dvi_analysis::ide::drivers::AccessSite, depth: usize, out: &mut Vec<String>) {
+        let ctx = if s.context.is_empty() { String::new() } else { format!(" @{}", s.context) };
+        let notes = if s.notes.is_empty() { String::new() } else { format!(" ({})", s.notes.join("; ")) };
+        let process = s.process.map(|p| format!(" in {p}")).unwrap_or_default();
+        out.push(format!("{}{} {} line {}{process}{ctx}{notes}", "  ".repeat(depth), s.group, s.label, s.line.unwrap_or(0) + 1));
+        for c in &s.children {
+            render(c, depth + 1, out);
+        }
+    }
+    let r = a.accesses_at(f, off, writes).expect("a signal");
+    let mut out = Vec::new();
+    for s in &r.sites {
+        render(s, 0, &mut out);
+    }
+    (out, r.limits, r.notes)
+}
+
+/// The offset of the first whole word `needle` after `after` in `src`.
+fn word_at(src: &str, after: &str, needle: &str) -> u32 {
+    let base = src.find(after).unwrap();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let (i, _) = src[base..].match_indices(needle).find(|(i, _)| !word(src[..base + i].chars().last()) && !word(src[base + i + needle.len()..].chars().next())).unwrap();
+    (base + i) as u32
+}
+
+#[test]
+fn drivers_and_loads_of_a_signal_follow_ports_both_ways() {
+    let (a, root) = project("drivers", &[("a.sv", DRIVERS_SRC)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let show = |after: &str, name: &str, writes: bool| -> Vec<String> {
+        let (lines, limits, notes) = access_lines(&a, f, word_at(DRIVERS_SRC, after, name), writes);
+        assert!(limits.is_empty() && notes.is_empty(), "{limits:?} {notes:?}");
+        lines
+    };
+    let top = "logic clk";
+    assert_eq!(show(top, "s", true), ["writes continuous line 22"], "a gate's input is no write");
+    assert_eq!(
+        show(top, "s", false),
+        [
+            "connections a of u_c (input) line 17",
+            "  reads read line 3 @u_c",
+            "connections a of u_p (input) line 18",
+            "  reads read line 3 @u_p",
+            "connections a of u_e (input) line 20 (connected in an expression: not followed)",
+            "reads gate input line 21",
+        ]
+    );
+    assert_eq!(show(top, "t", true), ["connections y of u_c (output) line 17", "  writes continuous line 3 @u_c"]);
+    assert_eq!(show(top, "t", false), ["connections d of u_l (input) line 19", "  reads read line 7 in always_ff @u_l", "  reads read line 7 in always_ff @u_l"]);
+    assert_eq!(
+        show(top, "n", true),
+        ["writes increment line 28 in initial", "writes argument of get line 29", "writes argument of $sscanf line 30", "writes compound line 33 in initial"],
+        "an output formal and `$sscanf`'s third argument write; `n <= 3` in a condition does not"
+    );
+    assert_eq!(show(top, "n", false), ["reads read line 26 in always_comb", "reads increment line 28 in initial", "reads read line 33 in initial", "reads compound line 33 in initial"]);
+    assert_eq!(show(top, "w", true), ["connections y of u_e (output) line 20", "  writes continuous line 3 @u_e", "writes force line 31 in initial", "control release line 32 in initial"]);
+    assert_eq!(show(top, "bus", true), ["writes blocking line 26 in always_comb"]);
+    assert!(show(top, "idx", true).is_empty(), "an index on the left side is read");
+    assert_eq!(show(top, "idx", false), ["reads read line 26 in always_comb"]);
+    assert_eq!(show(top, "g", true), ["writes gate output line 21"]);
+    assert_eq!(show(top, "p", true), ["writes variable initializer line 16"]);
+    // From a port: up to each instantiation, one branch each, and down again elsewhere.
+    assert_eq!(
+        show("module child(", "a", true),
+        ["connections a of u_c in top line 17", "  writes continuous line 22 @top", "connections a of u_p in top line 18", "  writes continuous line 22 @top", "connections a of u_e in top line 20 (connected to an expression: s & w)"]
+    );
+    assert_eq!(
+        show("module child(", "y", false),
+        [
+            "connections y of u_c in top line 17",
+            "  connections d of u_l (input) line 19 @top",
+            "    reads read line 7 in always_ff @top.u_l",
+            "    reads read line 7 in always_ff @top.u_l",
+            "connections y of u_p in top line 18",
+            "connections y of u_e in top line 20",
+            "  reads gate input line 21 @top",
+        ],
+        "the search that came up through u_c does not go down into u_c again"
+    );
+}
+
+const DRIVERS_EDGE_SRC: &str = r#"
+`define SET(x, v) x = v;
+module m3(input logic i, output logic o); assign o = i; endmodule
+module m2(input logic i, output logic o); m3 u3 (.i, .o); endmodule
+module m1(input logic i, output logic o); m2 u2 (.*); endmodule
+module m0(input logic i, output logic o); m1 u1 (.i(i), .o(o)); endmodule
+module chk(input logic c); endmodule
+module tb;
+  logic a, b, c, d;
+  m0 u0 (.i(a), .o(b));
+  generate if (1) begin : g
+    m3 u_g (.i(c), .o(d));
+  end endgenerate
+  unknown_mod u_x (c, d);
+  initial `SET(c, 1)
+  task t(output logic r); r = a; endtask
+endmodule
+bind tb chk u_bind (.c(c));
+class obj;
+  int f;
+  function void set(); f = 1; endfunction
+endclass
+module user;
+  obj h;
+  initial begin h = new; h.f = 2; $display(h.f); end
+endmodule
+"#;
+
+#[test]
+fn drivers_and_loads_through_implicit_connections_macros_and_classes() {
+    let (a, root) = project("drivers_edge", &[("a.sv", DRIVERS_EDGE_SRC)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let show = |after: &str, name: &str, writes: bool| access_lines(&a, f, word_at(DRIVERS_EDGE_SRC, after, name), writes);
+    let tb = "logic a";
+    let bind = vec!["`bind` instances in tb are not followed".to_string()];
+    assert_eq!(
+        show(tb, "b", true),
+        (
+            vec!["connections o of u0 (output) line 10", "  connections o of u1 (output) line 6 @u0", "    connections o of u2 (.*) (output) line 5 @u0.u1", "      connections o of u3 (output) line 4 @u0.u1.u2"].into_iter().map(String::from).collect::<Vec<_>>(),
+            vec!["depth"],
+            bind.clone()
+        ),
+        "named, `.*` and `.o` connections; the fourth level is past the depth limit"
+    );
+    assert_eq!(show(tb, "c", true).0, ["connections connection of u_x line 14 (module not found: not followed)", "writes blocking line 15 in initial"], "the macro's assignment");
+    assert_eq!(show(tb, "c", false), (vec!["connections i of u_g (input) line 12".to_string(), "  reads read line 3 @u_g".into(), "connections connection of u_x line 14 (module not found: not followed)".into()], vec![], bind.clone()), "in a generate block; the `.i` of m2 is no read of m3's port");
+    assert_eq!(show("output logic r", "r", true).0, ["writes blocking line 16 in task"]);
+    let field = vec!["a class field: the sites are those of every object of the class".to_string()];
+    assert_eq!(show("int f", "f", true), (vec!["writes blocking line 21 in function".to_string(), "writes blocking line 25 in initial".into()], vec![], field.clone()));
+    assert_eq!(show("int f", "f", false), (vec!["reads argument of $display line 25".to_string()], vec![], field));
+    assert_eq!(show("obj h", "h", true).0, ["writes blocking line 25 in initial"], "`h.f = 2` writes the object's field, not the handle");
+}
