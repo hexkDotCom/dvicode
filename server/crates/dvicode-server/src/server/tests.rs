@@ -1775,3 +1775,24 @@ fn a_line_that_opens_a_scope_waits_for_its_update() {
     assert!(c.reply(&w, WAIT).is_some_and(|r| r.error.is_none()));
     c.shutdown();
 }
+
+#[test]
+fn a_line_that_ends_a_loop_waits_for_its_update() {
+    // The loop's statement ends the loop on its line: past it, the loop's variable is gone.
+    let text = "module top;\n  function void f();\n    for (int loop_index = 0; loop_index < 2; loop_index++)\n      f();\n    f();\n  endfunction\nendmodule\n";
+    let root = project("linelocalloop", &[("top.sv", text)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let top = uri(&root, "top.sv");
+    c.open(&top, 1, text);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    gate.close();
+    c.change(&top, 2, &text.replace("      f();\n    f();", "      f(); loo\n    f();"));
+    let w = c.send_request("textDocument/completion", json!({ "textDocument": { "uri": top }, "position": { "line": 3, "character": 14 } }));
+    assert!(c.reply(&w, Duration::from_millis(300)).is_none(), "answered before its edit was analysed");
+    gate.open();
+    assert!(c.reply(&w, WAIT).is_some_and(|r| r.error.is_none()));
+    c.shutdown();
+}

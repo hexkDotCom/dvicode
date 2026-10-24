@@ -163,9 +163,18 @@ struct Updated {
 /// text of its line before it.
 struct LineLocal {
     file: FileId,
+    /// Where the line starts in the snapshot's text (and where its scope is looked up).
     off: u32,
-    line_start: u32,
     line: String,
+    /// The editor's text it answers for: when it has changed by the time the answer is made,
+    /// there is none (as for a waiting request whose document changes).
+    text: Arc<str>,
+}
+
+impl LineLocal {
+    fn current(&self, a: &Analysis) -> bool {
+        a.vfs.text(self.file).is_some_and(|t| Arc::ptr_eq(&t, &self.text))
+    }
 }
 
 /// A request that waits for edits to be analysed (see `Server::spawn`).
@@ -1477,7 +1486,9 @@ impl Server {
     /// other files compiled with it, or a build under way, make it wait as usual.
     fn line_local(&self, req: &Request) -> Option<LineLocal> {
         let file = self.file_of_request(&req.params)?;
-        if self.building || !self.dirty.contains_key(&file) || self.dirty.keys().any(|g| *g != file && self.related(false, Some(file), *g)) {
+        // A build under way, or done and waiting for the edits to be replayed on it, may
+        // replace what the snapshot in use says.
+        if self.building || self.built.is_some() || !self.dirty.contains_key(&file) || self.dirty.keys().any(|g| *g != file && self.related(false, Some(file), *g)) {
             return None;
         }
         let p: Position = serde_json::from_value(req.params.get("position")?.clone()).ok()?;
@@ -1495,16 +1506,9 @@ impl Server {
             }
             units += c.len_utf16() as u32;
         }
-        let mut at = col.min(lo.len());
-        while !lo.is_char_boundary(at) {
-            at -= 1;
-        }
-        let off = line_start + at as u32;
-        if !self.analysis.in_body(file, off) {
-            return None;
-        }
+        let off = self.analysis.line_scope(file, line_start, line_start + lo.len() as u32)?;
         log::debug!("{}: answered from revision {} with the editor's line {}", req.method, self.analysis.revision, p.line + 1);
-        Some(LineLocal { file, off, line_start, line: ln[..col].to_string() })
+        Some(LineLocal { file, off, line: ln[..col].to_string(), text: new })
     }
 
     fn file_of_request(&self, params: &Value) -> Option<FileId> {
@@ -1553,6 +1557,9 @@ impl Server {
             }),
             "textDocument/completion" => match self.line_local(&req) {
                 Some(l) => self.spawn_now(req, move |a, _: CompletionParams| {
+                    if !l.current(a) {
+                        return Ok(None);
+                    }
                     let items = a.completions_with_line(l.file, l.off, &l.line);
                     Ok(Some(CompletionResponse::List(CompletionList { is_incomplete: items.len() >= 3000, items })))
                 }),
@@ -1564,7 +1571,7 @@ impl Server {
                 }),
             },
             "textDocument/signatureHelp" => match self.line_local(&req) {
-                Some(l) => self.spawn_now(req, move |a, _: SignatureHelpParams| Ok(a.signature_help_with_line(l.file, l.line_start, &l.line))),
+                Some(l) => self.spawn_now(req, move |a, _: SignatureHelpParams| Ok(if l.current(a) { a.signature_help_with_line(l.file, l.off, &l.line) } else { None })),
                 None => self.spawn(req, |a, p: SignatureHelpParams| {
                     let tp = p.text_document_position_params;
                     let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };

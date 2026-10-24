@@ -152,6 +152,16 @@ def timed(srv, method, params):
     return (t - t0) * 1000, m.get("result")
 
 
+def pick_body_insertion(text):
+    """Where to type inside a body: a statement before the file's last `endfunction` or
+    `endtask`. Returns (line, prefix, typed)."""
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        if re.match(r"^\s*(endfunction|endtask)\b", lines[i]):
+            return i, "    ", "probe_missing = 1;"
+    raise SystemExit("no endfunction/endtask in the file")
+
+
 def pick_insertion(text):
     """Where to type: before the last `end...` of a module, class or package, with a line that
     makes sense there and names something undeclared (so that every version of the file has a
@@ -195,6 +205,8 @@ def main():
     ap.add_argument("--interval", type=int, default=100, help="ms between typed characters")
     ap.add_argument("--settle", type=int, default=3000, help="ms without problems that ends a wait")
     ap.add_argument("--wait", type=int, default=120, help="s to wait for the problems of a version")
+    ap.add_argument("--where", choices=["scope", "body"], default="scope",
+                    help="type a declaration before the last end of a scope, or a statement in the last subroutine")
     ap.add_argument("--json", help="write the measurements here too")
     ap.add_argument("--log", help="the engine's log file")
     ap.add_argument("--perf", help="record a perf profile (Linux) of the typing and the declaration into this file")
@@ -252,7 +264,7 @@ def main():
     version = 1
     srv.notify("textDocument/didOpen", {"textDocument": {"uri": doc, "languageId": "systemverilog", "version": version, "text": text}})
     lines = text.split("\n")
-    line, prefix, typed = pick_insertion(text)
+    line, prefix, typed = pick_body_insertion(text) if a.where == "body" else pick_insertion(text)
     # A position on a word of the file for hover: the first identifier of the line above.
     hover_line = max(0, line - 1)
     mw = re.search(r"[A-Za-z_]\w*", lines[hover_line])

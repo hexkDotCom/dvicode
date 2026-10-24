@@ -492,7 +492,8 @@ impl Analysis {
     /// snapshot's text.
     pub fn signature_help_with_line(&self, file: FileId, line_start: u32, line: &str) -> Option<SignatureHelp> {
         let text = self.file_text(file)?;
-        let start = (line_start as usize).saturating_sub(4000);
+        // The 4000 bytes before the cursor, as `signature_help` reads.
+        let start = (line_start as usize).saturating_sub(4000usize.saturating_sub(line.len()));
         let start = (start..line_start as usize).find(|i| text.is_char_boundary(*i)).unwrap_or(line_start as usize);
         let window = format!("{}{line}", text.get(start..line_start as usize)?);
         self.signature_help_in(file, &window, line_start)
@@ -588,6 +589,10 @@ impl Analysis {
 /// that opens or closes a scope, no directive, no block comment, string or line continuation.
 /// Returns where the line starts in `old` (the same in `new`), and the line in `old` and in
 /// `new`, without its end.
+///
+/// What the line being typed does to the lines after it (a statement not finished yet, a type
+/// whose name is on the next line) shows when the update is in, a keystroke later, as do
+/// names it declares itself.
 pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32, &'a str, &'a str)> {
     let start = |t: &str| -> Option<usize> {
         if line == 0 {
@@ -605,6 +610,10 @@ pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32
         return None;
     }
     let (lo, ln) = (&old[os..oe], &new[ns..ne]);
+    // The line before must not continue into this one (`ifdef \, a `define body).
+    if old[..os].trim_end_matches(['\n', '\r']).ends_with('\\') {
+        return None;
+    }
     let structural = |l: &str| {
         let l = l.trim_end_matches('\r');
         l.contains("/*") || l.contains("*/") || l.contains('"') || l.ends_with('\\') || l.contains('`') || {
@@ -618,7 +627,7 @@ pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32
                             | "randcase" | "covergroup" | "endgroup" | "property" | "endproperty" | "sequence" | "endsequence"
                             | "constraint" | "clocking" | "endclocking" | "checker" | "endchecker" | "config" | "endconfig"
                             | "specify" | "endspecify" | "primitive" | "endprimitive" | "table" | "endtable" | "foreach" | "for"
-                            | "extern" | "import" | "export" | "typedef" | "let"
+                            | "extern" | "import" | "export" | "typedef" | "let" | "randsequence"
                     )
             })
         }
@@ -630,13 +639,25 @@ pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32
 }
 
 impl Analysis {
-    /// Whether the scope at `off` of `file` is a subroutine or a block, where an edit on one
-    /// line (see [`line_local_edit`]) changes nothing a completion there sees but that line.
-    pub fn in_body(&self, file: FileId, off: u32) -> bool {
-        let Some(&unit) = self.units_for(file).first() else { return false };
-        let scope = self.scope_at(unit, file, off);
-        scope != dvi_syntax::ast::ParsedUnit::ROOT
-            && matches!(self.unit(unit).parsed.decl(scope).kind, DeclKind::Function | DeclKind::Task | DeclKind::Block)
+    /// The scope a line of `file` (from `start` to `end`) is in, when it is a subroutine or a
+    /// block that begins before the line and goes on after it, of a project unit: there an
+    /// edit of that line only (see [`line_local_edit`]) changes nothing a completion sees but
+    /// the line. The offset to resolve at (`start`).
+    pub fn line_scope(&self, file: FileId, start: u32, end: u32) -> Option<u32> {
+        let &unit = self.units_for(file).first()?;
+        let u = self.unit(unit);
+        if u.kind != crate::world::UnitKind::Project {
+            return None;
+        }
+        let scope = self.scope_at(unit, file, start);
+        let d = u.parsed.decl(scope);
+        let inside = scope != dvi_syntax::ast::ParsedUnit::ROOT
+            && matches!(d.kind, DeclKind::Function | DeclKind::Task | DeclKind::Block)
+            && d.span.file == file
+            && d.span.start < start
+            && d.span.end > end
+            && self.scope_at(unit, file, end) == scope;
+        inside.then_some(start)
     }
 }
 
