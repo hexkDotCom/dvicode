@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -181,6 +181,8 @@ enum Event {
     Inspected(Url, u64, Inspected),
     /// The update `UpdateJob::seq` finished; `None` when it failed.
     Updated(u64, Option<Box<Updated>>),
+    /// Inputs of the build of that generation changed since it read them.
+    InputsChanged(u64, Vec<PathBuf>),
 }
 
 /// Edits to apply to a snapshot, on the update thread (`update_thread`).
@@ -517,6 +519,9 @@ impl Server {
                                 log::warn!("the editor did not take the watchers of the build's files: {:?}", r.error);
                                 self.watch_inputs = false;
                                 self.watched.clear();
+                            } else if self.watch_request.as_ref() == Some(&r.id) {
+                                // Watched from now on: what changed before is looked for on disk.
+                                self.check_inputs(self.analysis.setup.clone());
                             }
                         }
                     }
@@ -526,6 +531,13 @@ impl Server {
                         Ok(Event::Built(a, generation, error)) => self.on_built(a.map(|a| *a), generation, error),
                         Ok(Event::Inspected(uri, seq, ins)) => self.on_inspected(uri, seq, ins),
                         Ok(Event::Updated(seq, done)) => self.on_updated(seq, done.map(|u| *u)),
+                        Ok(Event::InputsChanged(generation, paths)) => {
+                            // A build started since then reads them again.
+                            if generation == self.build_generation && !self.building {
+                                log::info!("build again: changed while nothing watched them: {}", paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
+                                self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
+                            }
+                        }
                         Err(_) => {}
                     }
                 }
@@ -759,15 +771,13 @@ impl Server {
             return;
         };
         // A file it reads changed while it ran: build again. Told by the client, or seen on
-        // disk for a file nothing watched yet (an argument file of the first build).
+        // disk for a file nothing watched yet (an argument file of the first build; looked
+        // for again once the client watches it).
         let changed = std::mem::take(&mut self.changed_while_building);
-        let unwatched = a.setup.config.changed_inputs().into_iter().filter(|p| !is_log(p)).map(|p| p.display().to_string()).collect::<Vec<_>>();
-        if !unwatched.is_empty() {
-            log::info!("build again: changed while the build read them: {}", unwatched.join(", "));
-        }
-        if !unwatched.is_empty() || changed.iter().any(|c| a.setup.config.inputs.iter().any(|p| build_docs::same_file(p, c))) {
+        if changed.iter().any(|c| a.setup.config.inputs.iter().any(|p| build_docs::same_file(p, c))) {
             self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
         }
+        self.check_inputs(a.setup.clone());
         // A running update started from the snapshot this replaces (or from an older build).
         self.cancel_update();
         // Files opened while it ran are looked for again in it once it is in.
@@ -798,6 +808,18 @@ impl Server {
             self.start_build();
         }
         self.run_deferred();
+    }
+
+    /// Looks on another thread (it asks the file system about every input) for inputs of the
+    /// current build's setup that changed since the build read them.
+    fn check_inputs(&self, setup: Arc<ProjectSetup>) {
+        let (tx, generation) = (self.events_tx.clone(), self.build_generation);
+        std::thread::spawn(move || {
+            let changed: Vec<PathBuf> = setup.config.changed_inputs().into_iter().filter(|p| !is_log(p)).map(Path::to_path_buf).collect();
+            if !changed.is_empty() {
+                let _ = tx.send(Event::InputsChanged(generation, changed));
+            }
+        });
     }
 
     /// Tells the client about the full build installed last: its status, and all problems.
@@ -2056,7 +2078,8 @@ fn describe_config(setup: &ProjectSetup) -> String {
 /// A SystemVerilog or Verilog source or header, by extension.
 /// The server's own log file.
 fn is_log(p: &std::path::Path) -> bool {
-    crate::logger::file().is_some_and(|l| build_docs::same_file(l, p))
+    // By identity, whatever its name (a link to the log).
+    crate::logger::file().is_some_and(|l| l == p || dvi_project::fsx::same_file(l, p))
 }
 
 /// One build input under two spellings: the same file on disk, or (where case does not matter)

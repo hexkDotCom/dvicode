@@ -59,9 +59,11 @@ pub fn blocked(path: &Path) -> Option<String> {
 /// The name of a namespace of devices other than drives that `path` is in: one may reach a
 /// network host too (`\\?\GLOBALROOT\Device\Mup\host\share`), so none is read while hosts are
 /// restricted.
-fn device_namespace(path: &Path) -> Option<String> {
+pub fn device_namespace(path: &Path) -> Option<String> {
     let Some(Component::Prefix(p)) = path.components().next() else { return None };
     match p.kind() {
+        // A local volume by its id (where a folder mounts a drive): looked into like a drive.
+        Prefix::Verbatim(n) if n.to_string_lossy().to_ascii_lowercase().starts_with("volume{") => None,
         Prefix::Verbatim(n) => Some(n.to_string_lossy().to_lowercase()),
         Prefix::DeviceNS(n) if !(n.len() == 2 && n.to_string_lossy().ends_with(':')) => Some(n.to_string_lossy().to_lowercase()),
         _ => None,
@@ -94,6 +96,7 @@ mod tests {
         assert_eq!(blocked(Path::new(r"\\.\C:\work\x.sv")), None);
         assert_eq!(blocked(Path::new(r"\\?\GLOBALROOT\Device\Mup\attacker\share\x.sv")).as_deref(), Some("globalroot"));
         assert_eq!(blocked(Path::new(r"\\.\pipe\x")).as_deref(), Some("pipe"));
+        assert_eq!(blocked(Path::new(r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\proj\x.sv")), None);
         // A build file naming a host that is not allowed: a problem, and nothing read there.
         let dir = std::env::temp_dir().join(format!("dvicode-netpath-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

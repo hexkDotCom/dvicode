@@ -219,14 +219,22 @@ pub(crate) fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
 pub fn load_with(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, String>, progress: &Progress) -> BuildConfig {
     let bf = build_file.map(|p| p.to_path_buf()).or_else(|| find_build_file(root));
     match bf {
-        Some(bf) => match read_input(&bf, MAX_ARG_FILE).map(|b| String::from_utf8_lossy(&b).into_owned()) {
-            Ok(text) => parse_build_with(root, &bf, &text, env, progress),
-            Err(e) => {
-                let mut cfg = parse_build_with(root, &bf, "", env, progress);
-                cfg.problems.push(BuildProblem { file: bf.clone(), line: 0, range: None, message: format!("Cannot read the build file {}: {e}", bf.display()) });
-                cfg
+        Some(bf) => {
+            // As it was before it was read (parsing records it later).
+            let before = stamp(&bf);
+            let mut cfg = match read_input(&bf, MAX_ARG_FILE).map(|b| String::from_utf8_lossy(&b).into_owned()) {
+                Ok(text) => parse_build_with(root, &bf, &text, env, progress),
+                Err(e) => {
+                    let mut cfg = parse_build_with(root, &bf, "", env, progress);
+                    cfg.problems.push(BuildProblem { file: bf.clone(), line: 0, range: None, message: format!("Cannot read the build file {}: {e}", bf.display()) });
+                    cfg
+                }
+            };
+            if let Some(i) = cfg.inputs.iter().position(|p| *p == bf) {
+                cfg.stamps[i] = before;
             }
-        },
+            cfg
+        }
         None => load_auto_with(root, env, progress),
     }
 }

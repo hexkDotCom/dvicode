@@ -149,11 +149,11 @@
   },
   "ibex-auto": {
    "commit": "65368a4c41d8e6c2e56ce816e418e21fc4e7b328",
-   "total": 283,
-   "errors": 266,
+   "total": 295,
+   "errors": 278,
    "warnings": 17,
    "codes": {
-    "UNDECLARED_IDENTIFIER": 141,
+    "UNDECLARED_IDENTIFIER": 153,
     "NON_EXISTING_TYPE": 105,
     "NON_EXISTING_DESIGN_ELEMENT": 17,
     "SYNTAX_ERROR": 9,
@@ -163,8 +163,8 @@
     "SKIPPED_CODE": 3
    },
    "files": 756,
-   "build_ms": 130,
-   "config_ms": 17
+   "build_ms": 163,
+   "config_ms": 101
   },
   "ibex-dv": {
    "commit": "65368a4c41d8e6c2e56ce816e418e21fc4e7b328",
@@ -192,11 +192,11 @@
   },
   "opentitan-auto": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
-   "total": 587,
-   "errors": 465,
+   "total": 609,
+   "errors": 487,
    "warnings": 122,
    "codes": {
-    "UNDECLARED_IDENTIFIER": 202,
+    "UNDECLARED_IDENTIFIER": 224,
     "NON_EXISTING_DESIGN_ELEMENT": 122,
     "UNDEFINED_MACRO": 96,
     "NON_EXISTING_TYPE": 78,
@@ -209,8 +209,8 @@
     "INCLUDE_SYNTAX": 1
    },
    "files": 3730,
-   "build_ms": 799,
-   "config_ms": 262
+   "build_ms": 903,
+   "config_ms": 694
   },
   "opentitan-earlgrey-rtl": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",

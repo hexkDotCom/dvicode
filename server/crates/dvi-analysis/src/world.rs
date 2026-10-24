@@ -601,9 +601,12 @@ impl Analysis {
                     .find(|u| u.invocation == inv_idx)
                     .map(|u| u.macros_after.clone())
                     .unwrap_or_else(|| self.invocation_macros(inv_idx));
+                // Only a unit whose id comes after those kept so far: ids stay in compile order
+                // (macros, imports and the files' first context follow ids), as in a full build.
+                let after = kept.last().copied();
                 let reuse = old_by_root.get(&id).into_iter().flatten().copied().find(|o| {
                     let u = self.unit(*o);
-                    !kept_set.contains(o) && u.invocation == inv_idx && u.macros_before.same_definitions(&macros)
+                    !kept_set.contains(o) && after.is_none_or(|k| *o > k) && u.invocation == inv_idx && u.macros_before.same_definitions(&macros)
                 });
                 let uid = match reuse {
                     Some(o) => o,
@@ -641,7 +644,31 @@ impl Analysis {
         }
         if changed {
             self.reindex();
+            self.refresh_adhoc_macros();
         }
+    }
+
+    /// Compiles again the ad-hoc units that no longer start with the macros at the end of
+    /// their invocation (the library units changed under them).
+    fn refresh_adhoc_macros(&mut self) {
+        let stale: Vec<(UnitId, FileId, usize)> = self
+            .units
+            .iter()
+            .flatten()
+            .filter(|u| u.kind == UnitKind::AdHoc && !u.macros_before.same_definitions(&self.last_macros(u.invocation)))
+            .map(|u| (u.id, u.root, u.invocation))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for (uid, file, inv) in stale {
+            let macros = self.last_macros(inv);
+            let src = self.reader();
+            let pp = preprocess(&src, &self.setup.pp_configs[inv.min(self.setup.pp_configs.len() - 1)], file, macros.clone());
+            let u = make_unit(&src, uid, file, UnitKind::AdHoc, inv, pp, macros);
+            self.units[uid as usize] = Some(Arc::new(u));
+        }
+        self.reindex();
     }
 
     /// Macro state at the end of an invocation's own files (not its library files).
@@ -944,8 +971,23 @@ impl Analysis {
         // Tables already pointed at the moved definitions, by identity.
         let mut replaced: FxHashMap<usize, Option<MacroTable>> = FxHashMap::default();
         let mut jobs = Vec::new();
-        let ids: Vec<UnitId> = self.units.iter().flatten().map(|u| u.id).collect();
-        for uid in ids {
+        // In compile order: the build's files, its library files, then files outside it.
+        let mut ids: Vec<(u8, UnitId)> = self
+            .units
+            .iter()
+            .flatten()
+            .map(|u| {
+                let rank = match u.kind {
+                    UnitKind::Builtin => 0,
+                    UnitKind::Project if u.library => 2,
+                    UnitKind::Project => 1,
+                    UnitKind::AdHoc => 3,
+                };
+                (rank, u.id)
+            })
+            .collect();
+        ids.sort_unstable();
+        for (_, uid) in ids {
             if progress.is_cancelled() {
                 return None;
             }

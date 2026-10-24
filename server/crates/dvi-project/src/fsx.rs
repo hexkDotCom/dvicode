@@ -230,9 +230,10 @@ pub fn ignores_case(path: &Path) -> bool {
 pub fn same_file(a: impl AsRef<Path>, b: impl AsRef<Path>) -> bool {
     let (a, b) = (a.as_ref(), b.as_ref());
     #[cfg(unix)]
-    {
-        // A canonical path keeps the case it was written in on a drive under WSL; the file
-        // itself does not change.
+    if ignores_case(a) && a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase() {
+        // A canonical path keeps the case it was written in on a drive under WSL: two
+        // spellings are one file when the file is (not two names of a hard link, whose
+        // folders may differ).
         use std::os::unix::fs::MetadataExt;
         if let (Ok(x), Ok(y)) = (metadata(a), metadata(b)) {
             if x.ino() != 0 && x.dev() == y.dev() && x.ino() == y.ino() {

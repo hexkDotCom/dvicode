@@ -27,7 +27,7 @@ pub fn parse(tokens: &[Token], root_file: FileId) -> ParsedUnit {
         expr_depth: 0,
         too_deep: false,
         port_index: None,
-        attr_open_until: 0,
+        attr_open: (0, 0),
     };
     p.u.decls.push(Decl {
         kind: DeclKind::Unit,
@@ -98,9 +98,9 @@ struct Parser<'t> {
     /// The ports (or arguments) of the scope whose body declarations are being matched to
     /// its header, by name: looked up once per declaration, not by a scan of the scope.
     port_index: Option<(DeclId, DeclKind, rustc_hash::FxHashMap<SmolStr, DeclId>)>,
-    /// No attribute in an expression closes before this token: a `(*` before it opens none
-    /// (each is not looked past again).
-    attr_open_until: usize,
+    /// Tokens in which no attribute in an expression closes before the second: a `(*` there
+    /// opens none (each is not looked past again; the parser may come back before the first).
+    attr_open: (usize, usize),
 }
 
 /// Statements nest at most this deep. Real code stays far below; much deeper (generated or
@@ -452,7 +452,7 @@ impl<'t> Parser<'t> {
     /// An attribute inside an expression, at `(*`. Only one closed before the next `;` is
     /// skipped: `@(*)` is no attribute, and one left open does not take the statements after it.
     fn skip_expr_attribute(&mut self) {
-        if self.pos < self.attr_open_until {
+        if (self.attr_open.0..self.attr_open.1).contains(&self.pos) {
             self.bump();
             return;
         }
@@ -463,7 +463,7 @@ impl<'t> Parser<'t> {
                 break;
             }
             if t.kind == TokKind::Eof || t.is_punct(";") || self.pos + k >= self.toks.len() {
-                self.attr_open_until = self.pos + k;
+                self.attr_open = (self.pos, self.pos + k);
                 self.bump();
                 return;
             }
@@ -484,12 +484,15 @@ impl<'t> Parser<'t> {
         match &*t.text {
             "signed" | "unsigned" => false,
             "type" => {
-                // A name after the closing parenthesis declares it.
+                // A name after the closing parenthesis declares it (looked for not far).
+                if !self.nth(1).is_punct("(") {
+                    return false;
+                }
                 let mut depth = 0usize;
                 let mut k = 1;
                 loop {
                     let t = self.nth(k);
-                    if t.kind == TokKind::Eof || t.is_punct(";") || self.pos + k >= self.toks.len() {
+                    if t.kind == TokKind::Eof || t.is_punct(";") || self.pos + k >= self.toks.len() || k > 64 {
                         return false;
                     }
                     if t.is_punct("(") {

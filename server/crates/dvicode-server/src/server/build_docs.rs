@@ -81,11 +81,7 @@ fn find_arg_file<'a>(path: &Path, files: &'a [ArgFile]) -> Option<&'a ArgFile> {
     }
     // The same file under another spelling (case, links, `..`). Names are compared first,
     // ignoring case (Windows), so that only likely candidates are resolved on disk.
-    let canon = fsx::canonicalize(path).ok()?;
-    files
-        .iter()
-        .filter(|a| same_name(&a.path, path))
-        .find(|a| fsx::canonicalize(&a.path).ok().as_ref() == Some(&canon))
+    files.iter().filter(|a| same_name(&a.path, path)).find(|a| fsx::same_file(&a.path, path))
 }
 
 fn same_name(a: &Path, b: &Path) -> bool {

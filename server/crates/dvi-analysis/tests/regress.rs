@@ -2656,6 +2656,21 @@ endmodule
 }
 
 #[test]
+fn a_closed_attribute_read_again_after_an_open_one_is_still_skipped() {
+    // The parameters of `t` are read again for `v`, after the open attribute in `u`.
+    let t = "module t #(int P = 0) (input logic x);
+endmodule
+module m(input logic a);
+  t #(.P(1 + (* keep=1 *) a))
+    u(.x(a + (* broken)), v(.x(a));
+endmodule
+";
+    let (a, _) = project("attrrescan", &[("m.sv", t)]);
+    let p = problems(&a);
+    assert!(!p.iter().any(|m| m.contains("'keep'")), "{p:?}");
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);
