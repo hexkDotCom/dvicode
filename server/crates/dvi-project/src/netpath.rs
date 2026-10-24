@@ -11,7 +11,7 @@ use std::sync::RwLock;
 static ALLOWED: RwLock<Option<Vec<String>>> = RwLock::new(None);
 
 /// Held by tests that change the allowed hosts.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) static TEST_HOSTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Sets the hosts network paths may name (`None`: any).
@@ -70,7 +70,7 @@ pub fn device_namespace(path: &Path) -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

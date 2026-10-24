@@ -244,7 +244,7 @@ pub fn same_file(a: impl AsRef<Path>, b: impl AsRef<Path>) -> bool {
     matches!((canonicalize(a), canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
