@@ -2556,7 +2556,12 @@ fn an_edit_is_local_to_a_line_only_when_nothing_else_changed() {
     assert_eq!(line_local_edit(old, "a;\n  x = pr\nb;\n", 1), None);
     assert_eq!(line_local_edit(old, "a;\n\nb;\n", 1), None);
     // The first and the last line.
-    assert_eq!(line_local_edit(old, "ab;\n  x = 1;\nb;\n", 0), Some((0, "a;", "ab;")));
+    // (the first line has no statement before it to be sure of)
+    assert_eq!(line_local_edit(old, "ab;\n  x = 1;\nb;\n", 0), None);
+    // An `else` gone may end a loop's statement on the line; a statement begun with a macro
+    // use on an earlier line (an alias of a call) may reach into it.
+    assert_eq!(line_local_edit("a;\n  if (f) t(); else\n  t();\n", "a;\n  if (f) t(); loo\n  t();\n", 1), None);
+    assert_eq!(line_local_edit("a;\n  `ALIAS(\n    KEEP) inn;\n", "a;\n  `ALIAS(\n    SWAP) inn;\n", 2), None);
     assert_eq!(line_local_edit("a;\nb;", "a;\nbc;", 1), Some((3, "b;", "bc;")));
     // Another line changed too, a line added or removed, a line that is not there.
     assert_eq!(line_local_edit(old, "A;\n  x = 12;\nb;\n", 1), None);

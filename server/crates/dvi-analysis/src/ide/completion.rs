@@ -637,10 +637,22 @@ pub fn line_local_edit<'a>(old: &'a str, new: &'a str, line: u32) -> Option<(u32
     if structural(lo) || structural(ln) {
         return None;
     }
-    // A `;` more or less may end a statement a scope is made of (a loop's) on this line.
-    let ends = |l: &str| lex(l, 0).iter().filter(|t| t.is_punct(";")).count();
-    if ends(lo) != ends(ln) {
+    // The same keywords (an `else` gone may end a loop's statement on this line) and as many
+    // statement ends: names and expressions may change, not the statement's shape.
+    let shape = |l: &str| {
+        let toks = lex(l, 0);
+        let kws: Vec<SmolStr> = toks.iter().filter(|t| t.kind == TokKind::Keyword).map(|t| t.text.clone()).collect();
+        (kws, toks.iter().filter(|t| t.is_punct(";")).count())
+    };
+    if shape(lo) != shape(ln) {
         return None;
+    }
+    // Nor may the statement the line goes on with have a macro use on an earlier line: its
+    // arguments may reach into the line (through an alias too) and open or close scopes.
+    let back = &old[os.saturating_sub(4096)..os];
+    match back.rfind(';') {
+        Some(i) if !back[i..].contains('`') => {}
+        _ => return None,
     }
     Some((os as u32, lo, ln))
 }
