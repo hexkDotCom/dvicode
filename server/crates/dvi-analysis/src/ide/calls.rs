@@ -113,6 +113,10 @@ impl Analysis {
 
     /// Call sites of a function/task, grouped by the calling function/task.
     pub fn incoming_calls(&self, callee: DeclRef) -> Vec<CallHierarchyIncomingCall> {
+        self.with_lookup_memo(|| self.incoming_calls_inner(callee))
+    }
+
+    fn incoming_calls_inner(&self, callee: DeclRef) -> Vec<CallHierarchyIncomingCall> {
         let callee = self.canonical(callee);
         let key = self.decl_key(callee);
         let name = self.decl(callee).name.clone();
@@ -164,6 +168,10 @@ impl Analysis {
     /// Functions and tasks called from the body of `caller` (or from a module/class outside
     /// of its functions).
     pub fn outgoing_calls(&self, caller: DeclRef) -> Vec<CallHierarchyOutgoingCall> {
+        self.with_lookup_memo(|| self.outgoing_calls_inner(caller))
+    }
+
+    fn outgoing_calls_inner(&self, caller: DeclRef) -> Vec<CallHierarchyOutgoingCall> {
         let caller = self.canonical(caller);
         let own = self.decl_key(caller);
         let body = self.implementation_of(caller).unwrap_or(caller);

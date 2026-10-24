@@ -112,6 +112,10 @@ impl Analysis {
 
     /// Every location referring to the declaration at the cursor.
     pub fn references(&self, file: FileId, off: u32, include_decl: bool) -> Vec<Location> {
+        self.with_lookup_memo(|| self.references_inner(file, off, include_decl))
+    }
+
+    fn references_inner(&self, file: FileId, off: u32, include_decl: bool) -> Vec<Location> {
         self.reference_spans(file, off, include_decl).into_iter().filter_map(|s| self.to_location(s)).collect()
     }
 
@@ -342,6 +346,10 @@ impl Analysis {
     }
 
     pub fn document_highlights(&self, file: FileId, off: u32) -> Vec<Span> {
+        self.with_lookup_memo(|| self.document_highlights_inner(file, off))
+    }
+
+    fn document_highlights_inner(&self, file: FileId, off: u32) -> Vec<Span> {
         let Some(hit) = self.hit_at(file, off) else { return Vec::new() };
         match self.target_of(&hit) {
             Some(Target::Decl(r)) => {
@@ -408,6 +416,10 @@ impl Analysis {
     }
 
     pub fn rename(&self, file: FileId, off: u32, new_name: &str) -> Result<WorkspaceEdit, String> {
+        self.with_lookup_memo(|| self.rename_inner(file, off, new_name))
+    }
+
+    fn rename_inner(&self, file: FileId, off: u32, new_name: &str) -> Result<WorkspaceEdit, String> {
         if !is_identifier(new_name) {
             return Err(format!("'{new_name}' is not a valid SystemVerilog identifier"));
         }
