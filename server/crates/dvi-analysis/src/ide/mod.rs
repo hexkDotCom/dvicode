@@ -10,6 +10,7 @@ pub mod factory;
 pub mod filter;
 pub mod hints;
 pub mod hover;
+pub mod instances;
 pub mod loops;
 pub mod nav;
 pub mod overrides;

@@ -1871,7 +1871,8 @@ impl Server {
                     })
                     .collect();
                 if wants("refactor.rewrite") {
-                    if let Some(r) = a.implement_pure_methods(f, start) {
+                    let refactors = a.implement_pure_methods(f, start).into_iter().chain(a.instance_actions(f, start));
+                    for r in refactors {
                         if let Some(edit) = a.versioned_edit(r.edits) {
                             actions.push(CodeActionOrCommand::CodeAction(CodeAction { title: r.title, kind: Some(CodeActionKind::REFACTOR_REWRITE), edit: Some(edit), ..Default::default() }));
                         }

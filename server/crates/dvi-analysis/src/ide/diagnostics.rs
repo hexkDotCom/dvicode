@@ -97,6 +97,10 @@ impl Analysis {
                 break;
             }
         }
+        // Instance connections: duplicates, mixed styles, too many ordered items.
+        for d in self.instance_problems(file) {
+            push(d, &mut out);
+        }
         // Build file problems.
         let path = self.vfs.path(file);
         for p in &self.setup.config.problems {

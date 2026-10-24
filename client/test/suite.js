@@ -410,6 +410,37 @@ async function run() {
     return `${md.split('\n')[0]} -> ${at}`;
   });
 
+  await test('instance repair: port completion and connect missing ports', async () => {
+    const doc = await open('rtl/top.sv');
+    const ed = await vscode.window.showTextDocument(doc);
+    const p = lineOf(doc, 'endmodule');
+    try {
+      await ed.edit((b) => b.insert(new vscode.Position(p.line, 0), '  fifo u_new (.clk(clk), .\n'));
+      const at = new vscode.Position(p.line, '  fifo u_new (.clk(clk), .'.length);
+      const labels = await waitFor('port completion', async () => {
+        const list = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', doc.uri, at);
+        const names = list.items.map((i) => (typeof i.label === 'string' ? i.label : i.label.label));
+        return names.includes('rst_n') ? names : undefined;
+      }, 20000);
+      // The connected port comes last.
+      if (labels[labels.length - 1] !== 'clk' || !labels.includes('empty')) throw new Error(`completion: ${labels.join(' ')}`);
+      // A complete statement: the action connects the rest.
+      const line = doc.lineAt(p.line);
+      await ed.edit((b) => b.replace(line.range, '  fifo u_new (.clk(clk));'));
+      const inside = new vscode.Position(p.line, 8);
+      const titles = await waitFor('connect action', async () => {
+        const acts = await vscode.commands.executeCommand('vscode.executeCodeActionProvider', doc.uri, new vscode.Range(inside, inside), 'refactor');
+        const t = (acts || []).map((x) => x.title);
+        return t.some((x) => x.startsWith('Connect')) ? t : undefined;
+      }, 20000);
+      const want = 'Connect 7 missing ports of u_new';
+      if (!titles.includes(want)) throw new Error(`actions: ${titles.join(' | ')}`);
+      return `${labels.length} ports offered; ${want}`;
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   await test('views: follow the editor', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

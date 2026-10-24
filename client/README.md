@@ -32,6 +32,9 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **uvm_config_db**: hover a `get` to see the `set` calls that can provide it (field, type
   and scope matched as UVM 1.2 matches them, through the test's component hierarchy), and a
   `set` for the `get` calls it reaches; go to definition from a field name to its sets.
+- **Instance repair**: complete port and parameter names in an instance's lists, connect the
+  missing ports, expand `.*`, turn ordered connections into named ones, and see ports
+  connected twice or ordered and named connections mixed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".

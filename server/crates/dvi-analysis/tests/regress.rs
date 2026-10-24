@@ -3622,6 +3622,101 @@ fn assertion_search_keeps_items_ports_and_arguments_apart() {
     assert_eq!(show(k("s3")), ["argument r of cgn.new() [argument]", "  coverpoint cp_r [checked]"], "new() of a declaration");
 }
 
+const INSTANCES: &str = r#"interface bus_if; logic v; endinterface
+module c(input logic clk, input logic rst_n = 1'b1, bus_if bus, output logic [7:0] q, input logic en);
+endmodule
+module na(a, b);
+  input a;
+  output b;
+endmodule
+module pp #(parameter int W = 8, parameter int D = 2) (input logic x);
+endmodule
+module top;
+  logic clk, en, x;
+  logic [7:0] q;
+  bus_if bus();
+  c u_named (
+    .clk(clk),
+    .q(q) // the output
+  );
+  c u_star (.*, .q());
+  na u_ord (x /* first */, en);
+  na u_hole (x, );
+  pp #(16, 4) u_p (.x(x));
+  na u_dup (.a(x), .a(en));
+  na u_mix (x, .b(en));
+  na u_many (x, en, clk);
+  c u_full (.clk(clk), .q(q), .bus(bus), .en(en));
+  pp #(.W(1), .D(2),) u_trail (.x(x),);
+endmodule
+"#;
+
+/// `text` with `edits` (spans into it) applied.
+fn apply(text: &str, edits: &[(dvi_syntax::Span, String)]) -> String {
+    let mut e = edits.to_vec();
+    e.sort_by_key(|x| std::cmp::Reverse(x.0.start));
+    let mut out = text.to_string();
+    for (sp, t) in e {
+        out.replace_range(sp.start as usize..sp.end as usize, &t);
+    }
+    out
+}
+
+#[test]
+fn instance_connections_are_repaired_without_changing_their_meaning() {
+    let (a, root) = project("instances", &[("top.sv", INSTANCES)]);
+    let f = a.vfs.lookup(&root.join("top.sv")).unwrap();
+    let at = |needle: &str| INSTANCES.find(needle).unwrap() as u32 + 3;
+    let actions = |needle: &str| a.instance_actions(f, at(needle)).into_iter().map(|r| (r.title.clone(), apply(INSTANCES, &r.edits))).collect::<Vec<_>>();
+    // Connect missing ports: the defaulted one left out, the list's layout kept.
+    let named = actions("c u_named");
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert_eq!(named[0].0, "Connect 2 missing ports of u_named (some left out: default value)");
+    assert!(named[0].1.contains("    .q(q),\n    .bus(bus),\n    .en(en) // the output\n  );"), "{}", named[0].1);
+    // Expand .*: the defaulted port with no signal is left out, as .* does.
+    let star = actions("c u_star");
+    assert_eq!(star[0].0, "Expand .* of u_star");
+    assert!(star[0].1.contains("c u_star (.clk(clk), .bus(bus), .en(en), .q());"), "{}", star[0].1);
+    // Ordered to named: comments kept, an empty hole explicit.
+    let ord = actions("na u_ord");
+    assert_eq!(ord[0].0, "Use named port connections for u_ord");
+    assert!(ord[0].1.contains("na u_ord (.a(x) /* first */, .b(en));"), "{}", ord[0].1);
+    let hole = actions("na u_hole");
+    assert!(hole.first().is_some_and(|h| h.1.contains("na u_hole (.a(x), .b());")), "{hole:?}");
+    let pp = actions("pp #(16");
+    assert_eq!(pp.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["Use named parameter values for pp"]);
+    assert!(pp[0].1.contains("pp #(.W(16), .D(4)) u_p (.x(x));"));
+    assert!(actions("c u_full").is_empty(), "nothing to repair");
+    assert!(actions("na u_many").is_empty(), "more items than ports: not rewritten");
+    // Every rewrite parses again without new problems.
+    for (title, text) in named.iter().chain(&star).chain(&ord).chain(&pp) {
+        let (b, _) = project("instances_after", &[("top.sv", text)]);
+        let before = problems(&a).len();
+        let after = problems(&b).len();
+        assert_eq!(after, before, "{title}: {:?}", problems(&b));
+    }
+    // Problems that are certain.
+    let p = problems(&a);
+    assert_eq!(
+        p,
+        [
+            "top.sv: The port 'a' is connected more than once",
+            "top.sv: Ordered and named port connections cannot be mixed in one list",
+            "top.sv: 3 ordered port connections, but only 2 ports",
+        ]
+    );
+    // Completion of names at an item's start: connected ones last.
+    let end = INSTANCES.find("endmodule\n\"").unwrap_or(INSTANCES.rfind("endmodule").unwrap()) as u32;
+    let labels = |line: &str| a.connection_completions(f, end, line).map(|v| {
+        let mut v: Vec<(String, String)> = v.into_iter().map(|i| (i.sort_text.unwrap(), i.label)).collect();
+        v.sort();
+        v.into_iter().map(|x| x.1).collect::<Vec<_>>()
+    });
+    assert_eq!(labels("  c u_x (.clk(clk), .").unwrap(), ["rst_n", "bus", "q", "en", "clk"]);
+    assert_eq!(labels("  pp #(.W(1), .").unwrap(), ["D", "W"]);
+    assert!(labels("  c u_x (.clk(obj.").is_none(), "a member, not a port");
+}
+
 #[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";

@@ -45,6 +45,9 @@ currently in preview.
 - **uvm_config_db**: hover a `get` to see the `set` calls that can provide it (field, type
   and scope matched as UVM 1.2 matches them, through the test's component hierarchy), and a
   `set` for the `get` calls it reaches; go to definition from a field name to its sets.
+- **Instance repair**: complete port and parameter names in an instance's lists, connect the
+  missing ports, expand `.*`, turn ordered connections into named ones, and see ports
+  connected twice or ordered and named connections mixed.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.
