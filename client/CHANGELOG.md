@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.1 (preview)
+
+**Checks**
+
+- Names on the right of a continuous assignment (`assign y = a & b;`) are checked like any
+  other use: an undeclared one is a problem. Only the left side may declare a net
+  implicitly. A missing `;` before the next declaration is reported, instead of taking that
+  declaration into the assignment.
+
+**Network paths on Windows**
+
+- The engine reads files on a network host (`\\host\share\...`) only if the host is among
+  VS Code's `security.allowedUNCHosts`, while `security.restrictUNCAccess` is on (the
+  default). This holds whether the path is written in a build file, an argument file, an
+  `include` or a compile log, or reached through a symbolic link or junction. A path to a
+  host that isn't allowed is reported as a build problem and not read. WSL's own
+  `\\wsl.localhost` paths are always allowed.
+
+**Performance**
+
+- Semantic highlighting of a 5 MB file takes 40 ms instead of 150 ms, and is computed once
+  per version. After an edit only the changes are sent (`full/delta`).
+- The Linux engine commits memory as it uses it: a large build peaks at about 40% less
+  memory, and an editing session stays flat.
+
+**Fixes**
+
+- An argument file rewritten while the first build read it is read again.
+- `-y`/`-v` library files keep their compile order across edits: files outside the build
+  see the macros of the last one, as after a full build.
+- Under WSL, two spellings of one file on a Windows drive (`/mnt/c/.../Defs.svh` and
+  `defs.svh`) are one file.
+
 ## 0.4.0 (preview)
 
 **Typing in large projects**
