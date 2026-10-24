@@ -563,8 +563,12 @@ export function valuesOnly<H extends CheckInfo>(hits: H[]): H[] {
   for (const h of hits) {
     const children = valuesOnly(h.children as H[]);
     const timing = h.roles.length > 0 && h.roles.every((r) => r === 'clock' || r === 'reset');
+    if (h.group === 'helpers' && timing) {
+      // Used there only as a clock or a reset: so is it in whatever uses the helper.
+      continue;
+    }
     if (h.group === 'connections' || h.group === 'helpers') {
-      if (children.length || (h.group === 'helpers' && !timing && !h.children.length)) {
+      if (children.length || (h.group === 'helpers' && !h.children.length)) {
         out.push({ ...h, children });
       }
     } else if (!timing) {

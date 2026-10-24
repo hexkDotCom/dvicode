@@ -51,6 +51,8 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
   result: ChecksResult | undefined;
   /** The newest analysis revision known: the result is out of date when it is older. */
   private latest = -1;
+  /** The server restarted since the result was made (its revisions count anew). */
+  private restarted = false;
   /** Hide what uses the target only as a clock or a reset. */
   valuesOnly = false;
   /** Request generation: an older answer is dropped. */
@@ -90,7 +92,8 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
   /** The server stopped or started: the result is kept, marked out of date. */
   reset(): void {
     this.gen++;
-    this.latest = Number.MAX_SAFE_INTEGER;
+    this.restarted = this.result !== undefined;
+    this.latest = -1;
     this.present();
   }
 
@@ -142,23 +145,28 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
     }
     const gen = ++this.gen;
     let r: ChecksResult | null;
+    let cancelled = false;
     try {
-      r = await vscode.window.withProgress({ location: { viewId: 'dvicode.checks' }, title: 'Searching assertions and coverage', cancellable: true }, (_, token) =>
-        c.sendRequest<ChecksResult | null>('dvicode/checksOf', { textDocument: { uri }, position }, token),
-      );
+      r = await vscode.window.withProgress({ location: { viewId: 'dvicode.checks' }, title: 'Searching assertions and coverage', cancellable: true }, (_, token) => {
+        token.onCancellationRequested(() => (cancelled = true));
+        return c.sendRequest<ChecksResult | null>('dvicode/checksOf', { textDocument: { uri }, position }, token);
+      });
     } catch (e) {
-      if (gen === this.gen) {
+      // A cancelled search says nothing (the server answers RequestCancelled, -32800).
+      const code = (e as { code?: number }).code;
+      if (gen === this.gen && !cancelled && code !== -32800) {
         void vscode.window.showErrorMessage(`DVICode: ${e instanceof Error ? e.message : String(e)}`);
       }
       return false;
     }
-    if (gen !== this.gen) {
+    if (gen !== this.gen || cancelled) {
       return false;
     }
     if (!r || (expect !== undefined && r.target.name !== expect)) {
       return null;
     }
     this.result = r;
+    this.restarted = false;
     this.latest = Math.max(this.latest, r.revision);
     this.present();
     this.emitter.fire(undefined);
@@ -177,7 +185,7 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
       this.view.message = 'Right-click a signal, field or property and choose Show Assertions and Coverage.';
       return;
     }
-    const stale = r.revision < this.latest ? ' · out of date' : '';
+    const stale = this.restarted || r.revision < this.latest ? ' · out of date' : '';
     const shown = this.valuesOnly ? ' · values only' : '';
     this.view.description = `${r.target.name} (${r.target.kind})${shown}${stale}`;
     this.view.message = checksMessage(r.target.name, this.hits().length, r.limits, r.notes);

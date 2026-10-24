@@ -3346,7 +3346,7 @@ fn assertions_and_coverage_of_a_signal_are_found_through_helpers_ports_and_argum
     assert_eq!(
         top(at(dut, "clk"))[..5],
         [
-            "checks default clocking [clock] line 15 (applies to 1 concurrent assertion without their own clock)",
+            "checks default clocking [clock] cb (applies to 1 concurrent assertion without their own clock)",
             "checks assert [clock] line 18",
             "checks assert [clock] a_mac",
             "coverage covergroup event [clock] covergroup event of cg_data",
@@ -3365,6 +3365,114 @@ fn assertions_and_coverage_of_a_signal_are_found_through_helpers_ports_and_argum
     let d = a.checks_at(f, at(dut, "data")).unwrap();
     assert_eq!(d.hits[0].form, Some("deferred"));
     assert_eq!((d.target.name.as_str(), d.target.kind.as_str()), ("data", "port of dut"));
+}
+
+const CHECKS_EDGES: &str = r#"
+`define BOTH(s) assert property (@(posedge clk) s); cover property (@(posedge clk) s);
+package pk; bit q; endpackage
+module c2(input logic a, input logic b);
+  logic clk;
+  a_a: assert property (@(posedge clk) a);
+  a_b: assert property (@(posedge clk) b);
+endmodule
+module na(p);
+  input bit p;
+  logic clk;
+  a_p: assert property (@(posedge clk) p);
+endmodule
+module cw(input logic w);
+  logic clk;
+  a_w: assert property (@(posedge clk) w);
+endmodule
+module bound(input logic s, input logic t);
+  logic clk;
+  a_s: assert property (@(posedge clk) s);
+  a_t: assert property (@(posedge clk) t);
+endmodule
+module m;
+  logic clk, c1, c2, sig, x, y, en, z, w, q, v;
+  `BOTH(sig)
+  a_two: assert property (@(posedge c1) sig |-> @(posedge c2) x);
+  clocking cb @(posedge clk); endclocking
+  default clocking cb;
+  a_dflt: assert property (z);
+  covergroup g @(posedge c1);
+    cp: coverpoint w { bins one = {1} iff (en); }
+  endgroup
+  c2 u (.a(v), .b(v));
+  c2 u1 (.a(x), .b()), u2 (.a(y), .b());
+  na u_na (z);
+  cw u_top (.*);
+  if (1) begin : gen
+    logic w;
+    cw u_star (.*);
+  end
+endmodule
+bind m bound u_b (.s(pk::q), .t(q));
+bind m bound u_b2 (.s(z), .t(z));
+module k;
+  logic clk;
+  bit s1, s2, s3;
+  covergroup cgs with function sample(bit v);
+    cp_v: coverpoint v;
+  endgroup
+  covergroup cgn(ref bit r) @(posedge clk);
+    cp_r: coverpoint r;
+  endgroup
+  cgs cg = new();
+  cgn cn = new(s3);
+  initial begin
+    cg.sample(.v(s1));
+    cg.sample((s2));
+  end
+endmodule
+"#;
+
+#[test]
+fn assertion_search_keeps_items_ports_and_arguments_apart() {
+    let (a, root) = project("checksedges", &[("e.sv", CHECKS_EDGES)]);
+    let f = a.vfs.lookup(&root.join("e.sv")).unwrap();
+    // The declaration of `name` in the module `module`.
+    let decl = |module: &str, name: &str| -> u32 {
+        let base = CHECKS_EDGES.find(&format!("module {module}")).unwrap();
+        let line = base + CHECKS_EDGES[base..].find("logic").unwrap_or(0);
+        let k = line + CHECKS_EDGES[line..].find(&format!(" {name}")).unwrap() + 1;
+        k as u32
+    };
+    fn flat(h: &dvi_analysis::ide::checks::CheckHit, depth: usize, out: &mut Vec<String>) {
+        out.push(format!("{}{} {} [{}]", "  ".repeat(depth), h.kind, h.label.clone().unwrap_or_default(), h.roles.join(",")));
+        for c in &h.children {
+            flat(c, depth + 1, out);
+        }
+    }
+    let show = |off: u32| -> Vec<String> {
+        let r = a.checks_at(f, off).expect("searchable");
+        let mut out = Vec::new();
+        for h in &r.hits {
+            flat(h, 0, &mut out);
+        }
+        out
+    };
+    let sig = show(decl("m", "sig"));
+    assert!(sig.contains(&"assert  [checked]".to_string()) && sig.contains(&"cover  [checked]".to_string()), "one macro, two items: {sig:?}");
+    assert!(sig.contains(&"assert a_two [checked]".to_string()), "{sig:?}");
+    assert!(show(decl("m", "c2")).contains(&"assert a_two [clock]".to_string()), "a clock inside the property");
+    assert!(show(decl("m", "clk")).iter().any(|l| l.starts_with("default clocking ") && l.ends_with("[clock]")), "default clocking cb; selects cb's clock");
+    assert_eq!(show(decl("m", "en")), ["coverpoint cp [gate]"], "a bin's iff is a gate");
+    assert_eq!(show(decl("m", "v")), ["port a of u [connection]", "  assert a_a [checked]", "port b of u [connection]", "  assert a_b [checked]"]);
+    assert_eq!(show(decl("m", "x")), ["assert a_two [checked]", "port a of u1 [connection]", "  assert a_a [checked]"], "the first instance of the statement");
+    let z = show(decl("m", "z"));
+    assert!(z.contains(&"port p of u_na [connection]".to_string()), "non-ANSI positional: {z:?}");
+    assert!(z.contains(&"port s of u_b2 (bind) [connection]".to_string()) && z.contains(&"port t of u_b2 (bind) [connection]".to_string()), "every port of the bind: {z:?}");
+    assert_eq!(show(decl("m", "w")), ["coverpoint cp [checked]", "port w of u_top (.*) [connection]", "  assert a_w [checked]"], "gen.w is what u_star connects");
+    assert_eq!(show(decl("m", "q")), ["port t of u_b (bind) [connection]", "  assert a_t [checked]"], "pk::q is not m.q");
+    let k = |name: &str| -> u32 {
+        let base = CHECKS_EDGES.find("module k").unwrap();
+        (base + CHECKS_EDGES[base..].find(&format!(" {name},")).or_else(|| CHECKS_EDGES[base..].find(&format!(" {name};"))).unwrap() + 1) as u32
+    };
+    assert_eq!(show(k("s1")), ["argument v of cgs.sample() [argument]", "  coverpoint cp_v [checked]"], "a named argument");
+    assert_eq!(show(k("s2")), ["argument v of cgs.sample() [argument]", "  coverpoint cp_v [checked]"], "an argument in parentheses");
+    assert_eq!(show(k("s3")), ["argument r of cgn.new() [argument]", "  coverpoint cp_r [checked]"], "new() of a declaration");
 }
 
 #[test]

@@ -353,6 +353,9 @@ pub enum VerifKind {
     /// The body of a `property` or `sequence` declaration (`decl` is the declaration).
     PropertyBody,
     SequenceBody,
+    /// A clocking block's event (`decl` is the block): the clock of the assertions a
+    /// `default clocking <name>;` gives it to.
+    ClockingBlock,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

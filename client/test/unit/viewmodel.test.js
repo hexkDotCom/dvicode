@@ -219,8 +219,9 @@ test.describe('assertions and coverage texts', () => {
       hit({ kind: 'port', group: 'connections', roles: ['connection'], children: [hit({ label: 'c', roles: ['reset'] })] }),
       hit({ kind: 'port', group: 'connections', roles: ['connection'], label: 'p', children: [hit({ label: 'd' })] }),
       hit({ kind: 'property', group: 'helpers', label: 'unused', children: [] }),
+      hit({ kind: 'property', group: 'helpers', label: 'clocked', roles: ['clock'], children: [hit({ label: 'e' })] }),
     ];
-    assert.deepEqual(vm.valuesOnly(tree).map((h) => h.label), ['b', 'p', 'unused']);
+    assert.deepEqual(vm.valuesOnly(tree).map((h) => h.label), ['b', 'p', 'unused'], 'a helper using it as a clock goes with what uses the helper');
   });
   test.it('say why nothing is shown or what limited the search', () => {
     assert.equal(vm.checksMessage('req', 0, [], []), "No assertion or coverage uses 'req' in this build configuration.");

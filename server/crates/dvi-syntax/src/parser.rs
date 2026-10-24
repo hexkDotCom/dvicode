@@ -2578,13 +2578,18 @@ impl<'t> Parser<'t> {
             if self.at_p("{") {
                 // The bins, without `option.*` settings and functions.
                 let r = self.refs_len();
-                let skipped = self.bins_block();
+                let (skipped, gates) = self.bins_block();
+                for &(a, b) in &gates {
+                    parts.push((VerifRole::Gate, a, b));
+                }
+                let mut cut: Vec<(RefId, RefId)> = skipped.into_iter().chain(gates).collect();
+                cut.sort();
                 let mut from = r;
-                for (a, b) in skipped.into_iter().chain([(self.refs_len(), self.refs_len())]) {
+                for (a, b) in cut.into_iter().chain([(self.refs_len(), self.refs_len())]) {
                     if a > from {
                         parts.push((VerifRole::Bins, from, a));
                     }
-                    from = b;
+                    from = from.max(b);
                 }
             } else {
                 self.eat_p(";");
@@ -2609,8 +2614,9 @@ impl<'t> Parser<'t> {
 
     /// The bins of a coverpoint or cross; the reference ranges of what is not a bin (`option.*`
     /// settings, functions).
-    fn bins_block(&mut self) -> Vec<(RefId, RefId)> {
+    fn bins_block(&mut self) -> (Vec<(RefId, RefId)>, Vec<(RefId, RefId)>) {
         let mut skipped = Vec::new();
+        let mut gates = Vec::new();
         self.bump(); // {
         while !self.at_eof() && !self.at_p("}") {
             let before = self.pos;
@@ -2627,6 +2633,15 @@ impl<'t> Parser<'t> {
                     self.pos = end;
                 }
                 self.eat_p("=");
+                // The values, then an `iff (...)` guard: a gate, not a bin value.
+                self.scan_expr(Stop { iff: true, ..STOP_NONE }, RefKind::Loose);
+                if self.eat_kw("iff") {
+                    let g = self.refs_len();
+                    if self.at_p("(") {
+                        self.paren_group(RefKind::Loose);
+                    }
+                    gates.push((g, self.refs_len()));
+                }
             } else if self.at_kw("function") {
                 let sp = self.tok().span;
                 self.subroutine(0, sp);
@@ -2642,7 +2657,7 @@ impl<'t> Parser<'t> {
             }
         }
         self.eat_p("}");
-        skipped
+        (skipped, gates)
     }
 
     fn assertion_decl(&mut self, kind: DeclKind, end: &'static str) {
@@ -2685,6 +2700,7 @@ impl<'t> Parser<'t> {
             parts.push((VerifRole::Reset, r, self.refs_len()));
         }
         let r = self.refs_len();
+        let from = self.pos;
         while !self.at_eof() && !self.at_kw(end) {
             let t = self.tok();
             if t.kind == TokKind::Keyword && is_end_kw(&t.text) && t.text != end {
@@ -2695,7 +2711,7 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
         }
-        parts.push((VerifRole::Checked, r, self.refs_len()));
+        parts.extend(self.event_parts(from, self.pos, r, self.refs_len()));
         let body = if kind == DeclKind::Property { VerifKind::PropertyBody } else { VerifKind::SequenceBody };
         let last = self.prev_span();
         self.u.verif.push(VerifItem { kind: body, form: VerifForm::None, label: Some(n.text.clone()), start, end: last, scope: id, decl: Some(id), parts });
@@ -2719,6 +2735,11 @@ impl<'t> Parser<'t> {
         if self.eat_p(";") {
             // `default clocking cb;` refers to an existing block.
             if let Some(n) = name {
+                if default {
+                    let scope = self.scope();
+                    let end = self.prev_span();
+                    self.u.verif.push(VerifItem { kind: VerifKind::DefaultClocking, form: VerifForm::None, label: Some(n.text.clone()), start, end, scope, decl: None, parts: Vec::new() });
+                }
                 self.add_ref(vec![Self::seg(&n, Sep::None)], RefKind::Loose);
             }
             return;
@@ -2733,10 +2754,10 @@ impl<'t> Parser<'t> {
             } else {
                 self.scan_expr(STOP_NONE, RefKind::Expr);
             }
-            if default {
-                let parts = vec![(VerifRole::Clock, r, self.refs_len())];
-                self.u.verif.push(VerifItem { kind: VerifKind::DefaultClocking, form: VerifForm::None, label: None, start, end: self.prev_span(), scope, decl: Some(id), parts });
-            }
+            let parts = vec![(VerifRole::Clock, r, self.refs_len())];
+            let kind = if default { VerifKind::DefaultClocking } else { VerifKind::ClockingBlock };
+            let label = name.as_ref().map(|n| n.text.clone());
+            self.u.verif.push(VerifItem { kind, form: VerifForm::None, label, start, end: self.prev_span(), scope, decl: Some(id), parts });
         }
         self.eat_p(";");
         while !self.at_eof() && !self.at_kw("endclocking") {
@@ -3612,8 +3633,44 @@ impl<'t> Parser<'t> {
             parts.push((VerifRole::Reset, r, self.refs_len()));
         }
         let r = self.refs_len();
+        let from = self.pos;
         self.group_rest(RefKind::Loose);
-        parts.push((VerifRole::Checked, r, self.refs_len()));
+        parts.extend(self.event_parts(from, self.pos, r, self.refs_len()));
+        parts
+    }
+
+    /// The references `first..end`, made from tokens `from..to`, by part: those in an event
+    /// control written there (`@(posedge c)`, `@c`) are clocks, the others checked.
+    fn event_parts(&self, from: usize, to: usize, first: RefId, end: RefId) -> Vec<(VerifRole, RefId, RefId)> {
+        let to = to.min(self.toks.len());
+        let mut events: Vec<Span> = Vec::new();
+        for i in from..to {
+            let t = &self.toks[i];
+            if !(t.is_punct("@") || t.is_punct("@@")) || !t.is_real() {
+                continue;
+            }
+            let Some(n) = self.toks.get(i + 1) else { continue };
+            if n.is_punct("(") && n.is_real() {
+                let e = self.skip_group_from(i + 1);
+                if let Some(last) = self.toks.get(e.saturating_sub(1)).filter(|l| l.is_real() && l.span.file == n.span.file) {
+                    events.push(Span::new(n.span.file, n.span.start, last.span.end));
+                }
+            } else if n.kind == TokKind::Ident && n.is_real() {
+                events.push(n.span);
+            }
+        }
+        let mut parts: Vec<(VerifRole, RefId, RefId)> = Vec::new();
+        for rid in first..end {
+            let sp = self.u.refs[rid as usize].segs.first().map(|s| s.span).unwrap_or_default();
+            let role = if events.iter().any(|e| sp.file == e.file && e.start <= sp.start && sp.end <= e.end) { VerifRole::Clock } else { VerifRole::Checked };
+            match parts.last_mut() {
+                Some(last) if last.0 == role => last.2 = rid + 1,
+                _ => parts.push((role, rid, rid + 1)),
+            }
+        }
+        if parts.is_empty() {
+            parts.push((VerifRole::Checked, first, end));
+        }
         parts
     }
 
