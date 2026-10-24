@@ -3649,6 +3649,36 @@ module top;
   c u_full (.clk(clk), .q(q), .bus(bus), .en(en));
   pp #(.W(1), .D(2),) u_trail (.x(x),);
 endmodule
+module dflt(input logic a = 1'b1, input logic b);
+endmodule
+module sel(a[0]);
+  input [1:0] a;
+endmodule
+module esc(input \p.q );
+endmodule
+module w8(input logic [7:0] p);
+endmodule
+module mi(interface a, b);
+endmodule
+primitive udp(o, i);
+  output o;
+  input i;
+  table
+    0 : 0;
+    1 : 1;
+  endtable
+endprimitive
+module top2;
+  logic b, x, o;
+  logic [15:0] p;
+  bus_if bus();
+  dflt u_blank (, b);
+  sel u_sel (x);
+  esc u_esc (x);
+  w8 u_w8 (.*);
+  mi u_mi (.a(bus));
+  udp #(1) u_udp (o, x);
+endmodule
 "#;
 
 /// `text` with `edits` (spans into it) applied.
@@ -3688,6 +3718,12 @@ fn instance_connections_are_repaired_without_changing_their_meaning() {
     assert!(pp[0].1.contains("pp #(.W(16), .D(4)) u_p (.x(x));"));
     assert!(actions("c u_full").is_empty(), "nothing to repair");
     assert!(actions("na u_many").is_empty(), "more items than ports: not rewritten");
+    assert!(actions("dflt u_blank").is_empty(), "an empty item keeps a default that .a() would not");
+    assert!(actions("sel u_sel").is_empty(), "a part of a port has no name");
+    let esc = actions("esc u_esc");
+    assert!(esc.first().is_some_and(|e| e.1.contains("esc u_esc (.\\p.q (x));")), "{esc:?}");
+    assert!(actions("w8 u_w8").is_empty(), ".* with another type is not expanded (it is an error there)");
+    assert!(actions("mi u_mi").is_empty(), "b is an interface port (inherited) with no interface to connect");
     // Every rewrite parses again without new problems.
     for (title, text) in named.iter().chain(&star).chain(&ord).chain(&pp) {
         let (b, _) = project("instances_after", &[("top.sv", text)]);
@@ -3715,6 +3751,7 @@ fn instance_connections_are_repaired_without_changing_their_meaning() {
     assert_eq!(labels("  c u_x (.clk(clk), .").unwrap(), ["rst_n", "bus", "q", "en", "clk"]);
     assert_eq!(labels("  pp #(.W(1), .").unwrap(), ["D", "W"]);
     assert!(labels("  c u_x (.clk(obj.").is_none(), "a member, not a port");
+    assert_eq!(labels("  c u0 (.clk(clk)), u1 (.").unwrap()[0], "clk", "a later instance of the statement");
 }
 
 #[test]

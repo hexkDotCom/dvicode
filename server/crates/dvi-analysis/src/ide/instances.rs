@@ -102,6 +102,18 @@ pub fn conn_list(toks: &[Token], open: usize) -> Option<ConnList> {
     Some(ConnList { open, close, items, macros })
 }
 
+/// A name as it must be written: `\p.q ` (escaped, with its terminating space) when it is not
+/// a plain identifier.
+pub fn ident(n: &str) -> String {
+    let mut c = n.chars();
+    let plain = c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_' || x == '$');
+    if plain {
+        n.to_string()
+    } else {
+        format!("\\{n} ")
+    }
+}
+
 /// The last name outside brackets and before a default value in a header slot, and whether
 /// it has a default.
 fn slot_name(item: &[Token]) -> (Option<String>, bool) {
@@ -160,14 +172,27 @@ impl Analysis {
         }
         let Some(l) = conn_list(&toks, j) else { return Header::default() };
         let mut known = !l.macros && !d.has(dflags::ENCRYPTED) && !self.has_inactive_between(def.unit, d.name_span.file, toks[j].span.start, toks[l.close].span.end);
-        let mut slots = Vec::new();
+        let by_name: rustc_hash::FxHashMap<&str, DeclRef> = ports.iter().map(|p| (self.decl(*p).name.as_str(), *p)).collect();
+        let mut slots: Vec<Slot> = Vec::new();
         for it in &l.items {
-            let (name, default) = slot_name(&toks[it.body..it.end]);
-            let port = name.as_ref().and_then(|n| ports.iter().copied().find(|p| self.decl(*p).name == n.as_str()));
+            let item = &toks[it.body..it.end];
+            let (mut name, default) = slot_name(item);
+            // A slot with no keyword and one name: a non-ANSI port reference (`a`, `a[0]`), or
+            // an ANSI port taking the slot before it's direction and type (`input a, b`).
+            let idents = item.iter().filter(|t| t.kind == TokKind::Ident).count();
+            let bare = !item.iter().any(|t| t.kind == TokKind::Keyword) && idents == 1;
+            if bare && item.iter().any(|t| t.is_punct("[")) {
+                // `a[0]`: a part of a port, which has no name to connect by.
+                name = None;
+                known = false;
+            }
+            let port = name.as_deref().and_then(|n| by_name.get(n).copied());
             if name.is_some() && port.is_none() {
                 known = false;
             }
-            let interface = port.and_then(|p| self.type_of(p)).is_some_and(|t| self.decl(t).kind == DeclKind::Interface) || toks[it.body..it.end].iter().any(|t| t.is_kw("interface"));
+            let interface = port.and_then(|p| self.type_of(p)).is_some_and(|t| self.decl(t).kind == DeclKind::Interface)
+                || item.iter().any(|t| t.is_kw("interface"))
+                || (bare && slots.last().is_some_and(|s| s.interface));
             slots.push(Slot { name, default, interface });
         }
         if slots.len() != ports.len() && !(slots.len() == 1 && l.items[0].kind == ItemKind::Empty && ports.is_empty()) {
@@ -263,6 +288,10 @@ impl Analysis {
             j = super::hints::skip(&toks, j);
         }
         let ports = toks.get(j).is_some_and(|t| t.is_punct("(")).then(|| conn_list(&toks, j)).flatten();
+        // A primitive's `#(...)` is a delay, not parameters.
+        if self.decl(def).kind == DeclKind::Primitive {
+            return Some((toks, def, ports, None));
+        }
         // The statement's parameters: `type [#(...)]` at its start.
         let s = toks.partition_point(|t| t.span.start < d.span.start);
         let mut p = s;
@@ -279,7 +308,13 @@ impl Analysis {
         if a.file != b.file {
             return None;
         }
-        self.file_text(a.file)?.get(a.start as usize..b.end as usize).map(str::to_string)
+        let text = self.file_text(a.file)?;
+        let mut out = text.get(a.start as usize..b.end as usize)?.to_string();
+        // An escaped identifier at the end needs its terminating whitespace.
+        if text.get(b.start as usize..).is_some_and(|t| t.starts_with('\\')) {
+            out.push(' ');
+        }
+        Some(out)
     }
 
     /// How a list lays out its items: on lines of their own (with that indent), or on one line.
@@ -306,8 +341,38 @@ impl Analysis {
     /// Whether a declaration named `name` is visible where instance `inst` is (a signal or an
     /// interface instance to connect).
     fn visible_signal(&self, inst: DeclRef, name: &str) -> bool {
+        self.visible(inst, name).is_some_and(|d| matches!(self.decl(d).kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port | DeclKind::Parameter | DeclKind::LocalParam))
+    }
+
+    /// The declaration named `name` where instance `inst` is.
+    fn visible(&self, inst: DeclRef, name: &str) -> Option<DeclRef> {
         let parent = self.decl(inst).parent.unwrap_or(0);
-        self.lookup(inst.unit, parent, name).is_some_and(|d| matches!(self.decl(d).kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port | DeclKind::Instance | DeclKind::Parameter | DeclKind::LocalParam))
+        self.lookup(inst.unit, parent, name)
+    }
+
+    /// Whether `name` where `inst` is names an interface instance or an interface port.
+    fn visible_interface(&self, inst: DeclRef, name: &str) -> bool {
+        self.visible(inst, name).is_some_and(|d| matches!(self.decl(d).kind, DeclKind::Instance | DeclKind::Port) && self.type_of(d).is_some_and(|t| self.decl(t).kind == DeclKind::Interface))
+    }
+
+    /// Whether the port `port` of `def` and the declaration `name` where `inst` is have the
+    /// same type for certain (what `.*` requires): the same written type with no name in it, or
+    /// the same declared type (a typedef, a class, an interface).
+    fn same_type_for_star(&self, def: DeclRef, port: &str, inst: DeclRef, name: &str) -> bool {
+        let Some(p) = self.member_of(def, port).filter(|p| self.decl(*p).kind == DeclKind::Port) else { return false };
+        let Some(v) = self.visible(inst, name) else { return false };
+        let (Some(pt), Some(vt)) = (self.decl(p).ty.as_ref(), self.decl(v).ty.as_ref()) else { return false };
+        let norm = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let named = |t: &str| dvi_syntax::lexer::lex(t, 0).iter().any(|x| x.kind == TokKind::Ident);
+        if !named(&pt.text) && !named(&vt.text) {
+            return norm(&pt.text) == norm(&vt.text);
+        }
+        // A declared type: both resolve to it, with nothing else written (no range on a typedef).
+        let simple = |t: &str| dvi_syntax::lexer::lex(t, 0).iter().filter(|x| !x.is_punct("::")).count() <= 3 && !t.contains('[');
+        simple(&pt.text) && simple(&vt.text) && match (self.type_of(p), self.type_of(v)) {
+            (Some(a), Some(b)) => self.decl_key(self.canonical(a)) == self.decl_key(self.canonical(b)),
+            _ => false,
+        }
     }
 
     /// The rewrites offered on the instance around `off`.
@@ -331,14 +396,19 @@ impl Analysis {
                     if named.contains(&n.as_str()) {
                         continue;
                     }
+                    let w = ident(n);
                     if s.default {
                         left.push("default value");
-                    } else if s.interface && !self.visible_signal(inst, n) {
-                        left.push("interface");
+                    } else if s.interface {
+                        if self.visible_interface(inst, n) {
+                            add.push(format!(".{w}({w})"));
+                        } else {
+                            left.push("interface");
+                        }
                     } else if self.visible_signal(inst, n) {
-                        add.push(format!(".{n}({n})"));
+                        add.push(format!(".{w}({w})"));
                     } else {
-                        add.push(format!(".{n}()"));
+                        add.push(format!(".{w}()"));
                     }
                 }
                 if !add.is_empty() {
@@ -371,10 +441,12 @@ impl Analysis {
                     if named.contains(&n.as_str()) {
                         continue;
                     }
-                    if self.visible_signal(inst, n) {
-                        add.push(format!(".{n}({n})"));
-                    } else if !s.default {
-                        // `.*` cannot connect it: an error the rewrite should not hide.
+                    let w = ident(n);
+                    let visible = if s.interface { self.visible_interface(inst, n) } else { self.visible_signal(inst, n) };
+                    if visible && self.same_type_for_star(def, n, inst, n) {
+                        add.push(format!(".{w}({w})"));
+                    } else if visible || !s.default {
+                        // `.*` cannot connect it, or a type it cannot prove: not rewritten.
                         ok = false;
                         break;
                     }
@@ -425,15 +497,19 @@ impl Analysis {
         for (k, it) in l.items.iter().enumerate() {
             let slot = header.slots.get(k)?.name.clone()?;
             if it.body >= it.end {
+                // An empty item keeps a port's default; `.p()` would not.
+                if header.slots[k].default {
+                    return None;
+                }
                 // An empty item: `.p()` just before what follows it (`,` or `)`).
                 let at = toks.get(it.end).or_else(|| toks.get(it.first))?.span;
-                edits.push((Span::new(at.file, at.start, at.start), format!(".{slot}()")));
+                edits.push((Span::new(at.file, at.start, at.start), format!(".{}()", ident(&slot))));
                 continue;
             }
             let text = self.source_of(toks, it.body, it.end - 1)?;
             let a = toks[it.body].span;
             let b = toks[it.end - 1].span;
-            edits.push((Span::new(a.file, a.start, b.end), format!(".{slot}({text})")));
+            edits.push((Span::new(a.file, a.start, b.end), format!(".{}({text})", ident(&slot))));
         }
         Some(edits)
     }
@@ -444,6 +520,7 @@ impl Analysis {
         let Some(&uid) = self.units_for(file).first() else { return out };
         let p = &self.unit(uid).parsed;
         let mut seen: FxHashSet<u32> = FxHashSet::default();
+        let mut headers: rustc_hash::FxHashMap<((u32, u32), bool), Arc<Header>> = rustc_hash::FxHashMap::default();
         for (i, d) in p.decls.iter().enumerate() {
             if d.kind != DeclKind::Instance || d.has(dflags::BOUND) || d.span.file != file {
                 continue;
@@ -458,7 +535,8 @@ impl Analysis {
                 if l.macros || !seen.insert(toks[l.open].span.start) {
                     continue;
                 }
-                let header = if header.is_none() { self.port_header(def) } else { self.param_header(def) };
+                let key = (self.decl_key(self.canonical(def)), header.is_some());
+                let header = headers.entry(key).or_insert_with(|| Arc::new(if key.1 { self.param_header(def) } else { self.port_header(def) })).clone();
                 self.list_problems(&toks, &l, &header, what, &mut out);
             }
         }
@@ -466,7 +544,7 @@ impl Analysis {
     }
 
     fn list_problems(&self, toks: &[Token], l: &ConnList, header: &Header, what: &str, out: &mut Vec<Diag>) {
-        let mut names: Vec<&str> = Vec::new();
+        let mut names: FxHashSet<&str> = FxHashSet::default();
         let mut stars = 0;
         let mut ordered = 0;
         let mut empty = 0;
@@ -475,10 +553,9 @@ impl Analysis {
             match &it.kind {
                 ItemKind::Named { name, name_tok, .. } => {
                     named += 1;
-                    if names.contains(&name.as_str()) {
+                    if !names.insert(name.as_str()) {
                         out.push(Diag::error(toks[*name_tok].span, "DUPLICATE_CONNECTION", format!("The {what} '{name}' is connected more than once")));
                     }
-                    names.push(name);
                 }
                 ItemKind::DotStar => {
                     stars += 1;
@@ -528,7 +605,13 @@ impl Analysis {
             return None;
         }
         // The open `(` the item is in: on this line, or before it in the file.
-        let line_toks = dvi_syntax::lexer::lex(before_dot, file);
+        let line_toks: Vec<Token> = dvi_syntax::lexer::lex(before_dot, file)
+            .into_iter()
+            .map(|mut t| {
+                t.span = Span::new(file, t.span.start + line_start, t.span.end + line_start);
+                t
+            })
+            .collect();
         let toks = self.file_tokens(file)?;
         let file_before: Vec<&Token> = toks.iter().take_while(|t| t.span.end <= line_start).collect();
         let all: Vec<&Token> = file_before.iter().copied().chain(line_toks.iter()).collect();
@@ -574,8 +657,47 @@ impl Analysis {
             if all[j].kind != TokKind::Ident {
                 return None;
             }
-            // The instance name; the definition before it (with its `#(...)`).
+            // The instance name; the definition before it (with its `#(...)`), past the earlier
+            // instances of the statement (`m u0(...), u1(`).
             let mut k = j.checked_sub(1)?;
+            while all[k].is_punct(",") {
+                k = k.checked_sub(1)?;
+                if !all[k].is_punct(")") {
+                    return None;
+                }
+                let mut d = 0;
+                loop {
+                    if all[k].is_punct(")") {
+                        d += 1;
+                    } else if all[k].is_punct("(") {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    k = k.checked_sub(1)?;
+                }
+                k = k.checked_sub(1)?;
+                while all[k].is_punct("]") {
+                    let mut d = 0;
+                    loop {
+                        if all[k].is_punct("]") {
+                            d += 1;
+                        } else if all[k].is_punct("[") {
+                            d -= 1;
+                            if d == 0 {
+                                break;
+                            }
+                        }
+                        k = k.checked_sub(1)?;
+                    }
+                    k = k.checked_sub(1)?;
+                }
+                if all[k].kind != TokKind::Ident {
+                    return None;
+                }
+                k = k.checked_sub(1)?;
+            }
             if all[k].is_punct(")") {
                 let mut d = 0;
                 loop {
@@ -595,7 +717,8 @@ impl Analysis {
         };
         let def_name = all.get(def_tok).filter(|t| t.kind == TokKind::Ident)?;
         let &uid = self.units_for(file).first()?;
-        let def = self.resolve_at_span(uid, def_name.span).or_else(|| self.lookup_design(&def_name.text))?;
+        let scope = self.scope_at(uid, file, line_start);
+        let def = self.resolve_at_span(uid, def_name.span).or_else(|| self.lookup(uid, scope, &def_name.text)).or_else(|| self.lookup_design(&def_name.text))?;
         if !self.decl(def).kind.is_definition() {
             return None;
         }
@@ -627,7 +750,7 @@ impl Analysis {
                     (None, true) => "connected".to_string(),
                     (None, false) => if params { "parameter".to_string() } else { "port".to_string() },
                 }),
-                insert_text: Some(format!("{n}($1)")),
+                insert_text: Some(format!("{}($1)", ident(n).replace('$', "\\$"))),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 sort_text: Some(format!("{}{k:04}", if connected { 1 } else { 0 })),
                 ..Default::default()
