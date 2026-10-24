@@ -1,19 +1,41 @@
 # Changelog
 
-## 0.3.2 (preview)
+## 0.4.0 (preview)
 
-A maintenance release: no change to the extension's behaviour.
+**Typing in large projects**
 
-- **Verifiable packages**: the packages of a release carry build provenance attestations,
-  which say that the release workflow built them from that release's tag. Check one with
-  `gh attestation verify dvicode-0.3.2.vsix -R hexkDotCom/dvicode --signer-workflow
-  hexkDotCom/dvicode/.github/workflows/release.yml --source-ref refs/tags/v0.3.2`. Open VSX
-  now receives the very packages of the GitHub release, checked against those attestations,
-  instead of a second build.
+- Completion and signature help no longer wait for a large file to be compiled again when
+  you type on one line inside a function, task or block: they are answered at once from the
+  last analysis with the line as it is now. Typing in a 5 MB register model went from about
+  100 ms to under 10 ms per keystroke. Names declared on that same line show up a keystroke
+  later.
+- Projects without a build file no longer check every file again after each edit to count
+  the uses that `ifdef`-removed code hides: only the files an edit can affect are checked
+  (typing in opentitan: 72 → 10 ms per keystroke).
+- `-y`/`-v` library files are looked for again only when an edit changes which design
+  elements are defined or instantiated, or the macros they see; editing a library file no
+  longer searches the library folders on every keystroke.
+- Faster updates of big files (lexing, parsing, indexing), member lookups that do not
+  allocate, and semantic tokens of a 5 MB file in 150 ms instead of 400 ms.
+
+**Fixes**
+
+- Edits that change what other files see through an instance (the ports a statement
+  connects, when a design element is defined twice without a build file), a `bind` target,
+  a named block's variables, or which scope `ifdef`-removed code is in, now update the
+  problems of the other files too.
+- A request about a file waits for edits of files compiled before it in the same build,
+  whose macros it is compiled with.
+
+**Release packages**
+
+- The packages of a release carry build provenance attestations, which say that the release
+  workflow built them from that release's tag. Check one with
+  `gh attestation verify dvicode-0.4.0.vsix -R hexkDotCom/dvicode --signer-workflow
+  hexkDotCom/dvicode/.github/workflows/release.yml --source-ref refs/tags/v0.4.0`. Open VSX
+  receives the very packages of the GitHub release, checked against those attestations.
 - The README explains the remote TCP engine's token, tunnelling it over SSH, and what
   Restricted Mode allows for `dvicode://` folders.
-- The release and CI workflows run on current GitHub Actions (Node 24) and are tested on
-  Ubuntu 26.04.
 
 ## 0.3.1 (preview)
 
