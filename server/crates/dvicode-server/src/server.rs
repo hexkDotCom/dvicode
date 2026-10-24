@@ -1919,7 +1919,7 @@ impl Server {
                         .register_fields(&model, p.register)
                         .into_iter()
                         .map(|f| {
-                            let range = f.lsb.zip(f.size).map(|(l, s)| if s <= 1 { format!("[{l}]") } else { format!("[{}:{l}]", l + s - 1) });
+                            let range = f.lsb.zip(f.size).and_then(|(l, s)| if s <= 1 { Some(format!("[{l}]")) } else { l.checked_add(s - 1).map(|h| format!("[{h}:{l}]")) });
                             let at = a.to_range(f.at).map(|r| r.start);
                             json!({
                                 "name": f.name, "kind": "field", "range": range, "access": f.access, "reset": f.reset, "volatile": f.volatile, "notes": f.notes,
@@ -2180,12 +2180,15 @@ fn view_tree(a: &Analysis, p: TreeParams, models: &RegisterModels) -> Value {
             let Some((top, model)) = chosen.and_then(|_| register_model(a, nonempty(p.top).as_deref(), models)) else {
                 return json!({ "revision": a.revision, "roots": [], "blocks": names(&blocks), "tops": names(&tops) });
             };
-            let (tree, truncated) = a.register_tree(&model, q.max_nodes);
+            // The whole tree is filtered first, then cut to the node limit (keeping `reveal`).
+            let (tree, _) = a.register_tree(&model, usize::MAX);
             let mut matches = 0;
-            let roots: Vec<dvi_analysis::ide::registers::RegNode> = match &q.filter {
+            let mut roots: Vec<dvi_analysis::ide::registers::RegNode> = match &q.filter {
                 Some(f) => dvi_analysis::ide::registers::prune(tree, f, &mut matches).into_iter().collect(),
                 None => vec![tree],
             };
+            let reveal = q.reveal.get(1..).unwrap_or(&[]);
+            let truncated = roots.iter_mut().fold(false, |t, r| dvi_analysis::ide::registers::limit_tree(r, q.max_nodes, reveal) | t);
             let incomplete = if truncated { Some("nodes") } else { None };
             json!({ "revision": a.revision, "incomplete": incomplete, "matches": matches, "roots": roots, "top": top, "blocks": names(&blocks), "tops": names(&tops), "cut": model.cut })
         }

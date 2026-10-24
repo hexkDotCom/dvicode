@@ -113,6 +113,8 @@ pub struct Map {
     pub base: Val,
     pub n_bytes: Val,
     pub byte_addressing: Val,
+    /// `UVM_LITTLE_FIFO`/`UVM_BIG_FIFO`: every word of a wide access at the same address.
+    pub fifo: bool,
     pub entries: Vec<Entry>,
     /// Mounted in a parent map, at this offset.
     pub parent: Option<(usize, Val)>,
@@ -204,6 +206,10 @@ pub struct AddressHit {
     /// The map the register is added to.
     pub map: String,
     pub address: String,
+    /// How the address is in it, when it is not one of its bus words (a byte of a word, a
+    /// memory element).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Lexical environment of a method being interpreted.
@@ -230,8 +236,10 @@ struct Interp<'a> {
     /// `lock_model()` reached in the top block's build.
     locked: bool,
     tokens: FxHashMap<FileId, Arc<Vec<Token>>>,
-    /// Macros being expanded in an expression (a bound on recursive definitions).
+    /// Macros and package constants being evaluated (a bound on recursive definitions).
     expanding: u8,
+    /// The members of the register whose `build` is interpreted (`This::Reg`).
+    reg_vars: FxHashMap<String, Handle>,
 }
 
 /// Names of the UVM register classes, for what a class derives from.
@@ -311,7 +319,7 @@ impl Analysis {
 
     /// The model `top` (a block class) builds.
     pub fn register_model(&self, top: DeclRef) -> Model {
-        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0 };
+        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default() };
         it.m.blocks.push(Block { name: self.decl(top).name.to_string(), class: top, maps: Vec::new(), default_map: None, regs: Vec::new(), at: None, notes: Vec::new(), vars: FxHashMap::default() });
         it.build_block(0, top, &[], &[], 0);
         it.m
@@ -322,8 +330,12 @@ impl Analysis {
     pub fn register_fields(&self, model: &Model, reg: usize) -> Vec<Field> {
         let Some(r) = model.regs.get(reg) else { return Vec::new() };
         let Some(class) = r.class else { return Vec::new() };
-        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0 };
+        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default() };
         it.m.regs.push(Reg { build_args: None, built: false, ..r.clone() });
+        // Fields are made by the register's `build()`: none when the model never calls it.
+        if !r.built {
+            return Vec::new();
+        }
         if let Some(build) = it.find_method(class, "build") {
             let args = r.build_args.clone().unwrap_or_default();
             it.exec_method(build, &args, &[], This::Reg, 0);
@@ -335,12 +347,15 @@ impl Analysis {
         for (i, f) in fields.iter_mut().enumerate() {
             match (f.lsb, f.size) {
                 (Some(_), Some(0)) => f.notes.push("zero width".into()),
-                (Some(l), Some(s)) => {
-                    if bits.is_some_and(|b| l + s > b) {
-                        f.notes.push("beyond the register's width".into());
+                (Some(l), Some(s)) => match l.checked_add(s) {
+                    Some(end) => {
+                        if bits.is_some_and(|b| end > b) {
+                            f.notes.push("beyond the register's width".into());
+                        }
+                        used.push((l, end, i));
                     }
-                    used.push((l, l + s, i));
-                }
+                    None => f.notes.push("beyond the register's width".into()),
+                },
                 _ => {}
             }
         }
@@ -354,20 +369,42 @@ impl Analysis {
         fields
     }
 
-    /// The registers and memories at `addr` in the model's maps (every map that contains it).
+    /// The registers and memories at `addr` in the maps the view shows (the top block's):
+    /// those with a bus word at that very address, else those with a word that holds that byte
+    /// (byte addressing), and memories whose range holds it.
     pub fn registers_at(&self, model: &Model, addr: u128) -> Vec<AddressHit> {
-        let mut out = Vec::new();
-        for (mi, m) in model.maps.iter().enumerate() {
-            if m.parent.is_some() {
-                continue;
-            }
-            walk_addresses(model, mi, &[model.blocks[m.block].name.clone(), m.name.clone()], 0, &mut |path, map, lo, hi| {
-                if (lo..=hi).contains(&addr) {
-                    out.push(AddressHit { path: path.to_vec(), map: map.to_string(), address: range_text(lo, hi) });
+        let mut exact = Vec::new();
+        let mut within = Vec::new();
+        let Some(top) = model.blocks.first() else { return Vec::new() };
+        for &mi in &top.maps {
+            let m = &model.maps[mi];
+            walk_addresses(model, mi, &[top.name.clone(), m.name.clone()], 0, &mut |path, map, ri, offset| {
+                let r = &model.regs[ri];
+                let Some(a) = entry_addresses(model, map, ri, offset) else { return };
+                let Some(base) = model.maps[a.top].base.num() else { return };
+                let at = |x: u128| base.checked_add(x);
+                let (Some(lo), Some(hi)) = (at(a.lo), at(a.hi)) else { return };
+                let hit = |note: Option<String>| AddressHit { path: path.to_vec(), map: model.maps[map].name.clone(), address: range_text(lo, hi), note };
+                if r.memory {
+                    if (lo..=hi).contains(&addr) {
+                        exact.push(hit(Some("in this memory".into())));
+                    }
+                    return;
+                }
+                if a.words.iter().any(|w| at(*w) == Some(addr)) {
+                    exact.push(hit(None));
+                } else if let Some(bw) = a.byte_width {
+                    if let Some(w) = a.words.iter().filter_map(|w| at(*w)).find(|w| *w < addr && addr - *w < bw) {
+                        within.push(hit(Some(format!("byte {} of the word at {w:#x}", addr - w))));
+                    }
                 }
             });
         }
-        out
+        if exact.is_empty() {
+            within
+        } else {
+            exact
+        }
     }
 
     /// The view's nodes for a model: the top block, its maps with their entries (sub-blocks
@@ -419,7 +456,7 @@ impl Analysis {
     fn map_node(&self, model: &Model, mi: usize, left: &mut usize, truncated: &mut bool, depth: usize) -> RegNode {
         let m = &model.maps[mi];
         let mut n = self.node_at(m.name.clone(), "map", Some(m.at), None);
-        n.address = physical(model, mi, 0, 0, 1, 0).map(|(a, top)| address_text(model, top, a[0], a[0]));
+        n.address = start_of(model, mi).map(|(a, top)| address_text(model, top, a, a));
         n.bits = m.n_bytes.num().map(|b| format!("{} bytes", b));
         if m.parent.is_none() && m.base.num().is_none() {
             n.notes.push(format!("base {} not constant: addresses relative to it", m.base.text()));
@@ -437,9 +474,9 @@ impl Analysis {
             *left -= 1;
             match e {
                 Entry::Reg { reg, offset, rights, unmapped, at, notes } => {
-                    let range = if *unmapped { None } else { entry_range(model, mi, *reg, offset) };
+                    let range = if *unmapped { None } else { entry_addresses(model, mi, *reg, offset) };
                     let mut rn = self.reg_node(model, *reg, Some(offset), rights.clone(), None);
-                    rn.address = range.map(|(lo, hi, top)| address_text(model, top, lo, hi));
+                    rn.address = range.as_ref().map(|a| address_text(model, a.top, a.lo, a.hi));
                     rn.notes.extend(notes.iter().cloned());
                     if *unmapped {
                         rn.notes.push("unmapped (reached by a front door only)".into());
@@ -448,18 +485,19 @@ impl Analysis {
                     rn.uri = uri;
                     rn.line = line;
                     rn.character = character;
-                    entries.push((range.map(|r| r.0), rn));
+                    entries.push((range.map(|a| a.lo), rn));
                 }
                 Entry::Sub { map, offset, at } => {
-                    let start = physical(model, *map, 0, 0, 1, 0);
+                    let start = start_of(model, *map);
                     let mut bn = self.block_node_mounted(model, model.maps[*map].block, *map, left, truncated, depth + 1);
+                    bn.name = mounted_name(model, mi, *map);
                     bn.offset = Some(offset.text());
-                    bn.address = start.as_ref().map(|(a, top)| address_text(model, *top, a[0], a[0]));
+                    bn.address = start.map(|(a, top)| address_text(model, top, a, a));
                     let (uri, line, character) = self.where_of(*at);
                     bn.uri = uri;
                     bn.line = line;
                     bn.character = character;
-                    entries.push((start.map(|(a, _)| a[0]), bn));
+                    entries.push((start.map(|(a, _)| a), bn));
                 }
             }
         }
@@ -537,13 +575,17 @@ impl Analysis {
     }
 }
 
+/// Addresses computed at most for one access (a chain of maps of falling widths multiplies
+/// them).
+const MAX_ADDRESSES: usize = 4096;
+
 /// The addresses UVM 1.2 gives to `n_bytes` bytes at local address `base`, element
 /// `mem_offset`, of map `mi` (`uvm_reg_map::get_physical_addresses`): one address per bus
-/// word, `n_bytes` apart with byte addressing and 1 apart without, translated through the
-/// parent maps (a child address scaled by the child's width in parent words, at its submap's
-/// offset). The addresses are in the top map's space, without its base; the top map comes
-/// with them.
-fn physical(model: &Model, mi: usize, base: u128, mem_offset: u128, n_bytes: u128, depth: usize) -> Option<(Vec<u128>, usize)> {
+/// word, `n_bytes` apart with byte addressing and 1 apart without (all the same in a FIFO
+/// map), translated through the parent maps (a child address scaled by the child's width in
+/// parent words, at its submap's offset). The addresses are in the top map's space, without
+/// its base; the top map comes with them. `left`: addresses that may still be made.
+fn physical(model: &Model, mi: usize, base: u128, mem_offset: u128, n_bytes: u128, depth: usize, left: &mut usize) -> Option<(Vec<u128>, usize)> {
     let m = &model.maps[mi];
     let bw = m.n_bytes.num().filter(|b| *b > 0)?;
     let mult = if m.byte_addressing.num()? != 0 { bw } else { 1 };
@@ -551,12 +593,14 @@ fn physical(model: &Model, mi: usize, base: u128, mem_offset: u128, n_bytes: u12
         vec![base.checked_add(mem_offset.checked_mul(mult)?)?]
     } else {
         let n = (n_bytes - 1) / bw + 1;
-        if n > MAX_ITERATIONS {
+        if n > *left as u128 {
             return None;
         }
         let first = base.checked_add(mem_offset.checked_mul(n.checked_mul(mult)?)?)?;
-        (0..n).map(|i| first.checked_add(i * mult)).collect::<Option<_>>()?
+        let step = if m.fifo { 0 } else { mult };
+        (0..n).map(|i| first.checked_add(i * step)).collect::<Option<_>>()?
     };
+    *left = left.checked_sub(local.len())?;
     let Some((p, offset)) = &m.parent else { return Some((local, mi)) };
     if depth > 16 {
         return None;
@@ -567,26 +611,45 @@ fn physical(model: &Model, mi: usize, base: u128, mem_offset: u128, n_bytes: u12
     let mut out = Vec::new();
     let mut top = mi;
     for l in local {
-        let (a, t) = physical(model, *p, offset.checked_add(l.checked_mul(k)?)?, 0, bw, depth + 1)?;
+        let (a, t) = physical(model, *p, offset.checked_add(l.checked_mul(k)?)?, 0, bw, depth + 1, left)?;
         out.extend(a);
         top = t;
     }
     Some((out, top))
 }
 
-/// The first and last address of register `ri` at `offset` in map `mi` (a memory: from its
-/// first element to its last), and the top map they are in. A register of unknown width shows
+/// Where local address 0 of map `mi` is in its top map, and the top map.
+fn start_of(model: &Model, mi: usize) -> Option<(u128, usize)> {
+    let (a, top) = physical(model, mi, 0, 0, 1, 0, &mut MAX_ADDRESSES.clone())?;
+    Some((*a.first()?, top))
+}
+
+/// The addresses of a register or memory in its top map (without the top map's base).
+struct Addresses {
+    /// A register's bus words (a memory's first element's).
+    words: Vec<u128>,
+    /// First and last address (a memory: of its first and last element).
+    lo: u128,
+    hi: u128,
+    top: usize,
+    /// The top map's bus width when it addresses bytes (a word then holds that many addresses).
+    byte_width: Option<u128>,
+}
+
+/// The addresses of register `ri` at `offset` in map `mi`. A register of unknown width shows
 /// its first address; so does a memory of unknown size.
-fn entry_range(model: &Model, mi: usize, ri: usize, offset: &Val) -> Option<(u128, u128, usize)> {
+fn entry_addresses(model: &Model, mi: usize, ri: usize, offset: &Val) -> Option<Addresses> {
     let r = &model.regs[ri];
     let off = offset.num()?;
     let n_bytes = r.bits.num().map_or(1, |b| b.div_ceil(8).max(1));
-    let (first, top) = physical(model, mi, off, 0, n_bytes, 0)?;
+    let (words, top) = physical(model, mi, off, 0, n_bytes, 0, &mut MAX_ADDRESSES.clone())?;
     let last = match r.size.as_ref().and_then(|s| s.num()) {
-        Some(size) if r.memory && size > 1 => physical(model, mi, off, size - 1, n_bytes, 0)?.0,
-        _ => first.clone(),
+        Some(size) if r.memory && size > 1 => physical(model, mi, off, size - 1, n_bytes, 0, &mut MAX_ADDRESSES.clone())?.0,
+        _ => words.clone(),
     };
-    Some((*first.iter().min()?, *last.iter().max()?, top))
+    let t = &model.maps[top];
+    let byte_width = if t.byte_addressing.num() == Some(0) { None } else { t.n_bytes.num().filter(|b| *b > 1) };
+    Some(Addresses { lo: *words.iter().min()?, hi: *last.iter().max()?, words, top, byte_width })
 }
 
 /// An address range as shown: with the top map's base, or after its name when it is not
@@ -602,9 +665,22 @@ fn address_text(model: &Model, top: usize, lo: u128, hi: u128) -> String {
     }
 }
 
-/// Calls `f(path, map name, first, last)` for each register and memory of map `mi` (and the
-/// maps mounted in it) whose address is known; `path` names the tree's nodes down to the map.
-fn walk_addresses(model: &Model, mi: usize, path: &[String], depth: usize, f: &mut dyn FnMut(&[String], &str, u128, u128)) {
+/// The name of the node of a block mounted in map `parent` through its map `child`: the
+/// block's name, with the map's when another map of the same block is mounted there too.
+fn mounted_name(model: &Model, parent: usize, child: usize) -> String {
+    let block = model.maps[child].block;
+    let name = &model.blocks[block].name;
+    let same = model.maps[parent].entries.iter().filter(|e| matches!(e, Entry::Sub { map, .. } if model.maps[*map].block == block)).count();
+    if same > 1 {
+        format!("{name} ({})", model.maps[child].name)
+    } else {
+        name.clone()
+    }
+}
+
+/// Calls `f(path, map, register, offset)` for each mapped register and memory of map `mi`
+/// and the maps mounted in it; `path` names the tree's nodes down to the register.
+fn walk_addresses(model: &Model, mi: usize, path: &[String], depth: usize, f: &mut dyn FnMut(&[String], usize, usize, &Val)) {
     let m = &model.maps[mi];
     if depth > 16 {
         return;
@@ -612,17 +688,14 @@ fn walk_addresses(model: &Model, mi: usize, path: &[String], depth: usize, f: &m
     for e in &m.entries {
         match e {
             Entry::Reg { reg, offset, unmapped: false, .. } => {
-                let Some((lo, hi, top)) = entry_range(model, mi, *reg, offset) else { continue };
-                let Some(base) = model.maps[top].base.num() else { continue };
-                let (Some(lo), Some(hi)) = (base.checked_add(lo), base.checked_add(hi)) else { continue };
                 let mut p = path.to_vec();
                 p.push(model.regs[*reg].name.clone());
-                f(&p, &m.name, lo, hi);
+                f(&p, mi, *reg, offset);
             }
             Entry::Sub { map, .. } => {
                 // The tree shows a mounted block's map as the block itself.
                 let mut p = path.to_vec();
-                p.push(model.blocks[model.maps[*map].block].name.clone());
+                p.push(mounted_name(model, mi, *map));
                 walk_addresses(model, *map, &p, depth + 1, f);
             }
             _ => {}
@@ -768,6 +841,9 @@ impl<'a> Interp<'a> {
                 continue;
             }
             // Control words around statements: both branches of a condition are interpreted.
+            if !self.spend(1) {
+                return;
+            }
             if x.is_kw("if") || x.is_kw("while") || x.is_kw("case") || x.is_kw("casex") || x.is_kw("casez") || x.is_kw("repeat") {
                 k = if t.get(k + 1).is_some_and(|p| p.is_punct("(")) { skip_group(t, k + 1) } else { k + 1 };
                 continue;
@@ -804,6 +880,9 @@ impl<'a> Interp<'a> {
             Some((var, vals)) => {
                 let saved = env.locals.get(&var).cloned();
                 for v in vals {
+                    if !self.spend(1) {
+                        break;
+                    }
                     env.locals.insert(var.clone(), Handle::Val(Val::Num(v)));
                     self.exec_range(t, hdr_end, body_end, m, env, this, depth, frames);
                     if self.m.cut.is_some() {
@@ -829,47 +908,115 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// `int i = A; i < B; i++` (or `<=`, `i += 1`, `i = i + 1`, `++i`): the variable and its
-    /// values.
+    /// `int i = A; i < B; i++` and its other plain forms (`<=`, `>`, `>=`, `!=`; `i++`, `++i`,
+    /// `i--`, `--i`, `i += C`, `i -= C`, `i = i + C`, `i = i - C`): the variable and its values.
+    /// Any other condition or step: not unrolled.
     fn for_values(&mut self, header: &[Token], m: DeclRef, env: &Env, this: This) -> Option<(String, Vec<u128>)> {
         let parts: Vec<&[Token]> = header.split(|x| x.is_punct(";")).collect();
         let [init, cond, step] = parts[..] else { return None };
         let eq = init.iter().position(|x| x.is_punct("="))?;
         let var = init[..eq].last().filter(|x| x.is_ident())?.text.to_string();
-        let start = self.eval(&init[eq + 1..], m, env, this).num()?;
-        let (op_i, op) = cond.iter().enumerate().find(|(_, x)| x.is_punct("<") || x.is_punct("<=") || x.is_punct("!="))?;
-        if !cond[..op_i].iter().any(|x| x.text == var.as_str()) {
+        let start = self.eval(&init[eq + 1..], m, env, this).num()? as i128;
+        // The condition: `var OP limit`.
+        let [v, op, limit @ ..] = cond else { return None };
+        if v.text != var.as_str() || limit.is_empty() {
             return None;
         }
-        let limit = self.eval(&cond[op_i + 1..], m, env, this).num()?;
-        let up = step.iter().any(|x| x.is_punct("++")) || step.iter().any(|x| x.is_punct("+=")) && step.last().is_some_and(|x| x.text == "1") || step.len() == 5 && step[3].is_punct("+") && step[4].text == "1";
-        if !up {
+        let limit = self.eval(limit, m, env, this).num()? as i128;
+        // The step.
+        let is_var = |x: &Token| x.text == var.as_str();
+        let delta: i128 = match step {
+            [a, b] if is_var(a) && b.is_punct("++") || a.is_punct("++") && is_var(b) => 1,
+            [a, b] if is_var(a) && b.is_punct("--") || a.is_punct("--") && is_var(b) => -1,
+            [a, o, c @ ..] if is_var(a) && (o.is_punct("+=") || o.is_punct("-=")) => {
+                let c = self.eval(c, m, env, this).num()? as i128;
+                if o.is_punct("+=") { c } else { -c }
+            }
+            [a, e, b, o, c @ ..] if is_var(a) && e.is_punct("=") && is_var(b) && (o.is_punct("+") || o.is_punct("-")) => {
+                let c = self.eval(c, m, env, this).num()? as i128;
+                if o.is_punct("+") { c } else { -c }
+            }
+            _ => return None,
+        };
+        if delta == 0 {
             return None;
         }
-        let end = if op.is_punct("<=") { limit.checked_add(1)? } else { limit };
-        if end < start || end - start > MAX_ITERATIONS {
+        let holds = |i: i128| match op.text.as_str() {
+            "<" => i < limit,
+            "<=" => i <= limit,
+            ">" => i > limit,
+            ">=" => i >= limit,
+            "!=" => i != limit,
+            _ => false,
+        };
+        if !matches!(op.text.as_str(), "<" | "<=" | ">" | ">=" | "!=") {
             return None;
         }
-        Some((var, (start..end).collect()))
+        let mut out = Vec::new();
+        let mut i = start;
+        while holds(i) {
+            if i < 0 || out.len() as u128 >= MAX_ITERATIONS {
+                return None;
+            }
+            out.push(i as u128);
+            i = i.checked_add(delta)?;
+        }
+        Some((var, out))
     }
 
-    /// `arr[i]` of a member array of fixed size: `i` and `0..size`.
-    fn foreach_values(&mut self, header: &[Token], m: DeclRef, _env: &Env, _this: This) -> Option<(String, Vec<u128>)> {
+    /// `arr[i]` of a member array: `i` and the array's indexes, from its declared dimension
+    /// (`[4]`: 0 to 3; `[4:7]`: 4 to 7; `[7:4]`: 7 down to 4).
+    fn foreach_values(&mut self, header: &[Token], m: DeclRef, env: &Env, this: This) -> Option<(String, Vec<u128>)> {
         let open = header.iter().position(|x| x.is_punct("["))?;
         let var = header.get(open + 1).filter(|x| x.is_ident())?.text.to_string();
         if !header.get(open + 2).is_some_and(|x| x.is_punct("]")) {
             return None;
         }
-        let array = &header[..open];
-        let name = array.last().filter(|x| x.is_ident())?;
-        // The member's declared size, through the analysis' loop counting.
+        let name = header[..open].last().filter(|x| x.is_ident())?.text.to_string();
+        if open == 1 {
+            if let Some(vals) = self.declared_indexes(&name, m, env, this) {
+                return (vals.len() as u128 <= MAX_ITERATIONS).then_some((var, vals));
+            }
+        }
+        // Otherwise the analysis' loop counting (a size only).
         let toks: &dyn Fn(FileId) -> Option<Arc<Vec<Token>>> = &|f| self.a.file_tokens(f);
         let n = self.a.loop_count("foreach", header, m.unit, toks)?;
-        let _ = name;
         if n as u128 > MAX_ITERATIONS {
             return None;
         }
         Some((var, (0..n as u128).collect()))
+    }
+
+    /// The indexes of the first unpacked dimension of member `name` of the method's class.
+    fn declared_indexes(&mut self, name: &str, m: DeclRef, env: &Env, this: This) -> Option<Vec<u128>> {
+        let class = self.class_of_method(m)?;
+        let member = self.a.members_list(class).into_iter().find(|d| self.a.decl(*d).name == name)?;
+        let span = self.a.decl(member).name_span;
+        let toks = self.a.file_tokens(span.file)?;
+        let k = toks.partition_point(|t| t.span.start < span.start);
+        if !toks.get(k).is_some_and(|t| t.span == span) || !toks.get(k + 1).is_some_and(|t| t.is_punct("[")) {
+            return None;
+        }
+        let close = skip_group(&toks, k + 1);
+        let inner = &toks[k + 2..close.checked_sub(1)?];
+        let range = match top_level(inner, ":") {
+            Some(c) => {
+                let l = self.eval(&inner[..c], m, env, this).num()?;
+                let r = self.eval(&inner[c + 1..], m, env, this).num()?;
+                if l.abs_diff(r) >= MAX_ITERATIONS {
+                    return None;
+                }
+                if l <= r { (l..=r).collect() } else { (r..=l).rev().collect() }
+            }
+            None => {
+                let n = self.eval(inner, m, env, this).num()?;
+                if n > MAX_ITERATIONS {
+                    return None;
+                }
+                (0..n).collect()
+            }
+        };
+        Some(range)
     }
 
     /// One statement (without its `;`).
@@ -1014,7 +1161,16 @@ impl<'a> Interp<'a> {
         match this {
             This::Block(b) => Some(&self.m.blocks[b].vars),
             This::RegFile(f) => Some(&self.regfiles[f].1),
-            This::Reg => None,
+            This::Reg => Some(&self.reg_vars),
+        }
+    }
+
+    /// Gives `target` the handle `h`: a local it declares, else as `set_var`.
+    fn bind_target(&mut self, target: &Target, this: This, env: &mut Env, h: Handle) {
+        if target.local {
+            env.locals.insert(target.key.clone(), h);
+        } else {
+            self.set_var(this, env, &target.key, h);
         }
     }
 
@@ -1037,7 +1193,7 @@ impl<'a> Interp<'a> {
                 self.regfiles[f].1.insert(name.to_string(), h);
             }
             This::Reg => {
-                env.locals.insert(name.to_string(), h);
+                self.reg_vars.insert(name.to_string(), h);
             }
         }
     }
@@ -1100,7 +1256,7 @@ impl<'a> Interp<'a> {
                 _ => None,
             };
             if let Some(o) = obj {
-                self.set_var(this, env, &target.key, Handle::Obj(o));
+                self.bind_target(target, this, env, Handle::Obj(o));
             }
             return;
         }
@@ -1128,6 +1284,12 @@ impl<'a> Interp<'a> {
                     base: get(1).unwrap_or(Val::Unknown("base_addr".into())),
                     n_bytes: get(2).unwrap_or(Val::Unknown("n_bytes".into())),
                     byte_addressing: get(4).unwrap_or(Val::Num(1)),
+                    fifo: match get(3) {
+                        Some(Val::Unknown(t)) => t.contains("FIFO"),
+                        // `uvm_endianness_e`: UVM_LITTLE_FIFO = 3, UVM_BIG_FIFO = 4.
+                        Some(Val::Num(v)) => v == 3 || v == 4,
+                        _ => false,
+                    },
                     entries: Vec::new(),
                     parent: None,
                     at: rhs[0].span,
@@ -1136,13 +1298,13 @@ impl<'a> Interp<'a> {
                 if self.m.blocks[b].default_map.is_none() {
                     self.m.blocks[b].default_map = Some(mi);
                 }
-                self.set_var(this, env, &target.key, Handle::Obj(Obj::Map(mi)));
+                self.bind_target(target, this, env, Handle::Obj(Obj::Map(mi)));
             }
             return;
         }
         // An alias of an object (`m = sub.default_map`), else a value.
         if let Some(o) = self.object(rhs, env, this) {
-            self.set_var(this, env, &target.key, Handle::Obj(o));
+            self.bind_target(target, this, env, Handle::Obj(o));
             return;
         }
         if target.local {
@@ -1161,7 +1323,7 @@ impl<'a> Interp<'a> {
         }
         // `T [#(...)] :: type_id :: create (`
         let create = rhs.iter().position(|x| x.text == "create")?;
-        if create < 3 || !rhs[create - 1].is_punct("::") || rhs[create - 2].text != "type_id" || !rhs[create - 3].is_punct("::") {
+        if create < 4 || !rhs[create - 1].is_punct("::") || rhs[create - 2].text != "type_id" || !rhs[create - 3].is_punct("::") {
             return None;
         }
         let open = rhs.get(create + 1).filter(|x| x.is_punct("(")).map(|_| create + 1)?;
@@ -1411,6 +1573,11 @@ impl<'a> Interp<'a> {
         if let [s] = t {
             if s.kind == TokKind::String {
                 return Val::Str(s.text.trim_matches('"').to_string());
+            }
+            if s.is_ident() {
+                if let Some(Handle::Val(v)) = env.locals.get(s.text.as_str()) {
+                    return v.clone();
+                }
             }
         }
         let text = super::views::tokens_text(t);
@@ -1759,10 +1926,42 @@ impl Eval<'_, '_> {
         if !matches!(dd.kind, DeclKind::Parameter | DeclKind::LocalParam) || dd.detail.is_empty() {
             return None;
         }
+        if self.it.expanding >= 8 {
+            return None;
+        }
         let text = dd.detail.to_string();
+        self.it.expanding += 1;
         let v = self.it.eval_text(&text, d, &Env::default(), self.this);
+        self.it.expanding -= 1;
         v.num()
     }
+}
+
+/// Keeps at most `max` nodes of the tree under `n` (depth first), and the nodes on the path
+/// `reveal` (names from `n`'s children down) beyond that; a node that lost children is marked
+/// truncated. Whether any was dropped.
+pub fn limit_tree(n: &mut RegNode, max: usize, reveal: &[String]) -> bool {
+    let mut left = max;
+    limit_children(n, &mut left, reveal)
+}
+
+fn limit_children(n: &mut RegNode, left: &mut usize, reveal: &[String]) -> bool {
+    let mut lost = false;
+    let mut below = false;
+    let mut kept = Vec::new();
+    for mut c in std::mem::take(&mut n.children) {
+        let on_path = reveal.first().is_some_and(|r| *r == c.name);
+        if *left == 0 && !on_path {
+            lost = true;
+            continue;
+        }
+        *left = left.saturating_sub(1);
+        below |= limit_children(&mut c, left, if on_path { &reveal[1..] } else { &[] });
+        kept.push(c);
+    }
+    n.children = kept;
+    n.truncated |= lost;
+    lost || below
 }
 
 /// The nodes of `n` whose name (or class) matches `f`, with their ancestors; the matches are

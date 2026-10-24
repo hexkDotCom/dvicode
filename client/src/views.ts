@@ -283,6 +283,28 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     }
   }
 
+  /** Selects the node at exactly `names` (not an ancestor), without focus; whether it is shown. */
+  async selectExact(names: string[]): Promise<boolean> {
+    const item = this.itemByNames(names);
+    if (!item || !this.view) {
+      return false;
+    }
+    this.revealing = true;
+    try {
+      await this.view.reveal(item, { select: true, focus: false });
+    } catch {
+      return false;
+    } finally {
+      this.revealing = false;
+    }
+    return true;
+  }
+
+  /** The analysis revision of the tree shown (-1 before the first). */
+  get shownRevision(): number {
+    return this.revision;
+  }
+
   /** Forgets the occurrences found (a restarted server, a refresh): they are searched again. */
   forget(): void {
     this.found = undefined;
@@ -841,7 +863,7 @@ const REGISTER_ICONS: Record<string, string> = { block: 'database', map: 'list-t
 export interface RegisterHits {
   revision: number;
   top: string;
-  hits: { path: string[]; map: string; address: string }[];
+  hits: { path: string[]; map: string; address: string; note?: string }[];
   cut: string | null;
 }
 
@@ -1138,7 +1160,7 @@ export class Views implements vscode.Disposable {
     const address = await vscode.window.showInputBox({
       title: 'Find Register at Address',
       prompt: "Address in hexadecimal (0x1000, 'h1000, 32'h1000 or 1000) or decimal ('d4096)",
-      validateInput: (t) => (/^\s*(0x[0-9a-f_]+|\d*'h[0-9a-f_]+|\d*'d[0-9_]+|[0-9a-f_]+)\s*$/i.test(t) ? undefined : 'Not an address'),
+      validateInput: (t) => (/^\s*(0x[0-9a-f][0-9a-f_]*|\d*'h[0-9a-f][0-9a-f_]*|\d*'d[0-9][0-9_]*|[0-9a-f][0-9a-f_]*)\s*$/i.test(t) ? undefined : 'Not an address'),
     });
     if (!address) {
       return;
@@ -1162,7 +1184,7 @@ export class Views implements vscode.Disposable {
     let hit = r.hits[0];
     if (r.hits.length > 1) {
       const pick = await vscode.window.showQuickPick(
-        r.hits.map((h) => ({ label: h.path.slice(1).join('.'), description: `${h.address} in map ${h.map}`, hit: h })),
+        r.hits.map((h) => ({ label: h.path.slice(1).join('.'), description: `${h.address}${h.note ? ` (${h.note})` : ''} in map ${h.map}`, hit: h })),
         { placeHolder: `${r.hits.length} registers at ${address.trim()}` },
       );
       if (!pick) {
@@ -1171,10 +1193,29 @@ export class Views implements vscode.Disposable {
       hit = pick.hit;
     }
     await vscode.commands.executeCommand('dvicode.registerModel.focus');
-    if (!v.size) {
+    // The tree shown must be of the model searched: the same top and revision.
+    if (!v.size || v.shownRevision < r.revision || (v.last?.top ?? null) !== r.top) {
       await v.refresh();
     }
-    await v.select(hit.path);
+    if (await v.selectExact(hit.path)) {
+      return;
+    }
+    const name = hit.path.slice(1).join('.');
+    if (v.filter) {
+      const clear = 'Clear Filter';
+      const pick = await vscode.window.showInformationMessage(`DVICode: ${name} (${hit.address}) is hidden by the filter '${v.filter}'.`, clear);
+      if (pick === clear) {
+        await vscode.commands.executeCommand('dvicode.registers.clearFilter');
+        await v.selectExact(hit.path);
+      }
+      return;
+    }
+    // Beyond the node limit: fetched again with the register in it.
+    await v.refresh(hit.path);
+    if (!(await v.selectExact(hit.path))) {
+      await v.select(hit.path);
+      void vscode.window.showInformationMessage(`DVICode: ${name} (${hit.address}) is not in the view.`);
+    }
   }
 
   /** After the tree of a view that follows the editor changed (filter, top, test). */

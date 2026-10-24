@@ -3046,6 +3046,149 @@ fn a_register_model_is_built_as_its_construction_code_says() {
     assert!(hits(0x10010).is_empty());
 }
 
+const RAL_EDGES: &str = r#"
+virtual class uvm_reg_block; endclass
+virtual class uvm_reg; endclass
+class uvm_reg_field; endclass
+class uvm_reg_map; endclass
+package loop_pkg; parameter int A = loop_pkg::A; endpackage
+class r32 extends uvm_reg;
+  function new(string name = "r32"); super.new(name, 32, 0); endfunction
+endclass
+class r64 extends uvm_reg;
+  function new(string name = "r64"); super.new(name, 64, 0); endfunction
+endclass
+class helper_reg extends uvm_reg;
+  uvm_reg_field f, g;
+  function new(string name = "helper_reg"); super.new(name, 32, 0); endfunction
+  function void make_f(); f = uvm_reg_field::type_id::create("f"); endfunction
+  virtual function void build(string access = "RO");
+    make_f();
+    f.configure(this, 4, 0, access, 0, 0, 1, 0, 0);
+    g = uvm_reg_field::type_id::create("g");
+    g.configure(this, 2, 'hffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, "RW", 0, 0, 1, 0, 0);
+  endfunction
+endclass
+class two_maps extends uvm_reg_block;
+  rand r32 x;
+  uvm_reg_map map_a, map_b;
+  function new(string name = "two_maps"); super.new(name); endfunction
+  virtual function void build();
+    map_a = create_map("map_a", 0, 4, UVM_LITTLE_ENDIAN);
+    map_b = create_map("map_b", 0, 4, UVM_LITTLE_ENDIAN);
+    x = r32::type_id::create("x");
+    map_a.add_reg(x, 'h4);
+    map_b.add_reg(x, 'h8);
+  endfunction
+endclass
+class lone extends uvm_reg_block;
+  rand r32 y;
+  function new(string name = "lone"); super.new(name); endfunction
+  virtual function void build();
+    default_map = create_map("lone_map", 'h9000, 4, UVM_LITTLE_ENDIAN);
+    y = r32::type_id::create("y");
+    default_map.add_reg(y, 0);
+  endfunction
+endclass
+class edge_block extends uvm_reg_block;
+  rand r32 arr[4:7];
+  rand r32 odd[2];
+  rand r64 wide, packed_w;
+  rand helper_reg h, unbuilt;
+  rand two_maps tm;
+  rand lone ln;
+  uvm_reg_map m, fifo_map;
+  function new(string name = "edge_block"); super.new(name); endfunction
+  function void scratch();
+    uvm_reg_map m = create_map("scratch", 'h7000, 4, UVM_LITTLE_ENDIAN);
+  endfunction
+  virtual function void build();
+    m = create_map("bus", 'h1000, 4, UVM_LITTLE_ENDIAN);
+    default_map = m;
+    fifo_map = create_map("fifo", 'h2000, 4, UVM_LITTLE_FIFO);
+    scratch();
+    foreach (arr[i]) begin
+      arr[i] = r32::type_id::create($sformatf("arr%0d", i));
+      m.add_reg(arr[i], i * 4);
+    end
+    for (int i = 0; i * 2 < 4; i++) begin
+      odd[i] = r32::type_id::create("odd");
+      m.add_reg(odd[i], 'h40);
+    end
+    wide = new("wide");
+    m.add_reg(wide, 'h80);
+    packed_w = new("packed_w");
+    fifo_map.add_reg(packed_w, 'h20);
+    h = helper_reg::type_id::create("h");
+    h.build();
+    m.add_reg(h, 'h90);
+    unbuilt = helper_reg::type_id::create("unbuilt");
+    m.add_reg(unbuilt, 'h94);
+    tm = two_maps::type_id::create("tm");
+    tm.build();
+    m.add_submap(tm.map_a, 'h100);
+    m.add_submap(tm.map_b, 'h200);
+    ln = lone::type_id::create("ln");
+    ln.build();
+    m.add_reg(arr[4], loop_pkg::A);
+    arr[4] = ::type_id::create("r");
+    for (int a = 0; a < 4096; a++) for (int b = 0; b < 4096; b++) for (int c = 0; c < 4096; c++) for (int d = 0; d < 4096; d++) begin end
+  endfunction
+endclass
+"#;
+
+#[test]
+fn register_model_edge_cases_are_bounded_and_follow_uvm() {
+    let (a, _) = project("raledges", &[("ral.sv", RAL_EDGES)]);
+    let (blocks, _) = a.register_blocks();
+    let top = *blocks.iter().find(|b| a.decl(**b).name == "edge_block").unwrap();
+    let t0 = std::time::Instant::now();
+    let model = a.register_model(top);
+    assert!(t0.elapsed().as_secs() < 20, "nested empty loops are charged: {:?}", t0.elapsed());
+    assert_eq!(model.cut, Some("work"), "four nested loops of 4096 stop at the work limit");
+    let (tree, _) = a.register_tree(&model, 1000);
+    let show = |n: &dvi_analysis::ide::registers::RegNode| -> Vec<String> { n.children.iter().map(|c| format!("{} {}", c.name, c.address.clone().unwrap_or_default())).collect() };
+    let maps: Vec<&str> = tree.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(maps, ["bus", "fifo", "scratch"], "the helper's local map is its own, not the member `m`");
+    let bus = &tree.children[0];
+    assert_eq!(
+        show(bus),
+        [
+            "arr[4] 0x1010",
+            "arr[5] 0x1014",
+            "arr[6] 0x1018",
+            "arr[7] 0x101c",
+            "odd[*] 0x1040",
+            "wide 0x1080–0x1084",
+            "h 0x1090",
+            "unbuilt 0x1094",
+            "tm (map_a) 0x1100",
+            "tm (map_b) 0x1200",
+            "arr[4] ",
+        ],
+        "foreach follows [4:7]; `i * 2 < 4` is not unrolled; a package constant defined by itself is not constant"
+    );
+    assert_eq!(show(&tree.children[1]), ["packed_w 0x2020"], "a FIFO map puts every word at the same address");
+    // Fields: a helper's member survives; a string argument's value; unbuilt: none; no overflow.
+    let reg = |name: &str| bus.children.iter().find(|c| c.name == name).unwrap().register.unwrap();
+    let f: Vec<String> = a.register_fields(&model, reg("h")).iter().map(|f| format!("{} {:?} {:?}", f.name, f.access, f.notes)).collect();
+    assert_eq!(f, ["f Some(\"RO\") []", "g Some(\"RW\") [\"beyond the register's width\"]"]);
+    assert!(a.register_fields(&model, reg("unbuilt")).is_empty(), "build() never called: no fields");
+    // Address search: exact words, a byte inside a word, and only blocks the view shows.
+    let hits = |x: u128| a.registers_at(&model, x).into_iter().map(|h| format!("{} {}{}", h.path.join("."), h.address, h.note.map(|n| format!(" ({n})")).unwrap_or_default())).collect::<Vec<_>>();
+    assert_eq!(hits(0x1084), ["edge_block.bus.wide 0x1080–0x1084"]);
+    assert_eq!(hits(0x1081), ["edge_block.bus.wide 0x1080–0x1084 (byte 1 of the word at 0x1080)"]);
+    assert_eq!(hits(0x1208), ["edge_block.bus.tm (map_b).x 0x1208"]);
+    assert!(hits(0x9000).is_empty(), "a block whose map is not mounted is not in the view");
+    // The node limit keeps a revealed path and marks what it cut.
+    let (mut t, _) = a.register_tree(&model, usize::MAX);
+    let cut = dvi_analysis::ide::registers::limit_tree(&mut t, 2, &["bus".to_string(), "unbuilt".to_string()]);
+    assert!(cut);
+    let bus = &t.children[0];
+    assert_eq!(bus.children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["arr[4]", "unbuilt"]);
+    assert!(bus.truncated && t.truncated);
+}
+
 #[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
