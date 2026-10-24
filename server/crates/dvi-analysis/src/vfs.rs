@@ -589,16 +589,16 @@ impl SourceProvider for Reader<'_> {
     fn source(&self, id: FileId) -> Option<(Arc<str>, Arc<Vec<Token>>)> {
         let (Some(text), Some(pin)) = (self.pinned_text(id), self.pin) else { return self.vfs.source(id) };
         let text = text?;
-        // The store's tokens while it has the same text.
-        if let Some((t, toks)) = self.vfs.source(id).filter(|(t, _)| Arc::ptr_eq(t, &text)) {
-            return Some((t, toks));
+        // The store's tokens while it has the same text; else the base to lex from (the
+        // editor's text is one edit or so further).
+        let base = self.vfs.source(id);
+        if let Some((t, toks)) = base.as_ref().filter(|(t, _)| Arc::ptr_eq(t, &text)) {
+            return Some((t.clone(), toks.clone()));
         }
         let mut cache = pin.tokens.lock().unwrap();
         if let Some((t, toks)) = cache.get(&id).filter(|(t, _)| Arc::ptr_eq(t, &text)) {
             return Some((t.clone(), toks.clone()));
         }
-        // From the store's tokens of the file: the editor's text is one edit or so further.
-        let base = self.vfs.source(id);
         let toks = Arc::new(lex_from(base.as_ref(), &text, id));
         cache.insert(id, (text.clone(), toks.clone()));
         Some((text, toks))

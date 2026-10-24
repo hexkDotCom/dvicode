@@ -62,7 +62,8 @@ pub fn relex(old_text: &str, old: &[Token], new: &str, file: FileId) -> Vec<Toke
         }
     }
     let start = if k == 0 { 0 } else { old[k - 1].span.end as usize };
-    let mut lx = Lexer::new(new, file, start, 0);
+    // Room for all of them at once: the old ones and about one per six bytes inserted.
+    let mut lx = Lexer::new(new, file, start, old.len() + (nb.len() - suffix).saturating_sub(prefix) / 6 + 16);
     lx.out.extend_from_slice(&old[..k]);
     let mut fl = if k == 0 { flags::NL_BEFORE } else { 0 };
     let edit_end = nb.len() - suffix;
@@ -560,8 +561,9 @@ mod tests {
             for _ in 0..20 {
                 // Delete a range and insert pieces, on character boundaries.
                 let bounds: Vec<usize> = (0..=text.len()).filter(|i| text.is_char_boundary(*i)).collect();
-                let a = bounds[rnd(bounds.len())];
-                let b = bounds[a.min(bounds.len() - 1)..].iter().copied().nth(rnd(8)).unwrap_or(text.len()).max(a);
+                let ia = rnd(bounds.len());
+                let a = bounds[ia];
+                let b = bounds[ia..].iter().copied().nth(rnd(8)).unwrap_or(text.len());
                 let mut ins = String::new();
                 for _ in 0..rnd(4) {
                     ins.push_str(PIECES[rnd(PIECES.len())]);
@@ -585,7 +587,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let toks = lex(&text, 0);
         let full = t0.elapsed();
-        let at = text[..text.len() / 2].rfind('\n').unwrap() + 1;
+        let at = text.as_bytes()[..text.len() / 2].iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
         let new = format!("{}    x = 1;\n{}", &text[..at], &text[at..]);
         let t1 = std::time::Instant::now();
         let re = relex(&text, &toks, &new, 0);
