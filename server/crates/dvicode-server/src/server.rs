@@ -184,7 +184,7 @@ struct Deferred {
     /// one, never for later ones.
     seq: u64,
     /// It looks at the whole project, so it waits for every edit; otherwise for the edits of
-    /// files compiled with `file`.
+    /// files compiled with `file` or before it (`Server::needs`).
     project: bool,
     /// The file it is about (`None`: none, it waits for every edit).
     file: Option<FileId>,
@@ -967,8 +967,9 @@ impl Server {
     }
 
     /// Whether request `d` needs the edits of file `f` that are not analysed yet: those made
-    /// before it came, of `f` itself or of a file compiled with it (a header and the files
-    /// that include it), or of any file for a request about the whole project.
+    /// before it came, of `f` itself, of a file compiled with it (a header and the files that
+    /// include it) or before it in the same build invocation (whose macros it is compiled
+    /// with), or of any file for a request about the whole project.
     fn needs(&self, d: &Deferred, f: FileId) -> bool {
         self.dirty.get(&f).is_some_and(|first| *first <= d.seq) && (d.needed.contains(&f) || self.related(d.project, d.file, f))
     }
@@ -979,7 +980,7 @@ impl Server {
             return true;
         }
         let units = self.analysis.units_of_file(file);
-        !units.is_empty() && self.analysis.units_of_file(f).iter().any(|u| units.contains(u))
+        !units.is_empty() && (self.analysis.units_of_file(f).iter().any(|u| units.contains(u)) || self.analysis.macros_flow(f, file))
     }
 
     /// Whether `d` must wait for edits not analysed yet.

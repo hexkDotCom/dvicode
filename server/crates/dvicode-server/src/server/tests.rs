@@ -854,6 +854,47 @@ fn a_request_is_answered_while_a_slow_update_runs() {
     c.shutdown();
 }
 
+const MACRO_DEFS: &str = "// no macros yet\n";
+
+const MACRO_USER: &str = "module body;\n`ifdef WIDE\n  int wide_x;\n`endif\n  initial wide_x = 1;\nendmodule\n";
+
+#[test]
+fn a_request_waits_for_an_edit_of_the_macros_an_earlier_file_defines() {
+    // Two units of one invocation: body.sv is compiled with the macros defs.sv leaves.
+    let root = project("earliermacros", &[("defs.sv", MACRO_DEFS), ("body.sv", MACRO_USER)]);
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (defs, body) = (uri(&root, "defs.sv"), uri(&root, "body.sv"));
+    c.open(&defs, 1, MACRO_DEFS);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    c.open(&body, 1, MACRO_USER);
+    gate.wait_entered(2);
+    c.wait_note("dvicode/revision", |_| true);
+    // An edit of body.sv, whose update is held at the gate.
+    gate.close();
+    let v2 = format!("{MACRO_USER}// edited\n");
+    c.change(&body, 2, &v2);
+    let first = c.send_request("textDocument/documentSymbol", json!({ "textDocument": { "uri": body } }));
+    gate.wait_entered(3);
+    // A request about defs.sv does not wait for it: macros do not flow back.
+    assert_eq!(c.request_ok("textDocument/documentSymbol", json!({ "textDocument": { "uri": defs } })), json!([]));
+    // Then defs.sv defines the macro that declares `wide_x` in body.sv.
+    c.change(&defs, 2, "`define WIDE\n");
+    let waiting = c.send_request("textDocument/definition", json!({ "textDocument": { "uri": body }, "position": at(&v2, "wide_x = 1") }));
+    // The server has it before body.sv's update goes on.
+    c.sync();
+    gate.open();
+    assert!(c.reply(&first, WAIT).is_some_and(|r| r.error.is_none()));
+    // Not answered when body.sv's update is in, but once defs.sv's macros reached it.
+    let r = c.reply(&waiting, WAIT).expect("a reply once the updates are in");
+    let locs = r.result.unwrap_or(Value::Null);
+    assert_eq!(locs.as_array().map(|l| l.len()), Some(1), "{locs}");
+    assert_eq!(locs[0]["range"]["start"]["line"], 2);
+    c.shutdown();
+}
+
 #[test]
 fn a_newer_edit_replaces_the_update_in_progress() {
     let root = project("supersede", &[("pkg.sv", PKG), ("top.sv", TOP)]);

@@ -70,6 +70,32 @@ fn a_moved_define_is_found_at_its_new_place_from_later_files() {
 }
 
 #[test]
+fn macros_flow_to_later_files_of_the_same_invocation() {
+    let b = "module b;\n  logic [`W-1:0] x;\n  sub u(.a(x[0]));\nendmodule\n";
+    let (a, root) = project("macrosflow", &[("defs.svh", DEFS), ("a.sv", A), ("b.sv", b), ("c.sv", "module c; endmodule\n")]);
+    // b.sv needs two library files; c.sv is in an invocation of its own.
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(root.join("lib/sub.v"), "module sub(input a);\n  leaf l(.x(a));\nendmodule\n").unwrap();
+    std::fs::write(root.join("lib/leaf.v"), "module leaf(input x);\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), "-y lib\n+libext+.v\na.sv\nb.sv\n+dvicode_init\nc.sv\n").unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(a.vfs.clone(), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let f = |name: &str| a.vfs.file_id(&root.join(name));
+    assert!(a.macros_flow(f("a.sv"), f("b.sv")));
+    assert!(a.macros_flow(f("defs.svh"), f("b.sv")), "a header of an earlier file");
+    assert!(!a.macros_flow(f("b.sv"), f("a.sv")), "a later file");
+    assert!(!a.macros_flow(f("b.sv"), f("defs.svh")));
+    assert!(!a.macros_flow(f("a.sv"), f("c.sv")), "another invocation");
+    assert!(!a.macros_flow(f("a.sv"), f("a.sv")));
+    // Library units come after the invocation's files, in an order their numbers do not tell.
+    assert!(a.macros_flow(f("b.sv"), f("lib/sub.v")));
+    assert!(!a.macros_flow(f("lib/sub.v"), f("b.sv")));
+    assert!(a.macros_flow(f("lib/sub.v"), f("lib/leaf.v")) && a.macros_flow(f("lib/leaf.v"), f("lib/sub.v")));
+    assert!(!a.macros_flow(f("lib/sub.v"), f("lib/sub.v")));
+    assert!(!a.macros_flow(f("lib/sub.v"), f("c.sv")));
+}
+
+#[test]
 fn open_files_keep_or_lose_their_own_unit_as_includes_change() {
     let (a, root) = project("openheader", &[("h.svh", "int from_h;\n"), ("a.sv", "module a;\n`include \"h.svh\"\nendmodule\n")]);
     let h = edit(&a, &root, "h.svh", "int from_h;\n");

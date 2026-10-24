@@ -769,6 +769,33 @@ impl Analysis {
         self.file_units.get(&f).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Whether an edit of `from` may change the macros `to` is compiled with: a build unit
+    /// that compiles `from` comes before one that compiles `to` in the same invocation (macros
+    /// flow from file to file, see `propagate_macros`), or `to` is an ad-hoc file of that
+    /// invocation (which sees its final macros). Library units start with the macros of their
+    /// invocation's own files and follow one another in the order they were found, which
+    /// their numbers do not tell (one kept from before can come after a new one): any other
+    /// unit of the invocation may come before them.
+    pub fn macros_flow(&self, from: FileId, to: FileId) -> bool {
+        // The first and last unit of each invocation that compiles `from`.
+        let mut span: FxHashMap<usize, (UnitId, UnitId)> = FxHashMap::default();
+        for u in self.units_of_file(from).iter().filter_map(|id| self.try_unit(*id)) {
+            if u.kind == UnitKind::Project {
+                let e = span.entry(u.invocation).or_insert((u.id, u.id));
+                *e = (e.0.min(u.id), e.1.max(u.id));
+            }
+        }
+        !span.is_empty()
+            && self.units_of_file(to).iter().filter_map(|id| self.try_unit(*id)).any(|u| {
+                span.get(&u.invocation).is_some_and(|&(first, last)| match u.kind {
+                    UnitKind::AdHoc => true,
+                    UnitKind::Project if u.library => first != u.id || last != u.id,
+                    UnitKind::Project => u.id > first,
+                    UnitKind::Builtin => false,
+                })
+            })
+    }
+
     /// Recompiles the units that contain any of `files`.
     pub fn update(&self, files: &[FileId]) -> Analysis {
         self.update_with(files, &Progress::new()).expect("an update that nothing cancels finishes")
