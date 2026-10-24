@@ -35,6 +35,8 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Instance repair**: complete port and parameter names in an instance's lists, connect the
   missing ports, expand `.*`, turn ordered connections into named ones, and see ports
   connected twice or ordered and named connections mixed.
+- **Factory override impact**: hover a `set_*_override*` call to see which components it
+  changes in the test's modeled build, which it may change, and why others are not changed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".

@@ -441,6 +441,18 @@ async function run() {
     }
   });
 
+  await test('factory override: hover says what it changes', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const doc = await open('tb/demo_env_pkg.sv');
+    const p = lineOf(doc, 'set_type_override_by_type(demo_driver');
+    const at = p.translate(0, 4);
+    const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', doc.uri, at);
+    const md = hovers.map((h) => h.contents.map((c) => (typeof c === 'string' ? c : c.value)).join('\n')).join('\n');
+    if (!md.includes('Factory type override `demo_driver` → `demo_err_driver`') || !md.includes('Changes')) throw new Error(md);
+    return md.split('\n').filter((l) => l.startsWith('- ')).slice(0, 2).join('; ');
+  });
+
   await test('views: follow the editor', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

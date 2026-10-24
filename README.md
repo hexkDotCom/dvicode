@@ -48,6 +48,8 @@ currently in preview.
 - **Instance repair**: complete port and parameter names in an instance's lists, connect the
   missing ports, expand `.*`, turn ordered connections into named ones, and see ports
   connected twice or ordered and named connections mixed.
+- **Factory override impact**: hover a `set_*_override*` call to see which components it
+  changes in the test's modeled build, which it may change, and why others are not changed.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.

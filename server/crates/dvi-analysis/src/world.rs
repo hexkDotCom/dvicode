@@ -186,6 +186,8 @@ pub struct Analysis {
     /// configured test places component classes (`Analysis::config_places`).
     pub config_calls: Arc<std::sync::OnceLock<Arc<crate::ide::configdb::ConfigIndex>>>,
     pub config_places_cache: Arc<std::sync::OnceLock<Arc<crate::ide::configdb::Places>>>,
+    /// The hierarchies factory override hovers read (`Analysis::override_model`).
+    pub override_model_cache: Arc<std::sync::OnceLock<Arc<crate::ide::override_impact::OverrideModel>>>,
     /// The class each factory name registers (`class_by_factory_name`), as asked.
     pub factory_names: Arc<std::sync::Mutex<FxHashMap<SmolStr, Option<DeclRef>>>>,
     /// The `-y`/`-v` library units in the order they are compiled (after the build's own
@@ -494,6 +496,7 @@ impl Analysis {
             out_of_block: Arc::default(),
             config_calls: Arc::default(),
             config_places_cache: Arc::default(),
+            override_model_cache: Arc::default(),
             factory_names: Arc::default(),
             library_order: Arc::default(),
             cancel: None,
@@ -797,6 +800,7 @@ impl Analysis {
         self.out_of_block = Arc::default();
         self.config_calls = Arc::default();
         self.config_places_cache = Arc::default();
+        self.override_model_cache = Arc::default();
         self.factory_names = Arc::default();
     }
 
@@ -886,6 +890,7 @@ impl Analysis {
         next.out_of_block = Arc::default();
         next.config_calls = Arc::default();
         next.config_places_cache = Arc::default();
+        next.override_model_cache = Arc::default();
         next.factory_names = Arc::default();
         // Preprocess the edited units in parallel with the macros they started with: that is
         // their result unless a file before them now leaves different macros behind.
@@ -1198,6 +1203,7 @@ impl Analysis {
         next.out_of_block = Arc::default();
         next.config_calls = Arc::default();
         next.config_places_cache = Arc::default();
+        next.override_model_cache = Arc::default();
         next.factory_names = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
@@ -1228,6 +1234,7 @@ impl Analysis {
         next.out_of_block = Arc::default();
         next.config_calls = Arc::default();
         next.config_places_cache = Arc::default();
+        next.override_model_cache = Arc::default();
         next.factory_names = Arc::default();
         for id in ids {
             next.units[id as usize] = None;

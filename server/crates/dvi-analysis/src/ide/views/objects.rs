@@ -256,6 +256,7 @@ impl Analysis {
             notes,
             object: true,
             declared,
+            requested_decl: requested,
             ..Default::default()
         };
         (node, cls)

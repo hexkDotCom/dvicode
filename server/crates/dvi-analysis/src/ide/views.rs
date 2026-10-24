@@ -60,6 +60,15 @@ pub struct VerifNode {
     /// Its class.
     #[serde(skip)]
     pub class_decl: Option<DeclRef>,
+    /// The class its creation asked for (before factory overrides).
+    #[serde(skip)]
+    pub requested_decl: Option<DeclRef>,
+    /// Made by the factory (`Some(true)`), by `new` (`Some(false)`), or not known.
+    #[serde(skip)]
+    pub made_by_factory: Option<bool>,
+    /// The path the factory looks overrides up with, when known.
+    #[serde(skip)]
+    pub lookup: Option<String>,
     /// Instance name: the string given to `create`/`new` (`uvm_test_top` for the test), or
     /// the variable when the name is computed.
     pub name: String,
@@ -624,6 +633,8 @@ struct Inst {
     path: String,
     /// The factory can match its path: no name on the way is computed.
     path_known: bool,
+    /// The path the factory looked up its class with (a context changes it), when known.
+    lookup: Option<String>,
     made: Option<Made>,
     class: Option<DeclRef>,
     requested: Option<DeclRef>,
@@ -1681,10 +1692,12 @@ impl Analysis {
         let dup = sibling(&mut inst.seen, &name);
         // Made for certain, and of that class for certain (no possible override).
         let certain = inst.certain && alternatives.is_empty() && conditions_text(&alts).is_empty() && self.loops_sure(&alts[0], scan) && overrides.iter().all(|o| o.applied);
+        let lookup = lookup_of(m);
         let mut child = Inst {
             name,
             path,
             path_known,
+            lookup,
             made: Some(m.clone()),
             class: cls,
             requested,
@@ -1760,6 +1773,9 @@ impl Analysis {
             let mut node = VerifNode {
                 path_known: child.path_known,
                 class_decl: child.class,
+                requested_decl: child.requested,
+                made_by_factory: Some(m.cr.factory),
+                lookup: child.lookup.clone(),
                 name: child.name.clone(),
                 path: child.path.clone(),
                 class: class_name,

@@ -3754,6 +3754,68 @@ fn instance_connections_are_repaired_without_changing_their_meaning() {
     assert_eq!(labels("  c u0 (.clk(clk)), u1 (.").unwrap()[0], "clk", "a later instance of the statement");
 }
 
+const IMPACT_UVM: &str = "`define uvm_component_utils(T)\npackage uvm_pkg;\n  class uvm_component; function new(string name, uvm_component parent); endfunction endclass\n  class uvm_factory; endclass\n  uvm_factory factory;\n  class uvm_test extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\n  class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass\nendpackage\n";
+
+const IMPACT_TB: &str = r#"package tb_pkg;
+  import uvm_pkg::*;
+  class leaf extends uvm_env; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class err_leaf extends leaf; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class drv extends uvm_env; `uvm_component_utils(drv) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class err_drv extends drv; `uvm_component_utils(err_drv) function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class agent extends uvm_env;
+    drv d;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); d = drv::type_id::create("d", this); endfunction
+  endclass
+  class env_a extends uvm_env;
+    leaf l;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      l = leaf::type_id::create("l", this);
+      set_type_override_by_type(leaf::get_type(), err_leaf::get_type()); // LATE
+    endfunction
+  endclass
+  class env_b extends uvm_env;
+    leaf l, by_new;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      l = leaf::type_id::create("l", this);
+      by_new = new("by_new", this);
+    endfunction
+  endclass
+  class the_test extends uvm_test;
+    env_a a; env_b b; agent agt1, agt2;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      set_inst_override_by_type("agt1.d", drv::get_type(), err_drv::get_type()); // INST
+      a = env_a::type_id::create("a", this);
+      b = env_b::type_id::create("b", this);
+      agt1 = agent::type_id::create("agt1", this);
+      agt2 = agent::type_id::create("agt2", this);
+    endfunction
+  endclass
+endpackage
+"#;
+
+#[test]
+fn an_override_call_says_what_it_changes_in_the_modeled_build() {
+    let (a, root) = project("impact", &[("uvm_pkg.sv", IMPACT_UVM), ("tb_pkg.sv", IMPACT_TB)]);
+    let f = a.vfs.lookup(&root.join("tb_pkg.sv")).unwrap();
+    let hover = |tag: &str| -> String {
+        let line_start: usize = IMPACT_TB.lines().take_while(|l| !l.ends_with(&format!("// {tag}"))).map(|l| l.len() + 1).sum();
+        let k = line_start + IMPACT_TB[line_start..].find("set_").unwrap() + 2;
+        a.hover(f, k as u32).unwrap().0
+    };
+    let late = hover("LATE");
+    assert!(late.contains("Changes (1):\n- `uvm_test_top.b.l` (leaf → err_leaf)"), "a sibling built later: {late}");
+    assert!(late.contains("- `uvm_test_top.a.l`: registered after it was made"), "{late}");
+    assert!(late.contains("- `uvm_test_top.b.by_new`: made with `new`"), "{late}");
+    let inst = hover("INST");
+    assert!(inst.contains("Changes (1):\n- `uvm_test_top.agt1.d` (drv → err_drv)"), "{inst}");
+    assert!(inst.contains("- `uvm_test_top.agt2.d`: its path `uvm_test_top.agt2.d` does not match `uvm_test_top.agt1.d`"), "{inst}");
+    assert!(inst.contains("as modeled"), "the scope is said");
+}
+
 #[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";

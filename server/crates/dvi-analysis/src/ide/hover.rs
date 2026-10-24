@@ -13,6 +13,10 @@ impl Analysis {
         if let Some(h) = self.config_hover(file, off) {
             return Some(h);
         }
+        // A factory override call: what it changes in the modeled build of each test.
+        if let Some(h) = self.override_hover(file, off) {
+            return Some(h);
+        }
         let hit = self.hit_at(file, off)?;
         let span = hit.span();
         let target = self.target_of(&hit)?;
