@@ -247,3 +247,22 @@ test.describe('drivers and loads', () => {
     assert.equal(vm.accessesMessage('q', 'reads', 2, [], []), undefined);
   });
 });
+
+test.describe('design hierarchy parameters', () => {
+  const node = (o) => ({ name: 'u_fifo', definition: 'fifo', kind: 'module', truncated: false, ...o });
+  test.it('describes the parameters given, the range and whether it exists', () => {
+    const params = [
+      { name: 'W', value: '16', state: 'evaluated', origin: 'override', kind: 'parameter' },
+      { name: 'DEPTH', value: '8', state: 'evaluated', origin: 'default', kind: 'parameter' },
+      { name: 'N', state: 'unresolved', why: 'a defparam with a path this version does not follow may set it', origin: 'defparam', kind: 'parameter' },
+    ];
+    assert.equal(vm.hierDescription(node({ params })), 'fifo · W=16 N=?');
+    assert.equal(vm.hierDescription(node({ array: '[3:0] · 4 instances' })), 'fifo · [3:0]');
+    assert.equal(vm.hierDescription(node({ presence: 'undetermined: condition not evaluated: `P` is not resolved' })), 'fifo · undetermined');
+    assert.equal(vm.hierDescription({ name: 'g[0]', definition: '', kind: 'generate', truncated: false }), undefined);
+    const tip = vm.hierTooltip(node({ params, presence: 'not elaborated: condition false' }), 'top.u_fifo');
+    assert.ok(tip.includes('*Not elaborated: condition false.*'), tip);
+    assert.ok(tip.includes('- `W` = `16` · given'), tip);
+    assert.ok(tip.includes('- `N` = ? (unresolved: a defparam with a path this version does not follow may set it) · defparam'), tip);
+  });
+});

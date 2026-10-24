@@ -278,7 +278,7 @@ impl Analysis {
 
     /// An instance's port list (from its name) and its statement's `#(...)` list, with the
     /// definition.
-    fn instance_lists(&self, inst: DeclRef) -> Option<(Arc<Vec<Token>>, DeclRef, Option<ConnList>, Option<ConnList>)> {
+    pub(crate) fn instance_lists(&self, inst: DeclRef) -> Option<(Arc<Vec<Token>>, DeclRef, Option<ConnList>, Option<ConnList>)> {
         let d = self.decl(inst);
         let def = self.type_of(inst).filter(|t| self.decl(*t).kind.is_definition())?;
         let toks = self.file_tokens(d.name_span.file)?;

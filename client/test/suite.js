@@ -189,7 +189,7 @@ async function run() {
     const h = await c.sendRequest('dvicode/designHierarchy', { top: null });
     const s = (n) => `${n.name}${n.children.length ? '(' + n.children.map(s).join(',') + ')' : ''}`;
     const text = h.map(s).join(' ');
-    if (!text.startsWith('tb_top(dut(u_fifo,g_mon(u_mon)))')) throw new Error(text);
+    if (!text.startsWith('tb_top(dut(u_fifo,g_mon[0](u_mon),g_mon[1](u_mon)))')) throw new Error(text);
     return text;
   });
 
@@ -307,7 +307,7 @@ async function run() {
     try {
       await v.design.setFilter('mon');
       const design = (await allNodes(v.design)).join(' ');
-      if (design !== 'tb_top tb_top.dut tb_top.dut.g_mon tb_top.dut.g_mon.u_mon') throw new Error(`design: ${design}`);
+      if (design !== 'tb_top tb_top.dut tb_top.dut.g_mon[0] tb_top.dut.g_mon[0].u_mon tb_top.dut.g_mon[1] tb_top.dut.g_mon[1].u_mon') throw new Error(`design: ${design}`);
       await v.verification.setFilter('drv');
       const verif = (await allNodes(v.verification)).join(' ');
       if (verif !== 'demo_full_test demo_full_test.env demo_full_test.env.agents[i] demo_full_test.env.agents[i].drv') throw new Error(`verification: ${verif}`);
@@ -390,6 +390,24 @@ async function run() {
     const wantAddr = 'Through ports and arguments (1) |   a of cg_addr.sample() |     cp_addr';
     if (addr !== wantAddr) throw new Error(`addr: ${addr}`);
     return `${push} || ${addr}`;
+  });
+
+  await test('parameters: values per instance in the hierarchy and in hover', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    const c = await api.ready();
+    const res = await c.sendRequest('dvicode/tree', { view: 'design', maxNodes: 1000 });
+    const find = (nodes, name) => nodes.find((n) => n.name === name);
+    const dut = find(res.roots[0].children, 'dut');
+    const fifo = find(dut.children, 'u_fifo');
+    const w = fifo.params.find((p) => p.name === 'W');
+    if (!w || w.value !== '16' || w.origin !== 'override') throw new Error(JSON.stringify(fifo.params));
+    const doc = await open('rtl/fifo.sv');
+    const line = lineOf(doc, 'parameter int W');
+    const pos = new vscode.Position(line.line, doc.lineAt(line.line).text.indexOf(' W ') + 1);
+    const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', doc.uri, pos);
+    const md = hovers.map((h) => h.contents.map((x) => (typeof x === 'string' ? x : x.value)).join('\n')).join('\n');
+    if (!md.includes('- `16` in `tb_top.dut.u_fifo`') || !md.includes('`tb_top.dut.g_mon[1].u_mon`')) throw new Error(md);
+    return `W=${w.value} (${w.origin}); ${md.split('\n').filter((l) => l.startsWith('- ')).join(' ')}`;
   });
 
   await test('drivers and loads view: through an output port and back', async () => {
@@ -512,13 +530,13 @@ async function run() {
       await until('design selection', v.design, 'tb_top.dut.u_fifo');
       if (vscode.window.activeTextEditor.document !== fifo) throw new Error('the editor lost the focus');
       const first = v.design.view.description;
-      if (first !== '1 of 2') throw new Error(`description: ${first}`);
+      if (first !== '1 of 3') throw new Error(`description: ${first}`);
       await vscode.commands.executeCommand('dvicode.design.nextOccurrence');
-      await until('next occurrence', v.design, 'tb_top.dut.g_mon.u_mon');
+      await until('next occurrence', v.design, 'tb_top.dut.g_mon[0].u_mon');
       // Moving inside fifo keeps the occurrence shown.
       await at(fifo, 'module fifo', 4);
       await sleep(1500);
-      if (sel(v.design) !== 'tb_top.dut.g_mon.u_mon') throw new Error(`moved to ${sel(v.design)}`);
+      if (sel(v.design) !== 'tb_top.dut.g_mon[0].u_mon') throw new Error(`moved to ${sel(v.design)}`);
       // On an instantiation line: that instance.
       const top = await open('rtl/top.sv');
       await at(top, 'u_fifo (', 0);

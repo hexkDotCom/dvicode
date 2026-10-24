@@ -2106,6 +2106,8 @@ struct TreeParams {
     ports: Option<bool>,
     /// Verification Hierarchy: objects (configurations, register models, sequences) are shown.
     objects: Option<bool>,
+    /// Design Hierarchy: generate branches proven not elaborated are shown.
+    inactive: Option<bool>,
 }
 
 /// `dvicode/structure`: the Structure of a file.
@@ -2195,6 +2197,7 @@ fn view_tree(a: &Analysis, p: TreeParams, models: &RegisterModels) -> Value {
     q.target = p.target;
     q.ports = p.ports.unwrap_or(true);
     q.objects = p.objects.unwrap_or(false);
+    q.inactive = p.inactive.unwrap_or(false);
     if q.target.is_some() {
         // Every occurrence counts ("1 of N").
         q.max_matches = q.max_nodes;

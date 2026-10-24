@@ -1,5 +1,7 @@
 //! Data for the custom views: compiled files, design hierarchy, including files, status.
 
+use super::elab::{Ancestor, Elab, Frame, Presence};
+use smol_str::SmolStr;
 use super::factory::{glob_match, OverrideCall};
 use super::filter::Filter;
 use super::stmt::{self, FrameKind};
@@ -49,6 +51,15 @@ pub struct HierNode {
     /// When siblings share the name: which one this is (2, 3...). The views name it `name#2`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dup: Option<u32>,
+    /// An instance's parameters, as elaborated.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<super::elab::ParamShow>,
+    /// Not elaborated (`not elaborated: condition false`) or `undetermined: why`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence: Option<String>,
+    /// An array of instances: its range (`[0:3]`, or why it is not known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub array: Option<String>,
 }
 
 /// A component of the UVM verification hierarchy (or, with `TreeQuery::objects`, an object).
@@ -225,11 +236,13 @@ pub struct TreeQuery {
     /// Verification Hierarchy: objects (configurations, register models, adapters, sequences)
     /// are shown.
     pub objects: bool,
+    /// Design Hierarchy: generate branches proven not elaborated are shown (marked).
+    pub inactive: bool,
 }
 
 impl TreeQuery {
     pub fn new(max_nodes: usize) -> TreeQuery {
-        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000, ports: true, objects: false }
+        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000, ports: true, objects: false, inactive: false }
     }
 }
 
@@ -304,7 +317,8 @@ impl Walk<'_> {
     /// true without one.
     fn matched(&mut self, texts: &[(&str, char)]) -> bool {
         let Some(f) = self.q.filter.as_ref().filter(|_| self.q.target.is_none()) else { return self.q.target.is_none() };
-        let m = texts.iter().any(|(t, sep)| f.matches(t, *sep));
+        // A loop's copies (`g[0]`) match a filter without indexes (`g.f`) too.
+        let m = texts.iter().any(|(t, sep)| f.matches(t, *sep) || (!f.has_index() && t.contains('[') && f.matches(&strip_indexes(t), *sep)));
         self.count(m)
     }
 
@@ -1016,6 +1030,7 @@ impl Analysis {
         };
         let mut w = Walk::new(q);
         let mut roots = Vec::new();
+        let mut cx = ElabCx { elab: Elab::new(self), anc: Vec::new(), names: Vec::new(), inactive: q.inactive };
         for t in tops {
             if w.stopped() && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
                 break;
@@ -1025,6 +1040,8 @@ impl Analysis {
             let name = d.name.to_string();
             let pin = pin_below(Some(q.reveal.as_slice()), &name);
             let matched = if q.target.is_some() { w.hit(&name, &name, "", "") } else { w.matched(&[(&name, '.')]) };
+            let names = vec![SmolStr::new(&name)];
+            let top = cx.elab.instance(None, t, &Arc::new(Frame::default()), &names, &[]);
             let mut node = HierNode {
                 name: name.clone(),
                 definition: name.clone(),
@@ -1037,10 +1054,16 @@ impl Analysis {
                 children: Vec::new(),
                 truncated: false,
                 dup: None,
+                params: top.shown,
+                presence: None,
+                array: None,
             };
-            let mut stack = vec![self.decl_key(t)];
+            let key = self.decl_key(self.canonical(t));
+            let mut stack = vec![(key, values_hash(&node.params))];
+            cx.anc = vec![Ancestor { module: key, frame: top.frame.clone(), depth: 1 }];
+            cx.names = names;
             if !w.stopped() {
-                node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated, &mut FxHashMap::default());
+                node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated, &mut FxHashMap::default(), &top.frame, &mut cx);
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 roots.push(node);
@@ -1049,19 +1072,25 @@ impl Analysis {
         (roots, w.meta)
     }
 
+    /// `seen`: names of the siblings so far (unnamed blocks add to their parent's level);
+    /// `frame`: the values of the instance (and generate blocks) `scope` is in.
     #[allow(clippy::too_many_arguments)]
-    /// `seen`: names of the siblings so far (unnamed blocks add to their parent's level).
-    #[allow(clippy::too_many_arguments)]
-    fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<(u32, u32)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>) -> Vec<HierNode> {
+    fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx) -> Vec<HierNode> {
         let mut out = Vec::new();
         if self.cancelled() {
             return out;
         }
         let u = self.unit(scope.unit);
-        let mut todo: Vec<DeclId> = u.parsed.decl(scope.decl).children.clone();
-        todo.reverse();
-        while let Some(c) = todo.pop() {
+        let children = cx.elab.children(scope, frame);
+        for child in children {
+            let c = child.decl;
             let d = u.parsed.decl(c);
+            let presence = match &child.presence {
+                Presence::Elaborated => None,
+                Presence::NotElaborated if !cx.inactive => continue,
+                Presence::NotElaborated => Some("not elaborated: condition false".to_string()),
+                Presence::Undetermined(why) => Some(format!("undetermined: {why}")),
+            };
             match d.kind {
                 // A `bind` adds its instance to the target, not to the module it is written in.
                 DeclKind::Instance if d.has(dflags::BOUND) => {}
@@ -1092,6 +1121,10 @@ impl Analysis {
                     let def_loc = def.and_then(|m| self.decl_location(m));
                     let ty_name = d.ty.as_ref().map(|t| t.text.split(|ch: char| ch == ' ' || ch == '#').next().unwrap_or("").to_string()).unwrap_or_default();
                     let child_path = format!("{path}.{}", d.name);
+                    let array = cx.elab.array_range(cr, frame).map(|r| match r {
+                        Ok((a, b)) => format!("[{a}:{b}] · {} instances", (a - b).abs() + 1),
+                        Err(e) => format!("[…] · range not evaluated: {}", e.why),
+                    });
                     let mut node = HierNode {
                         name: d.name.to_string(),
                         definition: def.map(|m| self.decl(m).name.to_string()).unwrap_or(ty_name),
@@ -1104,18 +1137,40 @@ impl Analysis {
                         children: Vec::new(),
                         truncated: false,
                         dup,
+                        params: Vec::new(),
+                        presence: presence.clone(),
+                        array,
                     };
                     let matched = if w.q.target.is_some() {
                         w.hit(&node.name, &node.definition, def_name, "")
                     } else {
                         w.matched(&[(&node.name, '.'), (&node.definition, '.'), (&child_path, '.')])
                     };
-                    if let Some(m) = def {
-                        let key = self.decl_key(m);
-                        if !stack.contains(&key) && stack.len() < 64 {
-                            stack.push(key);
+                    if let Some(m) = def.filter(|m| self.decl(*m).kind.is_definition()) {
+                        cx.names.push(d.name.clone());
+                        let ip = cx.elab.instance(Some(cr), m, frame, &cx.names, &cx.anc);
+                        node.params = ip.shown;
+                        let key = self.decl_key(self.canonical(m));
+                        let entry = (key, values_hash(&node.params));
+                        // A definition below itself with the same values never ends; with other
+                        // values (a recursion that counts down), it goes on to depth 64.
+                        if !stack.contains(&entry) && stack.len() < 64 {
+                            stack.push(entry);
+                            cx.anc.push(Ancestor { module: key, frame: ip.frame.clone(), depth: cx.names.len() });
                             let m_name = self.decl(m).name.to_string();
-                            node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default());
+                            node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default(), &ip.frame, cx);
+                            cx.anc.pop();
+                            stack.pop();
+                        } else if stack.contains(&entry) {
+                            node.presence.get_or_insert_with(|| "not followed: it contains itself with the same parameter values".into());
+                        }
+                        cx.names.pop();
+                    } else if let Some(m) = def {
+                        let key = self.decl_key(m);
+                        if !stack.iter().any(|(k, _)| *k == key) && stack.len() < 64 {
+                            stack.push((key, 0));
+                            let m_name = self.decl(m).name.to_string();
+                            node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default(), frame, cx);
                             stack.pop();
                         }
                     }
@@ -1129,31 +1184,53 @@ impl Analysis {
                     // Generate blocks: show named ones as scopes, flatten unnamed.
                     let gr = DeclRef { unit: scope.unit, decl: c };
                     let named = d.kind == DeclKind::Generate;
-                    let dup = if named { sibling(seen, &d.name) } else { None };
-                    let (gen_path, gen_pin) = if named { (format!("{path}.{}", d.name), pin_below(pin, &keyed(&d.name, dup))) } else { (path.to_string(), pin) };
-                    let mut own = FxHashMap::default();
-                    let level = if named { &mut own } else { &mut *seen };
-                    let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, truncated, level);
-                    if kids.is_empty() {
-                        continue;
-                    }
-                    if named {
-                        let loc = self.decl_location(gr);
-                        out.push(HierNode {
-                            name: d.name.to_string(),
-                            definition: String::new(),
-                            kind: "generate".into(),
-                            uri: loc.as_ref().map(|l| l.uri.to_string()),
-                            line: loc.as_ref().map_or(0, |l| l.range.start.line),
-                            character: loc.as_ref().map_or(0, |l| l.range.start.character),
-                            def_uri: None,
-                            def_line: 0,
-                            children: kids,
-                            truncated: false,
-                            dup,
-                        });
-                    } else {
-                        out.extend(kids);
+                    let name = child.name.to_string();
+                    // A loop: one block per value of its genvar.
+                    let copies: Vec<(String, Arc<Frame>, Option<String>)> = match &child.iterations {
+                        Some(Ok((key, values))) => values.iter().map(|v| (format!("{name}[{v}]"), cx.elab.block_frame(gr, frame, Some((*key, *v))), presence.clone())).collect(),
+                        Some(Err(e)) => vec![(name.clone(), cx.elab.block_frame(gr, frame, None), Some(format!("undetermined: loop not evaluated: {}", e.why)))],
+                        None => vec![(name.clone(), cx.elab.block_frame(gr, frame, None), presence.clone())],
+                    };
+                    for (copy, bframe, mark) in copies {
+                        if w.stopped() && pin.is_none() {
+                            *truncated = true;
+                            return out;
+                        }
+                        let dup = if named { sibling(seen, &copy) } else { None };
+                        let (gen_path, gen_pin) = if named { (format!("{path}.{copy}"), pin_below(pin, &keyed(&copy, dup))) } else { (path.to_string(), pin) };
+                        let mut own = FxHashMap::default();
+                        let level = if named { &mut own } else { &mut *seen };
+                        if named {
+                            cx.names.push(SmolStr::new(&copy));
+                        }
+                        let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, truncated, level, &bframe, cx);
+                        if named {
+                            cx.names.pop();
+                        }
+                        if kids.is_empty() && mark.is_none() {
+                            continue;
+                        }
+                        if named || mark.is_some() {
+                            let loc = self.decl_location(gr);
+                            out.push(HierNode {
+                                name: copy,
+                                definition: String::new(),
+                                kind: "generate".into(),
+                                uri: loc.as_ref().map(|l| l.uri.to_string()),
+                                line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                                character: loc.as_ref().map_or(0, |l| l.range.start.character),
+                                def_uri: None,
+                                def_line: 0,
+                                children: kids,
+                                truncated: false,
+                                dup,
+                                params: Vec::new(),
+                                presence: mark,
+                                array: None,
+                            });
+                        } else {
+                            out.extend(kids);
+                        }
                     }
                 }
                 _ => {}
@@ -2783,4 +2860,40 @@ pub(crate) fn tokens_text(t: &[Token]) -> String {
         s.push_str(&x.text);
     }
     s
+}
+
+/// The design tree's elaboration: the evaluator, the instances above (for `defparam`s) and
+/// the names from the top.
+struct ElabCx<'a> {
+    elab: Elab<'a>,
+    anc: Vec<Ancestor>,
+    names: Vec<SmolStr>,
+    inactive: bool,
+}
+
+/// A hash of parameter values (a definition repeated with the same values is a cycle).
+fn values_hash(p: &[super::elab::ParamShow]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    for x in p {
+        x.name.hash(&mut h);
+        x.value.hash(&mut h);
+        x.why.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// `text` without its `[...]` parts (`g[0].f` → `g.f`).
+fn strip_indexes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0;
+    for c in text.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }

@@ -132,7 +132,7 @@ fn hover_completion_hierarchy() {
     assert_eq!(h[0].name, "tb_top");
     assert_eq!(h[0].children[0].name, "dut");
     let kids: Vec<&str> = h[0].children[0].children.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(kids, vec!["u_fifo", "g_mon"]);
+    assert_eq!(kids, vec!["u_fifo", "g_mon[0]", "g_mon[1]"], "one generate block per value of the genvar");
 }
 
 fn verif_tree(n: &dvi_analysis::ide::views::VerifNode) -> String {

@@ -24,6 +24,12 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Design Hierarchy** and **UVM Verification Hierarchy** views, worked out from the source:
   filter them by name or path, and let them follow the editor (jump with F12 and the view
   selects where you landed).
+- **Parameters per instance**: the Design Hierarchy shows the parameter values each instance
+  gets (overrides, `defparam`s, defaults, localparams and constant functions evaluated), the
+  generate branches that exist in it and one block per generate loop copy (`g[0]`, `g[1]`);
+  hover a parameter or a signal for its value or width in each instance. What cannot be
+  evaluated is said, never guessed: branches whose condition is unknown are shown marked
+  *undetermined*.
 - **Register Model**: the maps, registers, addresses and fields a UVM register block's
   `build()` creates, read from its construction code, with search by address.
 - **Assertions and Coverage**: right-click a signal or field to see the assertions, covers and

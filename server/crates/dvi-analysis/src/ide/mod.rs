@@ -6,6 +6,7 @@ pub mod checks;
 pub mod completion;
 pub mod configdb;
 pub mod drivers;
+pub mod elab;
 pub mod diagnostics;
 pub mod factory;
 pub mod filter;

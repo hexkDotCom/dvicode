@@ -59,6 +59,11 @@ impl Filter {
     }
 
     /// Whether `text` matches; `sep` separates the levels of a path (`.` or `/`).
+    /// The filter names an index (`g[0]`).
+    pub fn has_index(&self) -> bool {
+        self.text.contains('[')
+    }
+
     pub fn matches(&self, text: &str, sep: char) -> bool {
         if !self.wild {
             return contains_ignore_case(text, &self.text);

@@ -21,7 +21,17 @@ impl Analysis {
         let span = hit.span();
         let target = self.target_of(&hit)?;
         let md = match target {
-            Target::Decl(r) => self.decl_hover(r),
+            Target::Decl(r) => {
+                let mut md = self.decl_hover(r);
+                // A parameter's values, a signal's width, in the elaborated instances.
+                if let Some(e) = self.elab_hover(r) {
+                    md.push_str("
+
+");
+                    md.push_str(&e);
+                }
+                md
+            }
             Target::Macro(m) => {
                 let mut s = self.macro_hover(&m);
                 if let Hit::MacroUse { unit, idx, .. } = hit {

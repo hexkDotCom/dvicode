@@ -597,7 +597,9 @@ impl<'t> Parser<'t> {
             "nettype" => self.nettype(),
             "defparam" => {
                 // `defparam u.P = v;` sets a parameter of another scope.
+                let (start, scope) = (t.span, self.scope());
                 self.bump();
+                self.defparams(start, scope);
                 self.scan_until_semi(RefKind::Foreign);
             }
             "specparam" | "timeunit" | "timeprecision" | "alias" => {
@@ -2937,6 +2939,54 @@ impl<'t> Parser<'t> {
         self.expect_p(";");
     }
 
+    /// Records the assignments of the `defparam` statement starting at the current token
+    /// (looking ahead only: the tokens are scanned for references afterwards).
+    fn defparams(&mut self, start: Span, scope: DeclId) {
+        let mut k = 0;
+        loop {
+            // `path = value` up to a `,` or `;` outside brackets.
+            let mut path = Vec::new();
+            let mut plain = true;
+            let mut expect_name = true;
+            while !(self.nth(k).is_punct("=") || self.nth(k).is_punct(";") || self.nth(k).kind == TokKind::Eof) && k < 10_000 {
+                let t = self.nth(k);
+                if t.kind == TokKind::Ident {
+                    path.push((t.text.clone(), t.span));
+                }
+                match expect_name {
+                    true if t.kind == TokKind::Ident && t.is_real() => expect_name = false,
+                    false if t.is_punct(".") => expect_name = true,
+                    _ => plain = false,
+                }
+                k += 1;
+            }
+            if !self.nth(k).is_punct("=") {
+                return;
+            }
+            k += 1;
+            let (first, mut last, mut depth) = (self.nth(k).span, None, 0i32);
+            while k < 10_000 {
+                let t = self.nth(k);
+                if t.kind == TokKind::Eof || (depth == 0 && (t.is_punct(",") || t.is_punct(";"))) {
+                    break;
+                }
+                if t.is_punct("(") || t.is_punct("[") || t.is_punct("{") {
+                    depth += 1;
+                } else if t.is_punct(")") || t.is_punct("]") || t.is_punct("}") {
+                    depth -= 1;
+                }
+                last = Some(t.span);
+                k += 1;
+            }
+            let plain = plain && path.len() >= 2 && !expect_name;
+            self.u.defparams.push(Defparam { scope, path, plain, value: last.map(|l| (first, l)), start });
+            if !self.nth(k).is_punct(",") {
+                return;
+            }
+            k += 1;
+        }
+    }
+
     // ----------------------------------------------------------------- generate
 
     fn genblk_name(&mut self) -> SmolStr {
@@ -2996,23 +3046,28 @@ impl<'t> Parser<'t> {
 
     fn generate_for(&mut self) {
         let start = self.tok().span;
+        let scope = self.scope();
         self.bump();
         let id = self.new_decl(DeclKind::Generate, None, start);
         let n = self.genblk_name();
         self.u.decls[id as usize].name = n;
         self.u.decls[id as usize].flags |= dflags::FROM_MACRO;
         self.push_scope(id);
+        let mut exprs = Vec::new();
         if self.eat_p("(") {
             if self.eat_kw("genvar") && self.at_ident() {
                 let g = self.tok().clone();
                 let gid = self.new_decl(DeclKind::Genvar, Some(&g), g.span);
                 self.u.decls[gid as usize].detail = SmolStr::new_static("genvar");
             }
-            self.scan_expr(STOP_NONE, RefKind::Expr);
-            self.eat_p(";");
-            self.scan_expr(STOP_NONE, RefKind::Expr);
-            self.eat_p(";");
-            self.scan_expr(STOP_NONE, RefKind::Expr);
+            for last in [false, false, true] {
+                let (first, at) = (self.tok().span, self.pos);
+                self.scan_expr(STOP_NONE, RefKind::Expr);
+                exprs.push((self.pos > at).then(|| (first, self.prev_span())));
+                if !last {
+                    self.eat_p(";");
+                }
+            }
             self.expect_p(")");
         }
         self.pop_scope();
@@ -3021,52 +3076,80 @@ impl<'t> Parser<'t> {
             self.u.decls[id as usize].flags &= !dflags::FROM_MACRO;
         }
         self.generate_body(Some(id));
+        self.u.generates.push(GenConstruct { kind: GenKind::For, scope, start, exprs, block: Some(id), branches: Vec::new() });
     }
 
     fn generate_if(&mut self) {
+        let (start, scope) = (self.tok().span, self.scope());
+        let mut branches = Vec::new();
         // `else if` chains in a loop: a generated chain of any length takes no stack.
         loop {
             self.bump();
+            let mut exprs = Vec::new();
             if self.at_p("(") {
+                let first = self.tok().span;
                 self.paren_group(RefKind::Expr);
+                exprs.push((first, self.prev_span()));
             }
+            let lo = self.u.decls.len() as DeclId;
             self.generate_body(None);
+            branches.push(GenBranch { exprs, decls: (lo, self.u.decls.len() as DeclId) });
             if !self.eat_kw("else") {
-                return;
+                break;
             }
             if !self.at_kw("if") {
+                let lo = self.u.decls.len() as DeclId;
                 self.generate_body(None);
-                return;
+                branches.push(GenBranch { exprs: Vec::new(), decls: (lo, self.u.decls.len() as DeclId) });
+                break;
             }
         }
+        self.u.generates.push(GenConstruct { kind: GenKind::If, scope, start, exprs: Vec::new(), block: None, branches });
     }
 
     fn generate_case(&mut self) {
+        let (start, scope) = (self.tok().span, self.scope());
         self.bump();
+        let mut exprs = Vec::new();
         if self.at_p("(") {
+            let first = self.tok().span;
             self.paren_group(RefKind::Expr);
+            exprs.push(Some((first, self.prev_span())));
         }
+        let mut branches = Vec::new();
         while !self.at_eof() && !self.at_kw("endcase") {
             let t = self.tok();
             if t.kind == TokKind::Keyword && is_end_kw(&t.text) {
                 break;
             }
             let before = self.pos;
+            let mut labels = Vec::new();
             if self.eat_kw("default") {
                 self.eat_p(":");
             } else {
-                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false }, RefKind::Expr);
+                let first = self.tok().span;
+                self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false }, RefKind::Expr);
+                if self.pos > before {
+                    labels.push((first, self.prev_span()));
+                }
                 while self.eat_p(",") {
+                    let (first, at) = (self.tok().span, self.pos);
                     self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false, implies: false, assign: false }, RefKind::Expr);
+                    if self.pos > at {
+                        labels.push((first, self.prev_span()));
+                    }
                 }
                 self.expect_p(":");
             }
+            let lo = self.u.decls.len() as DeclId;
             self.generate_body(None);
+            branches.push(GenBranch { exprs: labels, decls: (lo, self.u.decls.len() as DeclId) });
             if self.pos == before {
                 self.bump();
             }
         }
         self.eat_kw("endcase");
+        self.u.generates.push(GenConstruct { kind: GenKind::Case, scope, start, exprs, block: None, branches });
     }
 
     fn generate_block(&mut self, _start: Span) {

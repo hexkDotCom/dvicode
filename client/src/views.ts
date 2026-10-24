@@ -7,6 +7,7 @@ import type { LanguageClient } from 'vscode-languageclient/node';
 import type { Mapper } from './pathmap';
 import {
   Cycle,
+  ParamInfo,
   Placed,
   PlacedTree,
   RegInfo,
@@ -15,6 +16,8 @@ import {
   VerifInfo,
   ViewState,
   describeTarget,
+  hierDescription,
+  hierTooltip,
   isClassTarget,
   isDesignTarget,
   namesKey,
@@ -47,6 +50,12 @@ interface HierNode extends TreeNode {
   def_line: number;
   children: HierNode[];
   truncated: boolean;
+  /** An instance's parameters, as elaborated. */
+  params?: ParamInfo[];
+  /** `not elaborated: condition false` or `undetermined: why`. */
+  presence?: string;
+  /** An array of instances: its range. */
+  array?: string;
 }
 
 interface FileNode extends TreeNode {
@@ -624,7 +633,13 @@ export class DesignHierarchy extends TreeBase<HierNode> {
   }
 
   protected params(): Record<string, unknown> {
-    return { top: this.topValue ?? null };
+    const inactive = vscode.workspace.getConfiguration('dvicode').get<boolean>('designHierarchy.showInactiveGenerate', false);
+    return { top: this.topValue ?? null, inactive };
+  }
+
+  /** A setting changed what is shown. */
+  refreshShown(): void {
+    this.invalidate();
   }
 
   protected nameOf(n: HierNode): string {
@@ -635,12 +650,12 @@ export class DesignHierarchy extends TreeBase<HierNode> {
     const n = p.node;
     const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
     const item = new Item(p, parent, n.name, state);
-    item.description = (n.definition && n.definition !== n.name ? n.definition : '') + (n.truncated ? ' …' : '') || undefined;
+    item.description = hierDescription(n);
     item.contextValue = 'dvicode.hierNode';
-    item.iconPath = new vscode.ThemeIcon(DESIGN_ICONS[n.kind] ?? 'symbol-module');
+    item.iconPath = new vscode.ThemeIcon(n.presence ? 'circle-slash' : (DESIGN_ICONS[n.kind] ?? 'symbol-module'));
     item.command = openCommand(this.conn, n.uri, n.line, n.character);
     if (item.command) {
-      item.tooltip = new vscode.MarkdownString(`**${n.name}** : \`${n.definition || n.kind}\`\n\n${p.names.join('.')}`);
+      item.tooltip = new vscode.MarkdownString(hierTooltip(n, p.names.join('.')));
     }
     return item;
   }
@@ -1038,6 +1053,9 @@ export class Views implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('dvicode.buildFile')) {
           this.restore();
+        }
+        if (e.affectsConfiguration('dvicode.designHierarchy.showInactiveGenerate')) {
+          this.design.refreshShown();
         }
       }),
     );

@@ -303,6 +303,11 @@
           "default": "",
           "description": "UVM library location on the server (used by -uvm and auto-configuration when $UVM_HOME is not set)."
         },
+        "dvicode.designHierarchy.showInactiveGenerate": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show the generate blocks and instances whose condition is proven false in the Design Hierarchy, marked *not elaborated*. Blocks whose condition cannot be evaluated are always shown, marked *undetermined*."
+        },
         "dvicode.inlayHints.ports": {
           "type": "boolean",
           "default": true,

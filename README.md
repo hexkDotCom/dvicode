@@ -29,6 +29,12 @@ currently in preview.
 - **Override and implement**: complete an inherited method's name in a class to override it,
   or implement every pure virtual method left with one code action.
 - **Design Hierarchy**: browse the instance tree from your top module.
+- **Parameters per instance**: the Design Hierarchy shows the parameter values each instance
+  gets (overrides, `defparam`s, defaults, localparams and constant functions evaluated), the
+  generate branches that exist in it and one block per generate loop copy (`g[0]`, `g[1]`);
+  hover a parameter or a signal for its value or width in each instance. What cannot be
+  evaluated is said, never guessed: branches whose condition is unknown are shown marked
+  *undetermined*.
 - **UVM Verification Hierarchy**: explore the component hierarchy of the selected test
   (`+UVM_TESTNAME`), worked out from the source code the way UVM builds it: factory overrides
   applied, components made under a condition or in a loop marked, and, at the flip of a switch,
@@ -140,7 +146,8 @@ testbench; it needs no UVM installation.
     anywhere in a name or path, ignoring case (`fifo` finds `tb.dut.u_rx_fifo`); `*` matches
     within one level of a path, `**` across levels, `?` one character
     (`dut.*.mem`, `rtl/**.sv`). The Design Hierarchy matches instance names, module names and
-    paths; the Verification Hierarchy component names, their classes and paths; Compiled
+    paths (a filter without an index, `g.u`, matches every copy of a generate loop, `g[3].u`);
+    the Verification Hierarchy component names, their classes and paths; Compiled
     Files file paths. On very large designs the view says when the search stopped early.
   - **Follow the Editor** (link button): the view selects what the cursor is in, without taking
     the focus from the editor: the instance of the module (on an instantiation line, that

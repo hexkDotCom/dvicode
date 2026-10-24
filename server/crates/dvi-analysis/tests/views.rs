@@ -55,7 +55,7 @@ fn query(filter: &str) -> TreeQuery {
 fn design_filter_keeps_matches_and_their_parents() {
     let (a, _) = project("dfilter", &[("d.sv", DESIGN)]);
     let all = paths(&a.design_tree(Some("top"), &TreeQuery::new(1000)).0);
-    assert_eq!(all, ["top", "top.c0", "top.c0.u_rx_fifo", "top.c0.u_tx_fifo", "top.c1", "top.c1.u_rx_fifo", "top.c1.u_tx_fifo", "top.g", "top.g.f"]);
+    assert_eq!(all, ["top", "top.c0", "top.c0.u_rx_fifo", "top.c0.u_tx_fifo", "top.c1", "top.c1.u_rx_fifo", "top.c1.u_tx_fifo", "top.g[0]", "top.g[0].f", "top.g[1]", "top.g[1].f"]);
     let (t, meta) = a.design_tree(Some("top"), &query("rx"));
     assert_eq!(paths(&t), ["top", "top.c0", "top.c0.u_rx_fifo", "top.c1", "top.c1.u_rx_fifo"]);
     assert_eq!((meta.matches, meta.incomplete), (2, None));
@@ -63,7 +63,9 @@ fn design_filter_keeps_matches_and_their_parents() {
     assert_eq!(paths(&a.design_tree(Some("top"), &query("c1.*fifo")).0), ["top", "top.c1", "top.c1.u_rx_fifo", "top.c1.u_tx_fifo"]);
     assert_eq!(paths(&a.design_tree(Some("top"), &query("CORE")).0), ["top", "top.c0", "top.c1"]);
     // Named generate blocks are levels of the path.
-    assert_eq!(paths(&a.design_tree(Some("top"), &query("g.f")).0), ["top", "top.g", "top.g.f"]);
+    // A filter without an index matches every copy of a generate loop; one with an index, it.
+    assert_eq!(paths(&a.design_tree(Some("top"), &query("g.f")).0), ["top", "top.g[0]", "top.g[0].f", "top.g[1]", "top.g[1].f"]);
+    assert_eq!(paths(&a.design_tree(Some("top"), &query("g[1].f")).0), ["top", "top.g[1]", "top.g[1].f"]);
     assert!(a.design_tree(Some("top"), &query("nothing")).0.is_empty());
 }
 
@@ -132,8 +134,8 @@ fn targets_find_every_occurrence_in_tree_order() {
     };
     // Every fifo; the u_tx_fifo instance in core; core itself.
     let (p, n) = target("fifo", None);
-    assert_eq!(n, 5);
-    assert!(p.contains(&"top.g.f".to_string()) && p.contains(&"top.c1.u_tx_fifo".to_string()));
+    assert_eq!(n, 6);
+    assert!(p.contains(&"top.g[1].f".to_string()) && p.contains(&"top.c1.u_tx_fifo".to_string()));
     assert_eq!(target("core", Some("u_tx_fifo")), (vec!["top".into(), "top.c0".into(), "top.c0.u_tx_fifo".into(), "top.c1".into(), "top.c1.u_tx_fifo".into()], 2));
     assert_eq!(target("core", None).1, 2);
 }
@@ -204,14 +206,18 @@ fn large_trees_timing() {
 
 #[test]
 fn siblings_with_one_name_are_numbered_and_limits_hold() {
-    // Both branches of an if-generate are named g (only one is elaborated, both are read).
+    // Both branches of an if-generate are named g: only the first is elaborated; shown with
+    // the inactive ones, the second is numbered.
     let text = "module leaf; endmodule\nmodule top;\n  if (1) begin : g\n    leaf f();\n  end else begin : g\n    leaf f();\n  end\nendmodule\n";
     let (a, _) = project("dupnames", &[("d.sv", text)]);
-    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
-    let g: Vec<(String, Option<u32>)> = t[0].children.iter().map(|c| (c.name.clone(), c.dup)).collect();
-    assert_eq!(g, [("g".to_string(), None), ("g".to_string(), Some(2))]);
+    let names = |q: &TreeQuery| -> Vec<(String, Option<u32>, Option<String>)> { a.design_tree(Some("top"), q).0[0].children.iter().map(|c| (c.name.clone(), c.dup, c.presence.clone())).collect() };
+    assert_eq!(names(&TreeQuery::new(1000)), [("g".to_string(), None, None)]);
+    let mut inactive = TreeQuery::new(1000);
+    inactive.inactive = true;
+    assert_eq!(names(&inactive), [("g".to_string(), None, None), ("g".to_string(), Some(2), Some("not elaborated: condition false".to_string()))]);
     // The second one can be revealed by its numbered name.
     let mut q = TreeQuery::new(1);
+    q.inactive = true;
     q.reveal = vec!["top".into(), "g#2".into(), "f".into()];
     let (t, _) = a.design_tree(Some("top"), &q);
     assert!(t[0].children.iter().any(|c| c.dup == Some(2) && c.children.len() == 1), "{t:?}");
@@ -280,4 +286,131 @@ fn the_hint_names_only_what_it_checked() {
     let (a, _) = project("nouvm", &[("t.sv", "class t extends uvm_test;\nendclass\n")]);
     let hint = a.verification_tree(None, &TreeQuery::new(100)).0.hint.unwrap_or_default();
     assert!(hint.contains("add -uvm to the build file"), "{hint}");
+}
+
+const ELAB_SRC: &str = "package p;
+  localparam int BASE = 4;
+  function automatic int log2(input int v);
+    int r;
+    r = 0;
+    while ((1 << r) < v) r++;
+    return r;
+  endfunction
+endpackage
+module leaf #(parameter int W = 8, parameter MODE = \"fast\") ();
+endmodule
+module mid #(parameter int N = 2, parameter int W = p::BASE * 2) ();
+  localparam int AW = p::log2(N);
+  localparam logic [3:0] ONES = '1;
+  if (N > 2) begin : big
+    leaf #(.W(W)) u_big ();
+  end else begin : lite
+    leaf #(W, \"slow\") u_lite ();
+  end
+  case (AW)
+    0: leaf u_zero ();
+    1, 2: leaf u_few ();
+    default: leaf u_many ();
+  endcase
+  for (genvar i = N - 1; i >= 0; i -= 1) begin : g
+    leaf #(.W(i)) u ();
+  end
+  leaf u_arr [N-1:0] ();
+  if (UNKNOWN_P) begin : maybe
+    leaf u_maybe ();
+  end
+endmodule
+module top;
+  mid #(.N(4)) u_a ();
+  mid u_b ();
+  defparam u_b.W = 5;
+endmodule
+";
+
+/// Each node as `path [presence] {array} P=value...` (values, or `?` and why), depth first.
+fn elaborated(nodes: &[HierNode]) -> Vec<String> {
+    fn walk(n: &HierNode, prefix: &str, out: &mut Vec<String>) {
+        let p = if prefix.is_empty() { n.name.clone() } else { format!("{prefix}.{}", n.name) };
+        let mut line = p.clone();
+        if let Some(x) = &n.presence {
+            line.push_str(&format!(" [{x}]"));
+        }
+        if let Some(x) = &n.array {
+            line.push_str(&format!(" {{{x}}}"));
+        }
+        for x in &n.params {
+            line.push_str(&format!(" {}={}", x.name, x.value.clone().unwrap_or_else(|| format!("?({})", x.why.clone().unwrap_or_default()))));
+        }
+        out.push(line);
+        for c in &n.children {
+            walk(c, &p, out);
+        }
+    }
+    let mut out = Vec::new();
+    for n in nodes {
+        walk(n, "", &mut out);
+    }
+    out
+}
+
+#[test]
+fn parameters_and_generate_blocks_are_elaborated_per_instance() {
+    let (a, root) = project("elab", &[("e.sv", ELAB_SRC)]);
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
+    let undetermined = "undetermined: condition not evaluated: `UNKNOWN_P` is not resolved";
+    let want = [
+        "top".to_string(),
+        "top.u_a N=4 W=8 AW=2 ONES=15".into(),
+        "top.u_a.big".into(),
+        "top.u_a.big.u_big W=8 MODE=\"fast\"".into(),
+        "top.u_a.u_few W=8 MODE=\"fast\"".into(),
+        "top.u_a.g[3]".into(),
+        "top.u_a.g[3].u W=3 MODE=\"fast\"".into(),
+        "top.u_a.g[2]".into(),
+        "top.u_a.g[2].u W=2 MODE=\"fast\"".into(),
+        "top.u_a.g[1]".into(),
+        "top.u_a.g[1].u W=1 MODE=\"fast\"".into(),
+        "top.u_a.g[0]".into(),
+        "top.u_a.g[0].u W=0 MODE=\"fast\"".into(),
+        "top.u_a.u_arr {[3:0] · 4 instances} W=8 MODE=\"fast\"".into(),
+        format!("top.u_a.maybe [{undetermined}]"),
+        "top.u_a.maybe.u_maybe W=8 MODE=\"fast\"".into(),
+        "top.u_b N=2 W=5 AW=1 ONES=15".into(),
+        "top.u_b.lite".into(),
+        "top.u_b.lite.u_lite W=5 MODE=\"slow\"".into(),
+        "top.u_b.u_few W=8 MODE=\"fast\"".into(),
+        "top.u_b.g[1]".into(),
+        "top.u_b.g[1].u W=1 MODE=\"fast\"".into(),
+        "top.u_b.g[0]".into(),
+        "top.u_b.g[0].u W=0 MODE=\"fast\"".into(),
+        "top.u_b.u_arr {[1:0] · 2 instances} W=8 MODE=\"fast\"".into(),
+        format!("top.u_b.maybe [{undetermined}]"),
+        "top.u_b.maybe.u_maybe W=8 MODE=\"fast\"".into(),
+    ];
+    assert_eq!(
+        elaborated(&t),
+        want,
+        "named and ordered overrides, a defparam, a package constant, a function with a loop, '1, if/else, case with two labels, \
+         a descending loop, an instance array, an unknown condition shown as undetermined"
+    );
+    let origins: Vec<(String, dvi_analysis::ide::elab::Origin)> = t[0].children[1].params.iter().map(|p| (p.name.clone(), p.origin)).collect();
+    use dvi_analysis::ide::elab::Origin;
+    assert_eq!(origins, [("N".to_string(), Origin::Default), ("W".into(), Origin::Defparam), ("AW".into(), Origin::Local), ("ONES".into(), Origin::Local)]);
+    // Hover: a parameter's values and a signal's width, grouped, from the elaborated design.
+    let f = a.vfs.lookup(&root.join("e.sv")).unwrap();
+    let off = |after: &str, needle: &str| (ELAB_SRC.find(after).unwrap() + ELAB_SRC[ELAB_SRC.find(after).unwrap()..].find(needle).unwrap()) as u32;
+    let (h, _) = a.hover(f, off("module mid", "W = p::BASE")).unwrap();
+    assert!(h.contains("**Values in the design hierarchy** (2 instances from `top`)\n- `8` in `top.u_a`\n- `5` in `top.u_b`"), "{h}");
+    let (h, _) = a.hover(f, off("module mid", "AW =")).unwrap();
+    assert!(h.contains("- `2` in `top.u_a`\n- `1` in `top.u_b`"), "{h}");
+    let (h, _) = a.hover(f, off("module leaf", "W = 8")).unwrap();
+    assert!(h.contains("`top.u_a.maybe.u_maybe` (if it exists)"), "an instance under an undetermined branch: {h}");
+}
+
+#[test]
+fn casts_to_user_types_and_package_types_are_evaluated() {
+    let src = "package q;\n  typedef enum logic [1:0] {A, B, C} kind_t;\n  typedef logic [7:0] byte_t;\nendpackage\nmodule leaf #(parameter q::kind_t K = q::A, parameter q::byte_t V = 3) ();\nendmodule\nmodule top;\n  leaf #(.K(q::kind_t'(2)), .V(q::byte_t'(300))) u ();\n  if (q::kind_t'(1) == q::B) begin : g\n    leaf u2 ();\n  end\nendmodule\n";
+    let (a, _) = project("elabgaps", &[("g.sv", src)]);
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
+    assert_eq!(elaborated(&t), ["top", "top.u K=2 V=44", "top.g", "top.g.u2 K=0 V=3"], "300 cast to an 8-bit type is 44");
 }

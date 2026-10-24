@@ -337,6 +337,10 @@ pub struct ParsedUnit {
     pub accesses: Vec<Access>,
     /// `always*`, `initial` and `final` processes: kind, first and last token, in source order.
     pub processes: Vec<(ProcessKind, Span, Span)>,
+    /// Generate constructs (`if`/`else if` chains, `case`, `for`), in source order.
+    pub generates: Vec<GenConstruct>,
+    /// `defparam` assignments, in source order.
+    pub defparams: Vec<Defparam>,
 }
 
 /// What writes a name.
@@ -522,4 +526,56 @@ impl ParsedUnit {
         }
         self.file_tops = tops;
     }
+}
+
+/// The first and last token of an expression (both in one file when it is written there).
+pub type ExprSpan = (Span, Span);
+
+/// What a generate construct is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenKind {
+    /// `if (...) ... else if (...) ... else ...`: one construct.
+    If,
+    Case,
+    For,
+}
+
+/// A generate construct.
+#[derive(Clone, Debug)]
+pub struct GenConstruct {
+    pub kind: GenKind,
+    /// The scope it is written in.
+    pub scope: DeclId,
+    /// Its keyword.
+    pub start: Span,
+    /// `case`: the case expression (with its parentheses); `for`: the header's initialization,
+    /// condition and step (`None`: empty).
+    pub exprs: Vec<Option<ExprSpan>>,
+    /// `for`: the generate block of the loop (its body's scope).
+    pub block: Option<DeclId>,
+    /// `if`: one per condition and the `else`; `case`: one per item.
+    pub branches: Vec<GenBranch>,
+}
+
+/// A branch of a generate `if` or `case`.
+#[derive(Clone, Debug)]
+pub struct GenBranch {
+    /// `if`: its condition (with its parentheses), none for `else`; `case`: its labels, none
+    /// for `default`.
+    pub exprs: Vec<ExprSpan>,
+    /// The declarations made in it: ids `decls.0..decls.1`.
+    pub decls: (DeclId, DeclId),
+}
+
+/// `defparam a.b.P = value;` (one per assignment).
+#[derive(Clone, Debug)]
+pub struct Defparam {
+    pub scope: DeclId,
+    /// The path's names.
+    pub path: Vec<(SmolStr, Span)>,
+    /// The path is names separated by `.` only (no index, no macro).
+    pub plain: bool,
+    pub value: Option<ExprSpan>,
+    /// The statement's first token.
+    pub start: Span,
 }

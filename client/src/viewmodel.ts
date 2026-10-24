@@ -685,3 +685,74 @@ export function accessesMessage(name: string, mode: string, sites: number, limit
   }
   return parts.join(' ') || undefined;
 }
+
+/** A parameter of an instance in the Design Hierarchy. */
+export interface ParamInfo {
+  name: string;
+  value?: string;
+  /** `evaluated`, `unresolved`, `unsupported`, `invalid`, `incomplete`. */
+  state: string;
+  why?: string;
+  /** `default`, `override`, `defparam`, `local`. */
+  origin: string;
+  /** `parameter`, `localparam` or `type`. */
+  kind: string;
+}
+
+/** What the Design Hierarchy needs of a node to describe it. */
+export interface HierInfo {
+  name: string;
+  definition: string;
+  kind: string;
+  truncated: boolean;
+  params?: ParamInfo[];
+  presence?: string;
+  array?: string;
+}
+
+/** A parameter's value as shown: its value, else `?`. */
+function paramValue(p: ParamInfo): string {
+  return p.value ?? '?';
+}
+
+/** A node's description: its definition, the parameters given to it (by an override or a
+ * defparam), its array range and whether it exists. */
+export function hierDescription(n: HierInfo): string | undefined {
+  const parts: string[] = [];
+  if (n.definition && n.definition !== n.name) {
+    parts.push(n.definition);
+  }
+  const given = (n.params ?? []).filter((p) => p.origin === 'override' || p.origin === 'defparam');
+  if (given.length) {
+    parts.push(given.map((p) => `${p.name}=${paramValue(p)}`).join(' '));
+  }
+  if (n.array) {
+    parts.push(n.array.split(' · ')[0]);
+  }
+  if (n.presence) {
+    parts.push(n.presence.startsWith('not elaborated') ? 'not elaborated' : 'undetermined');
+  }
+  const text = parts.join(' · ') + (n.truncated ? ' …' : '');
+  return text || undefined;
+}
+
+/** A node's tooltip (Markdown): what it is, where, whether it exists, and every parameter
+ * with its value, origin and state. */
+export function hierTooltip(n: HierInfo, path: string): string {
+  const lines = [`**${n.name}** : \`${n.definition || n.kind}\``, path];
+  if (n.presence) {
+    lines.push(`*${n.presence.charAt(0).toUpperCase()}${n.presence.slice(1)}.*`);
+  }
+  if (n.array) {
+    lines.push(`Array of instances ${n.array}`);
+  }
+  if (n.params?.length) {
+    const origin: Record<string, string> = { default: 'default', override: 'given', defparam: 'defparam', local: 'localparam' };
+    const rows = n.params.map((p) => {
+      const v = p.value !== undefined ? `\`${p.value}\`` : `? (${p.state === 'unsupported' ? 'not evaluated' : p.state}${p.why ? `: ${p.why}` : ''})`;
+      return `- \`${p.name}\` = ${v} · ${p.kind === 'type' ? 'type, ' : ''}${origin[p.origin] ?? p.origin}`;
+    });
+    lines.push(rows.join('\n'));
+  }
+  return lines.join('\n\n');
+}
