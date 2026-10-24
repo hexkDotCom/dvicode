@@ -11,6 +11,7 @@ pub mod hover;
 pub mod loops;
 pub mod nav;
 pub mod overrides;
+pub mod registers;
 pub mod stmt;
 pub mod structure;
 pub mod symbols;

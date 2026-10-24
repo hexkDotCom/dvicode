@@ -430,3 +430,64 @@ export function innermostAt(nodes: StructNode[], inDoc: (uri: string) => boolean
   }
   return [];
 }
+
+/** What the Register Model view shows of a node (`dvicode/tree` view `registers`, and the
+ * fields `dvicode/registerFields` gives). */
+export interface RegInfo {
+  name: string;
+  /** `block`, `map`, `register`, `memory` or `field`. */
+  kind: string;
+  class?: string;
+  offset?: string;
+  address?: string;
+  rights?: string;
+  bits?: string;
+  range?: string | null;
+  access?: string | null;
+  reset?: string | null;
+  volatile?: boolean;
+  notes?: string[];
+}
+
+/** The description of a register model node: where it is, its width and access. */
+export function registerDescription(n: RegInfo): string | undefined {
+  let parts: (string | null | undefined)[];
+  switch (n.kind) {
+    case 'field':
+      parts = [n.range, n.access, n.reset ? `reset ${n.reset}` : undefined];
+      break;
+    case 'block':
+      parts = [n.address ?? (n.offset ? `offset ${n.offset}` : undefined), n.class && n.class !== n.name ? n.class : undefined];
+      break;
+    case 'map':
+      parts = [n.address, n.bits];
+      break;
+    default:
+      parts = [n.address ?? (n.offset ? `offset ${n.offset}` : undefined), n.bits, n.rights];
+  }
+  const s = parts.filter((x) => x).join(' · ');
+  return (n.notes?.length ? `${s} ⚠`.trim() : s) || undefined;
+}
+
+/** The tooltip of a register model node (Markdown); `path`: the names from the top block. */
+export function registerTooltip(n: RegInfo, path: string[]): string {
+  const lines = [`**${n.name}** ${n.kind}${n.class ? ` : \`${n.class}\`` : ''}`, path.join('.')];
+  const add = (label: string, v: string | null | undefined): void => {
+    if (v) {
+      lines.push(`${label}: \`${v}\``);
+    }
+  };
+  add('Address', n.address);
+  add('Offset', n.offset);
+  add(n.kind === 'map' ? 'Bus width' : 'Size', n.bits);
+  add('Bits', n.range);
+  add('Access', n.access ?? n.rights);
+  add('Reset', n.reset);
+  if (n.volatile) {
+    lines.push('Volatile.');
+  }
+  for (const note of n.notes ?? []) {
+    lines.push(note.charAt(0).toUpperCase() + note.slice(1) + '.');
+  }
+  return lines.join('\n\n');
+}

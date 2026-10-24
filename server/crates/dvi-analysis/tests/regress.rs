@@ -2906,6 +2906,146 @@ fn overrides_follow_the_class_chain_and_its_parameters() {
     assert!(ins.starts_with('\n') && ins.contains("virtual function void write(item t);"), "{ins:?}");
 }
 
+const RAL_MODEL: &str = r#"
+virtual class uvm_reg_block; endclass
+virtual class uvm_reg; endclass
+class uvm_reg_field; endclass
+virtual class uvm_mem; endclass
+class uvm_reg_map; endclass
+package cfg_pkg; parameter int SUB_BASE = 'h1000; endpackage
+`define MEM_BASE (`HALF_MEM_BASE * 2)
+`define HALF_MEM_BASE 'h200
+`define ADDR_W 64
+`define report(a, b) $display(a, b);
+class ctrl_reg extends uvm_reg;
+  rand uvm_reg_field en, mode;
+  function new(string name = "ctrl_reg", int unsigned n_bits = 32); super.new(name, n_bits, 0); endfunction
+  virtual function void build();
+    en = uvm_reg_field::type_id::create("en");
+    en.configure(this, 1, 0, "RW", 0, 1'b1, 1, 1, 0);
+    mode = uvm_reg_field::type_id::create("mode");
+    mode.configure(.parent(this), .size(3), .lsb_pos(4), .access("RO"), .volatile(1), .reset('1), .has_reset(1), .is_rand(0), .individually_accessible(0));
+  endfunction
+endclass
+class wide_reg extends uvm_reg;
+  function new(string name = "wide_reg"); super.new(name, 64, 0); endfunction
+endclass
+class buf_mem extends uvm_mem;
+  function new(string name = "buf_mem"); super.new(name, 256, 32, "RW", 0); endfunction
+endclass
+class sub_block extends uvm_reg_block;
+  rand ctrl_reg c;
+  function new(string name = "sub_block"); super.new(name); endfunction
+  virtual function void build();
+    default_map = create_map("sub_map", 'h40, 4, UVM_LITTLE_ENDIAN);
+    c = ctrl_reg::type_id::create("c",, get_full_name());
+    c.configure(this, null, "");
+    c.build();
+    default_map.add_reg(c, 'h8, "RW");
+  endfunction
+endclass
+class wide_block extends uvm_reg_block;
+  rand wide_reg x;
+  function new(string name = "wide_block"); super.new(name); endfunction
+  virtual function void build();
+    default_map = create_map("wide_map", 0, 8, UVM_LITTLE_ENDIAN, 0);
+    x = new("x");
+    default_map.add_reg(x, 'h2);
+  endfunction
+endclass
+class top_block extends uvm_reg_block;
+  rand ctrl_reg r[4];
+  rand wide_block wb;
+  rand wide_reg w;
+  rand buf_mem mem;
+  rand sub_block sub;
+  uvm_reg_map word_map;
+  function new(string name = "top_block"); super.new(name); endfunction
+  virtual function void build();
+    if (!$test$plusargs("quiet")) begin
+      `report("top_block", "building")
+    end
+    this.default_map = create_map(.name("bus"), .base_addr('h1_0000), .n_bytes(4), .endian(UVM_LITTLE_ENDIAN));
+    word_map = create_map("words", 0, 4, UVM_LITTLE_ENDIAN, 0);
+    for (int i = 0; i < 4; i++) begin
+      r[i] = (ctrl_reg::
+              type_id::create($sformatf("r%0d", i)));
+      r[i].configure(this);
+      r[i].build();
+      default_map.add_reg(r[i], i * 4, "RW");
+    end
+    w = new("w");
+    default_map.add_reg(.rg(w), .offset(`ADDR_W'h20));
+    word_map.add_reg(w, 'h8);
+    mem = buf_mem::type_id::create("mem");
+    mem.configure(this);
+    default_map.add_mem(mem, `MEM_BASE, "RW");
+    sub = sub_block::type_id::create("sub");
+    sub.configure(this);
+    sub.build();
+    default_map.add_submap(sub.default_map, cfg_pkg::SUB_BASE);
+    wb = wide_block::type_id::create("wb");
+    wb.configure(this);
+    wb.build();
+    default_map.add_submap(wb.default_map, 'h2000);
+    if (0) default_map.add_reg(r[0], 'h30);
+    lock_model();
+    default_map.add_reg(w, 'h80);
+  endfunction
+endclass
+"#;
+
+#[test]
+fn a_register_model_is_built_as_its_construction_code_says() {
+    let (a, _) = project("ral", &[("ral.sv", RAL_MODEL)]);
+    let (blocks, tops) = a.register_blocks();
+    let name = |d: &dvi_analysis::DeclRef| a.decl(*d).name.to_string();
+    assert_eq!(blocks.iter().map(name).collect::<Vec<_>>(), ["sub_block", "top_block", "wide_block"]);
+    assert_eq!(tops.iter().map(name).collect::<Vec<_>>(), ["top_block"]);
+    let model = a.register_model(tops[0]);
+    assert_eq!(model.cut, None);
+    let (tree, truncated) = a.register_tree(&model, 1000);
+    assert!(!truncated);
+    let show = |n: &dvi_analysis::ide::registers::RegNode| -> Vec<String> {
+        n.children.iter().map(|c| format!("{} {} {}{}", c.kind, c.name, c.address.clone().unwrap_or_default(), if c.notes.is_empty() { String::new() } else { format!(" ({})", c.notes.join("; ")) })).collect()
+    };
+    let bus = &tree.children[0];
+    assert_eq!(bus.name, "bus");
+    assert_eq!(
+        show(bus),
+        [
+            "register r[0] 0x10000",
+            "register r[1] 0x10004",
+            "register r[2] 0x10008",
+            "register r[3] 0x1000c",
+            "register w 0x10020–0x10024",
+            "register r[0] 0x10030 (added under a condition)",
+            "memory mem 0x10400–0x107fc",
+            "block sub 0x11000",
+            "block wb 0x12000 (word addressing)",
+        ],
+        "after lock_model() nothing is added; the submap's own base ('h40) is not used"
+    );
+    assert_eq!(show(&bus.children[7]), ["register c 0x11008"]);
+    // UVM 1.2: an 8-byte map's address 2 is 2 words of the 4-byte parent map, each taking 4
+    // bytes there; the 64-bit register then takes two parent words.
+    assert_eq!(show(&bus.children[8]), ["register x 0x12004–0x12008"]);
+    let words = &tree.children[1];
+    assert_eq!(show(words), ["register w 0x8–0x9 (word addressing)"].map(|s| s.replace(" (word addressing)", "")), "word addressing: one step per bus word");
+    assert!(words.notes.iter().any(|n| n == "word addressing"));
+    // Fields on demand.
+    let r0 = bus.children[0].register.unwrap();
+    let f: Vec<String> = a.register_fields(&model, r0).iter().map(|f| format!("{} {:?}+{:?} {:?} {:?}", f.name, f.lsb, f.size, f.access, f.reset)).collect();
+    assert_eq!(f, ["en Some(0)+Some(1) Some(\"RW\") Some(\"0x1\")", "mode Some(4)+Some(3) Some(\"RO\") Some(\"0x7\")"]);
+    // Address search.
+    let hits = |x: u128| a.registers_at(&model, x).into_iter().map(|h| format!("{} {}", h.path.join("."), h.address)).collect::<Vec<_>>();
+    assert_eq!(hits(0x11008), ["top_block.bus.sub.c 0x11008"]);
+    assert_eq!(hits(0x10024), ["top_block.bus.w 0x10020–0x10024"]);
+    assert_eq!(hits(0x12008), ["top_block.bus.wb.x 0x12004–0x12008"]);
+    assert_eq!(hits(0x9), ["top_block.words.w 0x8–0x9"]);
+    assert!(hits(0x10010).is_empty());
+}
+
 #[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";

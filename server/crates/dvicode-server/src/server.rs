@@ -111,7 +111,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1 } })),
         ..Default::default()
     }
 }
@@ -308,6 +308,7 @@ struct Server {
     announced_build_file: Option<Option<PathBuf>>,
     published: Arc<Mutex<PubState>>,
     token_results: Arc<Mutex<TokenResults>>,
+    register_models: RegisterModels,
     next_id: i32,
     /// The client shows `$/progress` notifications.
     progress: bool,
@@ -457,6 +458,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         announced_build_file: None,
         published: Arc::new(Mutex::new(PubState::default())),
         token_results: Arc::default(),
+        register_models: Arc::default(),
         next_id: 1,
         progress,
         watch_inputs,
@@ -1902,7 +1904,40 @@ impl Server {
                 Ok(a.verification_hierarchy(test.as_deref(), 20000))
             }),
             // The views: one tree, filtered and limited (see TreeParams).
-            "dvicode/tree" => self.spawn_project(req, |a, p: TreeParams| Ok(view_tree(a, p))),
+            "dvicode/tree" => {
+                let models = self.register_models.clone();
+                self.spawn_project(req, move |a, p: TreeParams| Ok(view_tree(a, p, &models)))
+            }
+            "dvicode/registerFields" => {
+                let models = self.register_models.clone();
+                self.spawn_project(req, move |a, p: RegisterFieldsParams| {
+                    if p.revision.is_some_and(|r| u64::try_from(r).ok() != Some(a.revision)) {
+                        return Ok(json!({ "revision": a.revision, "stale": true }));
+                    }
+                    let Some((_, model)) = register_model(a, p.top.as_deref(), &models) else { return Ok(Value::Null) };
+                    let fields: Vec<Value> = a
+                        .register_fields(&model, p.register)
+                        .into_iter()
+                        .map(|f| {
+                            let range = f.lsb.zip(f.size).map(|(l, s)| if s <= 1 { format!("[{l}]") } else { format!("[{}:{l}]", l + s - 1) });
+                            let at = a.to_range(f.at).map(|r| r.start);
+                            json!({
+                                "name": f.name, "kind": "field", "range": range, "access": f.access, "reset": f.reset, "volatile": f.volatile, "notes": f.notes,
+                                "uri": at.map(|_| dvi_analysis::ide::url_of(&a.path(f.at.file)).to_string()), "line": at.map(|p| p.line), "character": at.map(|p| p.character),
+                            })
+                        })
+                        .collect();
+                    Ok(json!({ "revision": a.revision, "fields": fields }))
+                })
+            }
+            "dvicode/registerAt" => {
+                let models = self.register_models.clone();
+                self.spawn_project(req, move |a, p: RegisterAtParams| {
+                    let Some(addr) = parse_address(&p.address) else { return Err(format!("not an address: {}", p.address)) };
+                    let Some((top, model)) = register_model(a, p.top.as_deref(), &models) else { return Ok(Value::Null) };
+                    Ok(json!({ "revision": a.revision, "top": top, "hits": a.registers_at(&model, addr), "cut": model.cut }))
+                })
+            }
             "dvicode/locate" => self.spawn_project(req, |a, p: LocateParams| {
                 let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
                 Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))
@@ -2067,7 +2102,60 @@ struct LocateParams {
     position: Position,
 }
 
-fn view_tree(a: &Analysis, p: TreeParams) -> Value {
+/// The register model `top` builds in `a` (the default top when `None`), from `models` when
+/// it was built for this revision.
+fn register_model(a: &Analysis, top: Option<&str>, models: &RegisterModels) -> Option<(String, Arc<dvi_analysis::ide::registers::Model>)> {
+    let (chosen, ..) = a.register_top(top.filter(|t| !t.is_empty()));
+    let chosen = chosen?;
+    let name = a.decl(chosen).name.to_string();
+    if let Some((rev, n, m)) = models.lock().unwrap().as_ref() {
+        if *rev == a.revision && *n == name {
+            return Some((name, m.clone()));
+        }
+    }
+    let m = Arc::new(a.register_model(chosen));
+    *models.lock().unwrap() = Some((a.revision, name.clone(), m.clone()));
+    Some((name, m))
+}
+
+/// An address as typed: `0x10`, `'h10`, `32'h10` or `10` (hexadecimal), `'d16` or `32'd16`
+/// (decimal).
+fn parse_address(s: &str) -> Option<u128> {
+    let s: String = s.trim().chars().filter(|c| *c != '_').collect::<String>().to_ascii_lowercase();
+    let (width, digits, radix) = match s.split_once('\'') {
+        Some((w, rest)) => match rest.split_at_checked(1)? {
+            ("h", h) => (w, h, 16),
+            ("d", d) => (w, d, 10),
+            _ => return None,
+        },
+        None => ("", s.strip_prefix("0x").unwrap_or(&s), 16),
+    };
+    if !width.chars().all(|c| c.is_ascii_digit()) || digits.is_empty() {
+        return None;
+    }
+    u128::from_str_radix(digits, radix).ok()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterFieldsParams {
+    top: Option<String>,
+    register: usize,
+    /// The revision of the tree the register is in (the client's -1: none yet).
+    revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterAtParams {
+    top: Option<String>,
+    address: String,
+}
+
+/// The last register model built: (revision, top, model).
+type RegisterModels = Arc<Mutex<Option<(u64, String, Arc<dvi_analysis::ide::registers::Model>)>>>;
+
+fn view_tree(a: &Analysis, p: TreeParams, models: &RegisterModels) -> Value {
     use dvi_analysis::ide::filter::Filter;
     use dvi_analysis::ide::views::TreeQuery;
     let mut q = TreeQuery::new(p.max_nodes.unwrap_or(20_000).min(100_000));
@@ -2085,6 +2173,21 @@ fn view_tree(a: &Analysis, p: TreeParams) -> Value {
         "design" => {
             let (roots, meta) = a.design_tree(nonempty(p.top).as_deref(), &q);
             json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": roots })
+        }
+        "registers" => {
+            let (chosen, blocks, tops) = a.register_top(nonempty(p.top.clone()).as_deref());
+            let names = |v: &[dvi_analysis::DeclRef]| v.iter().map(|b| a.decl(*b).name.to_string()).collect::<Vec<_>>();
+            let Some((top, model)) = chosen.and_then(|_| register_model(a, nonempty(p.top).as_deref(), models)) else {
+                return json!({ "revision": a.revision, "roots": [], "blocks": names(&blocks), "tops": names(&tops) });
+            };
+            let (tree, truncated) = a.register_tree(&model, q.max_nodes);
+            let mut matches = 0;
+            let roots: Vec<dvi_analysis::ide::registers::RegNode> = match &q.filter {
+                Some(f) => dvi_analysis::ide::registers::prune(tree, f, &mut matches).into_iter().collect(),
+                None => vec![tree],
+            };
+            let incomplete = if truncated { Some("nodes") } else { None };
+            json!({ "revision": a.revision, "incomplete": incomplete, "matches": matches, "roots": roots, "top": top, "blocks": names(&blocks), "tops": names(&tops), "cut": model.cut })
         }
         "verification" => {
             let (h, meta) = a.verification_tree(nonempty(p.test).as_deref(), &q);

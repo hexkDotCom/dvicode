@@ -50,7 +50,7 @@ impl Analysis {
         if !(kinds.ports || kinds.parameters || kinds.arguments) {
             return Vec::new();
         }
-        let Some(toks) = self.snapshot_tokens(file) else { return Vec::new() };
+        let Some(toks) = self.file_tokens(file) else { return Vec::new() };
         let Some(&uid) = self.units_for(file).first() else { return Vec::new() };
         let u = self.unit(uid);
         let Some(pos) = u.positions.get(&file) else { return Vec::new() };
@@ -146,17 +146,6 @@ impl Analysis {
         out.sort_by_key(|h| h.offset);
         out.dedup();
         out
-    }
-
-    /// The tokens of a file's text in this snapshot: the store's, when it has that very text.
-    fn snapshot_tokens(&self, file: FileId) -> Option<Arc<Vec<Token>>> {
-        let text = self.file_text(file)?;
-        if let Some((t, toks)) = dvi_syntax::SourceProvider::source(&*self.vfs, file) {
-            if Arc::ptr_eq(&t, &text) {
-                return Some(toks);
-            }
-        }
-        Some(Arc::new(lex(&text, file)))
     }
 
     /// The parameters positional values set, in order, and the port slots of a design element.

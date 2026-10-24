@@ -54,11 +54,53 @@ package demo_env_pkg;
     endfunction
   endclass
 
-  // The register model and the adapter to its bus (UVM objects).
+  // The register model (Register Model view) and the adapter to its bus (UVM objects).
+  class demo_ctrl_reg extends uvm_reg;
+    `uvm_object_utils(demo_ctrl_reg)
+    rand uvm_reg_field enable, mode;
+    function new(string name = "demo_ctrl_reg");
+      super.new(name, 32, 0);
+    endfunction
+    virtual function void build();
+      enable = uvm_reg_field::type_id::create("enable");
+      enable.configure(this, 1, 0, "RW", 0, 1'b0, 1, 1, 0);
+      mode = uvm_reg_field::type_id::create("mode");
+      mode.configure(this, 2, 4, "RW", 0, 2'h1, 1, 1, 0);
+    endfunction
+  endclass
+
+  class demo_status_reg extends uvm_reg;
+    `uvm_object_utils(demo_status_reg)
+    uvm_reg_field level;
+    function new(string name = "demo_status_reg");
+      super.new(name, 32, 0);
+    endfunction
+    virtual function void build();
+      level = uvm_reg_field::type_id::create("level");
+      level.configure(this, 8, 0, "RO", 1, 8'h0, 1, 0, 0);
+    endfunction
+  endclass
+
   class demo_regs extends uvm_reg_block;
     `uvm_object_utils(demo_regs)
+    rand demo_ctrl_reg   ctrl;
+    rand demo_status_reg status[2];
     function new(string name = "demo_regs");
       super.new(name);
+    endfunction
+    virtual function void build();
+      default_map = create_map("bus", 'h4000, 4, UVM_LITTLE_ENDIAN);
+      ctrl = demo_ctrl_reg::type_id::create("ctrl");
+      ctrl.configure(this);
+      ctrl.build();
+      default_map.add_reg(ctrl, 'h0, "RW");
+      foreach (status[i]) begin
+        status[i] = demo_status_reg::type_id::create($sformatf("status%0d", i));
+        status[i].configure(this);
+        status[i].build();
+        default_map.add_reg(status[i], 'h10 + i * 4, "RO");
+      end
+      lock_model();
     endfunction
   endclass
 

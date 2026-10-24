@@ -174,3 +174,26 @@ test.describe('Structure', () => {
     assert.deepEqual(vm.innermostAt(pkg, (u) => u === 'file:///a.sv', 45, 0).map((x) => x.id), ['p']);
   });
 });
+
+test.describe('register model texts', () => {
+  test.it('say where a node is, its width and access', () => {
+    assert.equal(vm.registerDescription({ name: 'ctrl', kind: 'register', address: '0x10', bits: '32 bits', rights: 'RW' }), '0x10 · 32 bits · RW');
+    assert.equal(vm.registerDescription({ name: 'r', kind: 'register', offset: 'base + 4', bits: '32 bits' }), 'offset base + 4 · 32 bits');
+    assert.equal(vm.registerDescription({ name: 'sub', kind: 'block', class: 'sub_block', address: '0x1000' }), '0x1000 · sub_block');
+    assert.equal(vm.registerDescription({ name: 'blk', kind: 'block', class: 'blk' }), undefined);
+    assert.equal(vm.registerDescription({ name: 'bus', kind: 'map', address: '0x0', bits: '4 bytes' }), '0x0 · 4 bytes');
+    assert.equal(vm.registerDescription({ name: 'en', kind: 'field', range: '[5:4]', access: 'RW', reset: '0x1' }), '[5:4] · RW · reset 0x1');
+    assert.equal(vm.registerDescription({ name: 'en', kind: 'field', range: '[0]', access: 'RO', reset: null }), '[0] · RO');
+  });
+  test.it('mark nodes with notes and list the notes in the tooltip', () => {
+    const n = { name: 'r[0]', kind: 'register', class: 'ctrl_reg', address: '0x30', bits: '32 bits', notes: ['added under a condition'] };
+    assert.equal(vm.registerDescription(n), '0x30 · 32 bits ⚠');
+    assert.equal(vm.registerDescription({ name: 'x', kind: 'register', notes: ['offset not constant'] }), '⚠');
+    assert.equal(
+      vm.registerTooltip(n, ['top', 'bus', 'r[0]']),
+      ['**r[0]** register : `ctrl_reg`', 'top.bus.r[0]', 'Address: `0x30`', 'Size: `32 bits`', 'Added under a condition.'].join('\n\n'),
+    );
+    assert.match(vm.registerTooltip({ name: 'bus', kind: 'map', bits: '4 bytes' }, ['top', 'bus']), /Bus width: `4 bytes`/);
+    assert.match(vm.registerTooltip({ name: 'en', kind: 'field', volatile: true, access: 'RC' }, ['top', 'bus', 'r', 'en']), /Access: `RC`\n\nVolatile\./);
+  });
+});

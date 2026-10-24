@@ -25,6 +25,9 @@ currently in preview.
 - **Smart completion**: members after `.`, package items after `::`, macros after `` ` ``,
   and complete module instantiations in one step.
 - **Hover documentation**: signatures, doc comments and what a macro expands to.
+- **Inlay hints**: port, parameter and argument names on positional connections and calls.
+- **Override and implement**: complete an inherited method's name in a class to override it,
+  or implement every pure virtual method left with one code action.
 - **Design Hierarchy**: browse the instance tree from your top module.
 - **UVM Verification Hierarchy**: explore the component hierarchy of the selected test
   (`+UVM_TESTNAME`), worked out from the source code the way UVM builds it: factory overrides
@@ -34,6 +37,8 @@ currently in preview.
 - **Structure**: the current file's modules, packages and classes grouped by what they hold
   (ports, signals, processes, fields, methods, the UVM phases...), with what a class inherits
   from each base class and which methods override.
+- **Register Model**: the maps, registers, addresses and fields a UVM register block's
+  `build()` creates, read from its construction code, with search by address.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.

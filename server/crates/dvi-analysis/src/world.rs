@@ -1324,8 +1324,16 @@ impl Analysis {
     }
 
     /// Tokens of a file's snapshot text.
+    /// The tokens of the snapshot's text of `f`: those the file system layer keeps for that
+    /// text, else lexed now.
     pub fn file_tokens(&self, f: FileId) -> Option<Arc<Vec<dvi_syntax::Token>>> {
-        self.source(f).map(|s| Arc::new(dvi_syntax::lexer::lex(&s.text, f)))
+        let s = self.source(f)?;
+        if let Some((t, toks)) = SourceProvider::source(&*self.vfs, f) {
+            if Arc::ptr_eq(&t, &s.text) {
+                return Some(toks);
+            }
+        }
+        Some(Arc::new(dvi_syntax::lexer::lex(&s.text, f)))
     }
 
     pub fn path(&self, f: FileId) -> PathBuf {

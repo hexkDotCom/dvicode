@@ -424,6 +424,57 @@ fn inlay_hints_follow_their_settings_without_a_rebuild() {
 }
 
 #[test]
+fn the_register_model_view_finds_registers_and_their_fields() {
+    let ral = "virtual class uvm_reg_block; endclass
+virtual class uvm_reg; endclass
+class uvm_reg_field; endclass
+class uvm_reg_map; endclass
+`define CTRL_ADDR 'h10
+class ctrl_reg extends uvm_reg;
+  rand uvm_reg_field en;
+  function new(string name = \"ctrl_reg\"); super.new(name, 32, 0); endfunction
+  virtual function void build();
+    en = uvm_reg_field::type_id::create(\"en\");
+    en.configure(this, 2, 4, \"RW\", 0, 2'h1, 1, 1, 0);
+  endfunction
+endclass
+class blk extends uvm_reg_block;
+  rand ctrl_reg ctrl;
+  function new(string name = \"blk\"); super.new(name); endfunction
+  virtual function void build();
+    default_map = create_map(\"bus\", 'hd000, 4, UVM_LITTLE_ENDIAN);
+    ctrl = ctrl_reg::type_id::create(\"ctrl\");
+    ctrl.configure(this);
+    ctrl.build();
+    default_map.add_reg(ctrl, `CTRL_ADDR);
+  endfunction
+endclass
+";
+    let root = project("registers", &[("ral.sv", ral)]);
+    let (mut c, init) = Client::start(&root, Value::Null);
+    assert_eq!(init["capabilities"]["experimental"]["dvicode"]["registers"], 1, "{init}");
+    let t = c.request_ok("dvicode/tree", json!({ "view": "registers", "top": null, "filter": null, "reveal": null }));
+    assert_eq!(t["top"], "blk", "{t}");
+    assert_eq!(t["tops"], json!(["blk"]));
+    let bus = &t["roots"][0]["children"][0];
+    let ctrl = &bus["children"][0];
+    assert_eq!((bus["name"].as_str(), ctrl["name"].as_str(), ctrl["address"].as_str()), (Some("bus"), Some("ctrl"), Some("0xd010")), "{t}");
+    let f = c.request_ok("dvicode/registerFields", json!({ "top": "blk", "register": ctrl["register"], "revision": t["revision"] }));
+    let en = &f["fields"][0];
+    assert_eq!((en["name"].as_str(), en["range"].as_str(), en["access"].as_str(), en["reset"].as_str()), (Some("en"), Some("[5:4]"), Some("RW"), Some("0x1")), "{f}");
+    let stale = c.request_ok("dvicode/registerFields", json!({ "top": "blk", "register": 0, "revision": -1 }));
+    assert_eq!(stale["stale"], true);
+    // A hexadecimal address may start with `d`; decimal ones are written `'d`.
+    for a in ["d010", "0xD010", "32'hd010", "'d53264"] {
+        let r = c.request_ok("dvicode/registerAt", json!({ "top": null, "address": a }));
+        assert_eq!(r["hits"][0]["path"], json!(["blk", "bus", "ctrl"]), "{a}: {r}");
+    }
+    let r = c.request("dvicode/registerAt", json!({ "top": null, "address": "8'q1" }));
+    assert!(r.error.is_some());
+    c.shutdown();
+}
+
+#[test]
 fn closing_a_file_outside_the_build_clears_its_problems() {
     let root = project("adhoc", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

@@ -143,9 +143,47 @@ package uvm_pkg;
     endfunction
   endclass
 
+  // Registers: what a register model's construction code calls.
+  typedef enum { UVM_LITTLE_ENDIAN, UVM_BIG_ENDIAN } uvm_endianness_e;
+  typedef class uvm_reg;
+  typedef class uvm_reg_block;
+
+  class uvm_reg_field extends uvm_object;
+    `uvm_object_utils(uvm_reg_field)
+    function new(string name = "uvm_reg_field");
+      super.new(name);
+    endfunction
+    function void configure(uvm_reg parent, int unsigned size, int unsigned lsb_pos, string access, bit volatile,
+                            logic [63:0] reset, bit has_reset, bit is_rand, bit individually_accessible);
+    endfunction
+  endclass
+
+  virtual class uvm_reg extends uvm_object;
+    function new(string name = "", int unsigned n_bits = 0, int has_coverage = 0);
+      super.new(name);
+    endfunction
+    function void configure(uvm_reg_block blk_parent, uvm_object regfile_parent = null, string hdl_path = "");
+    endfunction
+  endclass
+
+  class uvm_reg_map extends uvm_object;
+    function new(string name = "uvm_reg_map");
+      super.new(name);
+    endfunction
+    virtual function void add_reg(uvm_reg rg, longint unsigned offset, string rights = "RW");
+    endfunction
+  endclass
+
   virtual class uvm_reg_block extends uvm_object;
+    uvm_reg_map default_map;
     function new(string name = "");
       super.new(name);
+    endfunction
+    virtual function uvm_reg_map create_map(string name, longint unsigned base_addr, int unsigned n_bytes,
+                                            uvm_endianness_e endian, bit byte_addressing = 1);
+      return null;
+    endfunction
+    virtual function void lock_model();
     endfunction
   endclass
 

@@ -324,6 +324,37 @@ async function run() {
     }
   });
 
+  await test('register model view: maps, registers, fields on demand', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const v = api.views().registers;
+    await v.refresh();
+    const roots = await v.getChildren();
+    const nodes = [];
+    const walk = async (items) => {
+      for (const i of items) {
+        nodes.push(`${i.placed.names.join('.')}${i.description ? ` (${i.description})` : ''}`);
+        if (i.node.kind !== 'field') {
+          await walk(await v.getChildren(i));
+        }
+      }
+    };
+    await walk(roots);
+    const want = [
+      'demo_regs',
+      'demo_regs.bus (0x4000 · 4 bytes)',
+      'demo_regs.bus.ctrl (0x4000 · 32 bits · RW)',
+      'demo_regs.bus.ctrl.enable ([0] · RW · reset 0x0)',
+      'demo_regs.bus.ctrl.mode ([5:4] · RW · reset 0x1)',
+      'demo_regs.bus.status[0] (0x4010 · 32 bits · RO)',
+      'demo_regs.bus.status[0].level ([7:0] · RO · reset 0x0)',
+      'demo_regs.bus.status[1] (0x4014 · 32 bits · RO)',
+      'demo_regs.bus.status[1].level ([7:0] · RO · reset 0x0)',
+    ].join(' | ');
+    if (nodes.join(' | ') !== want) throw new Error(`${nodes.join(' | ')}; message '${v.view && v.view.message}', last ${JSON.stringify(v.last)}`);
+    return nodes.join(' | ');
+  });
+
   await test('views: follow the editor', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

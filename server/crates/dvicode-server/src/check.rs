@@ -106,7 +106,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--registers" | "--regtree" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -382,6 +382,47 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                     let edits: Vec<String> = q.edits.iter().map(|(s, t)| format!("{}@{} {:?}", a.vfs.path(s.file).display(), s.start, t)).collect();
                     println!("{line}: {} -> {}", q.title, edits.join("; "));
                 }
+            }
+        }
+        "--regtree" => {
+            // One model's tree, as the view gets it (the first 60 lines).
+            let (chosen, ..) = a.register_top(Some(arg));
+            if let Some(b) = chosen {
+                let model = a.register_model(b);
+                let (tree, _) = a.register_tree(&model, 2000);
+                let text = serde_json::to_string_pretty(&tree).unwrap_or_default();
+                for l in text.lines().filter(|l| !l.contains("\"uri\"") && !l.contains("def_uri")).take(60) {
+                    println!("{l}");
+                }
+            }
+        }
+        "--registers" => {
+            // Every block class (or the one named), built as a top: what it holds, how long it took.
+            let (blocks, _) = a.register_blocks();
+            for b in blocks.iter().filter(|b| arg.is_empty() || arg == "*" || a.decl(**b).name == arg) {
+                let t0 = std::time::Instant::now();
+                let model = a.register_model(*b);
+                let built = t0.elapsed();
+                let fields: usize = (0..model.regs.len()).filter(|r| !model.regs[*r].memory).map(|r| a.register_fields(&model, r).len()).sum();
+                let (tree, _) = a.register_tree(&model, usize::MAX);
+                fn count(n: &dvi_analysis::ide::registers::RegNode, addressed: &mut usize, total: &mut usize) {
+                    if n.kind == "register" || n.kind == "memory" {
+                        *total += 1;
+                        if n.address.is_some() {
+                            *addressed += 1;
+                        }
+                    }
+                    for c in &n.children {
+                        count(c, addressed, total);
+                    }
+                }
+                let (mut addressed, mut total) = (0, 0);
+                count(&tree, &mut addressed, &mut total);
+                println!(
+                    "{}: {} blocks, {} maps, {} registers ({} entries in maps, {} with an address), {} fields; {:?}{}",
+                    a.decl(*b).name, model.blocks.len(), model.maps.len(), model.regs.len(), total, addressed, fields, built,
+                    model.cut.map(|c| format!(", cut at the {c} limit")).unwrap_or_default()
+                );
             }
         }
         "--symbols" => {

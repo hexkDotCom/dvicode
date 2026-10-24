@@ -568,6 +568,36 @@
         "title": "Previous Occurrence of the Editor Position (Compiled Files)",
         "category": "DVICode",
         "icon": "$(arrow-up)"
+      },
+      {
+        "command": "dvicode.registers.selectTop",
+        "title": "Select Register Model...",
+        "category": "DVICode",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "dvicode.registers.findAddress",
+        "title": "Find Register at Address...",
+        "category": "DVICode",
+        "icon": "$(search)"
+      },
+      {
+        "command": "dvicode.registers.filter",
+        "title": "Filter... (Register Model)",
+        "category": "DVICode",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "dvicode.registers.clearFilter",
+        "title": "Clear Filter (Register Model)",
+        "category": "DVICode",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "dvicode.registers.openClass",
+        "title": "Go to Class",
+        "category": "DVICode",
+        "icon": "$(symbol-class)"
       }
     ],
     "menus": {
@@ -735,6 +765,31 @@
           "group": "filter@1"
         },
         {
+          "command": "dvicode.registers.filter",
+          "when": "view == dvicode.registerModel && !dvicode.registers.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.registers.clearFilter",
+          "when": "view == dvicode.registerModel && dvicode.registers.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.registers.findAddress",
+          "when": "view == dvicode.registerModel",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dvicode.registers.filter",
+          "when": "view == dvicode.registerModel && dvicode.registers.filtered",
+          "group": "filter@1"
+        },
+        {
+          "command": "dvicode.registers.selectTop",
+          "when": "view == dvicode.registerModel",
+          "group": "navigation@9"
+        },
+        {
           "command": "dvicode.selectUvmTest",
           "when": "view == dvicode.verificationHierarchy",
           "group": "navigation@9"
@@ -746,7 +801,7 @@
         },
         {
           "command": "dvicode.refreshViews",
-          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy || view == dvicode.compiledFiles || view == dvicode.structure",
+          "when": "view == dvicode.designHierarchy || view == dvicode.verificationHierarchy || view == dvicode.compiledFiles || view == dvicode.registerModel || view == dvicode.structure",
           "group": "navigation@9"
         },
         {
@@ -768,6 +823,15 @@
         {
           "command": "dvicode.openComponentClass",
           "when": "view == dvicode.verificationHierarchy && viewItem =~ /^dvicode\\.verif(Node|Object)\\.class$/"
+        },
+        {
+          "command": "dvicode.registers.openClass",
+          "when": "view == dvicode.registerModel && viewItem =~ /^dvicode\\.regNode\\.class$/",
+          "group": "inline"
+        },
+        {
+          "command": "dvicode.registers.openClass",
+          "when": "view == dvicode.registerModel && viewItem =~ /^dvicode\\.regNode\\.class$/"
         }
       ],
       "commandPalette": [
@@ -794,6 +858,10 @@
         {
           "command": "dvicode.verification.hidePorts",
           "when": "false"
+        },
+        {
+          "command": "dvicode.registers.openClass",
+          "when": "false"
         }
       ]
     },
@@ -819,6 +887,11 @@
         {
           "id": "dvicode.compiledFiles",
           "name": "Compiled Files"
+        },
+        {
+          "id": "dvicode.registerModel",
+          "name": "Register Model",
+          "when": "dvicode.engine.registers"
         },
         {
           "id": "dvicode.structure",

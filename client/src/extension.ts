@@ -173,9 +173,10 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   }
   pendingClient = undefined;
   // What this engine's views support (an engine at a custom path or remote may be older).
-  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number } } | undefined;
+  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number; registers?: number } } | undefined;
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.objects', (experimental?.dvicode?.verificationObjects ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.structure', (experimental?.dvicode?.structure ?? 0) >= 1);
+  void vscode.commands.executeCommand('setContext', 'dvicode.engine.registers', (experimental?.dvicode?.registers ?? 0) >= 1);
   c.onNotification('dvicode/status', (s: Status) => {
     lastStatus = s;
     if (s.build_error) {

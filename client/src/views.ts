@@ -1,5 +1,6 @@
-// Tree views: design hierarchy, UVM verification hierarchy and compiled files. Each view can be
-// filtered and can follow the editor (see viewmodel.ts for the rules).
+// Tree views: design hierarchy, UVM verification hierarchy, compiled files and the register
+// model. Each view can be filtered; all but the register model can follow the editor (see
+// viewmodel.ts for the rules).
 
 import * as vscode from 'vscode';
 import type { LanguageClient } from 'vscode-languageclient/node';
@@ -8,6 +9,7 @@ import {
   Cycle,
   Placed,
   PlacedTree,
+  RegInfo,
   Target,
   TreeNode,
   VerifInfo,
@@ -18,6 +20,8 @@ import {
   namesKey,
   occurrences,
   placeTree,
+  registerDescription,
+  registerTooltip,
   targetKey,
   verifDescription,
   verifTooltip,
@@ -70,6 +74,17 @@ interface VerifNode extends TreeNode, VerifInfo {
   truncated: boolean;
 }
 
+interface RegNode extends TreeNode, RegInfo {
+  /** A register whose fields are fetched when it is expanded (`dvicode/registerFields`). */
+  register?: number;
+  uri?: string | null;
+  line?: number | null;
+  character?: number | null;
+  def_uri?: string;
+  def_line?: number;
+  children: RegNode[];
+}
+
 export interface VerifHierarchyResult {
   test: string | null;
   configured: string | null;
@@ -89,6 +104,12 @@ interface TreeResult<N> {
   configured?: string | null;
   tests?: string[];
   hint?: string;
+  /** Register model: the top block shown, the block classes, those no other block holds, and
+   * the limit the model's construction stopped at. */
+  top?: string | null;
+  blocks?: string[];
+  tops?: string[];
+  cut?: string | null;
 }
 
 /** `dvicode/locate`. */
@@ -100,7 +121,7 @@ export interface Located {
   class: { name: string; uri: string | null; kind?: string } | null;
 }
 
-export type ViewName = 'design' | 'verification' | 'files';
+export type ViewName = 'design' | 'verification' | 'files' | 'registers';
 
 /** A node of a view. */
 export class Item<N extends TreeNode> extends vscode.TreeItem {
@@ -145,7 +166,8 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   private tree: PlacedTree<N> | undefined;
   private items = new Map<string, Item<N>>();
   private roots: Item<N>[] = [];
-  private revision = -1;
+  /** The analysis revision of the tree shown. */
+  protected revision = -1;
   private error: string | undefined;
   private incomplete: string | null = null;
   private matches = 0;
@@ -517,6 +539,9 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   }
 }
 
+/** Where the Register Model view's block class is remembered. */
+const REGISTER_TOP_KEY = 'dvicode.view.registers.top';
+
 /** Trees larger than this are not fetched again after each edit (the view says it is out of date). */
 const LARGE_TREE = 5000;
 
@@ -810,11 +835,126 @@ export function componentClassLocation(item: unknown, conn: Conn): { uri: vscode
   return n.def_uri && typeof n.class === 'string' && m ? { uri: m.toClient(n.def_uri), line: n.def_line ?? 0 } : undefined;
 }
 
-/** The three views, their commands, what they remember, and following the editor. */
+const REGISTER_ICONS: Record<string, string> = { block: 'database', map: 'list-tree', register: 'symbol-variable', memory: 'symbol-array', field: 'symbol-field' };
+
+/** An address search's answer (`dvicode/registerAt`). */
+export interface RegisterHits {
+  revision: number;
+  top: string;
+  hits: { path: string[]; map: string; address: string }[];
+  cut: string | null;
+}
+
+/** The register model (UVM RAL) a block class builds: its maps, registers and their fields. */
+export class RegisterModel extends TreeBase<RegNode> {
+  private topValue: string | undefined;
+  last: { top: string | null; blocks: string[]; tops: string[]; cut: string | null } | undefined;
+
+  constructor(conn: Conn) {
+    super('registers', 'dvicode.registerModel', conn);
+  }
+
+  /** The block class shown, undefined for the default one (a block no other block holds). */
+  get top(): string | undefined {
+    return this.topValue;
+  }
+
+  set top(t: string | undefined) {
+    this.topValue = t;
+    this.invalidate();
+  }
+
+  protected params(): Record<string, unknown> {
+    return { top: this.topValue ?? null };
+  }
+
+  protected onResult(r: TreeResult<RegNode>): void {
+    this.last = { top: r.top ?? null, blocks: r.blocks ?? [], tops: r.tops ?? [], cut: r.cut ?? null };
+  }
+
+  protected nameOf(n: RegNode): string {
+    return n.name;
+  }
+
+  async getChildren(e?: Item<RegNode>): Promise<Item<RegNode>[]> {
+    if (e && e.node.register !== undefined && !e.kids.length) {
+      e.kids = await this.fields(e);
+    }
+    return super.getChildren(e);
+  }
+
+  /** The fields of a register, asked for when it is expanded. */
+  private async fields(e: Item<RegNode>): Promise<Item<RegNode>[]> {
+    const c = this.conn.client();
+    if (!c) {
+      return [];
+    }
+    let r: { revision: number; stale?: boolean; fields?: RegNode[] } | null;
+    try {
+      r = await c.sendRequest('dvicode/registerFields', { top: this.last?.top ?? this.topValue ?? null, register: e.node.register, revision: this.revision });
+    } catch {
+      return [];
+    }
+    if (r?.stale) {
+      // The model was built again since: its registers may be numbered otherwise.
+      void this.refresh();
+      return [];
+    }
+    return (r?.fields ?? []).map((f) => {
+      const node: RegNode = { ...f, children: [] };
+      const placed: Placed<RegNode> = { node, parent: e.placed, children: [], names: [...e.placed.names, f.name], key: `${e.placed.key}\u0000${f.name}` };
+      const item = this.makeItem(placed, e, false);
+      item.id = `${e.id}\u0000${f.name}`;
+      return item;
+    });
+  }
+
+  protected makeItem(p: Placed<RegNode>, parent: Item<RegNode> | undefined, expand: boolean): Item<RegNode> {
+    const n = p.node;
+    const state = n.children.length
+      ? expand
+        ? vscode.TreeItemCollapsibleState.Expanded
+        : vscode.TreeItemCollapsibleState.Collapsed
+      : n.register !== undefined
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None;
+    const item = new Item(p, parent, n.name, state);
+    item.description = (registerDescription(n) ?? '') + (n.truncated ? ' …' : '') || undefined;
+    item.contextValue = 'dvicode.regNode' + (n.def_uri && n.class ? '.class' : '');
+    item.iconPath = new vscode.ThemeIcon(REGISTER_ICONS[n.kind] ?? 'symbol-misc');
+    item.tooltip = new vscode.MarkdownString(registerTooltip(n, p.names));
+    item.command = openCommand(this.conn, n.uri ?? null, n.line ?? 0, n.character ?? 0);
+    return item;
+  }
+
+  protected scopeText(): string | undefined {
+    const top = this.last?.top ?? this.topValue;
+    const cut = this.last?.cut ? `stopped at the ${this.last.cut} limit` : undefined;
+    return [top, cut].filter((x) => x).join(' · ') || undefined;
+  }
+
+  protected emptyText(): string | undefined {
+    if (this.topValue) {
+      return `No register block class '${this.topValue}'.`;
+    }
+    return 'No register model: no class derived from uvm_reg_block.';
+  }
+
+  protected isTarget(): boolean {
+    return false;
+  }
+
+  protected notFoundText(t: Target): string {
+    return `${describeTarget(t)} is not in the register model.`;
+  }
+}
+
+/** The views, their commands, what they remember, and following the editor. */
 export class Views implements vscode.Disposable {
   readonly design: DesignHierarchy;
   readonly verification: VerificationHierarchy;
   readonly files: CompiledFiles;
+  readonly registers: RegisterModel;
   private readonly all: TreeBase<TreeNode>[];
   private readonly subs: vscode.Disposable[] = [];
   private timer: NodeJS.Timeout | undefined;
@@ -831,7 +971,9 @@ export class Views implements vscode.Disposable {
     this.design = new DesignHierarchy(conn);
     this.verification = new VerificationHierarchy(conn);
     this.files = new CompiledFiles(conn);
-    this.all = [this.design, this.verification, this.files] as unknown as TreeBase<TreeNode>[];
+    this.registers = new RegisterModel(conn);
+    this.registers.top = ctx.workspaceState.get<string>(REGISTER_TOP_KEY) || undefined;
+    this.all = [this.design, this.verification, this.files, this.registers] as unknown as TreeBase<TreeNode>[];
     for (const v of this.all) {
       const view = vscode.window.createTreeView(v.viewId, { treeDataProvider: v, showCollapseAll: v.name !== 'files' });
       v.attach(view);
@@ -852,6 +994,17 @@ export class Views implements vscode.Disposable {
         vscode.commands.registerCommand(`dvicode.verification.hide${title}`, () => this.setOption(option, false)),
       );
     }
+    this.subs.push(
+      vscode.commands.registerCommand('dvicode.registers.selectTop', () => this.selectRegisterTop()),
+      vscode.commands.registerCommand('dvicode.registers.findAddress', () => this.findRegisterAt()),
+      vscode.commands.registerCommand('dvicode.registers.openClass', async (item: unknown) => {
+        const l = componentClassLocation(item, conn);
+        if (l) {
+          const pos = new vscode.Position(l.line, 0);
+          await vscode.window.showTextDocument(l.uri, { selection: new vscode.Range(pos, pos) });
+        }
+      }),
+    );
     this.restore();
     this.subs.push(
       vscode.window.onDidChangeActiveTextEditor(() => this.schedule(100)),
@@ -949,6 +1102,81 @@ export class Views implements vscode.Disposable {
     );
   }
 
+  /** Picks the block class the Register Model view shows (remembered in the workspace). */
+  private async selectRegisterTop(): Promise<void> {
+    const c = this.conn.client();
+    if (!c) {
+      return;
+    }
+    const v = this.registers;
+    // The block lists come with the tree.
+    if (!v.last) {
+      await v.refresh();
+    }
+    const tops = new Set(v.last?.tops ?? []);
+    type Pick = vscode.QuickPickItem & { value: string | undefined };
+    const items: Pick[] = [
+      { label: '$(sparkle) Automatic', description: 'a block no other block holds', value: undefined },
+      ...[...tops].map((t) => ({ label: t, description: 'top', value: t as string | undefined })),
+      ...(v.last?.blocks ?? []).filter((b) => !tops.has(b)).map((b) => ({ label: b, value: b as string | undefined })),
+    ];
+    const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Register block class to show', matchOnDescription: true });
+    if (pick) {
+      v.top = pick.value;
+      void this.ctx.workspaceState.update(REGISTER_TOP_KEY, pick.value);
+      await v.refresh();
+    }
+  }
+
+  /** Asks for an address and selects the register there (one of them, when several maps have one). */
+  private async findRegisterAt(): Promise<void> {
+    const c = this.conn.client();
+    if (!c) {
+      return;
+    }
+    const v = this.registers;
+    const address = await vscode.window.showInputBox({
+      title: 'Find Register at Address',
+      prompt: "Address in hexadecimal (0x1000, 'h1000, 32'h1000 or 1000) or decimal ('d4096)",
+      validateInput: (t) => (/^\s*(0x[0-9a-f_]+|\d*'h[0-9a-f_]+|\d*'d[0-9_]+|[0-9a-f_]+)\s*$/i.test(t) ? undefined : 'Not an address'),
+    });
+    if (!address) {
+      return;
+    }
+    let r: RegisterHits | null;
+    try {
+      r = await c.sendRequest<RegisterHits | null>('dvicode/registerAt', { top: v.top ?? null, address });
+    } catch (e) {
+      void vscode.window.showErrorMessage(`DVICode: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (!r) {
+      void vscode.window.showInformationMessage('DVICode: no register model in the project.');
+      return;
+    }
+    if (!r.hits.length) {
+      const cut = r.cut ? ` (the model stopped at the ${r.cut} limit)` : '';
+      void vscode.window.showInformationMessage(`DVICode: no register of ${r.top} at ${address.trim()}${cut}.`);
+      return;
+    }
+    let hit = r.hits[0];
+    if (r.hits.length > 1) {
+      const pick = await vscode.window.showQuickPick(
+        r.hits.map((h) => ({ label: h.path.slice(1).join('.'), description: `${h.address} in map ${h.map}`, hit: h })),
+        { placeHolder: `${r.hits.length} registers at ${address.trim()}` },
+      );
+      if (!pick) {
+        return;
+      }
+      hit = pick.hit;
+    }
+    await vscode.commands.executeCommand('dvicode.registerModel.focus');
+    if (!v.size) {
+      await v.refresh();
+    }
+    await v.select(hit.path);
+  }
+
   /** After the tree of a view that follows the editor changed (filter, top, test). */
   followAgain(v: TreeBase<TreeNode>): void {
     if (v.sync) {
@@ -1038,7 +1266,7 @@ export class Views implements vscode.Disposable {
   private async follow(): Promise<void> {
     const token = this.followGen;
     const started = Date.now();
-    const views = this.all.filter((v) => v.sync && v.view?.visible && started - v.lastPick > 1000);
+    const views = this.all.filter((v) => v.name !== 'registers' && v.sync && v.view?.visible && started - v.lastPick > 1000);
     // Still wanted: no newer follow, still following, and no pick in the view since.
     const wanted = (v: TreeBase<TreeNode>): StillWanted => () => token === this.followGen && v.sync && v.lastPick < started;
     const ed = vscode.window.activeTextEditor;
