@@ -290,6 +290,7 @@ struct Server {
     hint_kinds: HintKinds,
     /// The client can be asked to request inlay hints again.
     hint_refresh: bool,
+    hints_refreshed: Option<Instant>,
     open: FxHashMap<FileId, Url>,
     pending: FxHashSet<FileId>,
     pending_since: Option<Instant>,
@@ -441,6 +442,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         settings,
         hint_kinds,
         hint_refresh,
+        hints_refreshed: None,
         open: FxHashMap::default(),
         pending: FxHashSet::default(),
         pending_since: None,
@@ -1406,19 +1408,21 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<DidChangeConfigurationParams>(n.params) else { return };
                 let v = p.settings.get("dvicode").cloned().unwrap_or(p.settings);
                 let kinds = hint_kinds_of(&v);
-                if kinds != self.hint_kinds {
-                    self.hint_kinds = kinds;
-                    if self.hint_refresh {
-                        self.request_client("workspace/inlayHint/refresh", Value::Null);
-                    }
-                }
+                let hints_changed = kinds != self.hint_kinds;
+                self.hint_kinds = kinds;
+                let mut rebuild = false;
                 if let Ok(s) = serde_json::from_value::<Settings>(v) {
                     // The client sends its configuration once at start-up too.
                     if s != self.settings {
                         log::info!("settings changed: {s:?}");
                         self.settings = s;
                         self.start_build();
+                        rebuild = true;
                     }
+                }
+                // With a build coming, the hints are asked for again once it is in.
+                if hints_changed && !rebuild {
+                    self.refresh_hints(true);
                 }
             }
             _ => {}
@@ -1433,6 +1437,17 @@ impl Server {
         a.revision = self.revision;
         self.analysis = Arc::new(a);
         self.watch_build_inputs();
+        // An edit elsewhere (a function's arguments renamed) changes other files' hints.
+        self.refresh_hints(false);
+    }
+
+    /// Asks the client to request inlay hints again (at most once a second unless `now`).
+    fn refresh_hints(&mut self, now: bool) {
+        if !self.hint_refresh || !now && self.hints_refreshed.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.hints_refreshed = Some(Instant::now());
+        self.request_client("workspace/inlayHint/refresh", Value::Null);
     }
 
     /// Has the client watch the files the build read, whatever their names: the extension's

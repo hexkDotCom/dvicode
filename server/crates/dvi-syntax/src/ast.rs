@@ -177,6 +177,10 @@ pub mod dflags {
     pub const ENCRYPTED: u32 = 1 << 22;
     /// Instance connecting ports by name with `.*`: its connections name nothing in the source.
     pub const DOT_STAR: u32 = 1 << 23;
+    /// A parameter of a `#(...)` header (the ones positional values set, in order).
+    pub const PARAM_PORT: u32 = 1 << 24;
+    /// A `localparam type` (its kind is `TypeParam` like an overridable one).
+    pub const LOCAL_PARAM: u32 = 1 << 25;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

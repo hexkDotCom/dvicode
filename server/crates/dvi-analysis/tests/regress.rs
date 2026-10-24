@@ -2823,6 +2823,44 @@ fn inherited_methods_are_offered_with_their_signatures_and_pure_ones_implemented
 }
 
 #[test]
+fn inlay_hints_stay_off_where_the_binding_is_uncertain() {
+    use dvi_analysis::ide::hints::HintKinds;
+    let t = concat!(
+        "`define PAIR 10, 20\n",
+        "module p #(parameter int A = 1, localparam type L = int, parameter int B = 2) (input logic x);\nendmodule\n",
+        "module q ({a, b}, d);\n  input a, b, d;\nendmodule\n",
+        "import \"DPI-C\" function int cf(input int, input int count);\n",
+        "class base;\n  function new(int size, int depth); endfunction\nendclass\n",
+        "class kid extends base;\n  function new(); super.new(1, 2); endfunction\nendclass\n",
+        "module top;\n",
+        "  logic x, y, DATA;\n",
+        "  function automatic int f(int a, int b, int c); return 0; endfunction\n",
+        "  function automatic int g(int data, int b); return 0; endfunction\n",
+        "  int r;\n",
+        "  p #(3, 4) u1 (x);\n",
+        "  q u2 (x, y);\n",
+        "  p u3 (.*, y);\n",
+        "  initial begin\n",
+        "    r = f(`PAIR, 30);\n",
+        "    r = cf(1, 2);\n",
+        "    r = g(DATA, (* keep = 1, mark = 2 *) y);\n",
+        "  end\n",
+        "endmodule\n",
+    );
+    let (a, root) = project("hints2", &[("top.sv", t)]);
+    let f = a.vfs.lookup(&root.join("top.sv")).unwrap();
+    let got: Vec<String> = a
+        .inlay_hints(f, 0, t.len() as u32, HintKinds::default())
+        .into_iter()
+        .map(|h| format!("{}{}", h.label, &t[h.offset as usize..].split([',', ')', ';']).next().unwrap()))
+        .collect();
+    // `A`, `B` (not the local type); nothing for q's concatenated port, the mixed list or the
+    // macro; `count` but no empty label; `data` for `DATA` (names are case-sensitive), `b` past
+    // the attribute; `size` and `depth` for `super.new`.
+    assert_eq!(got, ["size:1", "depth:2", "A:3", "B:4", "count:2", "data:DATA", "b:(* keep = 1"], "{got:?}");
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

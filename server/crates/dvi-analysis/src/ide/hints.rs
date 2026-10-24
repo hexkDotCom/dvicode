@@ -1,11 +1,17 @@
 //! Inlay hints: the names of the ports, parameters and arguments that positional connections
 //! and calls bind (`u (a, b)` shows `clk: a, rst_n: b`).
+//!
+//! Hints are given only where the binding is certain from the source: no hint in a list that
+//! a macro call is part of (its expansion can add items), in a list that mixes named and
+//! positional items, or for a design element whose port slots are not plain names.
 
 use crate::world::{Analysis, DeclRef};
-use dvi_syntax::ast::{Decl, DeclKind, RefKind};
+use dvi_syntax::ast::{dflags, DeclKind, RefKind};
 use dvi_syntax::lexer::lex;
 use dvi_syntax::token::{TokKind, Token};
 use dvi_syntax::FileId;
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 /// Which hints to give.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,10 +37,12 @@ pub struct Hint {
     pub label: String,
 }
 
-/// How much text before the range is read, for an instance or call that starts above it.
-const LOOK_BACK: usize = 16 << 10;
-/// And after it, for one that starts in it and ends below.
-const LOOK_AHEAD: usize = 4 << 10;
+/// Tokens before the range looked at for a list that starts above it (a long port list).
+const LOOK_BACK: usize = 20_000;
+
+/// The names a list's items bind, in order; an empty name keeps a slot that gets no hint (an
+/// unnamed DPI argument).
+type Slots = Arc<Vec<String>>;
 
 impl Analysis {
     /// The hints for the part of `file` from `start` to `end`.
@@ -42,37 +50,42 @@ impl Analysis {
         if !(kinds.ports || kinds.parameters || kinds.arguments) {
             return Vec::new();
         }
-        let Some(text) = self.file_text(file) else { return Vec::new() };
+        let Some(toks) = self.snapshot_tokens(file) else { return Vec::new() };
         let Some(&uid) = self.units_for(file).first() else { return Vec::new() };
         let u = self.unit(uid);
         let Some(pos) = u.positions.get(&file) else { return Vec::new() };
-        // A window of the text around the range, from the start of a line.
-        let (s, e) = (start as usize, (end as usize).min(text.len()));
-        let mut lo = s.saturating_sub(LOOK_BACK);
-        while lo > 0 && !text.is_char_boundary(lo) {
-            lo -= 1;
-        }
-        if lo > 0 {
-            lo = text[lo..s.max(lo)].find('\n').map_or(s, |i| lo + i + 1);
-        }
-        let mut hi = (e + LOOK_AHEAD).min(text.len());
-        while hi < text.len() && !text.is_char_boundary(hi) {
-            hi += 1;
-        }
-        let mut toks = lex(&text[lo..hi], file);
-        for t in &mut toks {
-            t.span.start += lo as u32;
-            t.span.end += lo as u32;
-        }
+        let first = toks.partition_point(|t| t.span.end < start).saturating_sub(LOOK_BACK);
+        let last = toks.partition_point(|t| t.span.start <= end);
         let mut out = Vec::new();
-        let push = |offset: u32, label: &str, out: &mut Vec<Hint>| {
-            if (start..=end).contains(&offset) {
-                out.push(Hint { offset, label: format!("{label}:") });
+        let mut cache: FxHashMap<DeclRef, (Slots, Slots)> = FxHashMap::default();
+        let mut args_cache: FxHashMap<DeclRef, Slots> = FxHashMap::default();
+        let push = |items: &[(usize, usize)], names: &[String], out: &mut Vec<Hint>| {
+            // Not when a macro call may add items, nor when named and positional ones mix.
+            let macro_in = items.iter().any(|&(a, b)| toks[a..b].iter().any(|t| t.kind == TokKind::Directive));
+            let named = items.iter().any(|&(a, b)| a < b && (toks[a].is_punct(".") || toks[a].is_punct(".*")));
+            if macro_in || named {
+                return;
+            }
+            for (k, &(a, b)) in items.iter().enumerate() {
+                let Some(name) = names.get(k) else { break };
+                if a >= b || name.is_empty() {
+                    continue;
+                }
+                let at = toks[a].span.start;
+                // An item that is just the name it binds would only repeat it.
+                let same = b - a == 1 && toks[a].kind == TokKind::Ident && toks[a].text == name.as_str();
+                if !same && (start..=end).contains(&at) {
+                    out.push(Hint { offset: at, label: format!("{name}:") });
+                }
             }
         };
-        for i in 0..toks.len() {
+        for i in first..last.min(toks.len()) {
+            if i % 4096 == 0 && self.cancelled() {
+                return Vec::new();
+            }
             let t = &toks[i];
-            if !matches!(t.kind, TokKind::Ident) {
+            let ident = t.kind == TokKind::Ident || t.is_kw("new");
+            if !ident {
                 continue;
             }
             let lo_ref = pos.refs.partition_point(|(sp, _, _)| sp.start < t.span.start);
@@ -86,19 +99,12 @@ impl Analysis {
                     if !self.decl(def).kind.is_definition() {
                         continue;
                     }
-                    let (params, ports) = self.header(def);
+                    let (params, ports) = cache.entry(def).or_insert_with(|| self.header_slots(def)).clone();
                     let mut j = i + 1;
-                    // `#( ... )`
                     if toks.get(j).is_some_and(|t| t.is_punct("#")) && toks.get(j + 1).is_some_and(|t| t.is_punct("(")) {
                         let (items, after) = list(&toks, j + 1);
                         if kinds.parameters {
-                            for (k, item) in items.iter().enumerate() {
-                                if let Some(name) = positional(&toks, item).and(params.get(k)) {
-                                    if !same_name(&toks, item, name) {
-                                        push(toks[item.0].span.start, name, &mut out);
-                                    }
-                                }
-                            }
+                            push(&items, &params, &mut out);
                         }
                         j = after;
                     }
@@ -113,13 +119,7 @@ impl Analysis {
                         }
                         let (items, after) = list(&toks, j);
                         if kinds.ports {
-                            for (k, item) in items.iter().enumerate() {
-                                if let Some(name) = positional(&toks, item).and(ports.get(k)) {
-                                    if !same_name(&toks, item, name) {
-                                        push(toks[item.0].span.start, name, &mut out);
-                                    }
-                                }
-                            }
+                            push(&items, &ports, &mut out);
                         }
                         j = after;
                         if toks.get(j).is_some_and(|t| t.is_punct(",")) {
@@ -133,19 +133,11 @@ impl Analysis {
                     if !matches!(self.decl(callee).kind, DeclKind::Function | DeclKind::Task) {
                         continue;
                     }
-                    let args = self.arguments(callee);
+                    let args = args_cache.entry(callee).or_insert_with(|| self.argument_slots(callee)).clone();
                     let (items, _) = list(&toks, i + 1);
-                    // One argument named as itself would only repeat it; and a call with one
-                    // argument says enough.
-                    if items.len() < 2 {
-                        continue;
-                    }
-                    for (k, item) in items.iter().enumerate() {
-                        if let Some(name) = positional(&toks, item).and(args.get(k)) {
-                            if !same_name(&toks, item, name) {
-                                push(toks[item.0].span.start, name, &mut out);
-                            }
-                        }
+                    // A call with one argument says enough.
+                    if items.len() >= 2 {
+                        push(&items, &args, &mut out);
                     }
                 }
                 break;
@@ -156,25 +148,63 @@ impl Analysis {
         out
     }
 
-    /// The parameters (in order) and ports of a design element.
-    fn header(&self, def: DeclRef) -> (Vec<String>, Vec<String>) {
-        let u = self.unit(def.unit);
-        let d = u.parsed.decl(def.decl);
-        let kids = || d.children.iter().map(|c| u.parsed.decl(*c));
-        let params = kids().filter(|c| matches!(c.kind, DeclKind::Parameter | DeclKind::TypeParam)).map(|c: &Decl| c.name.to_string()).collect();
-        let ports = kids().filter(|c| c.kind == DeclKind::Port).map(|c| c.name.to_string()).collect();
-        (params, ports)
+    /// The tokens of a file's text in this snapshot: the store's, when it has that very text.
+    fn snapshot_tokens(&self, file: FileId) -> Option<Arc<Vec<Token>>> {
+        let text = self.file_text(file)?;
+        if let Some((t, toks)) = dvi_syntax::SourceProvider::source(&*self.vfs, file) {
+            if Arc::ptr_eq(&t, &text) {
+                return Some(toks);
+            }
+        }
+        Some(Arc::new(lex(&text, file)))
     }
 
-    /// The argument names of a function or task, in order.
-    fn arguments(&self, sub: DeclRef) -> Vec<String> {
-        let u = self.unit(sub.unit);
-        u.parsed.decl(sub.decl).children.iter().map(|c| u.parsed.decl(*c)).filter(|c| c.kind == DeclKind::Argument).map(|c| c.name.to_string()).collect()
+    /// The parameters positional values set, in order, and the port slots of a design element.
+    /// Parameters: those of its `#(...)` header that are not local, or without a header, those
+    /// of its body. Ports: none when a port slot is not a plain name (`module m({a, b}, c)`).
+    fn header_slots(&self, def: DeclRef) -> (Slots, Slots) {
+        let u = self.unit(def.unit);
+        let d = u.parsed.decl(def.decl);
+        let kids: Vec<_> = d.children.iter().map(|c| u.parsed.decl(*c)).collect();
+        let is_param = |c: &dvi_syntax::ast::Decl| matches!(c.kind, DeclKind::Parameter | DeclKind::TypeParam) && !c.has(dflags::LOCAL_PARAM);
+        let header = kids.iter().any(|c| c.has(dflags::PARAM_PORT));
+        let params = kids.iter().filter(|c| is_param(c) && (!header || c.has(dflags::PARAM_PORT))).map(|c| c.name.to_string()).collect();
+        // The header ends at the first `;` of the design element: a port declared only after
+        // it was not a plain name in the header.
+        let header_end = self
+            .file_text(d.span.file)
+            .and_then(|t| t.get(d.span.start as usize..d.span.end as usize).map(|s| s.to_string()))
+            .and_then(|s| first_semicolon(&s).map(|i| d.span.start + i as u32));
+        let ports: Vec<&&dvi_syntax::ast::Decl> = kids.iter().filter(|c| c.kind == DeclKind::Port).collect();
+        let plain = header_end.is_some_and(|e| ports.iter().all(|p| p.name_span.file == d.span.file && p.name_span.start < e));
+        let ports = if plain { ports.iter().map(|c| c.name.to_string()).collect() } else { Vec::new() };
+        (Arc::new(params), Arc::new(ports))
     }
+
+    /// The argument slots of a function or task, in order.
+    fn argument_slots(&self, sub: DeclRef) -> Slots {
+        let u = self.unit(sub.unit);
+        Arc::new(u.parsed.decl(sub.decl).children.iter().map(|c| u.parsed.decl(*c)).filter(|c| c.kind == DeclKind::Argument).map(|c| c.name.to_string()).collect())
+    }
+}
+
+/// Where the first `;` outside parentheses is in `src`.
+fn first_semicolon(src: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    lex(src, 0).into_iter().find(|t| {
+        if t.is_punct("(") {
+            depth += 1;
+        } else if t.is_punct(")") {
+            depth -= 1;
+        }
+        depth == 0 && t.is_punct(";")
+    }).map(|t| t.span.start as usize)
 }
 
 /// The items of the parenthesized list opening at `toks[open]` (`(`), as token index ranges
 /// (`(first, end)`, end excluded; empty for an empty item), and the index after its `)`.
+/// Attributes `(* ... *)` and nested groups (an inline constraint's `{ a; b; }`) are inside
+/// items; a `;` outside them ends the search (an unclosed list names nothing).
 fn list(toks: &[Token], open: usize) -> (Vec<(usize, usize)>, usize) {
     let mut items = Vec::new();
     let mut depth = 0usize;
@@ -184,8 +214,8 @@ fn list(toks: &[Token], open: usize) -> (Vec<(usize, usize)>, usize) {
         let t = &toks[i];
         if t.kind == TokKind::Punct {
             match t.text.as_str() {
-                "(" | "[" | "{" => depth += 1,
-                ")" | "]" | "}" if depth > 0 => depth -= 1,
+                "(" | "[" | "{" | "(*" => depth += 1,
+                ")" | "]" | "}" | "*)" if depth > 0 => depth -= 1,
                 ")" => {
                     if i > first || !items.is_empty() {
                         items.push((first, i));
@@ -196,13 +226,12 @@ fn list(toks: &[Token], open: usize) -> (Vec<(usize, usize)>, usize) {
                     items.push((first, i));
                     first = i + 1;
                 }
-                ";" => break,
+                ";" if depth == 0 => break,
                 _ => {}
             }
         }
         i += 1;
     }
-    // Not closed in the window: no items to name.
     (Vec::new(), i)
 }
 
@@ -220,18 +249,4 @@ fn skip(toks: &[Token], open: usize) -> usize {
         }
     }
     toks.len()
-}
-
-/// `Some(())` for a positional item that is not empty (a named one, `.p(x)` or `.*`, is not).
-fn positional(toks: &[Token], (first, end): &(usize, usize)) -> Option<()> {
-    if first >= end {
-        return None;
-    }
-    let t = &toks[*first];
-    (!(t.is_punct(".") || t.is_punct(".*"))).then_some(())
-}
-
-/// The item is just the name it binds to (`u (clk, rst_n)`): the hint would repeat it.
-fn same_name(toks: &[Token], (first, end): &(usize, usize), name: &str) -> bool {
-    end - first == 1 && toks[*first].kind == TokKind::Ident && toks[*first].text.eq_ignore_ascii_case(name)
 }

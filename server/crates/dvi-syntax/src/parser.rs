@@ -1056,6 +1056,7 @@ impl<'t> Parser<'t> {
                 self.bump();
                 let k = if is_type { DeclKind::TypeParam } else { kind };
                 let id = self.new_decl(k, Some(&n), start);
+                self.u.decls[id as usize].flags |= dflags::PARAM_PORT | if kind == DeclKind::LocalParam { dflags::LOCAL_PARAM } else { 0 };
                 self.u.decls[id as usize].ty = if is_type { None } else { ty.or_else(|| last_ty.clone()) };
                 self.dims(RefKind::Expr);
                 if self.eat_p("=") {
@@ -1492,6 +1493,9 @@ impl<'t> Parser<'t> {
                 let n = self.tok().clone();
                 self.bump();
                 let id = self.new_decl(DeclKind::TypeParam, Some(&n), start);
+                if kind == DeclKind::LocalParam {
+                    self.u.decls[id as usize].flags |= dflags::LOCAL_PARAM;
+                }
                 if self.eat_p("=") {
                     let from = self.pos;
                     if let Some(ti) = self.parse_type(false, RefKind::Type) {
