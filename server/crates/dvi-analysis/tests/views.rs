@@ -363,7 +363,8 @@ fn parameters_and_generate_blocks_are_elaborated_per_instance() {
         "top.u_a N=4 W=8 AW=2 ONES=15".into(),
         "top.u_a.big".into(),
         "top.u_a.big.u_big W=8 MODE=\"fast\"".into(),
-        "top.u_a.u_few W=8 MODE=\"fast\"".into(),
+        "top.u_a.genblk2".into(),
+        "top.u_a.genblk2.u_few W=8 MODE=\"fast\"".into(),
         "top.u_a.g[3]".into(),
         "top.u_a.g[3].u W=3 MODE=\"fast\"".into(),
         "top.u_a.g[2]".into(),
@@ -378,7 +379,8 @@ fn parameters_and_generate_blocks_are_elaborated_per_instance() {
         "top.u_b N=2 W=5 AW=1 ONES=15".into(),
         "top.u_b.lite".into(),
         "top.u_b.lite.u_lite W=5 MODE=\"slow\"".into(),
-        "top.u_b.u_few W=8 MODE=\"fast\"".into(),
+        "top.u_b.genblk2".into(),
+        "top.u_b.genblk2.u_few W=8 MODE=\"fast\"".into(),
         "top.u_b.g[1]".into(),
         "top.u_b.g[1].u W=1 MODE=\"fast\"".into(),
         "top.u_b.g[0]".into(),
@@ -413,4 +415,75 @@ fn casts_to_user_types_and_package_types_are_evaluated() {
     let (a, _) = project("elabgaps", &[("g.sv", src)]);
     let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
     assert_eq!(elaborated(&t), ["top", "top.u K=2 V=44", "top.g", "top.g.u2 K=0 V=3"], "300 cast to an 8-bit type is 44");
+}
+
+#[test]
+fn elaboration_review_cases() {
+    // (case, source, the first lines of its elaborated tree)
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("an unsigned context reaches a nested shift", "module top;\n  localparam P = (4'shf >>> 1) + 4'h0;\nendmodule\n", &["top P=7"]),
+        ("overrides and defparams are assignments to the parameter's type", "module m #(parameter logic [7:0] P = 0); endmodule\nmodule top;\n  m #(.P('1)) u();\n  m v();\n  defparam v.P = '1;\nendmodule\n", &["top", "top.u P=255", "top.v P=255"]),
+        ("a case's items in their common type", "module leaf; endmodule\nmodule top;\n  case ('1)\n    4'hf:   leaf good();\n    default: leaf bad();\n  endcase\nendmodule\n", &["top", "top.genblk1", "top.genblk1.good"]),
+        ("a macro is spliced, not parenthesized", "`define SUM 1 + 2\nmodule top;\n  localparam P = `SUM * 3;\nendmodule\n", &["top P=7"]),
+        ("types inherited across commas", "module top #(\n  parameter logic [3:0] A = 0, B = 31\n)(input logic [7:0] a, b);\n  function automatic int f(input int x, y);\n    return y;\n  endfunction\n  localparam F = f(0, 6);\n  localparam BW = $bits(b);\nendmodule\n", &["top A=0 B=15 F=6 BW=8"]),
+        ("an enum's base type", "module top;\n  typedef enum logic [3:0] { A = 4'hf } t;\n  localparam P = ~A;\n  localparam Q = $bits(A);\nendmodule\n", &["top P=0 Q=4"]),
+        ("no select of several packed dimensions", "module top;\n  parameter logic [1:0][3:0] P = 8'hab;\n  localparam Q = P[0];\nendmodule\n", &["top P=171 Q=?(a select of a name declared with another range or several dimensions)"]),
+        ("a large power by squaring", "module top;\n  localparam logic [7:0] P = 3 ** 129;\nendmodule\n", &["top P=3"]),
+        ("a power is left-associative", "module top;\n  localparam P = 2 ** 3 ** 2;\nendmodule\n", &["top P=64"]),
+        (
+            "an unassigned four-state local is no 0",
+            "module leaf; endmodule\nmodule top;\n  function automatic int f();\n    integer x;\n    return x;\n  endfunction\n  localparam P = f();\n  if (P == 0) begin : selected\n    leaf u();\n  end\nendmodule\n",
+            &["top P=?(an x value (a four-state variable not yet assigned))", "top.selected [undetermined: condition not evaluated: an x value (a four-state variable not yet assigned)]", "top.selected.u"],
+        ),
+        ("an assignment to the function's name extends with the value's sign", "module top;\n  function automatic logic [15:0] f();\n    f = 8'shff;\n  endfunction\n  localparam P = f();\nendmodule\n", &["top P=65535"]),
+        ("a signed parameter without a range keeps the value's width", "module top;\n  parameter signed P = 8'h80;\nendmodule\n", &["top P=-128"]),
+        ("a defparam in a module not instantiated under the top", "module leaf #(parameter P = 0); endmodule\nmodule unused;\n  defparam top.u.P = 7;\nendmodule\nmodule top;\n  leaf u();\nendmodule\n", &["top", "top.u P=0"]),
+        ("the implicit block of a body without begin", "module leaf #(parameter P = 0); endmodule\nmodule top;\n  if (1) leaf u();\n  defparam genblk1.u.P = 5;\nendmodule\n", &["top", "top.genblk1", "top.genblk1.u P=5"]),
+        ("a long comparison chain", "module top;\n  localparam P =\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 ==\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 ==\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 ==\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1;\nendmodule\n", &["top P=1"]),
+        ("a body parameter is local with a parameter port list", "module m #(parameter A=1);\n  parameter B=2;\nendmodule\nmodule top;\n  m #(.B(9)) u();\nendmodule\n", &["top", "top.u A=1 B=?(`B` is local: it cannot be overridden)"]),
+        ("a loop's shift by 32 gives 0", "module leaf; endmodule\nmodule top;\n  for (genvar i=1; i!=0; i<<=32) begin : g\n    leaf u();\n  end\nendmodule\n", &["top", "top.g[1]", "top.g[1].u"]),
+        ("a conditional directly in another shares its block", "module leaf; endmodule\nmodule top;\n  if (1) if (0) leaf a(); else leaf b();\n  if (1) begin leaf c(); end\nendmodule\n", &["top", "top.genblk1", "top.genblk1.b", "top.genblk2", "top.genblk2.c"]),
+    ];
+    for (what, src, want) in cases {
+        let (a, _) = project(&format!("elabrev{}", what.len()), &[("t.sv", src)]);
+        let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
+        let got = elaborated(&t);
+        assert_eq!(&got[..want.len().min(got.len())], *want, "{what}");
+    }
+}
+
+#[test]
+fn elaboration_limits_recursion_and_hover_lists() {
+    // A recursion that counts down is followed to 64 instances, the cut said.
+    let src = "module r #(parameter N=100);\n  if (N>0) r #(.N(N-1)) u();\nendmodule\nmodule top;\n  r u();\nendmodule\n";
+    let (a, root) = project("elabrec", &[("t.sv", src)]);
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(10_000));
+    let mut n = &t[0].children[0];
+    let mut depth = 1;
+    while let Some(g) = n.children.first() {
+        n = &g.children[0];
+        depth += 1;
+    }
+    assert_eq!((depth, n.truncated, n.presence.as_deref()), (64, true, Some("not followed: 64 levels of instances")));
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let (h, _) = a.hover(f, src.find("N=100").unwrap() as u32).unwrap();
+    assert!(h.contains("not elaborated to its end"), "{h}");
+    // Generated scopes count against the visit budget, with or without instances in them.
+    let src = "module top;\n  for (genvar i=0; i<1024; i++) begin : a\n    for (genvar j=0; j<1024; j++) begin : b\n    end\n  end\nendmodule\n";
+    let (a, _) = project("elabbudget", &[("t.sv", src)]);
+    let mut q = TreeQuery::new(1000);
+    q.max_visits = 5_000;
+    let (_, meta) = a.design_tree(Some("top"), &q);
+    assert_eq!(meta.incomplete, Some("visits"));
+    // Hover lists 10 values at most, 20 paths, and counts the rest; loop copies are levels of
+    // the path for defparams too.
+    let src = "module leaf #(parameter P=0); endmodule\nmodule top;\n  leaf u();\n  for (genvar i=0; i<30; i++) begin : a\n    leaf #(.P(i)) u();\n  end\n  defparam u.P = 77;\nendmodule\n";
+    let (a, root) = project("elabhover", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let (h, _) = a.hover(f, src.find("P=0").unwrap() as u32).unwrap();
+    let rows: Vec<&str> = h.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(rows.len(), 11, "{h}");
+    assert_eq!(rows[0], "- `77` in `top.u`", "the defparam sets top.u only: {h}");
+    assert_eq!(rows[1], "- `0` in `top.a[0].u`");
+    assert_eq!(rows[10], "- and 21 other values in 21 instances");
 }
