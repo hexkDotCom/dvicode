@@ -298,6 +298,9 @@ pub enum RefKind {
     /// A name that may be an implicit net or that the parser could not place reliably;
     /// it is resolved for navigation but never reported as undeclared.
     Loose,
+    /// A name written in one scope that belongs to another (a `bind`'s ports and parameters,
+    /// a `defparam` path): never reported, and not an implicit net of the scope it is in.
+    Foreign,
 }
 
 #[derive(Clone, Debug)]

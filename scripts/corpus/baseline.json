@@ -77,13 +77,13 @@
   },
   "cva6-auto": {
    "commit": "81245a47fad8fe1a5d562d953ef2662e099def76",
-   "total": 340,
-   "errors": 217,
+   "total": 348,
+   "errors": 225,
    "warnings": 123,
    "codes": {
     "NON_EXISTING_DESIGN_ELEMENT": 123,
     "UNDEFINED_MACRO": 83,
-    "UNDECLARED_IDENTIFIER": 69,
+    "UNDECLARED_IDENTIFIER": 77,
     "NON_EXISTING_TYPE": 53,
     "INCLUDE_NOT_FOUND": 30,
     "NON_EXISTING_PACKAGE": 30,
@@ -93,8 +93,8 @@
     "SKIPPED_CODE": 1
    },
    "files": 828,
-   "build_ms": 112,
-   "config_ms": 94
+   "build_ms": 148,
+   "config_ms": 57
   },
   "cva6-rtl": {
    "commit": "81245a47fad8fe1a5d562d953ef2662e099def76",
@@ -192,11 +192,11 @@
   },
   "opentitan-auto": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",
-   "total": 609,
-   "errors": 487,
+   "total": 612,
+   "errors": 490,
    "warnings": 122,
    "codes": {
-    "UNDECLARED_IDENTIFIER": 224,
+    "UNDECLARED_IDENTIFIER": 227,
     "NON_EXISTING_DESIGN_ELEMENT": 122,
     "UNDEFINED_MACRO": 96,
     "NON_EXISTING_TYPE": 78,
@@ -209,8 +209,8 @@
     "INCLUDE_SYNTAX": 1
    },
    "files": 3730,
-   "build_ms": 903,
-   "config_ms": 694
+   "build_ms": 834,
+   "config_ms": 184
   },
   "opentitan-earlgrey-rtl": {
    "commit": "f602dde0c71f0ee48dd621264a970aad92988983",

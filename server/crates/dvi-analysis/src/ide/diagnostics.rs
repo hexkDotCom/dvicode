@@ -155,7 +155,7 @@ impl Analysis {
                 continue;
             }
             match chain.kind {
-                RefKind::Loose | RefKind::With { .. } => continue,
+                RefKind::Loose | RefKind::Foreign | RefKind::With { .. } => continue,
                 _ => {}
             }
             if chain.segs[0].name == "local" {

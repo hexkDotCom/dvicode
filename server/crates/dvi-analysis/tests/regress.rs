@@ -2712,6 +2712,43 @@ fn index_names_in_port_connections_and_gate_terminals_are_uses() {
 }
 
 #[test]
+fn connection_selects_with_macros_iterators_parameters_bind_and_defparam() {
+    let t = concat!(
+        "`define CONN(n) {n, v[0]}\n",
+        "module c #(parameter int P = 0) (input [1:0] p);\nendmodule\n",
+        "module t;\nendmodule\n",
+        "module m;\n",
+        "  wire [3:0] v;\n",
+        "  int q[2];\n",
+        // A macro's brackets are not around its argument: an implicit net.
+        "  c u1(.p(`CONN(implicit_a)));\n",
+        // An array method's iterator.
+        "  c u2(.p(v[q.sum(it) with (it)]));\n",
+        // A parameter value declares nothing: both names are uses.
+        "  c #(.P(px[pi])) u3();\n",
+        // Names of a bind or defparam do not excuse the same names here.
+        "  defparam u3.P = dp_only;\n",
+        "  c u4(.p(v[dp_only]));\n",
+        "endmodule\n",
+        "bind m c b(.p(bind_only));\n",
+        "module n;\n  wire [3:0] v;\n  c u5(.p(v[bind_only]));\nendmodule\n",
+    );
+    let (a, _) = project("selects2", &[("m.sv", t)]);
+    let mut p = problems(&a);
+    p.sort();
+    assert_eq!(
+        p,
+        [
+            "m.sv: UNDECLARED_IDENTIFIER: 'bind_only' is not declared",
+            "m.sv: UNDECLARED_IDENTIFIER: 'dp_only' is not declared",
+            "m.sv: UNDECLARED_IDENTIFIER: 'pi' is not declared",
+            "m.sv: UNDECLARED_IDENTIFIER: 'px' is not declared",
+        ],
+        "{p:?}"
+    );
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

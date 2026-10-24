@@ -586,7 +586,12 @@ impl<'t> Parser<'t> {
             "typedef" => self.typedef(),
             "parameter" | "localparam" => self.param_decl(),
             "nettype" => self.nettype(),
-            "specparam" | "defparam" | "timeunit" | "timeprecision" | "alias" => {
+            "defparam" => {
+                // `defparam u.P = v;` sets a parameter of another scope.
+                self.bump();
+                self.scan_until_semi(RefKind::Foreign);
+            }
+            "specparam" | "timeunit" | "timeprecision" | "alias" => {
                 self.bump();
                 self.scan_until_semi(RefKind::Loose);
             }
@@ -594,7 +599,7 @@ impl<'t> Parser<'t> {
                 // Names in the instance's parameters and ports belong to the target module's
                 // scope (`bind m checker #(.W(W)) u (.*)`), so none of them is reported.
                 self.bump();
-                let saved = self.kind_override.replace(RefKind::Loose);
+                let saved = self.kind_override.replace(RefKind::Foreign);
                 if self.at_ident() {
                     // `bind module [: inst_path, ...] checker [#(...)] u (...);` or
                     // `bind inst.path checker u (...);` (the target is kept as `inst.path`).
@@ -1964,14 +1969,28 @@ impl<'t> Parser<'t> {
         if self.kind_override.is_some() {
             return;
         }
-        let mut selects: Vec<(u32, u32)> = Vec::new();
-        let mut open: Vec<u32> = Vec::new();
+        // Brackets written in the source (a macro's carry the call's span), and whether an
+        // array method's `with` is inside (its `item`/`it` iterators are declared there).
+        let mut selects: Vec<(u32, u32, bool)> = Vec::new();
+        let mut open: Vec<(u32, bool)> = Vec::new();
         for t in &self.toks[start..self.pos.min(self.toks.len())] {
+            if t.flags & tflags::FROM_MACRO != 0 {
+                continue;
+            }
             if t.is_punct("[") {
-                open.push(t.span.start);
+                open.push((t.span.start, false));
+            } else if t.is_kw("with") {
+                if let Some(o) = open.last_mut() {
+                    o.1 = true;
+                }
             } else if t.is_punct("]") {
-                if let Some(s) = open.pop() {
-                    selects.push((s, t.span.end));
+                if let Some((s, with)) = open.pop() {
+                    if with {
+                        if let Some(o) = open.last_mut() {
+                            o.1 = true;
+                        }
+                    }
+                    selects.push((s, t.span.end, with));
                 }
             }
         }
@@ -1979,14 +1998,26 @@ impl<'t> Parser<'t> {
             return;
         }
         for r in &mut self.u.refs[first_ref..] {
-            let at = r.segs[0].span.start;
-            if r.segs.len() == 1 && r.kind == RefKind::Loose && selects.iter().any(|(s, e)| *s < at && at < *e) {
+            let (at, macro_made) = (r.segs[0].span.start, r.segs[0].from_macro);
+            if r.segs.len() == 1 && !macro_made && r.kind == RefKind::Loose && selects.iter().any(|(s, e, with)| *s < at && at < *e && !*with) {
                 r.kind = RefKind::Expr;
             }
         }
     }
 
+    /// Member chains from reference `first` on stay as lenient as on the right of an
+    /// assignment: what they reach often depends on parameters and `generate` branches.
+    fn lenient_member_chains(&mut self, first: usize) {
+        for r in &mut self.u.refs[first..] {
+            if r.segs.len() > 1 && r.kind == RefKind::Expr {
+                r.kind = RefKind::Loose;
+            }
+        }
+    }
+
     fn connection_list(&mut self, end: usize, mk: fn(DeclId) -> RefKind, inst: DeclId) {
+        // A parameter's value declares no net: every name in it is a use.
+        let value = if matches!(mk(inst), RefKind::Param { .. }) { RefKind::Expr } else { RefKind::Loose };
         while self.pos < end {
             let before = self.pos;
             if self.at_p(".*") {
@@ -1999,16 +2030,18 @@ impl<'t> Parser<'t> {
                 self.add_ref(vec![Self::seg(&n, Sep::None)], mk(inst));
                 if self.at_p("(") {
                     let (start, first) = (self.pos, self.u.refs.len());
-                    self.paren_group(RefKind::Loose);
+                    self.paren_group(value);
                     self.selects_are_uses(start, first);
+                    self.lenient_member_chains(first);
                 } else {
                     // Implicit `.name` connection also refers to a local signal.
                     self.add_ref(vec![Self::seg(&n, Sep::None)], RefKind::Loose);
                 }
             } else {
                 let first = self.u.refs.len();
-                self.scan_expr(STOP_COMMA, RefKind::Loose);
+                self.scan_expr(STOP_COMMA, value);
                 self.selects_are_uses(before, first);
+                self.lenient_member_chains(first);
             }
             if self.at_p(",") {
                 self.bump();
