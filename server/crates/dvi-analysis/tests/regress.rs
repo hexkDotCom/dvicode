@@ -2703,6 +2703,15 @@ fn implicit_nets_are_only_the_names_assigned_in_their_own_generate_block() {
 }
 
 #[test]
+fn index_names_in_port_connections_and_gate_terminals_are_uses() {
+    let t = "module c(input logic x);\nendmodule\nmodule m;\n  logic [3:0] v;\n  c u(.x(v[idx]));\n  c w(v[jdx]);\n  and g(out_net, v[kdx], v[0]);\n  c z(.x(implicit_net));\nendmodule\n// A bind's names are the target's: not checked here.\nbind m c b_u(.x(v[target_idx]));\n";
+    let (a, _) = project("portselects", &[("m.sv", t)]);
+    let mut p = problems(&a);
+    p.sort();
+    assert_eq!(p, ["m.sv: UNDECLARED_IDENTIFIER: 'idx' is not declared", "m.sv: UNDECLARED_IDENTIFIER: 'jdx' is not declared", "m.sv: UNDECLARED_IDENTIFIER: 'kdx' is not declared"], "{p:?}");
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

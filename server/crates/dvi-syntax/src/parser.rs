@@ -730,9 +730,19 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
             _ => {
-                // Some other construct: skip it as a statement.
+                // Some other construct: skip it as a statement. The terminals of a gate are
+                // implicit nets; the names in their selects are uses.
+                let gate = matches!(
+                    t.text.as_str(),
+                    "and" | "nand" | "or" | "nor" | "xor" | "xnor" | "buf" | "not" | "bufif0" | "bufif1" | "notif0" | "notif1" | "nmos" | "pmos" | "cmos"
+                        | "rnmos" | "rpmos" | "rcmos" | "tran" | "tranif0" | "tranif1" | "rtran" | "rtranif0" | "rtranif1" | "pullup" | "pulldown"
+                );
                 self.bump();
+                let (start, first) = (self.pos, self.u.refs.len());
                 self.scan_until_semi(RefKind::Loose);
+                if gate {
+                    self.selects_are_uses(start, first);
+                }
             }
         }
     }
@@ -859,8 +869,11 @@ impl<'t> Parser<'t> {
         } else {
             self.delay_opt();
         }
-        // Undeclared names on the terminals are implicit nets (IEEE 1800 6.10).
+        // Undeclared names on the terminals are implicit nets (IEEE 1800 6.10); those in their
+        // selects are uses.
+        let (start, first) = (self.pos, self.u.refs.len());
         self.scan_until_semi(RefKind::Loose);
+        self.selects_are_uses(start, first);
     }
 
     fn skip_named(&mut self, kind: DeclKind, end: &'static str) {
@@ -1944,6 +1957,35 @@ impl<'t> Parser<'t> {
     }
 
     /// Named (`.a(x)`, `.a`, `.*`) or ordered connections up to token index `end`.
+    /// Names in the selects (`a[idx]`) of what was scanned from token `start` (references from
+    /// `first_ref`) are uses that must be declared: only the nets themselves may be implicit.
+    fn selects_are_uses(&mut self, start: usize, first_ref: usize) {
+        // Not in a `bind`: its names are the target's, not checked here.
+        if self.kind_override.is_some() {
+            return;
+        }
+        let mut selects: Vec<(u32, u32)> = Vec::new();
+        let mut open: Vec<u32> = Vec::new();
+        for t in &self.toks[start..self.pos.min(self.toks.len())] {
+            if t.is_punct("[") {
+                open.push(t.span.start);
+            } else if t.is_punct("]") {
+                if let Some(s) = open.pop() {
+                    selects.push((s, t.span.end));
+                }
+            }
+        }
+        if selects.is_empty() {
+            return;
+        }
+        for r in &mut self.u.refs[first_ref..] {
+            let at = r.segs[0].span.start;
+            if r.segs.len() == 1 && r.kind == RefKind::Loose && selects.iter().any(|(s, e)| *s < at && at < *e) {
+                r.kind = RefKind::Expr;
+            }
+        }
+    }
+
     fn connection_list(&mut self, end: usize, mk: fn(DeclId) -> RefKind, inst: DeclId) {
         while self.pos < end {
             let before = self.pos;
@@ -1956,13 +1998,17 @@ impl<'t> Parser<'t> {
                 self.bump();
                 self.add_ref(vec![Self::seg(&n, Sep::None)], mk(inst));
                 if self.at_p("(") {
+                    let (start, first) = (self.pos, self.u.refs.len());
                     self.paren_group(RefKind::Loose);
+                    self.selects_are_uses(start, first);
                 } else {
                     // Implicit `.name` connection also refers to a local signal.
                     self.add_ref(vec![Self::seg(&n, Sep::None)], RefKind::Loose);
                 }
             } else {
+                let first = self.u.refs.len();
                 self.scan_expr(STOP_COMMA, RefKind::Loose);
+                self.selects_are_uses(before, first);
             }
             if self.at_p(",") {
                 self.bump();
@@ -3304,25 +3350,7 @@ impl<'t> Parser<'t> {
         loop {
             let (start, first_left) = (self.pos, self.u.refs.len());
             self.scan_expr(LHS, RefKind::Loose);
-            // Names in the selects of the left side (`a[idx]`) are uses: only the nets
-            // assigned may be implicit.
-            let mut selects: Vec<(u32, u32)> = Vec::new();
-            let mut open: Vec<u32> = Vec::new();
-            for t in &self.toks[start..self.pos] {
-                if t.is_punct("[") {
-                    open.push(t.span.start);
-                } else if t.is_punct("]") {
-                    if let Some(s) = open.pop() {
-                        selects.push((s, t.span.end));
-                    }
-                }
-            }
-            for r in &mut self.u.refs[first_left..] {
-                let at = r.segs[0].span.start;
-                if r.segs.len() == 1 && r.kind == RefKind::Loose && selects.iter().any(|(s, e)| *s < at && at < *e) {
-                    r.kind = RefKind::Expr;
-                }
-            }
+            self.selects_are_uses(start, first_left);
             if self.eat_p("=") {
                 let first = self.u.refs.len();
                 self.scan_expr(Stop { comma: true, decl: true, ..STOP_NONE }, RefKind::Expr);
