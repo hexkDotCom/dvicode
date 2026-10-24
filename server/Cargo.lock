@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "dvi-analysis"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "dvi-project",
  "dvi-syntax",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "dvi-project"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "dvi-syntax",
  "log",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "dvi-syntax"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rustc-hash",
  "smol_str",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "dvicode-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64",
  "crossbeam-channel",

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.2 (preview)
+
+**Fewer false errors in large projects**
+
+- Enum constants declared outside any scope (in a header listed as a source file) are
+  visible to the files compiled after it, like the enum's type.
+- `foreach` inside the constraint set of an implication (`cond -> { foreach (a[i]) ... }`)
+  declares its loop variable, also in out-of-block constraints.
+- Without a build file:
+  - A file with `initial` or `always` outside any module is a piece of a module body,
+    written to be included in one. It is compiled only where it is included, instead of on
+    its own, where every name of the enclosing testbench was undeclared.
+  - A source file that declares a package is compiled even when every include of it is
+    in an `ifdef` of another flow.
+- Implicit nets follow IEEE 1800 more closely:
+  - an index name on the left of an assignment (`assign v[idx] = ...`) must be declared;
+  - a net implicitly declared in a generate block is a name of that block only.
+
+**Typing in big files**
+
+- After an edit, only the edited lines of a file are lexed again. In a 5 MB file that takes
+  7 ms instead of 40 ms.
+- The problem check resolves each name chain once and remembers lookups. Problems after
+  typing in a 5 MB file arrive in about 75 ms instead of 210 ms. Completion while typing
+  there takes about 60 ms instead of 100 ms.
+- Find references, highlights, rename and the call hierarchy remember lookups too.
+
 ## 0.4.1 (preview)
 
 **Checks**
