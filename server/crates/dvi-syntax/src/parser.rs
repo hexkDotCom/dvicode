@@ -644,7 +644,7 @@ impl<'t> Parser<'t> {
                     self.pos = end;
                 }
                 self.delay_opt();
-                self.scan_until_semi(RefKind::Loose);
+                self.cont_assign_list();
             }
             "assert" | "assume" | "cover" | "restrict" | "expect" => self.stmt(),
             "specify" => self.skip_until_kw("endspecify"),
@@ -3219,6 +3219,38 @@ impl<'t> Parser<'t> {
         } else {
             self.error(t.span, format!("Unexpected {}", Self::describe(&t)));
             self.recover_semi();
+        }
+    }
+
+    /// The assignments of `assign`: an undeclared name on the left of one is an implicit net
+    /// (IEEE 1800 6.10), one on the right is a use of a name that must be declared.
+    fn cont_assign_list(&mut self) {
+        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true };
+        loop {
+            self.scan_expr(LHS, RefKind::Loose);
+            if self.eat_p("=") {
+                let first = self.u.refs.len();
+                self.scan_expr(STOP_COMMA, RefKind::Expr);
+                // Member chains stay as lenient as before: what they reach often depends on
+                // parameters and `generate` branches, which are not elaborated.
+                for r in &mut self.u.refs[first..] {
+                    if r.segs.len() > 1 && r.kind == RefKind::Expr {
+                        r.kind = RefKind::Loose;
+                    }
+                }
+            }
+            if self.eat_p(",") {
+                continue;
+            }
+            if self.eat_p(";") || self.at_eof() {
+                return;
+            }
+            let t = self.tok();
+            if t.kind == TokKind::Keyword && (is_end_kw(&t.text) || is_item_kw(&t.text)) {
+                return;
+            }
+            // Unbalanced closing bracket or similar: skip it.
+            self.bump();
         }
     }
 

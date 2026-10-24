@@ -2584,3 +2584,15 @@ fn an_edit_is_local_to_a_line_only_when_nothing_else_changed() {
     // A keyword inside a longer name is not one.
     assert!(line_local_edit(old, "a;\n  x = begin_count;\nb;\n", 1).is_some());
 }
+
+#[test]
+fn only_the_left_of_a_continuous_assignment_declares_a_net() {
+    // IEEE 1800 6.10: an undeclared name on the left is an implicit net; on the right it is
+    // a use of a name that must be declared, unless it is an implicit net elsewhere.
+    let t = "module t(input logic a);\n  assign w = missing;\n  assign x = w, y = gone;\n  assign {p, q} = {a, x};\n  assign z = p & y;\nendmodule\n";
+    let (a, _) = project("assignsides", &[("t.sv", t)]);
+    let p = problems(&a);
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(p.iter().any(|m| m.contains("'missing' is not declared")), "{p:?}");
+    assert!(p.iter().any(|m| m.contains("'gone' is not declared")), "{p:?}");
+}
