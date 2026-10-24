@@ -9,43 +9,91 @@
 //! does not match the creation's known lookup path).
 
 use super::factory::OverrideCall;
-use super::views::{TreeQuery, VerifNode};
+use super::views::{OverrideStep, TreeQuery, VerifNode};
 use crate::world::{Analysis, DeclRef};
 use dvi_syntax::ast::DeclKind;
 use dvi_syntax::{FileId, Span, TokKind};
 use std::sync::Arc;
 
-/// The hierarchies the impact is read from: the configured test's, or every test's (at most 8).
-#[derive(Default)]
-pub struct OverrideModel {
-    pub tests: Vec<VerifNode>,
-    /// The model stopped somewhere (node limit, a budget): results may miss creations.
+/// One test's hierarchy as the model builds it (objects included).
+pub struct TestModel {
+    pub root: VerifNode,
+    /// The model stopped before its end (a node limit, a budget).
     pub incomplete: bool,
-    /// More tests than the ones modeled.
-    pub more_tests: usize,
 }
 
-/// Tests modeled at most when no test is configured.
+/// Tests modeled at most when no test is configured, and besides it.
 const MAX_TESTS: usize = 8;
 /// Creations listed per kind of result.
 const MAX_LISTED: usize = 10;
 
 impl Analysis {
-    /// The model, made once per analysis revision (a cancelled build is not kept).
-    pub fn override_model(&self) -> Arc<OverrideModel> {
-        if let Some(m) = self.override_model_cache.get() {
-            return m.clone();
+    /// The model of test `test`, made once per analysis revision (a cancelled build is not kept).
+    pub fn test_model(&self, test: DeclRef) -> Option<Arc<TestModel>> {
+        let key = self.decl_key(self.canonical(test));
+        if let Some(m) = self.override_models.lock().unwrap().get(&key) {
+            return Some(m.clone());
         }
         let mut q = TreeQuery::new(200_000);
         q.objects = true;
-        let (h, meta) = self.verification_tree(None, &q);
-        let (h, meta) = if h.test.is_none() && h.roots.len() > 1 { (h, meta) } else if h.roots.is_empty() { self.verification_tree(Some("*"), &q) } else { (h, meta) };
-        let more_tests = h.roots.len().saturating_sub(MAX_TESTS);
-        let m = Arc::new(OverrideModel { tests: h.roots.into_iter().take(MAX_TESTS).collect(), incomplete: meta.incomplete.is_some(), more_tests });
+        let name = self.decl(test).name.to_string();
+        let (h, meta) = self.verification_tree(Some(&name), &q);
+        let root = h.roots.into_iter().next()?;
+        let m = Arc::new(TestModel { root, incomplete: meta.incomplete.is_some() });
         if !self.cancelled() {
-            let _ = self.override_model_cache.set(m.clone());
+            self.override_models.lock().unwrap().insert(key, m.clone());
         }
-        m
+        Some(m)
+    }
+
+    /// The tests a hover on an override in class `class` reads: the configured one (or, when
+    /// none is configured, the first 8), and the tests derived from `class` (an override in a
+    /// test class or its base), at most 8 more. Notes say what was left out.
+    fn hover_tests(&self, class: Option<DeclRef>) -> (Vec<Arc<TestModel>>, Vec<String>) {
+        let tests = self.uvm_tests();
+        let mut picked: Vec<DeclRef> = Vec::new();
+        let mut notes = Vec::new();
+        match self.setup.config.uvm_testname() {
+            Some(name) => match tests.iter().find(|t| self.decl(**t).name == name.as_str()) {
+                Some(t) => picked.push(*t),
+                None => notes.push(format!("the configured test `{name}` is not a test of this build")),
+            },
+            None => {
+                picked.extend(tests.iter().take(MAX_TESTS));
+                if tests.len() > MAX_TESTS {
+                    notes.push(format!("{} more tests not modeled", tests.len() - MAX_TESTS));
+                }
+            }
+        }
+        if let Some(c) = class {
+            let ck = self.decl_key(self.canonical(c));
+            let derived: Vec<DeclRef> = tests
+                .iter()
+                .copied()
+                .filter(|t| !picked.iter().any(|p| self.decl_key(*p) == self.decl_key(*t)))
+                .filter(|t| {
+                    let mut cur = Some(*t);
+                    let mut steps = 0;
+                    while let Some(x) = cur {
+                        if self.decl_key(self.canonical(x)) == ck {
+                            return true;
+                        }
+                        steps += 1;
+                        if steps > 32 {
+                            return false;
+                        }
+                        cur = self.class_base(x);
+                    }
+                    false
+                })
+                .collect();
+            if derived.len() > MAX_TESTS {
+                notes.push(format!("{} more tests derived from `{}` not modeled", derived.len() - MAX_TESTS, self.decl(c).name));
+            }
+            picked.extend(derived.into_iter().take(MAX_TESTS));
+        }
+        let models = picked.into_iter().filter_map(|t| self.test_model(t)).collect();
+        (models, notes)
     }
 
     /// The override call whose method name is at `off`.
@@ -75,47 +123,33 @@ impl Analysis {
     /// Hover on an override call: what it changes in the modeled build of each test.
     pub fn override_hover(&self, file: FileId, off: u32) -> Option<(String, Span)> {
         let (call, at) = self.override_call_at(file, off)?;
-        let uri = crate::ide::url_of(&self.path(file)).to_string();
-        let line = self.to_range(at)?.start.line;
         let from = self.decl(call.from).name.to_string();
         let to = self.decl(call.to).name.to_string();
         let from_key = self.decl_key(self.canonical(call.from));
         let what = if call.instance { format!("instance override `{from}` → `{to}` at `{}`", call.path) } else { format!("type override `{from}` → `{to}`") };
         let mut md = format!("**Factory {what}**");
-        let model = self.override_model();
-        // An override in a test class the model does not cover: that test is modeled too.
-        let mut tests: Vec<&VerifNode> = model.tests.iter().collect();
-        let extra;
-        if let Some(c) = self.enclosing_class(self.units_for(file).first().copied()?, self.scope_at(self.units_for(file).first().copied()?, file, off)) {
-            let cname = self.decl(c).name.to_string();
-            let is_test = self.uvm_tests().iter().any(|t| self.decl_key(*t) == self.decl_key(c));
-            if is_test && !tests.iter().any(|t| t.class == cname) {
-                let mut q = TreeQuery::new(200_000);
-                q.objects = true;
-                extra = self.verification_tree(Some(&cname), &q).0.roots;
-                tests.extend(extra.iter());
-            }
-        }
+        let &uid = self.units_for(file).first()?;
+        let class = self.enclosing_class(uid, self.scope_at(uid, file, off));
+        let (tests, mut notes) = self.hover_tests(class);
         if tests.is_empty() {
             md.push_str("\n\nNo UVM test is modeled in this build configuration.");
+            if !notes.is_empty() {
+                md.push_str(&format!("\n\n*{}.*", notes.join("; ")));
+            }
             return Some((md, at));
         }
-        // The full path pattern: as written, or (relative to the caller) as a step made from it
-        // says.
-        let mut pattern: Option<String> = (call.instance && !call.relative).then(|| call.path.clone());
-        if call.instance && call.relative {
-            for root in &tests {
-                walk(root, &mut |n| {
-                    if pattern.is_none() {
-                        pattern = n.overrides.iter().find(|s| s.uri.as_deref() == Some(uri.as_str()) && s.line == line).and_then(|s| s.path.clone());
-                    }
-                });
+        let mine = |s: &OverrideStep| s.at == Some(at);
+        // A pattern known for certain: written as a full path (a relative one depends on where
+        // each registration is made).
+        let pattern: Option<String> = (call.instance && !call.relative).then(|| call.path.clone());
+        for model in &tests {
+            let root = &model.root;
+            if model.incomplete {
+                notes.push(format!("the model of `{}` stopped before its end (a limit)", root.class));
             }
-        }
-        for root in &tests {
             // Taken part in anywhere in this test? Else nothing here says why not.
             let mut met = false;
-            walk(root, &mut |n| met |= n.overrides.iter().any(|s| s.uri.as_deref() == Some(uri.as_str()) && s.line == line));
+            walk(root, &mut |n| met |= n.overrides.iter().any(mine));
             if !met {
                 md.push_str(&format!("
 
@@ -124,10 +158,10 @@ impl Analysis {
             }
             let (mut changes, mut may, mut not) = (Vec::new(), Vec::new(), Vec::new());
             walk(root, &mut |n| {
-                let mine: Vec<&super::views::OverrideStep> = n.overrides.iter().filter(|s| s.uri.as_deref() == Some(uri.as_str()) && s.line == line).collect();
-                if let Some(s) = mine.iter().find(|s| s.applied) {
+                let steps: Vec<&OverrideStep> = n.overrides.iter().filter(|s| mine(s)).collect();
+                if let Some(s) = steps.iter().find(|s| s.applied) {
                     changes.push(format!("`{}` ({} → {})", n.path, s.from, s.to));
-                } else if let Some(s) = mine.first() {
+                } else if let Some(s) = steps.first() {
                     let when = if s.conditions.is_empty() { String::new() } else { format!(" when {}", s.conditions.iter().map(|c| c.join(" && ")).collect::<Vec<_>>().join(" or ")) };
                     may.push(format!("`{}`{when}", n.path));
                 } else if n.requested_decl.is_some_and(|r| self.decl_key(self.canonical(r)) == from_key) {
@@ -138,7 +172,7 @@ impl Analysis {
                     } else {
                         let winners: Vec<String> = n.overrides.iter().filter(|s| s.applied).map(|s| format!("{} → {} ({})", s.from, s.to, s.set_in)).collect();
                         if winners.is_empty() {
-                            "registered after it was made, or not met before it".to_string()
+                            "registered after it was made, a path that does not match, or not met before it".to_string()
                         } else {
                             format!("another override comes first: {}", winners.join(", "))
                         }
@@ -165,13 +199,6 @@ impl Analysis {
             list("Changes", &changes, &mut md);
             list("May change", &may, &mut md);
             list("Not changed", &not, &mut md);
-        }
-        let mut notes = Vec::new();
-        if model.incomplete {
-            notes.push("the model stopped before its end (a limit)".to_string());
-        }
-        if model.more_tests > 0 {
-            notes.push(format!("{} more tests not modeled", model.more_tests));
         }
         notes.push("creations the model does not follow (`create_component_by_name`, `create_object`, ...) are not counted".to_string());
         md.push_str(&format!("\n\n*{}.*", notes.join("; ")));

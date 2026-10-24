@@ -165,6 +165,9 @@ pub struct OverrideStep {
     pub conditions: Vec<Vec<String>>,
     /// It makes the node's class; else it is set under conditions and would change it.
     pub applied: bool,
+    /// The override call (its method name).
+    #[serde(skip)]
+    pub at: Option<Span>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -1878,13 +1881,14 @@ impl Analysis {
                 line: loc.as_ref().map_or(0, |l| l.range.start.line),
                 conditions: e.conditions.clone(),
                 applied,
+                at: Some(e.span),
             }
         };
         let certain = |_: usize, e: &Entry| e.certain && !params;
         let Some((built, chain)) = self.factory_chain(factory, requested, path, &certain) else {
             // A chain too long to follow: nothing is claimed but that.
             let name = self.decl(requested).name.to_string();
-            return (requested, vec![OverrideStep { from: name, to: "?".into(), instance: false, path: None, set_in: "(an override chain too long to follow)".into(), uri: None, line: 0, conditions: Vec::new(), applied: false }]);
+            return (requested, vec![OverrideStep { from: name, to: "?".into(), instance: false, path: None, set_in: "(an override chain too long to follow)".into(), uri: None, line: 0, conditions: Vec::new(), applied: false, at: None }]);
         };
         let mut steps: Vec<OverrideStep> = chain.iter().map(|&i| step(&factory.entries[i], true)).collect();
         // The other overrides of the classes on the way, each listed when, set, it would change
@@ -1901,7 +1905,7 @@ impl Analysis {
             let changes = self.factory_chain(factory, requested, path, &with).map_or(true, |(c, _)| self.decl_key(c) != built_key);
             if changes {
                 if listed == 16 {
-                    steps.push(OverrideStep { from: self.decl(requested).name.to_string(), to: "?".into(), instance: false, path: None, set_in: "(more possible overrides not listed)".into(), uri: None, line: 0, conditions: Vec::new(), applied: false });
+                    steps.push(OverrideStep { from: self.decl(requested).name.to_string(), to: "?".into(), instance: false, path: None, set_in: "(more possible overrides not listed)".into(), uri: None, line: 0, conditions: Vec::new(), applied: false, at: None });
                     break;
                 }
                 steps.push(step(&factory.entries[i], false));

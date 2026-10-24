@@ -3788,6 +3788,7 @@ const IMPACT_TB: &str = r#"package tb_pkg;
     function new(string name, uvm_component parent); super.new(name, parent); endfunction
     function void build_phase(uvm_phase phase);
       set_inst_override_by_type("agt1.d", drv::get_type(), err_drv::get_type()); // INST
+      factory.set_inst_override_by_type(drv::get_type(), err_drv::get_type(), "*.agt2.*"); // ABS
       a = env_a::type_id::create("a", this);
       b = env_b::type_id::create("b", this);
       agt1 = agent::type_id::create("agt1", this);
@@ -3812,7 +3813,11 @@ fn an_override_call_says_what_it_changes_in_the_modeled_build() {
     assert!(late.contains("- `uvm_test_top.b.by_new`: made with `new`"), "{late}");
     let inst = hover("INST");
     assert!(inst.contains("Changes (1):\n- `uvm_test_top.agt1.d` (drv → err_drv)"), "{inst}");
-    assert!(inst.contains("- `uvm_test_top.agt2.d`: its path `uvm_test_top.agt2.d` does not match `uvm_test_top.agt1.d`"), "{inst}");
+    assert!(inst.contains("- `uvm_test_top.agt2.d`: another override comes first: drv → err_drv"), "a relative pattern gives no certain path reason: {inst}");
+    let abs = hover("ABS");
+    assert!(abs.contains("Changes (1):
+- `uvm_test_top.agt2.d`"), "{abs}");
+    assert!(abs.contains("- `uvm_test_top.agt1.d`: its path `uvm_test_top.agt1.d` does not match `*.agt2.*`"), "{abs}");
     assert!(inst.contains("as modeled"), "the scope is said");
 }
 
