@@ -28,15 +28,23 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+/// mimalloc's `mi_option_arena_eager_commit`: whether a new arena (hundreds of megabytes) is
+/// committed at once; 2 by default in mimalloc v3, which commits on Linux.
+#[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+
 /// Memory freed by a build goes back to the system at once: with the default delay a long
 /// session kept about twice the memory (3 GB instead of 1 GB after a few rebuilds of a
-/// 20,000-file project), for builds less than a tenth faster.
+/// 20,000-file project), for builds less than a tenth faster. Arenas are committed as they
+/// are used, not whole: that held about 500 MB more of opentitan's 1.25 GB peak, for the
+/// same build time.
 fn configure_allocator() {
     #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
     // SAFETY: options are plain fields, not safe to set while other threads use the allocator:
     // this runs first in `main`, before any thread is started.
     unsafe {
-        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0)
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0);
+        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
     };
 }
 
@@ -141,15 +149,20 @@ mod allocator_tests {
                 .env("DVICODE_ALLOCATOR_CHECK", "1")
                 .env_remove("MIMALLOC_PURGE_DELAY")
                 .env_remove("MIMALLOC_RESET_DELAY")
+                .env_remove("MIMALLOC_ARENA_EAGER_COMMIT")
+                .env_remove("MIMALLOC_EAGER_REGION_COMMIT")
                 .output()
                 .unwrap();
             assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"), "{}", String::from_utf8_lossy(&out.stdout));
             return;
         }
-        // Its default in mimalloc v3 (src/options.c: 1000 ms) identifies the option; then it is 0.
-        let get = || unsafe { libmimalloc_sys::mi_option_get(super::MI_OPTION_PURGE_DELAY) };
-        assert_eq!(get(), 1000);
+        // Their defaults in mimalloc v3 (src/options.c: 1000 ms, and 2) identify the options;
+        // then they are 0.
+        let get = |o| unsafe { libmimalloc_sys::mi_option_get(o) };
+        assert_eq!(get(super::MI_OPTION_PURGE_DELAY), 1000);
+        assert_eq!(get(super::MI_OPTION_ARENA_EAGER_COMMIT), 2);
         super::configure_allocator();
-        assert_eq!(get(), 0);
+        assert_eq!(get(super::MI_OPTION_PURGE_DELAY), 0);
+        assert_eq!(get(super::MI_OPTION_ARENA_EAGER_COMMIT), 0);
     }
 }
