@@ -5,7 +5,7 @@
 //! them, and files that mostly define macros come first.
 
 use crate::progress::{Phase, Progress};
-use crate::Invocation;
+use crate::{fsx, Invocation};
 use dvi_syntax::lexer::lex;
 use dvi_syntax::token::TokKind;
 use rayon::prelude::*;
@@ -34,7 +34,7 @@ fn is_header(p: &Path) -> bool {
 
 /// A file, or a link to one: a link to a device (`x.sv -> /dev/zero`) would be read forever.
 fn is_regular_file(ft: &std::fs::FileType, p: &Path) -> bool {
-    ft.is_file() || (ft.is_symlink() && std::fs::metadata(p).is_ok_and(|m| m.is_file()))
+    ft.is_file() || (ft.is_symlink() && fsx::is_file(p))
 }
 
 /// The patterns of the project's top-level `.gitignore`: build output, scratch files and
@@ -124,7 +124,7 @@ pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
             return out;
         }
         dirs += 1;
-        let rd = match std::fs::read_dir(&dir) {
+        let rd = match fsx::read_dir(&dir) {
             Ok(rd) => rd,
             Err(e) => {
                 log::debug!("auto-configuration: cannot read folder {}: {e}", dir.display());
@@ -152,7 +152,7 @@ pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
                     Some(why) if name != ".git" => log::debug!("auto-configuration: skipped {} ({why})", p.display()),
                     Some(_) => {}
                 }
-            } else if ft.is_symlink() && std::fs::metadata(&p).is_ok_and(|m| m.is_dir()) {
+            } else if ft.is_symlink() && fsx::is_dir(&p) {
                 log::debug!("auto-configuration: not followed: {} (symbolic link to a folder; list its sources in a build file)", p.display());
             } else if is_regular_file(&ft, &p) && is_source(&p) {
                 if ignore.ignores(&rel(&p), false) {
@@ -193,7 +193,7 @@ pub(crate) fn include_bases(sources: &[PathBuf], included: &[PathBuf]) -> Vec<Pa
     let operands: FxHashSet<String> = sources
         .par_iter()
         .flat_map_iter(|p| {
-            let text = std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            let text = fsx::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             scan(&text).include_paths
         })
         .collect();
@@ -450,8 +450,8 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
         match home {
             Some(h) => {
                 let h = PathBuf::from(h);
-                let src = if h.join("src").is_dir() { h.join("src") } else { h };
-                if src.join("uvm_pkg.sv").is_file() {
+                let src = if fsx::is_dir(h.join("src")) { h.join("src") } else { h };
+                if fsx::is_file(src.join("uvm_pkg.sv")) {
                     log::debug!("auto-configuration: the sources use UVM; compiling it from {}", src.display());
                     inv.incdirs.push(src.clone());
                     inv.files.push(src.join("uvm_pkg.sv"));

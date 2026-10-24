@@ -9,6 +9,7 @@
 //! read once instead; [`Vfs::clear_dir_cache`] starts over (every full build does) and
 //! [`Vfs::invalidate`] forgets the directory of a changed file.
 
+use dvi_project::fsx;
 use dvi_syntax::lexer::lex;
 use dvi_syntax::preproc::normalize;
 use dvi_syntax::{FileId, LineIndex, SourceProvider, Token};
@@ -64,14 +65,11 @@ enum DirListing {
 
 impl DirListing {
     fn read(dir: &Path) -> DirListing {
-        // A network host that is not allowed: as if it were not there (`dvi_project::netpath`).
-        if dvi_project::netpath::blocked(dir).is_some() {
-            return DirListing::Missing;
-        }
-        let rd = match std::fs::read_dir(dir) {
+        // A network host that is not allowed: as if it were not there (`dvi_project::fsx`).
+        let rd = match fsx::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirListing::Missing,
-            Err(_) if !dir.is_dir() => return DirListing::Missing,
+            Err(_) if !fsx::is_dir(dir) => return DirListing::Missing,
             Err(_) => return DirListing::Unlistable,
         };
         let mut entries = FxHashMap::default();
@@ -292,22 +290,15 @@ impl Vfs {
             };
             // Regular files only: reading a FIFO named as a source would block. Nothing on a
             // network host that is not allowed: not even its metadata.
-            let blocked = dvi_project::netpath::blocked(&path);
-            if let Some(host) = &blocked {
-                log::warn!("not reading {}: the network host {host} is not allowed (security.allowedUNCHosts)", path.display());
-            }
-            let meta = if blocked.is_some() { Err(()) } else { Ok(()) }.and_then(|()| std::fs::metadata(&path).map_err(|e| {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!("cannot read {}: {e}", path.display());
-                }
-            }));
-            let bytes = meta.ok().filter(|m| m.is_file()).and_then(|_| match std::fs::read(&path) {
+            let bytes = match fsx::read_regular(&path) {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    log::warn!("cannot read {}: {e}", path.display());
+                    if !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) {
+                        log::warn!("cannot read {}: {e}", path.display());
+                    }
                     None
                 }
-            });
+            };
             let text: Option<Arc<str>> = bytes.map(|b| match String::from_utf8(b) {
                 Ok(s) => Arc::from(s),
                 Err(e) => Arc::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
@@ -401,7 +392,7 @@ fn fold(p: &Path) -> Option<PathBuf> {
 /// Two spellings of one existing file: `Defs.svh` and `defs.svh` where the folder ignores
 /// case. A folder that does not (a case-sensitive one) has two files, kept apart.
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+    match (fsx::canonicalize(a), fsx::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
@@ -509,7 +500,7 @@ impl Vfs {
                 match self.entry_kind(&normalize(&prefix)) {
                     Some(EntryKind::Dir) => {}
                     Some(EntryKind::File) | None => return false,
-                    Some(EntryKind::Unknown) => return path.is_file(),
+                    Some(EntryKind::Unknown) => return fsx::is_file(path),
                 }
             }
             prefix.push(c);
@@ -519,7 +510,7 @@ impl Vfs {
         match self.entry_kind(&p) {
             Some(EntryKind::File) => true,
             Some(EntryKind::Dir) | None => false,
-            Some(EntryKind::Unknown) => p.is_file(),
+            Some(EntryKind::Unknown) => fsx::is_file(&p),
         }
     }
 }

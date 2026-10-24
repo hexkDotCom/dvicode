@@ -7,6 +7,7 @@
 
 use base64::Engine;
 use serde::Deserialize;
+use dvi_project::fsx;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -69,8 +70,8 @@ fn ms(t: std::io::Result<std::time::SystemTime>) -> u64 {
 }
 
 fn file_type(p: &Path) -> u32 {
-    let link = std::fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false);
-    let base = match std::fs::metadata(p) {
+    let link = fsx::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+    let base = match fsx::metadata(p) {
         Ok(m) if m.is_dir() => 2,
         Ok(m) if m.is_file() => 1,
         _ => 0,
@@ -78,14 +79,17 @@ fn file_type(p: &Path) -> u32 {
     base | if link { 64 } else { 0 }
 }
 
-/// Expands `~` and makes the path absolute.
-fn path_of(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix("~") {
-        if let Some(h) = std::env::var_os("HOME") {
-            return PathBuf::from(h).join(rest.trim_start_matches('/'));
-        }
+/// Expands `~` and makes the path absolute. A path to a network host that is not allowed (or
+/// through a link to one) is refused: see [`fsx`].
+fn path_of(s: &str) -> Result<PathBuf, FsError> {
+    let path = match s.strip_prefix("~").zip(std::env::var_os("HOME")) {
+        Some((rest, h)) => PathBuf::from(h).join(rest.trim_start_matches('/')),
+        None => PathBuf::from(s),
+    };
+    match fsx::blocked(&path) {
+        None => Ok(path),
+        Some(_) => Err(FsError { code: "NoPermissions", message: format!("{}: on a network host that is not allowed (security.allowedUNCHosts)", path.display()) }),
     }
-    PathBuf::from(s)
 }
 
 /// Handles one `dvicode/fs/<op>` request. Returns `Ok(result)` or an error with a code.
@@ -95,7 +99,7 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         "home" => Ok(json!({ "path": std::env::var("HOME").unwrap_or_else(|_| "/".into()), "host": hostname() })),
         "stat" => {
             let p: PathParam = serde_json::from_value(params).map_err(bad)?;
-            let path = path_of(&p.path);
+            let path = path_of(&p.path)?;
             let m = std::fs::metadata(&path).map_err(|e| err(e, &path))?;
             Ok(json!({
                 "type": file_type(&path),
@@ -107,7 +111,7 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         }
         "readDirectory" => {
             let p: PathParam = serde_json::from_value(params).map_err(bad)?;
-            let path = path_of(&p.path);
+            let path = path_of(&p.path)?;
             let rd = std::fs::read_dir(&path).map_err(|e| err(e, &path))?;
             let mut v: Vec<Value> = rd
                 .flatten()
@@ -118,7 +122,7 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         }
         "readFile" => {
             let p: PathParam = serde_json::from_value(params).map_err(bad)?;
-            let path = path_of(&p.path);
+            let path = path_of(&p.path)?;
             if path.is_dir() {
                 return Err(FsError { code: "FileIsADirectory", message: path.display().to_string() });
             }
@@ -127,7 +131,7 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         }
         "writeFile" => {
             let p: WriteParam = serde_json::from_value(params).map_err(bad)?;
-            let path = path_of(&p.path);
+            let path = path_of(&p.path)?;
             // Checked first: Windows reports "access denied" for a write to a directory.
             if path.is_dir() {
                 return Err(FsError { code: "FileIsADirectory", message: path.display().to_string() });
@@ -147,19 +151,19 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         }
         "createDirectory" => {
             let p: PathParam = serde_json::from_value(params).map_err(bad)?;
-            let path = path_of(&p.path);
+            let path = path_of(&p.path)?;
             std::fs::create_dir(&path).map_err(|e| err(e, &path))?;
             Ok(Value::Null)
         }
         "delete" => {
             let p: DeleteParam = serde_json::from_value(params).map_err(bad)?;
-            let path = path_of(&p.path);
+            let path = path_of(&p.path)?;
             remove(&path, p.recursive).map_err(|e| err(e, &path))?;
             Ok(Value::Null)
         }
         "rename" => {
             let p: RenameParam = serde_json::from_value(params).map_err(bad)?;
-            let (from, to) = (path_of(&p.from), path_of(&p.to));
+            let (from, to) = (path_of(&p.from)?, path_of(&p.to)?);
             std::fs::symlink_metadata(&from).map_err(|e| err(e, &from))?;
             // A change of case only (`a.sv` -> `A.sv`) names the same entry where case does not
             // matter: nothing to replace.

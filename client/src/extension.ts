@@ -136,7 +136,8 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     revealOutputChannelOn: RevealOutputChannelOn.Never,
     // A client a restart has replaced does not restart itself when its connection goes.
     errorHandler: reporter.errorHandler(() => generation !== startGeneration),
-    initializationOptions: settingsForServer(),
+    // Read again at each start: a restart after a crash sends the settings as they are then.
+    initializationOptions: () => settingsForServer(),
     synchronize: {
       configurationSection: 'dvicode',
       fileEvents: watcher,

@@ -2,7 +2,7 @@
 //! problems as they are typed, hover notes on what their words resolve to, and links to the
 //! files they name. They are not SystemVerilog, so they stay out of the analysis.
 
-use dvi_project::{ArgFile, BuildConfig, BuildProblem, Inspection};
+use dvi_project::{fsx, ArgFile, BuildConfig, BuildProblem, Inspection};
 use dvi_syntax::LineIndex;
 use lsp_types::*;
 use rustc_hash::FxHashMap;
@@ -81,11 +81,11 @@ fn find_arg_file<'a>(path: &Path, files: &'a [ArgFile]) -> Option<&'a ArgFile> {
     }
     // The same file under another spelling (case, links, `..`). Names are compared first,
     // ignoring case (Windows), so that only likely candidates are resolved on disk.
-    let canon = std::fs::canonicalize(path).ok()?;
+    let canon = fsx::canonicalize(path).ok()?;
     files
         .iter()
         .filter(|a| same_name(&a.path, path))
-        .find(|a| std::fs::canonicalize(&a.path).ok().as_ref() == Some(&canon))
+        .find(|a| fsx::canonicalize(&a.path).ok().as_ref() == Some(&canon))
 }
 
 fn same_name(a: &Path, b: &Path) -> bool {
@@ -96,7 +96,7 @@ fn same_name(a: &Path, b: &Path) -> bool {
 }
 
 pub fn same_file(a: &Path, b: &Path) -> bool {
-    a == b || (same_name(a, b) && std::fs::canonicalize(a).ok().is_some_and(|c| std::fs::canonicalize(b).ok() == Some(c)))
+    a == b || (same_name(a, b) && fsx::canonicalize(a).ok().is_some_and(|c| fsx::canonicalize(b).ok() == Some(c)))
 }
 
 pub fn inspect(path: &Path, text: &str, cx: &Context, env: &FxHashMap<String, String>) -> Inspection {

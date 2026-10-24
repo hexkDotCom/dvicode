@@ -10,16 +10,33 @@ use std::sync::RwLock;
 /// The hosts allowed, lowercase; `None`: every host.
 static ALLOWED: RwLock<Option<Vec<String>>> = RwLock::new(None);
 
+/// Held by tests that change the allowed hosts.
+#[cfg(test)]
+pub(crate) static TEST_HOSTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Sets the hosts network paths may name (`None`: any).
 pub fn set_allowed_hosts(hosts: Option<Vec<String>>) {
     *ALLOWED.write().unwrap() = hosts.map(|v| v.into_iter().map(|h| h.to_lowercase()).collect());
+    crate::fsx::forget();
+}
+
+/// Whether some hosts are not allowed.
+pub fn restricted() -> bool {
+    ALLOWED.read().unwrap().is_some()
 }
 
 /// The host of a network path, `None` for any other path.
 pub fn host(path: &Path) -> Option<String> {
-    match path.components().next()? {
+    let mut parts = path.components();
+    match parts.next()? {
         Component::Prefix(p) => match p.kind() {
             Prefix::UNC(host, _) | Prefix::VerbatimUNC(host, _) => Some(host.to_string_lossy().to_lowercase()),
+            // `\\.\UNC\host\share` and `\\?\unc\host\share` (the verbatim form spelled in another
+            // case): the host comes next.
+            Prefix::DeviceNS(n) | Prefix::Verbatim(n) if n.eq_ignore_ascii_case("unc") => parts.find_map(|c| match c {
+                Component::Normal(h) => Some(h.to_string_lossy().to_lowercase()),
+                _ => None,
+            }),
             _ => None,
         },
         _ => None,
@@ -46,9 +63,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn network_paths_reach_only_the_hosts_allowed() {
+        let _hosts = TEST_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
         let p = Path::new(r"\\build01\share\rtl\top.sv");
         assert_eq!(host(p).as_deref(), Some("build01"));
         assert_eq!(host(Path::new(r"\\?\UNC\Build01\share\x.sv")).as_deref(), Some("build01"));
+        assert_eq!(host(Path::new(r"\\.\UNC\Build01\share\x.sv")).as_deref(), Some("build01"));
+        assert_eq!(host(Path::new(r"\\?\unc\Build01\share\x.sv")).as_deref(), Some("build01"));
+        assert_eq!(host(Path::new(r"\\.\C:\work\x.sv")), None);
         assert_eq!(host(Path::new(r"C:\work\x.sv")), None);
         set_allowed_hosts(None);
         assert_eq!(blocked(p), None);

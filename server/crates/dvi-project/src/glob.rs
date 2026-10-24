@@ -1,6 +1,7 @@
 //! Ant-style wildcards: `?`, `*` (within one path component), `**` (any depth) and character
 //! classes `[abc]`, `[a-z]`, `[!abc]` (as in `.gitignore`).
 
+use crate::fsx;
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,7 @@ pub fn has_class(s: &str) -> bool {
 /// Whether a path written in a build file is a pattern to expand: a wildcard, or a character
 /// class unless a file or folder has that very name (`a[1].sv`).
 pub fn is_pattern(written: &str, abs: &Path) -> bool {
-    has_wildcard(written) || (has_class(written) && !abs.exists())
+    has_wildcard(written) || (has_class(written) && !fsx::exists(abs))
 }
 
 /// The character class starting at `p[i]` (`[`): whether it matches `c`, and the index after
@@ -104,7 +105,7 @@ pub fn expand_bounded(pattern: &Path) -> (Vec<PathBuf>, bool) {
 }
 
 fn expand_steps(pattern: &Path, steps: usize) -> (Vec<PathBuf>, bool) {
-    if crate::netpath::blocked(pattern).is_some() {
+    if fsx::blocked(pattern).is_some() {
         return (Vec::new(), true);
     }
     let mut comps: Vec<String> = pattern.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
@@ -159,13 +160,13 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen:
         // Zero directories...
         walk(dir, &rest[1..], out, depth + 1, seen);
         // ...or one more.
-        if let Ok(rd) = std::fs::read_dir(dir) {
+        if let Ok(rd) = fsx::read_dir(dir) {
             for e in rd.flatten() {
                 if !seen.step() {
                     return;
                 }
                 let p = e.path();
-                if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, rest.len(), &mut seen.links) {
+                if fsx::is_dir(&p) && !e.file_name().to_string_lossy().starts_with('.') && !links_to_ancestor(dir, &e) && first_visit(&e, rest.len(), &mut seen.links) {
                     walk(&p, rest, out, depth + 1, seen);
                 }
             }
@@ -173,14 +174,14 @@ fn walk(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, depth: usize, seen:
         return;
     }
     // A class names itself when a file or folder has that name.
-    if !has_wildcard(first) && (!has_class(first) || dir.join(first).exists()) {
+    if !has_wildcard(first) && (!has_class(first) || fsx::exists(dir.join(first))) {
         let p = dir.join(first);
-        if p.exists() {
+        if fsx::exists(&p) {
             walk(&p, &rest[1..], out, depth + 1, seen);
         }
         return;
     }
-    if let Ok(rd) = std::fs::read_dir(dir) {
+    if let Ok(rd) = fsx::read_dir(dir) {
         let mut entries = Vec::new();
         for e in rd.flatten() {
             if !seen.step() {
@@ -202,7 +203,7 @@ fn first_visit(e: &std::fs::DirEntry, left: usize, links: &mut FxHashSet<(PathBu
     if !e.file_type().is_ok_and(|t| t.is_symlink()) {
         return true;
     }
-    std::fs::canonicalize(e.path()).is_ok_and(|t| links.insert((t, left)))
+    fsx::canonicalize(e.path()).is_ok_and(|t| links.insert((t, left)))
 }
 
 /// A symbolic link in `dir` to `dir` itself or a directory above it (`a -> .`): following it
@@ -211,7 +212,7 @@ fn links_to_ancestor(dir: &Path, e: &std::fs::DirEntry) -> bool {
     if !e.file_type().is_ok_and(|t| t.is_symlink()) {
         return false;
     }
-    match (std::fs::canonicalize(dir), std::fs::canonicalize(e.path())) {
+    match (fsx::canonicalize(dir), fsx::canonicalize(e.path())) {
         (Ok(d), Ok(t)) => d.starts_with(t),
         _ => true,
     }

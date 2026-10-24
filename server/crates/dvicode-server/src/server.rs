@@ -335,11 +335,13 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         .unwrap_or_default();
     // The network hosts paths may name (VS Code's `security.allowedUNCHosts`, when it restricts
     // them): read here only, not with the settings that change, as the editor sends it once.
-    let unc_hosts: Option<Vec<String>> = params
-        .initialization_options
-        .as_ref()
-        .and_then(|v| v.get("uncHosts"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    // Anything but a list or `null` (no restriction) allows no host; a name that is not a string
+    // names none.
+    let unc_hosts: Option<Vec<String>> = match params.initialization_options.as_ref().and_then(|v| v.get("uncHosts")) {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(a.iter().filter_map(|h| h.as_str().map(str::to_string)).collect()),
+        Some(_) => Some(Vec::new()),
+    };
     if let Some(h) = &unc_hosts {
         log::info!("network hosts allowed: {h:?}");
     }
@@ -1346,6 +1348,8 @@ impl Server {
         let literal = |s: &str| s.chars().map(|c| if "*?[]{}\\".contains(c) { '?' } else { c }).collect::<String>();
         let watchers: Vec<Value> = inputs
             .iter()
+            // The client's watcher would look at a network host that is not allowed.
+            .filter(|p| dvi_project::fsx::blocked(p).is_none())
             .filter_map(|p| {
                 let (dir, name) = (p.parent()?, p.file_name()?.to_str()?);
                 Some(if self.relative_patterns {

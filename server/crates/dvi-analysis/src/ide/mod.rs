@@ -252,7 +252,7 @@ impl Analysis {
         let mut linked = false;
         for c in p.components().skip(n) {
             cur.push(c);
-            match std::fs::symlink_metadata(&cur) {
+            match dvi_project::fsx::symlink_metadata(&cur) {
                 Ok(m) => linked |= m.file_type().is_symlink(),
                 Err(_) => return false,
             }
@@ -262,7 +262,7 @@ impl Analysis {
         }
         // Through a link, or spelt in another case (a folder where case matters may hold both
         // `Work` and `work`): where it really is. Canonical paths have the names' real case.
-        match (std::fs::canonicalize(&p), std::fs::canonicalize(root)) {
+        match (dvi_project::fsx::canonicalize(&p), dvi_project::fsx::canonicalize(root)) {
             (Ok(p), Ok(root)) => p.starts_with(root),
             _ => false,
         }

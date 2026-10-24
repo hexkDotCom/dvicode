@@ -2605,6 +2605,25 @@ fn attributes_tags_and_casts_on_the_right_of_an_assignment_are_not_names() {
 }
 
 #[test]
+fn type_operators_event_controls_and_open_attributes_in_assignments() {
+    let t = "module m(input logic a, b, output logic y, z, output logic q);
+  assign y = type(a) == type(b);
+  always_comb q = @(*) a;
+  assign z = a + (* keep b;
+  wire w;
+  assign q = w;
+endmodule
+module n;
+  m u();
+endmodule
+";
+    let (a, _) = project("assigntype", &[("m.sv", t)]);
+    let p = problems(&a);
+    // The open attribute ends at its `;`: the rest of the module, and the next, are read.
+    assert_eq!(p, ["m.sv: UNDECLARED_IDENTIFIER: 'keep' is not declared"]);
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m;\n  assign a = 0\n  wire b;\n  assign c = b;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

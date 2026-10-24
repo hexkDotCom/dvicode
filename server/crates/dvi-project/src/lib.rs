@@ -7,6 +7,7 @@
 mod auto;
 mod glob;
 mod jinja;
+pub mod fsx;
 pub mod netpath;
 mod progress;
 mod simlog;
@@ -126,14 +127,14 @@ impl BuildConfig {
 
 /// The default build file of a project, if any.
 pub fn find_build_file(root: &Path) -> Option<PathBuf> {
-    Some(root.join(".dvicode/default.build")).filter(|p| p.is_file())
+    Some(root.join(".dvicode/default.build")).filter(|p| fsx::is_file(p))
 }
 
 /// All build configurations of a project (`.dvicode/*.build`).
 pub fn list_build_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in [".dvicode"] {
-        if let Ok(rd) = std::fs::read_dir(root.join(dir)) {
+        if let Ok(rd) = fsx::read_dir(root.join(dir)) {
             let mut v: Vec<PathBuf> = rd
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.extension().is_some_and(|e| e == "build"))
@@ -176,10 +177,7 @@ pub(crate) const MAX_SOURCE: u64 = 2 << 30;
 /// never end) of at most `limit` bytes.
 pub(crate) fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Error, ErrorKind, Read};
-    if let Some(host) = netpath::blocked(path) {
-        return Err(Error::new(ErrorKind::PermissionDenied, format!("the network host {host} is not among your allowed hosts (security.allowedUNCHosts)")));
-    }
-    let meta = std::fs::metadata(path)?;
+    let meta = fsx::metadata(path)?;
     if !meta.is_file() {
         return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
     }
@@ -187,7 +185,7 @@ pub(crate) fn read_input(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
         return Err(Error::new(ErrorKind::InvalidInput, format!("larger than {} MB", limit >> 20)));
     }
     let mut b = Vec::new();
-    std::fs::File::open(path)?.take(limit).read_to_end(&mut b)?;
+    fsx::open(path)?.take(limit).read_to_end(&mut b)?;
     Ok(b)
 }
 
@@ -382,7 +380,7 @@ impl Builder {
             base_change: None,
             uvm: None,
             depth: 0,
-            reading: vec![std::fs::canonicalize(build_file).unwrap_or_else(|_| build_file.to_path_buf())],
+            reading: vec![fsx::canonicalize(build_file).unwrap_or_else(|_| build_file.to_path_buf())],
             files_read: 0,
             span: (0, 0),
             word: (0, String::new()),
@@ -428,14 +426,14 @@ impl Builder {
     }
 
     fn link(&mut self, file: &Path, target: &Path) {
-        if self.inspecting && target.is_file() {
+        if self.inspecting && fsx::is_file(&target) {
             self.links.push((file.to_path_buf(), self.span.0, self.span.1, target.to_path_buf()));
         }
     }
 
     /// "`/abs/path` (exists)" with how a variable expanded, for notes.
     fn describe_path(&self, written: &str, expanded: &str, abs: &Path, kind: &str) -> String {
-        let exists = if kind.ends_with("directory") { abs.is_dir() } else { abs.is_file() };
+        let exists = if kind.ends_with("directory") { fsx::is_dir(&abs) } else { fsx::is_file(&abs) };
         let mut s = format!("**{kind}** `{}` — {}", abs.display(), if exists { "found" } else { "**not found**" });
         if written != expanded {
             s.push_str(&format!("\n\n`{written}` expands to `{expanded}`"));
@@ -469,8 +467,8 @@ impl Builder {
         }
         let to_abs = absolutize(&to, base);
         let to = to_abs.display().to_string();
-        self.note(file, format!("**path map** `{from}` is read as `{to}` — {}", if to_abs.is_dir() { "found" } else { "**not found**" }));
-        if !to_abs.is_dir() {
+        self.note(file, format!("**path map** `{from}` is read as `{to}` — {}", if fsx::is_dir(&to_abs) { "found" } else { "**not found**" }));
+        if !fsx::is_dir(&to_abs) {
             self.problem(file, line, format!("+dvicode_path_map+: folder not found: {to}"));
         }
         if !self.inspecting {
@@ -658,7 +656,7 @@ impl Builder {
                             if let Some(p) = self.resolve(file, line, &w, &base) {
                                 let e = self.expand(&w, true).unwrap_or_default();
                                 self.note(file, self.describe_path(&w, &e, &p, "library directory"));
-                                if !p.is_dir() {
+                                if !fsx::is_dir(&p) {
                                     self.problem(file, line, format!("Library directory not found: {}", p.display()));
                                 }
                                 self.inv().lib_dirs.push(p);
@@ -672,7 +670,7 @@ impl Builder {
                                 let e = self.expand(&w, true).unwrap_or_default();
                                 self.note(file, self.describe_path(&w, &e, &p, "library file"));
                                 self.link(file, &p);
-                                if !p.is_file() {
+                                if !fsx::is_file(&p) {
                                     self.problem(file, line, format!("Library file not found: {}", p.display()));
                                 }
                                 self.inv().lib_files.push(p);
@@ -892,7 +890,7 @@ impl Builder {
                     if let Some(p) = self.resolve(file, line, a, base) {
                         let e = self.expand(a, true).unwrap_or_default();
                         self.note(file, self.describe_path(a, &e, &p, "compilation root directory"));
-                        if !p.is_dir() {
+                        if !fsx::is_dir(&p) {
                             self.problem(file, line, format!("Compilation root directory not found: {}", p.display()));
                         }
                         self.comp_root = p.clone();
@@ -1018,8 +1016,8 @@ impl Builder {
             return;
         };
         let home = PathBuf::from(home);
-        let src = if home.join("src").is_dir() { home.join("src") } else { home };
-        let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| p.is_file());
+        let src = if fsx::is_dir(home.join("src")) { home.join("src") } else { home };
+        let pkg = ["uvm_pkg.sv", "uvm.sv"].iter().map(|f| src.join(f)).find(|p| fsx::is_file(p));
         if !self.inspecting {
             log::debug!("build: UVM library {} ({})", src.display(), if pkg.is_some() { "found" } else { "no uvm_pkg.sv there" });
         }
@@ -1054,7 +1052,7 @@ impl Builder {
         }
         self.note(file, self.describe_path(p, &e, &path, "argument file"));
         self.link(file, &path);
-        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let key = fsx::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if self.reading.contains(&key) {
             self.problem(file, line, format!("Argument file {} includes itself", path.display()));
             return;
@@ -1063,7 +1061,7 @@ impl Builder {
         self.input(&path);
         let text = match read_input(&path, MAX_ARG_FILE) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-            Err(_) if !path.exists() => return self.problem(file, line, format!("Argument file not found: {}", path.display())),
+            Err(_) if !fsx::exists(&path) => return self.problem(file, line, format!("Argument file not found: {}", path.display())),
             Err(e) => return self.problem(file, line, format!("Cannot read argument file {}: {e}", path.display())),
         };
         let nested_base = if relative_to_file { path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.to_path_buf()) } else { self.comp_root.clone() };
@@ -1095,7 +1093,7 @@ impl Builder {
     /// the `+incdir+` of `-f` lists the log does not show).
     fn read_simlog(&mut self, file: &Path, line: u32, log: &str, base: &Path) {
         let Some(path) = self.resolve(file, line, log, base) else { return };
-        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let key = fsx::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if self.reading.contains(&key) || self.depth > 32 {
             return self.problem(file, line, format!("Simulation log {} reads itself", path.display()));
         }
@@ -1104,7 +1102,7 @@ impl Builder {
         self.input(&path);
         let text = match read_input(&path, MAX_LOG) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-            Err(_) if !path.exists() => {
+            Err(_) if !fsx::exists(&path) => {
                 self.note(file, self.describe_path(log, &e, &path, "simulation log"));
                 return self.problem(file, line, format!("Simulation log not found: {}", path.display()));
             }
@@ -1182,7 +1180,7 @@ impl Builder {
                 let inv = self.inv();
                 let (files, libs): (Vec<PathBuf>, Vec<PathBuf>) = (inv.files[files_at..].to_vec(), inv.lib_files[libs_at..].to_vec());
                 let (nd, ni) = (inv.defines.len() - defines_at, inv.incdirs.len() - incdirs_at);
-                missing.extend(files.iter().chain(libs.iter()).filter(|f| !f.is_file()).cloned());
+                missing.extend(files.iter().chain(libs.iter()).filter(|f| !fsx::is_file(f)).cloned());
                 (n_files, n_lib_files, n_defines, n_incdirs) = (n_files + files.len(), n_lib_files + libs.len(), n_defines + nd, n_incdirs + ni);
                 command = true;
                 continue;
@@ -1191,7 +1189,7 @@ impl Builder {
                 self.add_define(d);
             }
             // A log written elsewhere may name network hosts: those not allowed are left out.
-            let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).filter(|p| netpath::blocked(p).is_none()).collect();
+            let mut incdirs: Vec<PathBuf> = s.incdirs.iter().map(|d| self.abs(d, &dir)).filter(|p| fsx::blocked(p).is_none()).collect();
             for f in &s.included {
                 if let Some(parent) = self.abs(f, &dir).parent() {
                     if !incdirs.iter().any(|d| d == parent) {
@@ -1199,8 +1197,8 @@ impl Builder {
                     }
                 }
             }
-            let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f) && netpath::blocked(f).is_none()).collect();
-            let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).filter(|p| netpath::blocked(p).is_none()).collect();
+            let files: Vec<PathBuf> = s.files.iter().map(|f| self.abs(f, &dir)).filter(|f| !is_foreign_source(f) && fsx::blocked(f).is_none()).collect();
+            let lib_files: Vec<PathBuf> = s.lib_files.iter().map(|f| self.abs(f, &dir)).filter(|p| fsx::blocked(p).is_none()).collect();
             // `include "pkg/defs.svh"` of /p/inc/pkg/defs.svh needs /p/inc.
             let included: Vec<PathBuf> = s.included.iter().map(|f| self.abs(f, &dir)).collect();
             let sources: Vec<PathBuf> = files.iter().chain(lib_files.iter()).chain(included.iter()).cloned().collect();
@@ -1209,7 +1207,7 @@ impl Builder {
                     incdirs.push(d);
                 }
             }
-            missing.extend(files.iter().chain(lib_files.iter()).filter(|f| !f.is_file()).cloned());
+            missing.extend(files.iter().chain(lib_files.iter()).filter(|f| !fsx::is_file(f)).cloned());
             (n_files, n_lib_files, n_defines, n_incdirs) = (n_files + files.len(), n_lib_files + lib_files.len(), n_defines + s.defines.len(), n_incdirs + incdirs.len());
             command |= s.command;
             let inv = self.inv();
@@ -1262,7 +1260,7 @@ No command line found in the log: no defines from it.");
             return;
         }
         let (found, complete) = if glob::is_pattern(&e, &abs) { glob::expand_bounded(&abs) } else { (Vec::new(), true) };
-        let found: Vec<PathBuf> = found.into_iter().filter(|d| d.is_dir()).collect();
+        let found: Vec<PathBuf> = found.into_iter().filter(|d| fsx::is_dir(d)).collect();
         if !complete {
             self.stopped_glob(file, line, &abs);
         }
@@ -1279,7 +1277,7 @@ No command line found in the log: no defines from it.");
             return;
         }
         self.note(file, self.describe_path(p, &e, &abs, "include directory"));
-        if !abs.is_dir() {
+        if !fsx::is_dir(&abs) {
             self.problem(file, line, format!("Include directory not found: {}", abs.display()));
         }
         self.inv().incdirs.push(abs);
@@ -1295,7 +1293,7 @@ No command line found in the log: no defines from it.");
         if !complete {
             self.stopped_glob(file, line, &abs);
         }
-        found.retain(|f| f.is_file());
+        found.retain(|f| fsx::is_file(f));
         found.sort();
         // A name with brackets only, that matches nothing, is that file.
         if glob::has_wildcard(&e) || !found.is_empty() {
@@ -1316,7 +1314,7 @@ No command line found in the log: no defines from it.");
         }
         self.note(file, self.describe_path(p, &e, &abs, kind));
         self.link(file, &abs);
-        if !abs.is_file() {
+        if !fsx::is_file(&abs) {
             self.problem(file, line, format!("File not found: {}", abs.display()));
         }
         if !is_foreign_source(&abs) {
@@ -1369,7 +1367,7 @@ No command line found in the log: no defines from it.");
     /// Whether `path` may be read: not a network path to a host that is not allowed (see
     /// [`netpath`]); one that is gets a problem.
     fn reachable(&mut self, file: &Path, line: u32, path: &Path) -> bool {
-        match netpath::blocked(path) {
+        match fsx::blocked(path) {
             None => true,
             Some(host) => {
                 self.problem(file, line, format!("{} is on the network host {host}, which is not among your allowed hosts (security.allowedUNCHosts): it is not read", path.display()));

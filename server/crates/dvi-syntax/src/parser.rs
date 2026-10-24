@@ -445,6 +445,36 @@ impl<'t> Parser<'t> {
         }
     }
 
+    /// An attribute inside an expression, at `(*`. Only one closed before the next `;` is
+    /// skipped: `@(*)` is no attribute, and one left open does not take the statements after it.
+    fn skip_expr_attribute(&mut self) {
+        let mut k = 1;
+        loop {
+            let t = self.nth(k);
+            if t.is_punct("*)") {
+                break;
+            }
+            if t.kind == TokKind::Eof || t.is_punct(";") || self.pos + k >= self.toks.len() {
+                self.bump();
+                return;
+            }
+            k += 1;
+        }
+        for _ in 0..=k {
+            self.bump();
+        }
+    }
+
+    /// At a net or data type keyword that begins a declaration: not a cast (`int'(a)`), nor the
+    /// type operator (`type(a) == type(b)`) or a signing of an expression.
+    fn at_declaration(&self) -> bool {
+        let t = self.tok();
+        t.kind == TokKind::Keyword
+            && (is_net_type_kw(&t.text) || is_builtin_type_kw(&t.text))
+            && !matches!(&*t.text, "type" | "signed" | "unsigned")
+            && !self.nth(1).is_punct("'")
+    }
+
     /// One item, guarded like statements: generate blocks nest items in items.
     fn item(&mut self) {
         if self.stmt_depth >= MAX_STMT_DEPTH {
@@ -3247,13 +3277,13 @@ impl<'t> Parser<'t> {
             if self.eat_p(";") || self.at_eof() {
                 return;
             }
-            let t = self.tok();
-            if t.kind == TokKind::Keyword && (is_net_type_kw(&t.text) || is_builtin_type_kw(&t.text)) && !self.nth(1).is_punct("'") {
+            if self.at_declaration() {
                 // A declaration: the `;` before it is missing.
                 let at = self.toks[self.pos.saturating_sub(1)].span;
                 self.error(at, "Expected ';'");
                 return;
             }
+            let t = self.tok();
             if t.kind == TokKind::Keyword && (is_end_kw(&t.text) || is_item_kw(&t.text)) {
                 return;
             }
@@ -3409,7 +3439,7 @@ impl<'t> Parser<'t> {
                             self.bump();
                         }
                         // `a + (* use_dsp = "no" *) b`: attribute names name nothing declared.
-                        "(*" => self.skip_attributes(),
+                        "(*" => self.skip_expr_attribute(),
                         _ => self.bump(),
                     }
                 }
@@ -3436,8 +3466,7 @@ impl<'t> Parser<'t> {
                     if stop.iff && k == "iff" && depth0 {
                         return;
                     }
-                    // (not a cast: `int'(a)`)
-                    if stop.decl && depth0 && (is_net_type_kw(k) || is_builtin_type_kw(k)) && !self.nth(1).is_punct("'") {
+                    if stop.decl && depth0 && self.at_declaration() {
                         return;
                     }
                     if matches!(k, "this" | "super" | "local") && self.expr_depth >= MAX_EXPR_DEPTH {
