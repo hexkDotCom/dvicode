@@ -2775,6 +2775,54 @@ fn inlay_hints_name_positional_ports_parameters_and_arguments() {
 }
 
 #[test]
+fn inherited_methods_are_offered_with_their_signatures_and_pure_ones_implemented() {
+    let t = concat!(
+        "virtual class base;\n",
+        "  pure virtual function int size();\n",
+        "  virtual function void build(int n); n = n + 1; endfunction\n",
+        "  virtual task run(); endtask\n",
+        "  extern virtual function void report(string s);\n",
+        "  function new(string name = \"\"); endfunction\n",
+        "  local virtual function void hidden(); endfunction\n",
+        "  static function void util(); endfunction\n",
+        "endclass\n",
+        "function void base::report(string s); $display(s); endfunction\n",
+        "interface class ic;\n  pure virtual function bit check(int x);\nendclass\n",
+        "class child extends base implements ic;\n",
+        "  int k;\n",
+        "  bu\n",
+        "endclass\n",
+    );
+    let (a, root) = project("overrides", &[("c.sv", t)]);
+    let f = a.vfs.lookup(&root.join("c.sv")).unwrap();
+    let at = t.find("  bu\n").unwrap() as u32 + 4;
+    let items = a.completions(f, at);
+    let build = items.iter().find(|i| i.label == "build" && i.sort_text.as_deref() == Some("0build")).expect("override item");
+    assert_eq!(build.insert_text.as_deref(), Some("virtual function void build(int n);\n\tsuper.build(n);\n\t$0\nendfunction"));
+    // All that may be overridden, nearest first; not local or static ones.
+    let class = {
+        let u = a.unit(a.units_for(f)[0]);
+        let d = u.parsed.decls.iter().position(|d| d.name == "child").unwrap();
+        dvi_analysis::DeclRef { unit: u.id, decl: d as u32 }
+    };
+    let names: Vec<(String, bool)> = a.overridable_methods(class).iter().map(|o| (a.decl(o.method).name.to_string(), o.pure)).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(sorted, [("build".into(), false), ("check".into(), true), ("new".into(), false), ("report".into(), false), ("run".into(), false), ("size".into(), true)], "{names:?}");
+    let text = |n: &str| a.override_text(a.overridable_methods(class).into_iter().find(|o| a.decl(o.method).name == n).unwrap().method, "  ", false).unwrap();
+    assert_eq!(text("run"), "virtual task run();\nendtask", "an empty base body: no super call");
+    assert_eq!(text("report"), "virtual function void report(string s);\n  super.report(s);\nendfunction", "the body outside the class counts");
+    assert_eq!(text("new"), "function new(string name = \"\");\n  super.new(name);\nendfunction");
+    assert_eq!(text("size"), "virtual function int size();\nendfunction");
+    // The action implements the two pure ones before `endclass`.
+    let r = a.implement_pure_methods(f, at).expect("action");
+    assert!(r.title.contains("2 pure virtual methods"), "{}", r.title);
+    let (span, ins) = &r.edits[0];
+    assert_eq!(span.start as usize, t.rfind("endclass").unwrap());
+    assert!(ins.contains("  virtual function int size();\n  endfunction\n") && ins.contains("  virtual function bit check(int x);\n  endfunction\n"), "{ins}");
+}
+
+#[test]
 fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
     let t = "module m(input logic x);\n  assign a = 0\n  wire b;\n  assign c = b;\n  assign d = 0\n  type(x) e;\n  assign f = e;\nendmodule\n";
     let (a, _) = project("assignsemi", &[("m.sv", t)]);

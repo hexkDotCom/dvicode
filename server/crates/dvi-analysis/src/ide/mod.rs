@@ -10,6 +10,7 @@ pub mod hints;
 pub mod hover;
 pub mod loops;
 pub mod nav;
+pub mod overrides;
 pub mod stmt;
 pub mod structure;
 pub mod symbols;

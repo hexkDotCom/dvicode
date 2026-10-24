@@ -97,7 +97,40 @@ impl Analysis {
                 return self.member_completions(ctx, toks, &prefix);
             }
         }
-        self.scope_completions(ctx, &prefix, file)
+        // A new item in a class body: the inherited methods to override come first.
+        let mut out = if toks.is_empty() { self.override_completions(ctx, &prefix) } else { Vec::new() };
+        out.extend(self.scope_completions(ctx, &prefix, file));
+        out
+    }
+
+    /// The whole definition of each inherited method the class around `ctx` may override (see
+    /// [`Analysis::overridable_methods`]), for a name being typed alone on its line.
+    fn override_completions(&self, ctx: &Ctx, prefix: &str) -> Vec<CompletionItem> {
+        let class = DeclRef { unit: ctx.unit, decl: ctx.scope };
+        if self.decl(class).kind != DeclKind::Class {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for o in self.overridable_methods(class) {
+            let d = self.decl(o.method);
+            if !starts_like(&d.name, prefix) {
+                continue;
+            }
+            let Some(text) = self.override_text(o.method, "	", true) else { continue };
+            let what = if o.pure { "implement" } else { "override" };
+            out.push(CompletionItem {
+                label: d.name.to_string(),
+                label_details: Some(CompletionItemLabelDetails { detail: None, description: Some(format!("{what} {}", self.decl(o.owner).name)) }),
+                kind: Some(CompletionItemKind::METHOD),
+                detail: Some(format!("{what} {}::{}", self.decl(o.owner).name, d.name)),
+                insert_text: Some(text),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                filter_text: Some(d.name.to_string()),
+                sort_text: Some(format!("0{}", d.name)),
+                ..Default::default()
+            });
+        }
+        out
     }
 
     fn macro_completions(&self) -> Vec<CompletionItem> {

@@ -97,7 +97,7 @@ fn capabilities() -> ServerCapabilities {
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_REWRITE]),
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
         })),
@@ -1834,13 +1834,11 @@ impl Server {
             // Links are for build files only (`on_build_doc_request`).
             "textDocument/documentLink" => self.send(Message::Response(Response::new_ok(req.id, Value::Null))),
             "textDocument/codeAction" => self.spawn(req, |a, p: CodeActionParams| {
-                if p.context.only.as_ref().is_some_and(|o| !o.iter().any(|k| k.as_str().starts_with("quickfix"))) {
-                    return Ok(None);
-                }
+                let wants = |kind: &str| p.context.only.as_ref().is_none_or(|o| o.iter().any(|k| kind.starts_with(k.as_str())));
                 let Some((f, start)) = pos(a, &p.text_document.uri, p.range.start) else { return Ok(None) };
                 let end = a.offset_at(f, p.range.end).unwrap_or(start);
-                let actions: Vec<CodeActionOrCommand> = a
-                    .quick_fixes(f, start, end)
+                let fixes = if wants("quickfix") { a.quick_fixes(f, start, end) } else { Vec::new() };
+                let mut actions: Vec<CodeActionOrCommand> = fixes
                     .into_iter()
                     .filter_map(|q| {
                         let edit = a.versioned_edit(q.edits.clone())?;
@@ -1854,6 +1852,13 @@ impl Server {
                         }))
                     })
                     .collect();
+                if wants("refactor.rewrite") {
+                    if let Some(r) = a.implement_pure_methods(f, start) {
+                        if let Some(edit) = a.versioned_edit(r.edits) {
+                            actions.push(CodeActionOrCommand::CodeAction(CodeAction { title: r.title, kind: Some(CodeActionKind::REFACTOR_REWRITE), edit: Some(edit), ..Default::default() }));
+                        }
+                    }
+                }
                 Ok(Some(actions))
             }),
             // ---------------------------------------------------------- custom

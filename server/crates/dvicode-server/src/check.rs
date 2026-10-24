@@ -431,6 +431,10 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                 "--complete" => {
                     for c in a.completions(f, off).iter().take(40) {
                         println!("{} [{:?}] {}", c.label, c.kind, c.detail.clone().unwrap_or_default());
+                        // An inherited method's whole definition (an override).
+                        if c.insert_text_format == Some(lsp_types::InsertTextFormat::SNIPPET) && c.sort_text.as_deref().is_some_and(|s| s.starts_with('0')) {
+                            println!("    {}", c.insert_text.clone().unwrap_or_default().replace('\n', "\n    "));
+                        }
                     }
                 }
                 "--sig" => {
