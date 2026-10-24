@@ -71,6 +71,53 @@ folder of another host cannot be opened in the same window.
 | `dvi-analysis` | compilation of the project in order, global index (packages, modules, classes, macros), scopes and resolution (lexical, class inheritance, imports, `pkg::x`, `a.b.c` member chains), and the IDE features |
 | `dvicode-server` | binary: LSP loop, document store, transports (`--stdio`, `--listen`), remote file system |
 
+## Edits of large files
+
+An edit is compiled again with the unit it belongs to, from the file's new text. What keeps
+that quick in big files:
+
+- **Lexing:** a file over 32 KB is lexed again only from the line of the edit to the first
+  unchanged token after it (`lexer::relex`). The tokens after that are the old ones, moved.
+  `DVICODE_CHECK_RELEX=1` also lexes the whole file and logs any difference.
+- **Answers while typing:** completion and signature help on a line inside a body are
+  answered from the last analysis plus that line, without waiting for the update
+  (`Server::line_local`).
+- **Name resolution:** the problem check, semantic tokens and the reference searches
+  resolve each `a.b.c` chain once and remember lookups for the request.
+
+On a 5 MB generated register model, an update takes about 80 ms. About 55% of that is
+preprocessing (macro expansion over the whole unit), and about 30% building the unit
+(parsing 15%, indexes).
+
+### Postponed: reusing preprocessing and parsing
+
+Two further steps would make an update depend on the size of the edit rather than of the
+unit:
+
+1. **Reuse the preprocessed output.** When an edit's tokens contain no directive and no
+   macro use, before and after, the new output is the old one with those tokens replaced,
+   and the macro state after the file is unchanged.
+   - It needs a map from source tokens to output tokens, kept through includes, macro
+     expansions and `` `ifdef `` regions.
+   - Every directive rule must be shown local to the edit.
+   - The unit's inactive regions, macro uses and problems must be spliced the same way.
+   - Expected: about 80 → 40 ms for that file.
+2. **Reparse only the enclosing item.** Parse the module, class or member around the edit
+   and splice its declarations and references into the unit. Declaration and reference ids
+   are indexes into vectors with parent links and indexes on top, so this needs either
+   renumbering or stable ids.
+
+Both are postponed until real use shows the need. The files that benefit most are large
+generated files, which are rarely typed in. Typing elsewhere already waits less than the
+gap between keystrokes. Signs to take them up again:
+- reports of lag while editing large hand-written files;
+- slow machines where an update takes longer than about 100 ms;
+- a profile of such a file showing preprocessing (stage 1) or `make_unit` (stage 2) as the
+  cost.
+
+Each step would come with a compare-with-full mode, like `DVICODE_CHECK_RELEX`, and a
+corpus fuzz run in that mode.
+
 ## Custom requests (`dvicode/*`)
 
 | method | purpose |
