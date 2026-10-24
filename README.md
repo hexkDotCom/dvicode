@@ -240,7 +240,7 @@ in `dvicode.server.tcpToken`) to listen on any address but loopback, since whoev
 can read and write that account's files; the connection is not encrypted, so across a network
 listen on `127.0.0.1` and use an SSH tunnel (`ssh -L 7777:127.0.0.1:7777 host`), or the `ssh`
 mode, which needs no port. In Restricted Mode, a `dvicode://` folder reaches an SSH or TCP
-engine only when your own settings name it; trust the workspace to use another. On Windows the engine reads network paths (`\host\share\...`, which can make
+engine only when your own settings name it; trust the workspace to use another. On Windows the engine reads network paths (`\\host\share\...`, which can make
 Windows sign in to that host) only on the hosts VS Code allows (`security.allowedUNCHosts`);
 a build file or `` `include `` naming another host gets a problem instead. See
 [docs/architecture.md](docs/architecture.md) for the details.

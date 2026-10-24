@@ -2596,3 +2596,19 @@ fn only_the_left_of_a_continuous_assignment_declares_a_net() {
     assert!(p.iter().any(|m| m.contains("'missing' is not declared")), "{p:?}");
     assert!(p.iter().any(|m| m.contains("'gone' is not declared")), "{p:?}");
 }
+
+#[test]
+fn attributes_tags_and_casts_on_the_right_of_an_assignment_are_not_names() {
+    let t = "module m(input logic a, b, output logic y, output int z);\n  typedef union tagged {\n    logic [7:0] Valid;\n    void Invalid;\n  } result_t;\n  result_t r;\n  assign y = a + (* use_dsp = \"no\" *) b;\n  assign r = tagged Valid 8'h42;\n  assign z = int'(a) + 1;\nendmodule\n";
+    let (a, _) = project("assignattr", &[("m.sv", t)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+}
+
+#[test]
+fn a_missing_semicolon_after_an_assignment_does_not_take_the_next_declaration() {
+    let t = "module m;\n  assign a = 0\n  wire b;\n  assign c = b;\nendmodule\n";
+    let (a, _) = project("assignsemi", &[("m.sv", t)]);
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("Expected ';'")), "{p:?}");
+    assert!(!p.iter().any(|m| m.contains("'b' is not declared")), "{p:?}");
+}

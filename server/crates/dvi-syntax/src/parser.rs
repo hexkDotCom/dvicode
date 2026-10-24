@@ -65,10 +65,12 @@ struct Stop {
     lbrace: bool,
     iff: bool,
     eq: bool,
+    /// A net or data type keyword at depth 0 (a declaration after a missing `;`).
+    decl: bool,
 }
 
-const STOP_NONE: Stop = Stop { comma: false, colon: false, lbrace: false, iff: false, eq: false };
-const STOP_COMMA: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: false };
+const STOP_NONE: Stop = Stop { comma: false, colon: false, lbrace: false, iff: false, eq: false, decl: false };
+const STOP_COMMA: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: false, decl: false };
 
 const ARRAY_ITER_METHODS: &[&str] = &[
     "find", "find_index", "find_first", "find_first_index", "find_last", "find_last_index", "min",
@@ -2364,7 +2366,7 @@ impl<'t> Parser<'t> {
                 let k = if is_cross { DeclKind::Cross } else { DeclKind::Coverpoint };
                 self.new_decl(k, Some(l), start)
             });
-            let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false };
+            let stop = Stop { comma: false, colon: false, lbrace: true, iff: true, eq: false, decl: false };
             loop {
                 if self.at_p("{") {
                     // `coverpoint {a, b}`: a concatenation, not the bins block.
@@ -2772,9 +2774,9 @@ impl<'t> Parser<'t> {
             if self.eat_kw("default") {
                 self.eat_p(":");
             } else {
-                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false }, RefKind::Expr);
+                self.scan_expr(Stop { colon: true, comma: false, lbrace: false, iff: false, eq: false, decl: false }, RefKind::Expr);
                 while self.eat_p(",") {
-                    self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false }, RefKind::Expr);
+                    self.scan_expr(Stop { colon: true, comma: true, lbrace: false, iff: false, eq: false, decl: false }, RefKind::Expr);
                 }
                 self.expect_p(":");
             }
@@ -3225,12 +3227,12 @@ impl<'t> Parser<'t> {
     /// The assignments of `assign`: an undeclared name on the left of one is an implicit net
     /// (IEEE 1800 6.10), one on the right is a use of a name that must be declared.
     fn cont_assign_list(&mut self) {
-        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true };
+        const LHS: Stop = Stop { comma: true, colon: false, lbrace: false, iff: false, eq: true, decl: true };
         loop {
             self.scan_expr(LHS, RefKind::Loose);
             if self.eat_p("=") {
                 let first = self.u.refs.len();
-                self.scan_expr(STOP_COMMA, RefKind::Expr);
+                self.scan_expr(Stop { comma: true, decl: true, ..STOP_NONE }, RefKind::Expr);
                 // Member chains stay as lenient as before: what they reach often depends on
                 // parameters and `generate` branches, which are not elaborated.
                 for r in &mut self.u.refs[first..] {
@@ -3246,6 +3248,12 @@ impl<'t> Parser<'t> {
                 return;
             }
             let t = self.tok();
+            if t.kind == TokKind::Keyword && (is_net_type_kw(&t.text) || is_builtin_type_kw(&t.text)) && !self.nth(1).is_punct("'") {
+                // A declaration: the `;` before it is missing.
+                let at = self.toks[self.pos.saturating_sub(1)].span;
+                self.error(at, "Expected ';'");
+                return;
+            }
             if t.kind == TokKind::Keyword && (is_end_kw(&t.text) || is_item_kw(&t.text)) {
                 return;
             }
@@ -3400,6 +3408,8 @@ impl<'t> Parser<'t> {
                             self.bump();
                             self.bump();
                         }
+                        // `a + (* use_dsp = "no" *) b`: attribute names name nothing declared.
+                        "(*" => self.skip_attributes(),
                         _ => self.bump(),
                     }
                 }
@@ -3426,6 +3436,10 @@ impl<'t> Parser<'t> {
                     if stop.iff && k == "iff" && depth0 {
                         return;
                     }
+                    // (not a cast: `int'(a)`)
+                    if stop.decl && depth0 && (is_net_type_kw(k) || is_builtin_type_kw(k)) && !self.nth(1).is_punct("'") {
+                        return;
+                    }
                     if matches!(k, "this" | "super" | "local") && self.expr_depth >= MAX_EXPR_DEPTH {
                         self.expr_too_deep();
                         self.bump();
@@ -3446,6 +3460,11 @@ impl<'t> Parser<'t> {
                             self.bump();
                         }
                         "default" if self.nth(1).is_punct(":") => {
+                            self.bump();
+                            self.bump();
+                        }
+                        // `tagged Valid 8'h42`: the member of the tagged union, not a name.
+                        "tagged" if matches!(self.nth(1).kind, TokKind::Ident) => {
                             self.bump();
                             self.bump();
                         }
