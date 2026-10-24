@@ -3383,6 +3383,10 @@ endpackage
 "#;
 
 const CONFIG_TB: &str = r#"
+interface bus_if; endinterface
+package p;
+  typedef virtual bus_if bus_vif;
+endpackage
 package tb_pkg;
   import uvm_pkg::*;
   class base_cfg extends uvm_object; endclass
@@ -3395,6 +3399,25 @@ package tb_pkg;
       void'(uvm_config_db #(base_cfg)::get(this, "", "cfg", bcfg)); // G2
       void'(uvm_config_db #(int)::get(this, "", "depth", depth)); // G3
       void'(uvm_config_db #(int)::get(get_parent(), "", "depth", depth)); // G4
+      void'(uvm_config_db #(bit [7:0])::get(this, "", "b8", b8)); // G5
+      void'(uvm_config_db #(virtual bus_if)::get(this, "", "vif", vif)); // G6
+      void'(uvm_config_db #(my_cfg)::get(this, "", "cfg", cfg)); // G7
+    endfunction
+    bit [7:0] b8;
+    virtual bus_if vif;
+  endclass
+  class pagent #(type T = int) extends uvm_agent;
+    T t;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      void'(uvm_config_db #(T)::get(this, "", "depth", t)); // G8
+    endfunction
+  endclass
+  class lone_agent extends uvm_agent;
+    my_cfg cfg;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      void'(uvm_config_db #(my_cfg)::get(this, "", "cfg", cfg)); // G9
     endfunction
   endclass
   class my_env extends uvm_env;
@@ -3408,7 +3431,14 @@ package tb_pkg;
       uvm_config_db #(my_cfg)::set(this, "*", "cfg", cfg); // S2
       uvm_config_db #(my_cfg)::set(this, "agt", "*", cfg); // S3
       uvm_config_db #(my_cfg)::set(this, "/ag.*/", "cfg", cfg); // S4
+      uvm_config_db #(bit[7:0])::set(this, "*", "b8", 1); // S9
+      uvm_config_db #(p::bus_vif)::set(this, "*", "vif", null); // S10
+      uvm_config_db #(my_cfg)::set(this, "*", name_of_field, cfg); // S11
+`ifdef OFF
+      uvm_config_db #(my_cfg)::set(null, "*", "cfg", cfg); // S12
+`endif
     endfunction
+    string name_of_field;
   endclass
   class my_test extends uvm_test;
     my_env env;
@@ -3419,6 +3449,13 @@ package tb_pkg;
       uvm_config_db #(int)::set(null, "/uvm_test_top\..*/", "depth", 5); // S6
       uvm_config_db #(int)::set(uvm_root::get(), "uvm_test_top.env.+", "depth", 6); // S7
       uvm_config_db #(int)::set(.cntxt(this), .inst_name("env.other"), .field_name("depth"), .value(7)); // S8
+    endfunction
+  endclass
+  class test_b extends uvm_test;
+    lone_agent la;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      la = lone_agent::type_id::create("la", this);
     endfunction
   endclass
 endpackage
@@ -3432,7 +3469,12 @@ fn config_db_sets_are_matched_to_gets_as_uvm_does() {
     assert!(glob_match("env.+", "env.x") && !glob_match("env.+", "env."));
     assert!(!glob_match("env", "env.agt"), "anchored");
     assert_eq!((scope_of("", "x"), scope_of("top", ""), scope_of("top", "a")), ("x".into(), "top".into(), "top.a".into()));
-    let (a, _) = project("configdb", &[("uvm_pkg.sv", CONFIG_UVM), ("tb_pkg.sv", CONFIG_TB)]);
+    let (a, root) = project("configdb", &[("uvm_pkg.sv", CONFIG_UVM), ("tb_pkg.sv", CONFIG_TB)]);
+    let f_of = |a: &dvi_analysis::Analysis, n: &str| a.vfs.lookup(&root.join(n)).unwrap();
+    let off_of = |tag: &str| -> u32 {
+        let line_start: usize = CONFIG_TB.lines().take_while(|l| !l.ends_with(&format!("// {tag}"))).map(|l| l.len() + 1).sum();
+        (line_start + CONFIG_TB[line_start..].find("::get").unwrap() + 3) as u32
+    };
     let idx = a.config_index();
     let call = |tag: &str| {
         let line = CONFIG_TB.lines().position(|l| l.ends_with(&format!("// {tag}"))).unwrap() as u32;
@@ -3455,7 +3497,18 @@ fn config_db_sets_are_matched_to_gets_as_uvm_does() {
     assert_eq!(st("S8", "G3").2, Match, "named arguments; one of the two places of my_agent");
     assert_eq!(st("S5", "G4").2, Unknown, "get_parent() is not placed");
     assert_eq!(call("S8").inst.as_deref(), Some("env.other"));
+    assert_eq!(st("S9", "G5").1, Match, "bit[7:0] is bit [7:0]");
+    assert_eq!(st("S10", "G6").1, Match, "a package typedef of the virtual interface");
+    assert_eq!(st("S1", "G7").0, Match, "an octal escape: \\143fg is cfg");
+    assert_eq!(st("S5", "G8").1, Unknown, "a type parameter is not a type");
+    assert_eq!(st("S11", "G1").0, Unknown, "a computed field");
+    assert!(a.config_hover(f_of(&a, "tb_pkg.sv"), off_of("G1")).unwrap().0.contains("name_of_field"), "a computed field is a candidate in the hover");
+    assert_eq!(st("S2", "G9").2, Mismatch, "my_env and lone_agent are never in the same test");
+    assert!(!idx.calls.iter().any(|c| CONFIG_TB.lines().nth(a.to_range(c.method).unwrap().start.line as usize).unwrap().ends_with("// S12")), "inactive code");
     // Completion of field names inside a field string, same type first.
+    assert!(a.config_field_completions("uvm_config_db #(p::bus_vif)::get(this, \"\", \"").is_some(), "a type with ::");
+    assert!(a.config_field_completions("uvm_config_db #(int)::get(this, \"\", $sformatf(\"").is_none(), "a string inside the argument");
+    assert!(a.config_field_completions("uvm_config_db #(int)::get(.field_name(\"").is_some(), "a named argument");
     let items = a.config_field_completions("      void'(uvm_config_db #(int)::get(this, \"\", \"de").unwrap();
     assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()[..2], ["depth", "*"]);
     assert!(a.config_field_completions("uvm_config_db #(int)::get(this, \"de").is_none(), "not the field argument");

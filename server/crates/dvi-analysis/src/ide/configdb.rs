@@ -78,6 +78,8 @@ pub struct ConfigCall {
 pub struct ConfigIndex {
     pub calls: Vec<ConfigCall>,
     by_field: FxHashMap<String, Vec<usize>>,
+    /// Calls whose field is computed: candidates for any field.
+    unknown_field: Vec<usize>,
     by_file: FxHashMap<FileId, Vec<usize>>,
 }
 
@@ -86,7 +88,13 @@ pub struct ConfigIndex {
 pub struct Places {
     /// (test, class key → (path, path known)).
     pub tests: Vec<(String, FxHashMap<(u32, u32), Vec<(String, bool)>>)>,
+    /// A test's hierarchy is cut somewhere, or a class has more places than are kept: a place
+    /// may be missing, so "no match" is not certain.
+    pub incomplete: bool,
 }
+
+/// Places kept per class and test.
+const MAX_PLACES: usize = 256;
 
 /// How one dimension of a match stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,13 +173,81 @@ pub fn scope_of(context: &str, inst: &str) -> String {
     }
 }
 
-/// A string literal's text, `\"` and `\\` decoded.
+/// A string literal's value, its escapes decoded (`\n`, `\t`, `\\`, `\"`, `\v`, `\f`, `\a`,
+/// octal `\ddd`, hex `\xhh`, a line continuation); `None` for an escape it does not know.
 fn literal(t: &Token) -> Option<String> {
     if t.kind != TokKind::String {
         return None;
     }
     let s = t.text.strip_prefix('"')?.strip_suffix('"')?;
-    Some(s.replace("\\\"", "\"").replace("\\\\", "\\"))
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next()? {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'v' => out.push('\u{0b}'),
+            'f' => out.push('\u{0c}'),
+            'a' => out.push('\u{07}'),
+            '\n' => {}
+            '\r' => {
+                if it.peek() == Some(&'\n') {
+                    it.next();
+                }
+            }
+            d @ '0'..='7' => {
+                let mut v = d.to_digit(8)?;
+                for _ in 0..2 {
+                    match it.peek().and_then(|x| x.to_digit(8)) {
+                        Some(x) => {
+                            v = v * 8 + x;
+                            it.next();
+                        }
+                        None => break,
+                    }
+                }
+                out.push(char::from_u32(v)?);
+            }
+            'x' => {
+                let (mut v, mut n) = (0, 0);
+                while n < 2 {
+                    match it.peek().and_then(|x| x.to_digit(16)) {
+                        Some(x) => {
+                            v = v * 16 + x;
+                            it.next();
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if n == 0 {
+                    return None;
+                }
+                out.push(char::from_u32(v)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A built-in type's text as compared: no spaces, default signedness dropped (`int signed`
+/// is `int`, `bit unsigned [7:0]` is `bit[7:0]`).
+fn builtin_text(ty: &[Token]) -> String {
+    let mut w: Vec<&str> = ty.iter().map(|t| t.text.as_str()).collect();
+    if w.len() >= 2 && ["byte", "shortint", "int", "longint", "integer"].contains(&w[0]) && w[1] == "signed" {
+        w.remove(1);
+    }
+    if w.len() >= 2 && ["bit", "logic", "reg"].contains(&w[0]) && w[1] == "unsigned" {
+        w.remove(1);
+    }
+    w.concat()
 }
 
 /// The argument tokens of a call's items by name (`cntxt`, `inst_name`, `field_name`,
@@ -199,7 +275,15 @@ fn arguments<'t>(toks: &'t [Token], items: &[(usize, usize)]) -> [Option<&'t [To
 impl Analysis {
     /// The `uvm_config_db` calls of the project (made once per snapshot).
     pub fn config_index(&self) -> Arc<ConfigIndex> {
-        self.config_calls.get_or_init(|| Arc::new(self.build_config_index())).clone()
+        if let Some(i) = self.config_calls.get() {
+            return i.clone();
+        }
+        let idx = Arc::new(self.build_config_index());
+        // A cancelled build is partial: used for this request only.
+        if !self.cancelled() {
+            let _ = self.config_calls.set(idx.clone());
+        }
+        idx
     }
 
     fn build_config_index(&self) -> ConfigIndex {
@@ -208,6 +292,9 @@ impl Analysis {
         for u in self.units.iter().flatten() {
             if u.kind == UnitKind::Builtin || u.library {
                 continue;
+            }
+            if self.cancelled() {
+                break;
             }
             for &f in &u.files {
                 if !files.insert(f) {
@@ -220,16 +307,31 @@ impl Analysis {
             }
         }
         for (i, c) in idx.calls.iter().enumerate() {
-            if let Some(f) = &c.field {
-                idx.by_field.entry(f.clone()).or_default().push(i);
+            match &c.field {
+                Some(f) => idx.by_field.entry(f.clone()).or_default().push(i),
+                None => idx.unknown_field.push(i),
             }
             idx.by_file.entry(c.method.file).or_default().push(i);
         }
         idx
     }
 
+    /// The calls that may use field `f` (`None`: every call).
+    fn calls_of_field(idx: &ConfigIndex, f: Option<&str>) -> Vec<usize> {
+        match f {
+            Some(f) => idx.by_field.get(f).into_iter().flatten().chain(idx.unknown_field.iter()).copied().collect(),
+            None => (0..idx.calls.len()).collect(),
+        }
+    }
+
     fn index_file(&self, unit: UnitId, f: FileId, idx: &mut ConfigIndex) {
         let Some(toks) = self.file_tokens(f) else { return };
+        let u = self.unit(unit);
+        let inactive: Vec<Span> = u.inactive.iter().filter(|s| s.file == f).copied().collect();
+        // The methods of the file, by start: the innermost one around a call is found by search.
+        let mut methods: Vec<(Span, dvi_syntax::ast::DeclId)> =
+            u.parsed.decls.iter().enumerate().filter(|(_, d)| matches!(d.kind, DeclKind::Function | DeclKind::Task) && d.span.file == f).map(|(i, d)| (d.span, i as dvi_syntax::ast::DeclId)).collect();
+        methods.sort_by_key(|m| m.0.start);
         let mut i = 0;
         while i < toks.len() {
             if toks[i].text != "uvm_config_db" || toks[i].kind != TokKind::Ident {
@@ -265,7 +367,11 @@ impl Analysis {
                 _ => None,
             };
             let method = toks[j + 1].span;
-            let (class, in_method) = self.enclosing_class_and_method(unit, f, method.start);
+            if inactive.iter().any(|s| s.start <= method.start && method.end <= s.end) {
+                i = after.max(i);
+                continue;
+            }
+            let (class, in_method) = self.enclosing_class_and_method(unit, &methods, method.start);
             let call_end = toks.get(after.saturating_sub(1)).map_or(method, |t| t.span);
             idx.calls.push(ConfigCall {
                 kind,
@@ -290,40 +396,25 @@ impl Analysis {
         }
     }
 
-    /// The class (component) and the method a position is in.
-    fn enclosing_class_and_method(&self, unit: UnitId, f: FileId, off: u32) -> (Option<DeclRef>, String) {
+    /// The class (component) and the method a position is in, from the file's methods by start.
+    fn enclosing_class_and_method(&self, unit: UnitId, methods: &[(Span, dvi_syntax::ast::DeclId)], off: u32) -> (Option<DeclRef>, String) {
         let u = self.unit(unit);
-        let mut d = Some(self.scope_at(unit, f, off));
-        let mut method = String::new();
-        let mut class = None;
+        let k = methods.partition_point(|m| m.0.start <= off);
+        let Some(&(_, m)) = methods[..k].iter().rev().take(64).find(|m| m.0.end >= off) else { return (None, String::new()) };
+        let method = u.parsed.decl(m).name.to_string();
+        let mut d = u.parsed.decl(m).parent;
         while let Some(id) = d {
             let decl = u.parsed.decl(id);
-            match decl.kind {
-                DeclKind::Function | DeclKind::Task if method.is_empty() => method = decl.name.to_string(),
-                DeclKind::Class => {
-                    class = Some(DeclRef { unit, decl: id });
-                    break;
-                }
-                k if k.is_definition() => break,
-                _ => {}
+            if decl.kind == DeclKind::Class {
+                return (Some(DeclRef { unit, decl: id }), method);
+            }
+            if decl.kind.is_definition() {
+                break;
             }
             d = decl.parent;
         }
-        // An out-of-block body (`function C::build_phase`): its class through the prototype.
-        if class.is_none() && !method.is_empty() {
-            let mut d = Some(self.scope_at(unit, f, off));
-            while let Some(id) = d {
-                let decl = u.parsed.decl(id);
-                if matches!(decl.kind, DeclKind::Function | DeclKind::Task) {
-                    if let Some(c) = self.owner_class(DeclRef { unit, decl: id }) {
-                        class = Some(c);
-                    }
-                    break;
-                }
-                d = decl.parent;
-            }
-        }
-        (class, method)
+        // An out-of-block body (`function C::build_phase`): its class through its owner.
+        (self.owner_class(DeclRef { unit, decl: m }), method)
     }
 
     /// The type `uvm_config_db #(...)` is specialized with.
@@ -337,30 +428,42 @@ impl Analysis {
             if ty.get(k).is_some_and(|t| t.is_kw("interface")) {
                 k += 1;
             }
+            // `p::bus_if`: the last name of the chain.
+            while ty.get(k).is_some_and(|t| t.kind == TokKind::Ident) && ty.get(k + 1).is_some_and(|t| t.is_punct("::")) {
+                k += 2;
+            }
             let Some(name) = ty.get(k).filter(|t| t.kind == TokKind::Ident) else { return CfgType::Unknown };
-            let rest = super::views::tokens_text(&ty[k + 1..]);
+            let rest = builtin_text(&ty[k + 1..]);
             return match self.resolve_at_span(unit, name.span).and_then(|d| self.follow_typedef(d)) {
-                Some(d) => CfgType::Decl(self.decl_key(self.canonical(d)), rest),
-                None => CfgType::Unknown,
+                Some(d) if self.decl(d).kind != DeclKind::TypeParam => CfgType::Decl(self.decl_key(self.canonical(d)), rest),
+                _ => CfgType::Unknown,
             };
         }
         if ty.iter().all(|t| matches!(t.kind, TokKind::Keyword | TokKind::Number) || t.is_punct("[") || t.is_punct("]") || t.is_punct(":") || t.is_punct("-")) {
-            return CfgType::Builtin(super::views::tokens_text(ty));
+            return CfgType::Builtin(builtin_text(ty));
         }
         // `[pkg::]name [#(...)]`
         let hash = ty.iter().position(|t| t.is_punct("#")).unwrap_or(ty.len());
         let Some(name) = ty[..hash].iter().rev().find(|t| t.kind == TokKind::Ident) else { return CfgType::Unknown };
-        let params = super::views::tokens_text(&ty[hash..]);
+        let params = builtin_text(&ty[hash..]);
         match self.resolve_at_span(unit, name.span).and_then(|d| self.follow_typedef(d)) {
-            Some(d) => CfgType::Decl(self.decl_key(self.canonical(d)), params),
-            None => CfgType::Unknown,
+            // A type parameter is whatever the specialization makes it.
+            Some(d) if self.decl(d).kind != DeclKind::TypeParam => CfgType::Decl(self.decl_key(self.canonical(d)), params),
+            _ => CfgType::Unknown,
         }
     }
 
     /// Where the configured test's hierarchy (every test's, when none is configured) places
     /// each component class.
     pub fn config_places(&self) -> Arc<Places> {
-        self.config_places_cache.get_or_init(|| Arc::new(self.build_places())).clone()
+        if let Some(p) = self.config_places_cache.get() {
+            return p.clone();
+        }
+        let p = Arc::new(self.build_places());
+        if !self.cancelled() {
+            let _ = self.config_places_cache.set(p.clone());
+        }
+        p
     }
 
     fn build_places(&self) -> Places {
@@ -371,13 +474,16 @@ impl Analysis {
             let mut map: FxHashMap<(u32, u32), Vec<(String, bool)>> = FxHashMap::default();
             // A node's path is a place of its class and of every base class (a base's method
             // runs with `this` being the node).
-            fn walk(a: &Analysis, n: &super::views::VerifNode, map: &mut FxHashMap<(u32, u32), Vec<(String, bool)>>) {
+            fn walk(a: &Analysis, n: &super::views::VerifNode, map: &mut FxHashMap<(u32, u32), Vec<(String, bool)>>, incomplete: &mut bool) {
+                *incomplete |= n.truncated;
                 let mut class = n.class_decl;
                 let mut steps = 0;
                 while let Some(c) = class {
                     let v = map.entry(a.decl_key(a.canonical(c))).or_default();
-                    if v.len() < 64 {
+                    if v.len() < MAX_PLACES {
                         v.push((n.path.clone(), n.path_known && n.count.is_none()));
+                    } else {
+                        *incomplete = true;
                     }
                     steps += 1;
                     if steps > 32 {
@@ -386,10 +492,10 @@ impl Analysis {
                     class = a.class_base(c);
                 }
                 for c in &n.children {
-                    walk(a, c, map);
+                    walk(a, c, map, incomplete);
                 }
             }
-            walk(self, root, &mut map);
+            walk(self, root, &mut map, &mut out.incomplete);
             out.tests.push((root.class.clone(), map));
         }
         out
@@ -418,6 +524,7 @@ impl Analysis {
         let mut scope = Status::Mismatch;
         let mut scope_text = String::new();
         let mut placed = false;
+        let (mut g_any, mut s_any) = (false, false);
         let mut precedence = None;
         for (test, map) in &places.tests {
             let names = |c: &ConfigCall| -> Option<Vec<(String, bool)>> {
@@ -427,7 +534,10 @@ impl Analysis {
                     Ctx::Unknown => None,
                 }
             };
-            let (Some(gn), Some(sn)) = (names(g), names(s)) else {
+            let (gn, sn) = (names(g), names(s));
+            g_any |= gn.is_some();
+            s_any |= sn.is_some();
+            let (Some(gn), Some(sn)) = (gn, sn) else {
                 // A context that is not placed: unknown, unless the class is not in this test.
                 let absent = |c: &ConfigCall| c.ctx == Ctx::This && c.class.is_some_and(|k| !map.contains_key(&self.decl_key(self.canonical(k))));
                 if !absent(g) && !absent(s) && scope != Status::Match {
@@ -470,12 +580,32 @@ impl Analysis {
             }
         }
         if !placed && scope == Status::Mismatch {
-            scope = Status::Unknown;
-            if scope_text.is_empty() {
-                scope_text = "not placed in the hierarchy of a test".into();
+            // Both placed, never in the same test: they cannot meet.
+            if g_any && s_any && !places.incomplete {
+                scope_text = "not in the same test".into();
+            } else {
+                scope = Status::Unknown;
+                if scope_text.is_empty() {
+                    scope_text = "not placed in the hierarchy of a test".into();
+                }
             }
         }
+        if scope == Status::Mismatch && places.incomplete {
+            scope = Status::Unknown;
+            scope_text = format!("{scope_text} (the hierarchy is not complete)");
+        }
         Pairing { field, ty, scope, scope_text, precedence }
+    }
+
+    /// Whether `off` can be in a config_db call: a `get`/`set` name or a string, in a file that
+    /// names `uvm_config_db` (checked before the index is built).
+    fn maybe_config_at(&self, file: FileId, off: u32) -> bool {
+        if !self.file_text(file).is_some_and(|t| t.contains("uvm_config_db")) {
+            return false;
+        }
+        let Some(toks) = self.file_tokens(file) else { return false };
+        let k = toks.partition_point(|t| t.span.end < off);
+        toks.get(k).is_some_and(|t| t.span.start <= off && (t.kind == TokKind::String || t.text == "get" || t.text == "set"))
     }
 
     /// The config_db call whose `get`/`set` name or field string is at `off`.
@@ -488,16 +618,16 @@ impl Analysis {
 
     /// Hover on a config_db `get`/`set`: the candidate providers or consumers.
     pub fn config_hover(&self, file: FileId, off: u32) -> Option<(String, Span)> {
+        if !self.maybe_config_at(file, off) {
+            return None;
+        }
         let idx = self.config_index();
         let i = self.config_call_at(&idx, file, off)?;
         let c = &idx.calls[i];
         let what = if c.kind == CallKind::Get { "get" } else { "set" };
         let field = c.field.as_deref().map_or_else(|| "a computed field".to_string(), |f| format!("`\"{f}\"`"));
         let mut md = format!("**uvm_config_db #({}) {what}** {field}", if c.ty_text.is_empty() { "?" } else { &c.ty_text });
-        let others: Vec<usize> = match &c.field {
-            Some(f) => idx.by_field.get(f).cloned().unwrap_or_default(),
-            None => (0..idx.calls.len()).collect(),
-        };
+        let others = Self::calls_of_field(&idx, c.field.as_deref());
         let mut good = Vec::new();
         let mut near = Vec::new();
         for j in others.into_iter().filter(|&j| idx.calls[j].kind != c.kind) {
@@ -508,9 +638,6 @@ impl Analysis {
                 good.push((j, p));
             } else if p.field == Status::Match {
                 near.push((j, p));
-            }
-            if good.len() + near.len() > 40 {
-                break;
             }
         }
         let status = |x: Status| match x {
@@ -538,9 +665,12 @@ impl Analysis {
             md.push_str(&format!("\n\n{none} in this build configuration."));
         } else {
             md.push_str(&format!("\n\n**{them}** ({})", good.len()));
-            for (j, p) in &good {
+            for (j, p) in good.iter().take(20) {
                 md.push('\n');
                 md.push_str(&line(*j, p));
+            }
+            if good.len() > 20 {
+                md.push_str(&format!("\n- and {} more (Find References on the field lists them)", good.len() - 20));
             }
         }
         if !near.is_empty() {
@@ -571,13 +701,17 @@ impl Analysis {
     /// Go to Definition on a get's field string: the candidate sets (every set of that field
     /// when none is a candidate).
     pub fn config_definition(&self, file: FileId, off: u32) -> Option<Vec<Location>> {
+        if !self.maybe_config_at(file, off) {
+            return None;
+        }
         let idx = self.config_index();
         let i = self.config_call_at(&idx, file, off)?;
         let c = &idx.calls[i];
         if c.kind != CallKind::Get || !c.field_span.is_some_and(|s| s.start <= off && off <= s.end) {
             return None;
         }
-        let sets: Vec<usize> = idx.by_field.get(c.field.as_ref()?)?.iter().copied().filter(|&j| idx.calls[j].kind == CallKind::Set).collect();
+        c.field.as_ref()?;
+        let sets: Vec<usize> = Self::calls_of_field(&idx, c.field.as_deref()).into_iter().filter(|&j| idx.calls[j].kind == CallKind::Set).collect();
         let good: Vec<usize> = sets.iter().copied().filter(|&j| self.config_pair(&idx.calls[j], c).candidate()).collect();
         let pick = if good.is_empty() { sets } else { good };
         Some(pick.into_iter().filter_map(|j| self.to_location(idx.calls[j].field_span.unwrap_or(idx.calls[j].call))).collect())
@@ -585,6 +719,9 @@ impl Analysis {
 
     /// Find References on a field string: every get and set of that literal field.
     pub fn config_references(&self, file: FileId, off: u32) -> Option<Vec<Location>> {
+        if !self.maybe_config_at(file, off) {
+            return None;
+        }
         let idx = self.config_index();
         let i = self.config_call_at(&idx, file, off)?;
         let c = &idx.calls[i];
@@ -595,50 +732,136 @@ impl Analysis {
         Some(all.iter().filter_map(|&j| self.to_location(idx.calls[j].field_span.unwrap_or(idx.calls[j].call))).collect())
     }
 
-    /// Completion inside the field string of a `uvm_config_db` call on the line before the
-    /// cursor (`line`): the fields set or got with the same type first, then the others.
+    /// Completion inside the field string of a `uvm_config_db` call written on the cursor's
+    /// line (`line`, up to the cursor): the fields set or got with the same type first, then the
+    /// others. The cursor must be in a string that is the field argument itself (third, or
+    /// `.field_name(`), not one nested in it.
     pub fn config_field_completions(&self, line: &str) -> Option<Vec<CompletionItem>> {
         let at = line.rfind("uvm_config_db")?;
-        let rest = &line[at..];
-        let (ty, call) = match rest.find("::") {
-            Some(k) => (rest[..k].trim_start_matches("uvm_config_db").trim().trim_start_matches('#').trim().trim_start_matches('(').trim_end_matches(')').trim().to_string(), &rest[k + 2..]),
-            None => return None,
-        };
-        let open = call.find('(')?;
-        if !matches!(call[..open].trim(), "get" | "set") {
-            return None;
-        }
-        // Inside the third argument's string: two commas and an open quote at depth 0.
-        let (mut depth, mut commas, mut quote) = (0i32, 0, false);
-        let mut prev = ' ';
-        for ch in call[open + 1..].chars() {
-            if quote {
-                if ch == '"' && prev != '\\' {
-                    quote = false;
-                }
-            } else {
-                match ch {
-                    '"' => quote = true,
-                    '(' | '[' | '{' => depth += 1,
-                    ')' | ']' | '}' => depth -= 1,
-                    ',' if depth == 0 => commas += 1,
-                    _ => {}
-                }
+        let rest: Vec<char> = line[at + "uvm_config_db".len()..].chars().collect();
+        let mut k = 0;
+        let skip_ws = |k: &mut usize| {
+            while rest.get(*k).is_some_and(|c| c.is_whitespace()) {
+                *k += 1;
             }
-            prev = ch;
-            if depth < 0 {
+        };
+        skip_ws(&mut k);
+        // `#( type )`, balanced (`p::cfg`, `#(8)` inside).
+        let mut ty = String::new();
+        if rest.get(k) == Some(&'#') {
+            k += 1;
+            skip_ws(&mut k);
+            if rest.get(k) != Some(&'(') {
                 return None;
             }
+            let mut depth = 0;
+            loop {
+                let c = *rest.get(k)?;
+                k += 1;
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                if depth > 0 && !(depth == 1 && c == '(') {
+                    ty.push(c);
+                }
+            }
         }
-        if !quote || commas != 2 {
+        skip_ws(&mut k);
+        if rest.get(k) != Some(&':') || rest.get(k + 1) != Some(&':') {
+            return None;
+        }
+        k += 2;
+        skip_ws(&mut k);
+        let name: String = rest[k..].iter().take_while(|c| c.is_alphanumeric() || **c == '_').collect();
+        if name != "get" && name != "set" {
+            return None;
+        }
+        k += name.len();
+        skip_ws(&mut k);
+        if rest.get(k) != Some(&'(') {
+            return None;
+        }
+        k += 1;
+        // The arguments: position at depth 1, named ones, and where the open string starts.
+        let (mut depth, mut arg, mut named) = (1i32, 0usize, None::<String>);
+        let mut arg_start = k;
+        let mut i = k;
+        while i < rest.len() {
+            let c = rest[i];
+            match c {
+                '"' => {
+                    // A string: closed later on the line, or open at the cursor.
+                    let mut j = i + 1;
+                    let mut closed = false;
+                    while j < rest.len() {
+                        if rest[j] == '\\' {
+                            j += 2;
+                            continue;
+                        }
+                        if rest[j] == '"' {
+                            closed = true;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if !closed {
+                        // The open string must be the whole argument so far.
+                        let before: String = rest[arg_start..i].iter().collect();
+                        let lead = before.trim();
+                        let field_named = named.as_deref() == Some("field_name") && depth == 2 && lead.is_empty();
+                        let field_pos = named.is_none() && depth == 1 && arg == 2 && lead.is_empty();
+                        if !(field_named || field_pos) {
+                            return None;
+                        }
+                        break;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    // `.field_name(`: a named argument opens.
+                    if c == '(' && depth == 2 {
+                        let before: String = rest[arg_start..i].iter().collect();
+                        let b = before.trim();
+                        if let Some(n) = b.strip_prefix('.') {
+                            named = Some(n.trim().to_string());
+                            arg_start = i + 1;
+                        }
+                    }
+                }
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    if depth <= 0 {
+                        return None;
+                    }
+                }
+                ',' if depth == 1 => {
+                    arg += 1;
+                    named = None;
+                    arg_start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if i >= rest.len() {
             return None;
         }
         let idx = self.config_index();
         let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let ty = norm(&ty);
         let mut seen: FxHashMap<String, bool> = FxHashMap::default();
         for c in &idx.calls {
             if let Some(f) = &c.field {
-                let same = norm(&c.ty_text) == norm(&ty);
+                let same = norm(&c.ty_text) == ty;
                 let e = seen.entry(f.clone()).or_insert(false);
                 *e |= same;
             }
