@@ -36,12 +36,19 @@ export function placeTree<N extends TreeNode>(roots: N[], nameOf: (n: N, root: b
   const tree: PlacedTree<N> = { roots: [], byKey: new Map(), byNames: new Map(), truncated: false };
   const place = (nodes: N[], parent: Placed<N> | undefined): Placed<N>[] => {
     const seen = new Map<string, number>();
+    // Segments given: a sibling literally named `r#2` does not share the second `r`'s.
+    const used = new Set<string>();
     return nodes.map((n) => {
       const name = nameOf(n, parent === undefined);
-      const k = (seen.get(name) ?? 0) + 1;
+      let k = (seen.get(name) ?? 0) + 1;
+      let segment = k > 1 ? `${name}#${k}` : name;
+      while (used.has(segment)) {
+        k++;
+        segment = `${name}#${k}`;
+      }
       seen.set(name, k);
+      used.add(segment);
       const names = parent ? [...parent.names, name] : [name];
-      const segment = k > 1 ? `${name}#${k}` : name;
       const key = parent ? `${parent.key}\u0000${segment}` : segment;
       const p: Placed<N> = { node: n, parent, children: [], names, key };
       tree.byKey.set(key, p);

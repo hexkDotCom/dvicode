@@ -57,10 +57,15 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
   result: AccessesResult | undefined;
   /** The newest analysis revision known: the result is out of date when it is older. */
   private latest = -1;
-  /** The server restarted since the result was made (its revisions count anew). */
+  /** The server restarted, or built the project again, since the result was made (its
+   * revisions count anew). */
   private restarted = false;
+  /** The engine the result came from: another one's paths are not its files. */
+  private from: string | undefined;
   /** Request generation: an older answer is dropped. */
   private gen = 0;
+  /** The search running. */
+  private search: vscode.CancellationTokenSource | undefined;
 
   constructor(private readonly conn: Conn) {
     this.view = vscode.window.createTreeView('dvicode.accesses', { treeDataProvider: this, showCollapseAll: true });
@@ -97,6 +102,21 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
     this.present();
   }
 
+  /** The project was built again: the result is kept, marked out of date. */
+  rebuilt(): void {
+    this.restarted ||= this.result !== undefined;
+    this.present();
+  }
+
+  /** Drops a result of another engine than the one connected now. */
+  private ofThisEngine(): void {
+    const now = this.conn.endpoint();
+    if (this.result && now !== undefined && this.from !== now) {
+      this.result = undefined;
+      this.emitter.fire(undefined);
+    }
+  }
+
   /** Asks for the signal at the active editor's cursor. */
   async showAtCursor(mode: string): Promise<void> {
     const ed = vscode.window.activeTextEditor;
@@ -116,6 +136,7 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
 
   /** Asks again for the target shown (in `mode`, else the mode shown), at its declaration. */
   async refresh(mode?: string): Promise<void> {
+    this.ofThisEngine();
     const t = this.result?.target;
     const m = mode ?? this.result?.mode ?? 'writes';
     if (!t?.uri || t.line === null || t.character === null) {
@@ -137,29 +158,33 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
       return false;
     }
     const gen = ++this.gen;
+    // A view's progress has no cancel button: a new search cancels the one running.
+    this.search?.cancel();
+    this.search?.dispose();
+    const search = new vscode.CancellationTokenSource();
+    this.search = search;
     let r: AccessesResult | null;
-    let cancelled = false;
     try {
       const title = mode === 'writes' ? 'Searching drivers' : 'Searching loads';
-      r = await vscode.window.withProgress({ location: { viewId: 'dvicode.accesses' }, title, cancellable: true }, (_, token) => {
-        token.onCancellationRequested(() => (cancelled = true));
-        return c.sendRequest<AccessesResult | null>('dvicode/accessesOf', { textDocument: { uri }, position, mode }, token);
-      });
+      r = await vscode.window.withProgress({ location: { viewId: 'dvicode.accesses' }, title }, () =>
+        c.sendRequest<AccessesResult | null>('dvicode/accessesOf', { textDocument: { uri }, position, mode }, search.token),
+      );
     } catch (e) {
       // A cancelled search says nothing (the server answers RequestCancelled, -32800).
       const code = (e as { code?: number }).code;
-      if (gen === this.gen && !cancelled && code !== -32800) {
+      if (gen === this.gen && !search.token.isCancellationRequested && code !== -32800) {
         void vscode.window.showErrorMessage(`DVICode: ${e instanceof Error ? e.message : String(e)}`);
       }
       return false;
     }
-    if (gen !== this.gen || cancelled) {
+    if (gen !== this.gen || search.token.isCancellationRequested) {
       return false;
     }
     if (!r || (expect !== undefined && r.target.name !== expect)) {
       return null;
     }
     this.result = r;
+    this.from = this.conn.endpoint();
     this.restarted = false;
     this.latest = Math.max(this.latest, r.revision);
     void vscode.commands.executeCommand('setContext', 'dvicode.accesses.mode', r.mode);
@@ -169,6 +194,7 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
   }
 
   private present(): void {
+    this.ofThisEngine();
     const r = this.result;
     if (!r) {
       this.view.description = undefined;
@@ -202,6 +228,7 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
 
   getChildren(n?: Node): Node[] {
     if (!n) {
+      this.ofThisEngine();
       const sites = this.result?.sites ?? [];
       return ACCESS_GROUPS.map(([group, title]) => ({ group, title, sites: sites.filter((s) => s.group === group) })).filter((g) => g.sites.length);
     }

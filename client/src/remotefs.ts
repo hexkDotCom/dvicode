@@ -64,6 +64,22 @@ export class RemoteFs implements vscode.FileSystemProvider {
     }
   }
 
+  /**
+   * Tells the server itself about a deleted or renamed path: the editor's watcher reports
+   * only source and build files, not a folder of them (`rtl/`), whose files the server forgets
+   * or looks for again from this.
+   */
+  private async moved(changes: { path: string; type: number }[]): Promise<void> {
+    try {
+      const c = await this.client();
+      await c.sendNotification('workspace/didChangeWatchedFiles', {
+        changes: changes.map((x) => ({ uri: vscode.Uri.from({ scheme: 'file', path: x.path }).toString(), type: x.type })),
+      });
+    } catch {
+      // The server is gone: it reads everything again when it starts.
+    }
+  }
+
   watch(): vscode.Disposable {
     // The server watches nothing; edits made through VS Code are reported below.
     return new vscode.Disposable(() => undefined);
@@ -107,6 +123,7 @@ export class RemoteFs implements vscode.FileSystemProvider {
   async delete(uri: vscode.Uri, options: { recursive: boolean }): Promise<void> {
     await this.call('delete', { path: uri.path, recursive: options.recursive }, uri);
     this.emitter.fire([{ type: vscode.FileChangeType.Deleted, uri }]);
+    await this.moved([{ path: uri.path, type: 3 }]);
   }
 
   async rename(oldUri: vscode.Uri, newUri: vscode.Uri, options: { overwrite: boolean }): Promise<void> {
@@ -114,6 +131,10 @@ export class RemoteFs implements vscode.FileSystemProvider {
     this.emitter.fire([
       { type: vscode.FileChangeType.Deleted, uri: oldUri },
       { type: vscode.FileChangeType.Created, uri: newUri },
+    ]);
+    await this.moved([
+      { path: oldUri.path, type: 3 },
+      { path: newUri.path, type: 1 },
     ]);
   }
 }

@@ -26,6 +26,12 @@ test.describe('placeTree', () => {
     assert.deepEqual(keys, ['top', 'top/c0', 'top/c0/u_rx', 'top/c0/u_rx#2', 'top/c1', 'top/c1/u_rx', 'top/g', 'top/g/f']);
     assert.equal(t.byNames.get(vm.namesKey(['top', 'c0', 'u_rx'])).length, 2);
   });
+  test.it('does not give a repeated name the key of a sibling named like it', () => {
+    const v = vm.placeTree([d('r', 'x'), d('r', 'x'), d('r#2', 'x'), d('r#3', 'x'), d('r', 'x')], (n) => n.name);
+    const keys = v.roots.map((p) => p.key);
+    assert.deepEqual(keys, ['r', 'r#2', 'r#2#2', 'r#3', 'r#4']);
+    assert.equal(v.byKey.size, 5);
+  });
   test.it('links parents and notices cut nodes', () => {
     const f = t.byNames.get(vm.namesKey(['top', 'g', 'f']))[0];
     assert.deepEqual(f.parent.names, ['top', 'g']);

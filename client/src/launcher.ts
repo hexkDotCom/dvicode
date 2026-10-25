@@ -107,6 +107,15 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * A server path for the remote shell: taken literally (no `$`, backquote or glob expansion),
+ * except that a leading `~/` or `$HOME/` is the home directory.
+ */
+export function shPath(p: string): string {
+  const home = /^(~|\$HOME|\$\{HOME\})\//.exec(p);
+  return home ? `"$HOME"/${shQuote(p.slice(home[0].length))}` : shQuote(p);
+}
+
 function run(cmd: string, args: string[], input?: Buffer, timeoutMs = 60000): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const p = cp.spawn(cmd, args, { windowsHide: true });
@@ -326,7 +335,7 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
       const exe: Executable = {
         command: 'wsl.exe',
         // A login shell gives the server the user's environment (UVM_HOME, ...).
-        args: ['-d', wslDistro, '-e', 'bash', '-lc', `exec "${serverPath}" ${args}`],
+        args: ['-d', wslDistro, '-e', 'bash', '-lc', `exec ${shPath(serverPath)} ${args}`],
       };
       return {
         mode,
@@ -344,7 +353,7 @@ export async function makeLaunch(ctx: vscode.ExtensionContext, out: vscode.Outpu
       const args = serverArgs(cfg).map(shQuote).join(' ');
       const exe: Executable = {
         command: cfg.sshCommand,
-        args: [...sshBase(cfg), sshHost, `bash -lc ${shQuote(`exec "${serverPath}" ${args}`)}`],
+        args: [...sshBase(cfg), sshHost, `bash -lc ${shQuote(`exec ${shPath(serverPath)} ${args}`)}`],
       };
       const authority = remoteAuthority ?? `ssh+${sshHost}`;
       // Server files outside dvicode.pathMappings and outside the (shared) workspace folders,

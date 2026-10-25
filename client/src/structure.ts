@@ -171,8 +171,13 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
     this.timer = setTimeout(() => void this.load(), ms);
   }
 
+  /** Counts the filters set: the items of each have ids of their own. */
+  private filterGen = 0;
+
   private setFilter(text: string | undefined): void {
     this.filter = text?.trim() || undefined;
+    // New ids: VS Code keeps what was collapsed under the previous filter otherwise.
+    this.filterGen++;
     this.save();
     void this.load();
   }
@@ -275,7 +280,7 @@ export class Structure implements vscode.TreeDataProvider<Item>, vscode.Disposab
       ns.map((n) => {
         const open = n.children.length === 0 ? vscode.TreeItemCollapsibleState.None : this.filter || (!n.collapsed && (n.kind === 'group' || depth === 0)) ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed;
         const item = new Item(n, parent, open);
-        item.id = `structure:${this.uri ?? ''}:${this.filter ? 'f:' : ''}${n.id}`;
+        item.id = `structure:${this.uri ?? ''}:${this.filter ? `f${this.filterGen}:` : ''}${n.id}`;
         const extra = [n.detail, n.mark, n.inherited_from && n.kind !== 'group' ? `from ${n.inherited_from}` : undefined].filter((x) => x);
         item.description = extra.join(' · ') || undefined;
         item.iconPath = new vscode.ThemeIcon(ICONS[n.kind] ?? 'symbol-misc', n.inactive ? new vscode.ThemeColor('disabledForeground') : undefined);

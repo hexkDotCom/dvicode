@@ -202,6 +202,9 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     }
     views.refreshAll();
     structure.reset();
+    // A full build makes no revision: the results searched before it are out of date.
+    checks.rebuilt();
+    drivers.rebuilt();
   });
   c.onNotification('dvicode/revision', (r: { revision?: number }) => {
     views.onRevision(r?.revision);
@@ -277,6 +280,7 @@ function restart(ctx: vscode.ExtensionContext): Promise<void> {
     startGeneration++;
     // The stopped state of a dropped client no longer reaches them: the views' results are
     // marked out of date here (the new engine counts its revisions anew).
+    views.presentAll();
     structure.reset();
     checks.reset();
     drivers.reset();
@@ -384,8 +388,13 @@ async function selectBuildConfig(): Promise<void> {
   ];
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Build configuration' });
   if (pick) {
-    const target = vscode.workspace.workspaceFolders?.length ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
-    await vscode.workspace.getConfiguration('dvicode').update('buildFile', pick.value, target);
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const target = folder ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+    // Inside the project, relative to it (the engine takes it from its root): the workspace
+    // settings hold no path of this machine or checkout.
+    const root = folder && launch.mapper.serverPath(folder.uri)?.replace(/\/+$/, '');
+    const value = root && pick.value.startsWith(`${root}/`) ? pick.value.slice(root.length + 1) : pick.value;
+    await vscode.workspace.getConfiguration('dvicode').update('buildFile', value, target);
   }
 }
 
@@ -549,6 +558,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   const conn = {
     client: () => client,
     mapper: (): Mapper | undefined => launch?.mapper,
+    endpoint: (): string | undefined => launch?.target,
   };
   views = new Views(ctx, conn);
   structure = new Structure(ctx, conn);

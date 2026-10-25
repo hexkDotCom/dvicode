@@ -239,6 +239,14 @@ test.describe('dvicode:// folders', () => {
       both(env, m, 'dvicode://wsl+Ubuntu/home/me/a.sv', 'file:///home/me/a.sv');
       assert.equal(m.toClient('file:///mnt/c').toString(), 'dvicode://wsl%2Bubuntu/mnt/c');
     });
+    test.it(`a document of another server is not this server's file (${os})`, () => {
+      const m = pathmap.makeMapper({ remoteAuthority: 'ssh+build02', mappings: [] });
+      const u = vscode.Uri.parse('dvicode://ssh+build01/home/me/a.sv');
+      assert.equal(m.serverPath(u), undefined);
+      assert.equal(m.toServer(u), u.toString());
+      assert.equal(pathmap.makeMapper({ wslDistro: 'Ubuntu', mappings: [] }).serverPath(vscode.Uri.parse('dvicode://wsl+ubuntu/home/me/a.sv')), '/home/me/a.sv');
+      assert.equal(pathmap.identityMapper().serverPath(u), undefined);
+    });
     test.it(`keeps an encoded authority (${os})`, () => {
       // "Open Folder on the Server" encodes user@host.
       const m = pathmap.makeMapper({ remoteAuthority: 'ssh+me%40build01', mappings: [] });

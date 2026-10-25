@@ -51,12 +51,17 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
   result: ChecksResult | undefined;
   /** The newest analysis revision known: the result is out of date when it is older. */
   private latest = -1;
-  /** The server restarted since the result was made (its revisions count anew). */
+  /** The server restarted, or built the project again, since the result was made (its
+   * revisions count anew). */
   private restarted = false;
+  /** The engine the result came from: another one's paths are not its files. */
+  private from: string | undefined;
   /** Hide what uses the target only as a clock or a reset. */
   valuesOnly = false;
   /** Request generation: an older answer is dropped. */
   private gen = 0;
+  /** The search running. */
+  private search: vscode.CancellationTokenSource | undefined;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -97,6 +102,21 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
     this.present();
   }
 
+  /** The project was built again: the result is kept, marked out of date. */
+  rebuilt(): void {
+    this.restarted ||= this.result !== undefined;
+    this.present();
+  }
+
+  /** Drops a result of another engine than the one connected now. */
+  private ofThisEngine(): void {
+    const now = this.conn.endpoint();
+    if (this.result && now !== undefined && this.from !== now) {
+      this.result = undefined;
+      this.emitter.fire(undefined);
+    }
+  }
+
   private setValuesOnly(on: boolean): void {
     this.valuesOnly = on;
     void this.ctx.workspaceState.update('dvicode.checks.valuesOnly', on);
@@ -124,6 +144,7 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
 
   /** Asks again for the target shown, at its declaration (not at the old cursor position). */
   async refresh(): Promise<void> {
+    this.ofThisEngine();
     const t = this.result?.target;
     if (!t?.uri || t.line === null || t.character === null) {
       await this.showAtCursor();
@@ -144,28 +165,32 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
       return false;
     }
     const gen = ++this.gen;
+    // A view's progress has no cancel button: a new search cancels the one running.
+    this.search?.cancel();
+    this.search?.dispose();
+    const search = new vscode.CancellationTokenSource();
+    this.search = search;
     let r: ChecksResult | null;
-    let cancelled = false;
     try {
-      r = await vscode.window.withProgress({ location: { viewId: 'dvicode.checks' }, title: 'Searching assertions and coverage', cancellable: true }, (_, token) => {
-        token.onCancellationRequested(() => (cancelled = true));
-        return c.sendRequest<ChecksResult | null>('dvicode/checksOf', { textDocument: { uri }, position }, token);
-      });
+      r = await vscode.window.withProgress({ location: { viewId: 'dvicode.checks' }, title: 'Searching assertions and coverage' }, () =>
+        c.sendRequest<ChecksResult | null>('dvicode/checksOf', { textDocument: { uri }, position }, search.token),
+      );
     } catch (e) {
       // A cancelled search says nothing (the server answers RequestCancelled, -32800).
       const code = (e as { code?: number }).code;
-      if (gen === this.gen && !cancelled && code !== -32800) {
+      if (gen === this.gen && !search.token.isCancellationRequested && code !== -32800) {
         void vscode.window.showErrorMessage(`DVICode: ${e instanceof Error ? e.message : String(e)}`);
       }
       return false;
     }
-    if (gen !== this.gen || cancelled) {
+    if (gen !== this.gen || search.token.isCancellationRequested) {
       return false;
     }
     if (!r || (expect !== undefined && r.target.name !== expect)) {
       return null;
     }
     this.result = r;
+    this.from = this.conn.endpoint();
     this.restarted = false;
     this.latest = Math.max(this.latest, r.revision);
     this.present();
@@ -179,6 +204,7 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
   }
 
   private present(): void {
+    this.ofThisEngine();
     const r = this.result;
     if (!r) {
       this.view.description = undefined;
@@ -213,6 +239,7 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
 
   getChildren(n?: Node): Node[] {
     if (!n) {
+      this.ofThisEngine();
       const hits = this.hits();
       return CHECK_GROUPS.map(([group, title]) => ({ group, title, hits: hits.filter((h) => h.group === group) })).filter((g) => g.hits.length);
     }

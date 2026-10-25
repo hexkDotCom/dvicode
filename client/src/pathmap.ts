@@ -9,6 +9,7 @@
 
 import * as net from 'net';
 import * as vscode from 'vscode';
+import { sameAuthority } from './remotefs';
 
 export interface PathMapping {
   local: string;
@@ -107,9 +108,12 @@ export function makeMapper(opts: MapperOptions): Mapper {
   // The other direction picks the longest server prefix.
   const reverse = [...mappings].sort((a, b) => b.remote.length - a.remote.length);
 
+  // The dvicode:// authorities this server serves: a document of another server (open from an
+  // earlier engine) is none of its files.
+  const served = [opts.remoteAuthority, opts.fallbackAuthority, opts.wslDistro !== undefined ? `wsl+${opts.wslDistro}` : undefined].filter((a): a is string => !!a);
   const serverPath = (uri: vscode.Uri): string | undefined => {
     if (uri.scheme === 'dvicode') {
-      return uri.path;
+      return served.some((a) => sameAuthority(a, uri.authority)) ? uri.path : undefined;
     }
     if (uri.scheme !== 'file') {
       return undefined;

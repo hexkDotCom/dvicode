@@ -35,6 +35,8 @@ import {
 export interface Conn {
   client(): LanguageClient | undefined;
   mapper(): Mapper | undefined;
+  /** The engine connected to (its machine), undefined before the first start. */
+  endpoint(): string | undefined;
 }
 
 interface HierNode extends TreeNode {
@@ -333,6 +335,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   /** Forgets the tree (its parameters changed): the next getChildren fetches it. */
   protected invalidate(): void {
     this.reset();
+    this.revealed = undefined;
     this.gen++;
     this.attempted = false;
     this.tree = undefined;
@@ -376,6 +379,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       }
       this.error = e instanceof Error ? e.message : String(e);
       this.tree = undefined;
+      this.revealed = undefined;
       this.roots = [];
       this.items.clear();
     }
@@ -386,6 +390,8 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   private setTree(roots: N[]): void {
     const tree = placeTree(roots, (n, root) => this.nameOf(n, root));
     this.tree = tree;
+    // An item of the tree replaced would keep all of it.
+    this.revealed = undefined;
     this.items.clear();
     const prefix = this.filter ? `f${this.filterGen}:` : '';
     const make = (ps: Placed<N>[], parent: Item<N> | undefined): Item<N>[] =>
@@ -640,6 +646,7 @@ export class DesignHierarchy extends TreeBase<HierNode> {
   /** A setting changed what is shown. */
   refreshShown(): void {
     this.invalidate();
+    void this.refresh();
   }
 
   protected nameOf(n: HierNode): string {
@@ -722,7 +729,8 @@ export class CompiledFiles extends TreeBase<FileNode> {
   }
 
   protected notFoundText(t: Target): string {
-    return `${describeTarget(t)} is not compiled.`;
+    // A filter may hide it: only the whole list says it is not compiled.
+    return this.filter ? `${describeTarget(t)} is not among the files the filter shows.` : `${describeTarget(t)} is not compiled.`;
   }
 
   protected fileOccurrences(file: string): string[][] {
@@ -774,7 +782,8 @@ const VERIF_ICONS: Record<string, string> = {
 /** UVM component tree of the selected test (`+UVM_TESTNAME` by default). */
 export class VerificationHierarchy extends TreeBase<VerifNode> {
   private testValue: string | undefined;
-  last: VerifHierarchyResult | undefined;
+  /** The last answer without its tree (the tree shown holds that). */
+  last: (Omit<VerifHierarchyResult, 'roots'> & { rootCount: number }) | undefined;
   /** UVM objects (configurations, register models, sequences) are shown. */
   objects = false;
   /** TLM ports are shown. */
@@ -805,7 +814,7 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
   }
 
   protected onResult(r: TreeResult<VerifNode>): void {
-    this.last = { test: r.test ?? null, configured: r.configured ?? null, tests: r.tests ?? [], roots: r.roots, hint: r.hint };
+    this.last = { test: r.test ?? null, configured: r.configured ?? null, tests: r.tests ?? [], rootCount: r.roots.length, hint: r.hint };
   }
 
   /** The test class names the root; components their instance names. */
@@ -834,7 +843,7 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
     if (!r) {
       return undefined;
     }
-    const scope = r.test ?? (r.roots.length ? 'all tests' : undefined);
+    const scope = r.test ?? (r.rootCount ? 'all tests' : undefined);
     const shown = [this.objects ? 'objects' : '', this.ports ? 'ports' : ''].filter((x) => x).join(', ');
     return [scope, shown].filter((x) => x).join(' · ') || undefined;
   }
@@ -937,11 +946,16 @@ export class RegisterModel extends TreeBase<RegNode> {
       void this.refresh();
       return [];
     }
+    // Two fields of one name (two create("f") calls): ids of their own.
+    const seen = new Map<string, number>();
     return (r?.fields ?? []).map((f) => {
+      const k = (seen.get(f.name) ?? 0) + 1;
+      seen.set(f.name, k);
+      const segment = k > 1 ? `${f.name}\u0000${k}` : f.name;
       const node: RegNode = { ...f, children: [] };
-      const placed: Placed<RegNode> = { node, parent: e.placed, children: [], names: [...e.placed.names, f.name], key: `${e.placed.key}\u0000${f.name}` };
+      const placed: Placed<RegNode> = { node, parent: e.placed, children: [], names: [...e.placed.names, f.name], key: `${e.placed.key}\u0000${segment}` };
       const item = this.makeItem(placed, e, false);
-      item.id = `${e.id}\u0000${f.name}`;
+      item.id = `${e.id}\u0000${segment}`;
       return item;
     });
   }
