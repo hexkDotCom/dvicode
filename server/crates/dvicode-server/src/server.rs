@@ -141,6 +141,8 @@ fn hint_kinds_of(v: &Value) -> HintKinds {
 #[derive(Default)]
 struct TokenResults {
     by_file: FxHashMap<FileId, TokenResult>,
+    /// The open documents: only theirs are kept (an answer finished after a close is not).
+    open: FxHashSet<FileId>,
     next: u64,
 }
 
@@ -166,8 +168,8 @@ impl TokenResults {
         let mut g = results.lock().unwrap();
         g.next += 1;
         let id = g.next.to_string();
-        // Kept unless a newer snapshot's were kept meanwhile.
-        if g.by_file.get(&f).is_none_or(|r| r.revision < a.revision) {
+        // Kept unless a newer snapshot's were kept meanwhile, or the document was closed.
+        if g.open.contains(&f) && g.by_file.get(&f).is_none_or(|r| r.revision < a.revision) {
             g.by_file.insert(f, TokenResult { revision: a.revision, id: id.clone(), data: data.clone() });
         }
         ((id, data), before.map(|(_, id, data)| (id, data)))
@@ -909,6 +911,10 @@ impl Server {
             o.insert("build_error".into(), Value::String(e));
         }
         self.notify("dvicode/status", &status);
+        // The files the build no longer compiles (another configuration, a branch switch)
+        // keep no text.
+        let a = self.analysis.clone();
+        self.vfs.forget_texts_except(|id| !a.units_of_file(id).is_empty());
         self.publish_all();
         // The build may read open argument files differently now.
         if !self.build_docs.is_empty() {
@@ -1315,6 +1321,7 @@ impl Server {
                 }
                 let id =self.vfs.set_overlay_versioned(&path, Arc::from(p.text_document.text), Some(p.text_document.version));
                 self.open.insert(id, p.text_document.uri);
+                self.token_results.lock().unwrap().open.insert(id);
                 if self.analysis.units_of_file(id).is_empty() {
                     self.retry_includes_of(id, None);
                 }
@@ -1381,7 +1388,10 @@ impl Server {
                 self.vfs.clear_overlay(&path);
                 if let Some(id) = self.vfs.lookup(&path) {
                     self.open.remove(&id);
-                    self.token_results.lock().unwrap().by_file.remove(&id);
+                    let mut tr = self.token_results.lock().unwrap();
+                    tr.by_file.remove(&id);
+                    tr.open.remove(&id);
+                    drop(tr);
                     // Back to the disk contents, also in the units of other open files that
                     // include it.
                     self.note_change(id);
@@ -1554,7 +1564,7 @@ impl Server {
     fn spawn<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
-        R: Serialize,
+        R: Serialize + 'static,
     {
         self.spawn_with(req, Some(false), f);
     }
@@ -1564,7 +1574,7 @@ impl Server {
     fn spawn_project<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
-        R: Serialize,
+        R: Serialize + 'static,
     {
         self.spawn_with(req, Some(true), f);
     }
@@ -1573,7 +1583,7 @@ impl Server {
     fn spawn_now<P, R>(&mut self, req: Request, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
-        R: Serialize,
+        R: Serialize + 'static,
     {
         self.spawn_with(req, None, f);
     }
@@ -1583,7 +1593,7 @@ impl Server {
     fn spawn_with<P, R>(&mut self, req: Request, project: Option<bool>, f: impl FnOnce(&Analysis, P) -> Result<R, String> + Send + 'static)
     where
         P: DeserializeOwned + Send + 'static,
-        R: Serialize,
+        R: Serialize + 'static,
     {
         let id = req.id.clone();
         let file = self.file_of_request(&req.params);
@@ -1616,7 +1626,7 @@ impl Server {
                     let mut a = (*a).clone();
                     a.cancel = Some(cancel.clone());
                     let mut resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
-                        Some(Ok(v)) => Response::new_ok(rid, v),
+                        Some(Ok(v)) => ok_response(rid, into_value(v)),
                         Some(Err(msg)) => Response::new_err(rid, ErrorCode::RequestFailed as i32, msg),
                         None => Response::new_err(rid, ErrorCode::InternalError as i32, format!("{method} failed")),
                     };
@@ -1724,7 +1734,7 @@ impl Server {
         let current = doc.inspected.as_ref().filter(|ins| ins.version == doc.version);
         if !answers || current.is_some() {
             let result = current.filter(|_| answers).map_or(Value::Null, |ins| build_docs::answer(&req.method, &req.params, ins));
-            self.send(Message::Response(Response::new_ok(req.id.clone(), result)));
+            self.send(Message::Response(ok_response(req.id.clone(), result)));
             return true;
         }
         // Edited since the last check: check this text now, so that ranges match it.
@@ -1733,7 +1743,7 @@ impl Server {
         let (id, method, params, sender) = (req.id.clone(), req.method.clone(), req.params.clone(), self.sender.clone());
         rayon::spawn(move || {
             let result = job.and_then(|j| j()).map_or(Value::Null, |ins| build_docs::answer(&method, &params, &ins));
-            let _ = sender.send(Message::Response(Response::new_ok(id, result)));
+            let _ = sender.send(Message::Response(ok_response(id, result)));
         });
         true
     }
@@ -1838,7 +1848,7 @@ impl Server {
                         _ => Value::Null,
                     })
                     .unwrap_or(Value::Null);
-                    let _ = sender.send(Message::Response(Response::new_ok(id, result)));
+                    let _ = sender.send(Message::Response(ok_response(id, result)));
                 });
             }
             "textDocument/inlayHint" => {
@@ -1925,7 +1935,7 @@ impl Server {
                 Ok(a.call_item_decl(f, off).map(|r| a.outgoing_calls(r)))
             }),
             // Links are for build files only (`on_build_doc_request`).
-            "textDocument/documentLink" => self.send(Message::Response(Response::new_ok(req.id, Value::Null))),
+            "textDocument/documentLink" => self.send(Message::Response(ok_response(req.id, Value::Null))),
             "textDocument/codeAction" => self.spawn(req, |a, p: CodeActionParams| {
                 // Kinds form a dotted hierarchy: `refactor` asks for `refactor.rewrite`, not `refactor.re`.
                 let wants = |kind: &str| p.context.only.as_ref().is_none_or(|o| o.iter().any(|k| k.as_str().is_empty() || kind == k.as_str() || kind.starts_with(&format!("{}.", k.as_str()))));
@@ -2075,7 +2085,7 @@ impl Server {
                 // watcher reports it (outside the workspace, or on a remote host).
                 self.vfs.clear_disk_cache();
                 self.start_build();
-                self.send(Message::Response(Response::new_ok(req.id, Value::Null)));
+                self.send(Message::Response(ok_response(req.id, Value::Null)));
             }
             m if m.starts_with("dvicode/fs/") => {
                 let op = m.trim_start_matches("dvicode/fs/").to_string();
@@ -2085,7 +2095,7 @@ impl Server {
                 rayon::spawn(move || {
                     let feature = format!("remote file access ({op})");
                     let resp = match crash::catch(&feature, Some(&sender), || fs::handle(&op, params)) {
-                        Some(Ok(v)) => Response::new_ok(id, v),
+                        Some(Ok(v)) => ok_response(id, v),
                         Some(Err(e)) => Response { id, result: None, error: Some(lsp_server::ResponseError { code: ErrorCode::RequestFailed as i32, message: e.message, data: Some(json!({ "code": e.code })) }) },
                         None => Response::new_err(id, ErrorCode::InternalError as i32, format!("{feature} failed")),
                     };
@@ -2422,4 +2432,18 @@ fn plain_edits(v: &mut Value) {
         }
         _ => {}
     }
+}
+
+/// A success answer holding `v` itself (`Response::new_ok` would serialize it into a copy).
+fn ok_response(id: RequestId, v: Value) -> Response {
+    Response { id, result: Some(v), error: None }
+}
+
+/// `r` as JSON: moved when it is JSON already, else serialized.
+fn into_value<R: serde::Serialize + 'static>(r: R) -> Value {
+    let mut slot = Some(r);
+    if let Some(v) = (&mut slot as &mut dyn std::any::Any).downcast_mut::<Option<Value>>() {
+        return v.take().unwrap_or(Value::Null);
+    }
+    slot.map_or(Value::Null, |r| serde_json::to_value(r).unwrap_or(Value::Null))
 }

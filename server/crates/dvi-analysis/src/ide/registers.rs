@@ -2067,19 +2067,22 @@ fn limit_children(n: &mut RegNode, left: &mut usize, reveal: &[String]) -> bool 
 
 /// The nodes of `n` whose name (or class) matches `f`, with their ancestors; the matches are
 /// counted.
-pub fn prune(n: RegNode, f: &super::filter::Filter, matches: &mut usize) -> Option<RegNode> {
-    let hit = f.matches(&n.name, '.') || n.class.as_deref().is_some_and(|c| f.matches(c, '.'));
-    if hit {
-        *matches += 1;
-    }
-    let kept: Vec<RegNode> = n.children.clone().into_iter().filter_map(|c| prune(c, f, matches)).collect();
-    if hit || !kept.is_empty() {
-        let mut n = n;
-        if !hit {
-            n.children = kept;
+pub fn prune(mut n: RegNode, f: &super::filter::Filter, matches: &mut usize) -> Option<RegNode> {
+    let hit = |n: &RegNode| f.matches(&n.name, '.') || n.class.as_deref().is_some_and(|c| f.matches(c, '.'));
+    if hit(&n) {
+        // Kept whole; the matches under it are counted (not copied).
+        let mut todo: Vec<&RegNode> = vec![&n];
+        while let Some(x) = todo.pop() {
+            *matches += usize::from(hit(x));
+            todo.extend(&x.children);
         }
-        Some(n)
-    } else {
+        return Some(n);
+    }
+    let kept: Vec<RegNode> = std::mem::take(&mut n.children).into_iter().filter_map(|c| prune(c, f, matches)).collect();
+    if kept.is_empty() {
         None
+    } else {
+        n.children = kept;
+        Some(n)
     }
 }

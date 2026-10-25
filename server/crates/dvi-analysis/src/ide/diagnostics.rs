@@ -75,9 +75,16 @@ pub const MAX_SYNTAX_PER_FILE: usize = 50;
 impl Analysis {
     pub fn file_diagnostics(&self, file: FileId) -> Vec<Diag> {
         let mut out: Vec<Diag> = Vec::new();
-        let mut seen: FxHashSet<(u32, u32, String)> = FxHashSet::default();
+        // By place and a hash of the message (not a second copy of every message).
+        let mut seen: FxHashSet<(u32, u32, u64)> = FxHashSet::default();
         let mut push = |d: Diag, out: &mut Vec<Diag>| {
-            if seen.insert((d.span.start, d.span.end, d.message.clone())) {
+            let h = {
+                use std::hash::{Hash, Hasher};
+                let mut h = rustc_hash::FxHasher::default();
+                d.message.hash(&mut h);
+                h.finish()
+            };
+            if seen.insert((d.span.start, d.span.end, h)) {
                 out.push(d);
             }
         };

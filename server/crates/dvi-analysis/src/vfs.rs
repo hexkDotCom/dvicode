@@ -336,6 +336,22 @@ impl Vfs {
         }
     }
 
+    /// Forgets the text, tokens and line index kept of each file that is not open and that
+    /// `keep` does not want (no longer compiled): read again if they are asked for. The file
+    /// keeps its id.
+    pub fn forget_texts_except(&self, keep: impl Fn(FileId) -> bool) {
+        let mut g = self.inner.write().unwrap();
+        for (i, e) in g.entries.iter_mut().enumerate() {
+            if e.overlay.is_none() && (e.disk_loaded || e.tokens.is_some() || e.lines.is_some()) && !keep(i as FileId) {
+                e.disk = None;
+                e.disk_loaded = false;
+                e.tokens = None;
+                e.lines = None;
+                e.version += 1;
+            }
+        }
+    }
+
     /// Forgets all directory listings, so that files created or deleted since are seen, also
     /// where the editor does not watch.
     pub fn clear_dir_cache(&self) {
@@ -671,6 +687,38 @@ mod tests {
         // The old text is no longer the editor's text.
         assert_eq!(vfs.lsp_version_for(id, &st1), None);
         assert_eq!(vfs.line_index(id).unwrap().line_count(), 2);
+    }
+
+    #[test]
+    fn texts_of_files_no_longer_wanted_are_forgotten() {
+        let root = std::env::temp_dir().join(format!("dvicode-vfs-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for f in ["kept.sv", "gone.sv"] {
+            std::fs::write(root.join(f), "module m; endmodule").unwrap();
+        }
+        let vfs = Vfs::new();
+        let (kept, gone) = (vfs.file_id(&root.join("kept.sv")), vfs.file_id(&root.join("gone.sv")));
+        let open = vfs.set_overlay_versioned(&root.join("open.sv"), Arc::from("module o; endmodule"), Some(1));
+        for id in [kept, gone, open] {
+            vfs.source(id).unwrap();
+            vfs.line_index(id).unwrap();
+        }
+        let before = vfs.version(gone);
+        vfs.forget_texts_except(|id| id == kept);
+        let g = vfs.inner.read().unwrap();
+        let cached = |id: FileId| {
+            let e = &g.entries[id as usize];
+            (e.disk.is_some(), e.tokens.is_some(), e.lines.is_some())
+        };
+        assert_eq!(cached(kept), (true, true, true));
+        assert_eq!(cached(gone), (false, false, false));
+        assert_eq!(cached(open), (false, true, true), "an open file keeps its tokens");
+        drop(g);
+        assert!(vfs.version(gone) > before);
+        // Read again when asked for.
+        assert_eq!(&*vfs.text_versioned(gone).unwrap().0, "module m; endmodule");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

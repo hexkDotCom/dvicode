@@ -20,12 +20,16 @@ pub struct TestModel {
     pub root: VerifNode,
     /// The model stopped before its end (a node limit, a budget).
     pub incomplete: bool,
+    /// Its nodes (what keeping it costs).
+    pub nodes: usize,
 }
 
 /// Tests modeled at most when no test is configured, and besides it.
 const MAX_TESTS: usize = 8;
 /// Creations listed per kind of result.
 const MAX_LISTED: usize = 10;
+/// Nodes of the models kept at most (one analysis revision): past it, the ones kept go.
+const MAX_KEPT_NODES: usize = 400_000;
 
 impl Analysis {
     /// The model of test `test`, made once per analysis revision (a cancelled build is not kept).
@@ -39,9 +43,19 @@ impl Analysis {
         let name = self.decl(test).name.to_string();
         let (h, meta) = self.verification_tree(Some(&name), &q);
         let root = h.roots.into_iter().next()?;
-        let m = Arc::new(TestModel { root, incomplete: meta.incomplete.is_some() });
+        let mut nodes = 0;
+        let mut todo = vec![&root];
+        while let Some(n) = todo.pop() {
+            nodes += 1;
+            todo.extend(&n.children);
+        }
+        let m = Arc::new(TestModel { root, incomplete: meta.incomplete.is_some(), nodes });
         if !self.cancelled() {
-            self.override_models.lock().unwrap().insert(key, m.clone());
+            let mut kept = self.override_models.lock().unwrap();
+            if kept.values().map(|m| m.nodes).sum::<usize>() + nodes > MAX_KEPT_NODES {
+                kept.clear();
+            }
+            kept.insert(key, m.clone());
         }
         Some(m)
     }
