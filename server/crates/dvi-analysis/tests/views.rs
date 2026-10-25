@@ -442,6 +442,17 @@ fn elaboration_review_cases() {
         ("a long comparison chain", "module top;\n  localparam P =\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 ==\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 ==\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 ==\n    1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1 == 1;\nendmodule\n", &["top P=1"]),
         ("a body parameter is local with a parameter port list", "module m #(parameter A=1);\n  parameter B=2;\nendmodule\nmodule top;\n  m #(.B(9)) u();\nendmodule\n", &["top", "top.u A=1 B=?(`B` is local: it cannot be overridden)"]),
         ("a loop's shift by 32 gives 0", "module leaf; endmodule\nmodule top;\n  for (genvar i=1; i!=0; i<<=32) begin : g\n    leaf u();\n  end\nendmodule\n", &["top", "top.g[1]", "top.g[1].u"]),
+        (
+            "a macro's names are the invocation's",
+            "`define WP1 (W + 1)\nmodule a #(parameter W = 2);\n  localparam P = `WP1;\nendmodule\nmodule b #(parameter W = 5);\n  localparam P = `WP1;\nendmodule\nmodule top;\n  a u1();\n  b u2();\n  a #(.W(7)) u3();\nendmodule\n",
+            &["top", "top.u1 W=2 P=3", "top.u2 W=5 P=6", "top.u3 W=7 P=8"],
+        ),
+        (
+            "a macro's name is the module's, not the compilation unit's",
+            "`define WP1 (W + 1)\nparameter W = 100;\nmodule a #(parameter W = 2);\n  localparam P = `WP1;\nendmodule\nmodule top;\n  a u1();\nendmodule\n",
+            &["top", "top.u1 W=2 P=3"],
+        ),
+        ("a macro in a constant function names its argument", "`define INC (x + 1)\nmodule top;\n  function automatic int f(input int x);\n    return `INC;\n  endfunction\n  localparam P = f(4);\nendmodule\n", &["top P=5"]),
         ("a conditional directly in another shares its block", "module leaf; endmodule\nmodule top;\n  if (1) if (0) leaf a(); else leaf b();\n  if (1) begin leaf c(); end\nendmodule\n", &["top", "top.genblk1", "top.genblk1.b", "top.genblk2", "top.genblk2.c"]),
     ];
     for (what, src, want) in cases {

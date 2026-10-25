@@ -727,7 +727,18 @@ impl<'a> Eval<'a> {
                     let same = first.is_some_and(|f| f.params.is_none() && defs.iter().all(|d| d.params.is_none() && d.body.len() == f.body.len() && d.body.iter().zip(&f.body).all(|(p, q)| p.text == q.text && p.kind == q.kind)));
                     if let (true, Some(f)) = (same, first) {
                         n += 1;
-                        todo.extend(f.body.iter().rev().cloned());
+                        // A simple name of the body is the invocation's: it takes the invocation's
+                        // place, where it is looked up (a name in a chain keeps the definition's).
+                        let chained = |j: Option<&Token>| j.is_some_and(|y| y.is_punct("::") || y.is_punct("."));
+                        let body = &f.body;
+                        todo.extend(body.iter().enumerate().rev().map(|(i, b)| {
+                            let mut b = b.clone();
+                            let simple = b.kind == TokKind::Ident && !chained(i.checked_sub(1).and_then(|j| body.get(j))) && !chained(body.get(i + 1));
+                            if simple || b.kind == TokKind::Directive {
+                                b.span = x.span;
+                            }
+                            b
+                        }));
                         continue;
                     }
                 }
@@ -735,6 +746,18 @@ impl<'a> Eval<'a> {
             out.push(x);
         }
         out
+    }
+
+    /// The declaration the name `text` written at `span` refers to. A name a macro's body gives
+    /// is at the macro's invocation: it is looked up from there.
+    fn resolve_name(&mut self, unit: UnitId, text: &str, span: Span) -> Option<DeclRef> {
+        let a = self.a;
+        let toks = self.file_tokens(span.file)?;
+        let k = toks.partition_point(|t| t.span.start < span.start);
+        if toks.get(k).is_some_and(|t| t.span == span && t.kind == TokKind::Directive && t.text != text) {
+            return a.lookup(unit, a.scope_at(unit, span.file, span.start), text);
+        }
+        a.resolve_at_span(unit, span)
     }
 
     /// The self-determined value of the expression `t` (written in `unit`) in `frame`.
@@ -1241,7 +1264,7 @@ impl<'a> Eval<'a> {
     /// an enum member.
     fn name(&mut self, n: &str, sp: Span, unit: UnitId, frame: &Arc<Frame>) -> R<Val> {
         let a = self.a;
-        let Some(r) = a.resolve_at_span(unit, sp) else { return unresolved(format!("`{n}` is not resolved")) };
+        let Some(r) = self.resolve_name(unit, n, sp) else { return unresolved(format!("`{n}` is not resolved")) };
         let key = a.decl_key(a.canonical(r));
         if let Some(v) = frame.get(key) {
             return v.clone();
@@ -1436,7 +1459,7 @@ impl<'a> Eval<'a> {
     /// base type).
     fn user_type(&mut self, text: &str, span: Span, unit: UnitId, frame: &Arc<Frame>) -> R<IntType> {
         let a = self.a;
-        let Some(r) = a.resolve_at_span(unit, span) else { return unresolved(format!("the type `{text}` is not resolved")) };
+        let Some(r) = self.resolve_name(unit, text, span) else { return unresolved(format!("the type `{text}` is not resolved")) };
         let d = a.decl(r);
         if d.kind != DeclKind::Typedef {
             return unsupported(format!("the type `{text}`"));
@@ -1991,7 +2014,7 @@ impl StmtParser<'_, '_, '_> {
 
     fn key_of(&mut self, t: &Token) -> Option<(u32, u32)> {
         let a = self.e.a;
-        if let Some(r) = a.resolve_at_span(self.unit, t.span) {
+        if let Some(r) = self.e.resolve_name(self.unit, &t.text, t.span) {
             return Some(a.decl_key(a.canonical(r)));
         }
         // A local's declaration: its name is no reference.
