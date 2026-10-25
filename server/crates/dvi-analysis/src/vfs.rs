@@ -214,6 +214,14 @@ impl Vfs {
                     ids.push(*id);
                 }
             }
+            // Not a known file: maybe a directory (created, deleted, renamed): the files in it.
+            if ids.is_empty() {
+                for (q, id) in &g.ids {
+                    if q.starts_with(&p) && q != &p && !ids.contains(id) {
+                        ids.push(*id);
+                    }
+                }
+            }
         }
         let mut g = self.inner.write().unwrap();
         for id in &ids {

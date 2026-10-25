@@ -142,16 +142,16 @@ fn scan(t: &str) -> Vec<Lex> {
             i = (i + 2).min(n);
             Lk::BlockComment
         } else if c == b'"' {
-            if t[i..].starts_with("\"\"\"") {
+            if b[i..].starts_with(b"\"\"\"") {
                 i += 3;
-                while i < n && !t[i..].starts_with("\"\"\"") {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
+                while i < n && !b[i..].starts_with(b"\"\"\"") {
+                    i += escape_len(b, i);
                 }
                 i = (i + 3).min(n);
             } else {
                 i += 1;
                 while i < n && b[i] != b'"' && b[i] != b'\n' {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
+                    i += escape_len(b, i);
                 }
                 i = (i + 1).min(n);
             }
@@ -179,8 +179,8 @@ fn scan(t: &str) -> Vec<Lex> {
                 i += 1;
             }
             if i == start + 1 {
-                // `` `" ``, ``` `` ```, `` `\`" ``: macro text.
-                i += 1;
+                // `` `" ``, ``` `` ```, `` `\`" ``: macro text (a lone `` ` `` at the end too).
+                i += t[i..].chars().next().map_or(0, |ch| ch.len_utf8());
                 Lk::Punct
             } else {
                 Lk::Directive
@@ -206,9 +206,24 @@ fn scan(t: &str) -> Vec<Lex> {
             }
             Lk::Punct
         };
+        // Within the text, on a character boundary (after an escape or a byte step).
+        i = i.min(n);
+        while !t.is_char_boundary(i) {
+            i += 1;
+        }
         out.push(Lex { kind, start, end: i });
     }
     out
+}
+
+/// Bytes from `i` in a string: an escape (`\` and the character after it, `\` and a CRLF line
+/// break), or one byte.
+fn escape_len(b: &[u8], i: usize) -> usize {
+    match (b[i], b.get(i + 1), b.get(i + 2)) {
+        (b'\\', Some(b'\r'), Some(b'\n')) => 3,
+        (b'\\', _, _) => 2,
+        _ => 1,
+    }
 }
 
 /// When a protected envelope begins at byte `i` (a line's first non-blank): the byte after
@@ -315,6 +330,10 @@ enum Fk {
     Bracket,
     /// The one statement of `if`/`else`/a loop/a process/a case item, on a later line.
     Body,
+    /// The `{...}` of a constraint, or of an `if`/`foreach` in one: a block of statements.
+    Constraint,
+    /// A `do ... while (...);` statement: its body, then its `while`.
+    Do,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,7 +343,7 @@ struct Frame {
     base: usize,
     /// The level of the lines inside.
     inner: usize,
-    /// Bracket: the depth it closes at; others: the depth when opened.
+    /// Bracket and Constraint: the depth it closes at; others: the depth when opened.
     depth: usize,
     /// Bracket in align mode: the column its lines line up at.
     align: Option<usize>,
@@ -384,6 +403,14 @@ struct State {
     in_header: bool,
     /// An `import ...;` clause in a header: its `;` does not end the header.
     header_import: bool,
+    /// In an attribute `(* ... *)`: whether a statement was open before it.
+    attr: Option<bool>,
+    /// The `while (...)` of a `do` is being read.
+    do_while: bool,
+    /// An assertion's parentheses come next (after `property`, `final`, `#0`).
+    pending_header: bool,
+    /// In a macro call's arguments: the depth they opened at.
+    macro_args: Option<usize>,
 }
 
 impl State {
@@ -444,7 +471,7 @@ const DIRECTIVES: &[&str] = &[
 ];
 
 const HEADERS: &[&str] = &["if", "for", "foreach", "while", "repeat", "wait"];
-const PROCESSES: &[&str] = &["always", "always_ff", "always_comb", "always_latch", "initial", "final", "forever", "do"];
+const PROCESSES: &[&str] = &["always", "always_ff", "always_comb", "always_latch", "initial", "final", "forever"];
 
 /// Formats `t`; `None` when the result would change more than whitespace (a bug: logged by
 /// the caller) or the text is too large.
@@ -689,6 +716,10 @@ fn indent_pass(t: &str, lex: &[Lex], lines: &[Line], o: &Options, kept: &[bool])
             if let Some(f) = s.frames.iter().rev().find(|f| kinds.contains(&f.kind)) {
                 lv = Indent { levels: f.base, column: None };
             }
+        } else if first.kind == Lk::Punct && w0 == "}" && s.top().is_some_and(|f| f.kind == Fk::Constraint) {
+            lv = Indent { levels: s.top().unwrap().base, column: None };
+        } else if first.kind == Lk::Word && w0 == "while" && s.top().is_some_and(|f| f.kind == Fk::Do) {
+            lv = Indent { levels: s.top().unwrap().base, column: None };
         } else if first.kind == Lk::Punct && matches!(w0, ")" | "]" | "}") {
             if let Some(f) = s.frames.iter().rev().find(|f| f.kind == Fk::Bracket) {
                 lv = Indent { levels: f.base, column: None };
@@ -742,10 +773,13 @@ fn indent_pass(t: &str, lex: &[Lex], lines: &[Line], o: &Options, kept: &[bool])
                 comment_col = Some((old, new));
             }
         }
-        if !l.frozen && !kept[li] {
+        // In a macro call's arguments, a line at column 0 stays there: indenting it would put
+        // white space where the expansion has none (`` `" `` stringification sees it).
+        let keep_line = kept[li] || (s.macro_args.is_some() && old_width == 0);
+        if !l.frozen && !keep_line {
             out[li] = Some(lv);
         }
-        let new_width = if l.frozen || kept[li] { old_width } else { lv.column.unwrap_or(lv.levels * o.indent_size) };
+        let new_width = if l.frozen || keep_line { old_width } else { lv.column.unwrap_or(lv.levels * o.indent_size) };
         if !continuation && !comment_line {
             s.shift = new_width as isize - old_width as isize;
         }
@@ -754,7 +788,7 @@ fn indent_pass(t: &str, lex: &[Lex], lines: &[Line], o: &Options, kept: &[bool])
             s.stmt_level = lv.levels;
         }
         // Where this line's lexemes start, as it will be.
-        prev_cols = toks.iter().map(|x| new_width + display_column(t, l.lead, x.start, o.indent_size)).collect();
+        prev_cols = columns(t, l.lead, toks, o.indent_size).into_iter().map(|c| new_width + c).collect();
         // The column of this line's trailing comment, before and after.
         trailing = comment_col.or_else(|| {
             let c = toks.last().filter(|c| toks.len() > 1 && matches!(c.kind, Lk::LineComment | Lk::BlockComment))?;
@@ -814,6 +848,25 @@ fn indent_pass(t: &str, lex: &[Lex], lines: &[Line], o: &Options, kept: &[bool])
     (out, keep)
 }
 
+/// The display columns of `toks`' starts, counted from byte `from` (tabs to `tab` stops), in
+/// one pass.
+fn columns(t: &str, from: usize, toks: &[Lex], tab: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(toks.len());
+    let (mut col, mut at) = (0usize, from);
+    for x in toks {
+        if x.start < at {
+            out.push(col);
+            continue;
+        }
+        for ch in t[at..x.start].chars() {
+            col = if ch == '\t' { (col / tab.max(1) + 1) * tab.max(1) } else { col + 1 };
+        }
+        at = x.start;
+        out.push(col);
+    }
+    out
+}
+
 /// The display column of byte `at` in the line starting at `start` (tabs to `tab` stops).
 fn display_column(t: &str, start: usize, at: usize, tab: usize) -> usize {
     let mut col = 0;
@@ -833,7 +886,51 @@ fn step(s: &mut State, t: &str, lex: &[Lex], k: usize, x: &Lex, line_level: usiz
     let next_word = |k: usize| lex[k + 1..].iter().find(|y| !matches!(y.kind, Lk::LineComment | Lk::BlockComment)).map(|y| &t[y.start..y.end]);
     // Brackets.
     match (x.kind, w) {
-        (Lk::Punct, "(" | "[" | "{" | "'{" | "(*") => {
+        // An attribute leaves the statement as it was.
+        (Lk::Punct, "(*") => {
+            s.attr = Some(s.open);
+            s.depth += 1;
+            return;
+        }
+        (Lk::Punct, "*)") => {
+            s.depth = s.depth.saturating_sub(1);
+            s.min_depth = s.min_depth.min(s.depth);
+            if let Some(open) = s.attr.take() {
+                s.open = open;
+            }
+            return;
+        }
+        // A constraint's block, and the block of an `if`/`foreach`/`else` in one.
+        (Lk::Punct, "{") if (s.first_word == "constraint" && s.words <= 3) || (s.top().is_some_and(|f| f.kind == Fk::Constraint) && (s.expect.is_some() || s.prev == "else")) => {
+            let base = s.expect.take().map(|e| e.saturating_sub(1)).unwrap_or(s.stmt_level.max(if s.open { 0 } else { line_level }));
+            s.depth += 1;
+            let depth = s.depth;
+            s.frames.push(Frame { kind: Fk::Constraint, base, inner: base + 1, depth, align: None, open_col: None, ifs: Vec::new() });
+            // A block, not a bracket left open: no bracket frame for this line.
+            s.min_depth = s.depth;
+            s.open = false;
+            s.words = 0;
+            s.first_word.clear();
+            s.open_depth = s.depth;
+            return;
+        }
+        (Lk::Punct, "}") if s.top().is_some_and(|f| f.kind == Fk::Constraint && f.depth == s.depth) => {
+            s.frames.pop();
+            s.depth = s.depth.saturating_sub(1);
+            s.min_depth = s.min_depth.min(s.depth);
+            s.open_depth = s.depth;
+            s.end_statement();
+            return;
+        }
+        (Lk::Punct, "(" | "[" | "{" | "'{") => {
+            if w == "(" && s.pending_header {
+                s.pending_header = false;
+                s.header = Some(s.depth);
+            }
+            // A macro call's arguments (their line breaks matter to `` `" ``).
+            if w == "(" && s.macro_args.is_none() && k > 0 && lex[k - 1].kind == Lk::Directive && lex[k - 1].end == x.start {
+                s.macro_args = Some(s.depth);
+            }
             s.depth += 1;
             if !s.open {
                 s.open = true;
@@ -841,9 +938,12 @@ fn step(s: &mut State, t: &str, lex: &[Lex], k: usize, x: &Lex, line_level: usiz
             }
             return;
         }
-        (Lk::Punct, ")" | "]" | "}" | "*)") => {
+        (Lk::Punct, ")" | "]" | "}") => {
             s.depth = s.depth.saturating_sub(1);
             s.min_depth = s.min_depth.min(s.depth);
+            if s.macro_args == Some(s.depth) {
+                s.macro_args = None;
+            }
             while s.top().is_some_and(|f| f.kind == Fk::Bracket && f.depth >= s.depth) {
                 s.frames.pop();
             }
@@ -859,7 +959,7 @@ fn step(s: &mut State, t: &str, lex: &[Lex], k: usize, x: &Lex, line_level: usiz
                 s.end_statement();
             }
             // A block `{...}` of a constraint or a coverage item ends its statement.
-            if w == "}" && s.open && s.depth == s.open_depth && matches!(s.first_word.as_str(), "constraint" | "coverpoint" | "cross" | "bins" | "ignore_bins" | "illegal_bins" | "wildcard" | "covergroup" | "dist") {
+            if w == "}" && s.open && s.depth == s.open_depth && matches!(s.first_word.as_str(), "coverpoint" | "cross" | "bins" | "ignore_bins" | "illegal_bins" | "wildcard" | "covergroup" | "dist") {
                 let next = lex[k + 1..].iter().find(|y| !matches!(y.kind, Lk::LineComment | Lk::BlockComment)).map(|y| &t[y.start..y.end]);
                 if next != Some(";") {
                     s.end_statement();
@@ -908,6 +1008,12 @@ fn step(s: &mut State, t: &str, lex: &[Lex], k: usize, x: &Lex, line_level: usiz
             s.in_label = false;
             s.header = None;
             s.event = false;
+            if s.do_while {
+                s.do_while = false;
+                if s.top().is_some_and(|f| f.kind == Fk::Do) {
+                    s.frames.pop();
+                }
+            }
             s.end_statement();
         }
         (Lk::Punct, "?") if s.in_label => s.ternary += 1,
@@ -965,6 +1071,14 @@ fn step(s: &mut State, t: &str, lex: &[Lex], k: usize, x: &Lex, line_level: usiz
             word(s, t, lex, k, w, line_level, o)
         }
         _ => {
+            // `always @*`, `always #5`: the event control or delay ends here.
+            if s.event && ((s.prev == "@" && w == "*") || (s.prev == "#" && x.kind == Lk::Number)) {
+                s.event = false;
+                s.open = false;
+                s.expect = Some(s.hdr + 1);
+                s.prev = w.to_string();
+                return;
+            }
             if !s.open {
                 s.open = true;
                 s.open_depth = s.depth;
@@ -1060,6 +1174,33 @@ fn word(s: &mut State, t: &str, lex: &[Lex], k: usize, w: &str, line_level: usiz
         }
         "specify" => opener(s, Fk::Specify),
         "table" => opener(s, Fk::Table),
+        "do" => {
+            // The body, then its `while`: a frame keeps them together.
+            s.push(Fk::Do, line_level, line_level);
+            s.hdr = line_level;
+            s.open = false;
+            s.expect = Some(line_level + 1);
+        }
+        "while" if s.top().is_some_and(|f| f.kind == Fk::Do) => {
+            s.do_while = true;
+            s.open = true;
+            s.open_depth = s.depth;
+        }
+        "assert" | "assume" | "cover" | "expect" => {
+            // An immediate or concurrent assertion: its action block like an `if`'s body, and
+            // its `else` with it.
+            s.hdr = line_level;
+            if let Some(ifs) = s.ifs_mut() {
+                ifs.push(line_level);
+            }
+            s.open = true;
+            s.open_depth = s.depth;
+            if next == Some("(") {
+                s.header = Some(s.depth);
+            } else {
+                s.pending_header = true;
+            }
+        }
         "else" => {
             if let Some(ifs) = s.ifs_mut() {
                 ifs.pop();

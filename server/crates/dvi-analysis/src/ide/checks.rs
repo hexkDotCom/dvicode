@@ -620,9 +620,35 @@ impl Search<'_> {
         let toks = self.file_tokens(o.span.file)?;
         let at = toks.partition_point(|t| t.span.start < o.span.start);
         let k = insts.partition_point(|x| x.0.start <= o.span.start);
-        // Instances of one statement share its start: the one whose list holds the reference.
-        let (inst, items, slot, first, end) = insts[..k].iter().rev().take(64).filter(|x| x.0.end >= o.span.end).find_map(|x| {
-            let inst = DeclRef { unit: o.unit, decl: x.1 };
+        // Instances of one statement share its start: the one named before the `(` around the
+        // reference (through a `.port(...)` and a concatenation).
+        let mut open = super::drivers::enclosing_paren(&toks, at)?;
+        for _ in 0..64 {
+            if open >= 3 && toks[open - 1].kind == TokKind::Ident && toks[open - 2].is_punct(".") && (toks[open - 3].is_punct("(") || toks[open - 3].is_punct(",")) {
+                open = super::drivers::enclosing_paren(&toks, open - 2)?;
+            } else {
+                break;
+            }
+        }
+        let mut c = open.checked_sub(1)?;
+        // An array of instances: `u[3:0] (...)`.
+        while toks.get(c).is_some_and(|t| t.is_punct("]")) {
+            let mut d = 0i32;
+            loop {
+                if toks[c].is_punct("]") {
+                    d += 1;
+                } else if toks[c].is_punct("[") {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                c = c.checked_sub(1)?;
+            }
+            c = c.checked_sub(1)?;
+        }
+        let name_at = toks.get(c)?.span;
+        let (inst, items, slot, first, end) = insts[..k].iter().rev().filter(|x| x.0.end >= o.span.end).map(|x| DeclRef { unit: o.unit, decl: x.1 }).find(|r| a.decl(*r).name_span == name_at).and_then(|inst| {
             let (_, items) = Self::connection_list(&toks, a.decl(inst).name_span)?;
             let (slot, &(first, end)) = items.iter().enumerate().find(|(_, (f, e))| *f <= at && at < *e)?;
             Some((inst, items.clone(), slot, first, end))
@@ -945,6 +971,10 @@ fn header_ports(a: &Analysis, def: DeclRef) -> Option<Vec<String>> {
         return None;
     }
     let (items, _) = list(&toks, j);
+    // A macro may add ports: their positions are not known.
+    if items.iter().any(|&(f, e)| toks[f..e].iter().any(|t| t.kind == TokKind::Directive)) {
+        return None;
+    }
     Some(
         items
             .iter()

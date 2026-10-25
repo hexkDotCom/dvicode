@@ -2809,7 +2809,7 @@ fn inherited_methods_are_offered_with_their_signatures_and_pure_ones_implemented
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(sorted, [("build".into(), false), ("check".into(), true), ("new".into(), false), ("report".into(), false), ("run".into(), false), ("size".into(), true)], "{names:?}");
-    let text = |n: &str| a.override_text(&a.overridable_methods(class).into_iter().find(|o| a.decl(o.method).name == n).unwrap(), "  ", "
+    let text = |n: &str| a.override_text(&a.overridable_methods(class).into_iter().find(|o| a.decl(o.method).name == n).unwrap(), class, "  ", "
 ", false).unwrap();
     assert_eq!(text("run"), "virtual task run();\nendtask", "an empty base body: no super call");
     assert_eq!(text("report"), "virtual function void report(string s);\n  super.report(s);\nendfunction", "the body outside the class counts");
@@ -2889,7 +2889,7 @@ fn overrides_follow_the_class_chain_and_its_parameters() {
     // `f` is b_c's (still virtual, not pure); the interface's `f` is defined by b_c; `h` is not.
     assert!(!get("f").pure && a.decl(get("f").owner).name == "b_c");
     assert!(get("h").pure);
-    let text = |o: &dvi_analysis::ide::overrides::Overridable| a.override_text(o, "  ", "\n", false).unwrap();
+    let text = |o: &dvi_analysis::ide::overrides::Overridable| a.override_text(o, c, "  ", "\n", false).unwrap();
     assert_eq!(text(&get("f")), "function void f();\n  super.f();\nendfunction");
     assert_eq!(text(&get("g")), "virtual function string g(string s = \" void \");\n  return super.g(s);\nendfunction", "returns a value");
     // b_c has no constructor: an implicit one, not a_c's.
@@ -4093,3 +4093,94 @@ fn drivers_and_loads_scale_linearly_and_survive_malformed_nesting() {
     let (l, _, _) = access_lines(&a, fc, word_at(&nested, "logic s", "s"), false);
     assert_eq!(l.len(), 1);
 }
+
+// ------------------------------------------------------------------ general review 1
+
+#[test]
+fn register_models_survive_deep_expressions_unfinished_loops_and_follow_widths() {
+    std::thread::Builder::new().stack_size(16 << 20).spawn(register_case).unwrap().join().unwrap();
+}
+
+fn register_case() {
+    let deep = format!("{}0{}", "1+(".repeat(20_000), ")".repeat(20_000));
+    let src = format!(
+        "virtual class uvm_reg_block; endclass\nvirtual class uvm_reg; endclass\nvirtual class uvm_mem; endclass\nclass uvm_reg_map; endclass\nclass r_t extends uvm_reg;\n  function new(string name = \"r_t\"); super.new(name, 32, 0); endfunction\nendclass\nclass m_t extends uvm_mem;\n  function new(string name = \"m_t\"); super.new(name, 4, 32, \"RW\", 0); endfunction\nendclass\nclass top_block extends uvm_reg_block;\n  rand r_t a;\n  m_t mem;\n  function new(string name = \"top_block\"); super.new(name); endfunction\n  virtual function void build();\n    int unsigned off = 32'hffff_ffff + 32'd1;\n    if (0) lock_model();\n    default_map = create_map(\"map\", 0, 4, UVM_LITTLE_ENDIAN);\n    a = r_t::type_id::create(\"a\");\n    a.configure(this, null, \"\");\n    default_map.add_reg(a, off, \"RW\");\n    mem = m_t::type_id::create(\"mem\");\n    mem.configure(this, \"\");\n    default_map.add_mem(mem, 'h100, \"RW\");\n    for (\n  endfunction\nendclass\n"
+    );
+    // The deep expression in a file of its own (the parser stops a file nested too deeply).
+    let deep_src = format!("class deep_block extends uvm_reg_block;\n  function new(string name = \"deep_block\"); super.new(name); endfunction\n  virtual function void build();\n    default_map = create_map(\"map\", {deep}, 4, UVM_LITTLE_ENDIAN);\n  endfunction\nendclass\n");
+    let (a, _) = project("review1ral", &[("ral.sv", &src), ("deep.sv", &deep_src)]);
+    let (blocks, _) = a.register_blocks();
+    let block = |n: &str| *blocks.iter().find(|b| a.decl(**b).name == n).unwrap();
+    // A deep expression: no crash, just no value.
+    let _ = a.register_model(block("deep_block"));
+    let model = a.register_model(block("top_block"));
+    let hits = |x: u128| a.registers_at(&model, x).into_iter().map(|h| h.path.join(".")).collect::<Vec<_>>();
+    assert_eq!(hits(0), ["top_block.map.a"], "an int unsigned local is cut to 32 bits; a lock in a branch does not stop the model; an unfinished `for (` stops quietly");
+    assert_eq!(hits(0x10d), ["top_block.map.mem"], "a byte of the memory's last word");
+}
+
+#[test]
+fn constant_functions_literals_strings_and_bits_are_evaluated_honestly() {
+    // On a stack the size of the engine's worker threads (deep nesting is parsed there).
+    std::thread::Builder::new().stack_size(16 << 20).spawn(constant_functions_case).unwrap().join().unwrap();
+}
+
+fn constant_functions_case() {
+    let nested = format!("{}return 1;{}", "begin ".repeat(5_000), " end".repeat(5_000));
+    let src = format!(
+        "module leaf; endmodule\nmodule top;\n  function automatic int f();\n    {nested}\n  endfunction\n  localparam P = f();\n  localparam Q = 'h1_0000_0000;\n  parameter string S = \"\\141\";\n  int arr[4];\n  localparam N = $bits(arr);\n  if (Q != 0) begin : wide\n    leaf u();\n  end\n  if (S == \"a\") begin : decoded\n    leaf v();\n  end\nendmodule\n"
+    );
+    let (a, _) = project("review1elab", &[("t.sv", &src)]);
+    let (t, _) = a.design_tree(Some("top"), &dvi_analysis::ide::views::TreeQuery::new(100));
+    let p = |n: &str| t[0].params.iter().find(|x| x.name == n).map(|x| (x.value.clone(), x.why.clone())).unwrap();
+    assert_eq!(p("P").0, None, "nested too deeply: not evaluated, no crash");
+    assert_eq!(p("Q").0.as_deref(), Some("4294967296"), "an unsized based number keeps its width");
+    assert_eq!(p("S").0.as_deref(), Some("\"a\""), "escapes decoded");
+    assert_eq!(p("N").1.as_deref(), Some("`$bits` of an unpacked array"));
+    let names: Vec<&str> = t[0].children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["wide", "decoded"]);
+}
+
+#[test]
+fn override_text_keeps_specializations_escapes_and_package_names() {
+    let src = "package p;\n  typedef int value_t;\n  class box #(type T = int); endclass\n  virtual class base #(type T = int);\n    pure virtual function value_t f();\n    virtual function void g(T \\a.b , int y); endfunction\n    virtual function int h; input int x; return x; endfunction\n  endclass\nendpackage\nclass child extends p::base #(.T(p::box#(int)));\nendclass\n";
+    let (a, _) = project("review1ovr", &[("t.sv", src)]);
+    let class = {
+        let u = a.unit(a.units_for(a.project_files()[0])[0]);
+        let d = u.parsed.decls.iter().position(|d| d.name == "child").unwrap();
+        dvi_analysis::DeclRef { unit: u.id, decl: d as u32 }
+    };
+    let os = a.overridable_methods(class);
+    let text = |n: &str| os.iter().find(|o| o.name == n).and_then(|o| a.override_text(o, class, "  ", "\n", false));
+    assert_eq!(text("f").as_deref(), Some("virtual function p::value_t f();\nendfunction"), "a package's type the class does not see: qualified");
+    assert_eq!(text("g").as_deref(), Some("virtual function void g(p::box#(int) \\a.b , int y);\nendfunction"), "the named specialization whole; an escaped argument");
+    assert_eq!(text("h"), None, "a non-ANSI header: not offered");
+}
+
+#[test]
+fn instance_lists_assertions_and_drivers_review_cases() {
+    // `u(,,)`: no "Connect missing ports".
+    let src = "module m(input a, input b, input c); endmodule\nmodule top;\n  logic x, y;\n  m u(,,);\nendmodule\n";
+    let (a, root) = project("review1inst", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let titles: Vec<String> = a.instance_actions(f, src.find("u(,,)").unwrap() as u32).into_iter().map(|r| r.title).collect();
+    assert!(!titles.iter().any(|t| t.starts_with("Connect")), "{titles:?}");
+    // An assertion found through the 65th instance of one statement.
+    let insts: String = (1..65).map(|i| format!(", u{i}(y)")).collect();
+    let src = format!("module c(input logic p);\n  a_p: assert property (p);\nendmodule\nmodule top;\n  logic x, y;\n  c u0(x){insts};\nendmodule\n");
+    let (a, root) = project("review1checks", &[("t.sv", &src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let r = a.checks_at(f, src.find("logic x").unwrap() as u32 + 6).unwrap();
+    assert_eq!(r.hits.len(), 1, "{:?}", r.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    // Increments in an expression statement and a condition; a write through another instance.
+    let src = "module child(output logic y); endmodule\nmodule top;\n  int i;\n  logic a, b;\n  child u0(a), u1(b);\n  assign u1.y = 1'b1;\n  initial begin\n    $display(i++);\n    if (i-- > 0) ;\n  end\nendmodule\n";
+    let (a, root) = project("review1drv", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let (l, _, _) = access_lines(&a, f, word_at(src, "int i", "i"), true);
+    assert_eq!(l, ["writes increment line 8 in initial", "writes increment line 9 in initial"]);
+    let (l, _, _) = access_lines(&a, f, word_at(src, "logic a", "a"), true);
+    assert_eq!(l, ["connections y of u0 (output) line 5"], "u1.y is not u0's");
+}
+
+
+

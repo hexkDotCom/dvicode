@@ -129,7 +129,7 @@ impl Analysis {
             if !starts_like(&o.name, prefix) {
                 continue;
             }
-            let Some(text) = self.override_text(&o, "	", "
+            let Some(text) = self.override_text(&o, class, "	", "
 ", true) else { continue };
             let what = if o.pure { "implement" } else { "override" };
             out.push(CompletionItem {

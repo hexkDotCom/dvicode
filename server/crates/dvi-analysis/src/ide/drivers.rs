@@ -74,7 +74,7 @@ fn system_writes(name: &str, k: usize) -> bool {
 
 /// The `(` around token `i`, through a concatenation's braces (not through an index's `[`:
 /// what is inside one is read).
-fn enclosing_paren(toks: &[Token], i: usize) -> Option<usize> {
+pub(crate) fn enclosing_paren(toks: &[Token], i: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut k = i;
     while k > 0 {
@@ -297,6 +297,15 @@ impl Walk<'_> {
         for o in occs {
             if self.stopped() {
                 break;
+            }
+            // Followed into one instance: a hierarchical name through another instance
+            // (`u1.y` while in `u0`) is that instance's signal, not this one's.
+            if o.seg > 0 {
+                if let (Some(inst), Some(head)) = (came_from, a.resolve_ref(o.unit, o.rid, 0)) {
+                    if a.decl(head).kind == DeclKind::Instance && a.decl_key(a.canonical(head)) != a.decl_key(a.canonical(inst)) {
+                        continue;
+                    }
+                }
             }
             if let Some(s) = self.classify(o, target, ctx, class_handle, skip, depth) {
                 out.push(s);

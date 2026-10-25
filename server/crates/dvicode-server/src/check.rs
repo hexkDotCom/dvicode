@@ -77,7 +77,11 @@ pub fn run(args: &[String]) -> i32 {
             "--fuzz-verbose" => fuzz.verbose = true,
             "--build" => {
                 i += 1;
-                build = args.get(i).map(PathBuf::from);
+                let Some(b) = args.get(i) else {
+                    eprintln!("check: --build needs a build file");
+                    return 2;
+                };
+                build = Some(PathBuf::from(b));
             }
             "-q" | "--quiet" => quiet = true,
             "--max" => {
@@ -106,7 +110,8 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--format-check" | "--format" | "--format-twice" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--format-check" => queries.push((a.to_string(), String::new())),
+            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--format" | "--format-twice" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -209,8 +214,13 @@ pub fn run(args: &[String]) -> i32 {
         "dvicode check: {} top files, {} files, {} declarations, {} macros, {} packages, {} classes, {} design elements; config {} ms, build {} ms",
         st.top_files, st.files, st.declarations, st.macros, st.packages, st.classes, st.modules, cfg_ms, st.build_ms
     );
+    // A source or include the build names and that does not exist: nothing of it was checked.
+    let mut missing = 0usize;
     for p in &a.setup.config.problems {
         eprintln!("{}:{}: build config: {}", p.file.display(), p.line + 1, p.message);
+        if p.message.starts_with("File not found") {
+            missing += 1;
+        }
     }
     let t1 = std::time::Instant::now();
     let mut counts: FxHashMap<&'static str, usize> = FxHashMap::default();
@@ -271,7 +281,7 @@ pub fn run(args: &[String]) -> i32 {
     if let Ok(mut c) = current.lock() {
         c.0.clear();
     }
-    if errors > 0 {
+    if errors > 0 || missing > 0 {
         1
     } else {
         0

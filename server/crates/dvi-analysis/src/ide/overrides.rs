@@ -175,18 +175,20 @@ impl Analysis {
     /// The definition overriding `o`, its body indented by `indent` (one level), lines ending
     /// with `nl`, with `$0` (a snippet's cursor) in the body when `snippet`. `None` when its
     /// header cannot be read.
-    pub fn override_text(&self, o: &Overridable, indent: &str, nl: &str, snippet: bool) -> Option<String> {
+    /// `into`: the class it goes in (names it cannot see are qualified).
+    pub fn override_text(&self, o: &Overridable, into: DeclRef, indent: &str, nl: &str, snippet: bool) -> Option<String> {
         let esc = |s: &str| if snippet { s.replace('\\', "\\\\").replace('$', "\\$").replace('}', "\\}") } else { s.to_string() };
         let cursor = if snippet { format!("{indent}$0{nl}") } else { String::new() };
         if o.implicit_new {
             return Some(format!("function new();{nl}{indent}super.new();{nl}{cursor}endfunction"));
         }
-        let (header, returns) = self.method_header(o.method, &o.subst)?;
+        let (header, returns) = self.method_header(o.method, &o.subst, into)?;
         let d = self.decl(o.method);
         let task = d.kind == DeclKind::Task;
         let u = self.unit(o.method.unit);
-        let args: Vec<String> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| c.kind == DeclKind::Argument).map(|c| c.name.to_string()).collect();
-        let call = format!("super.{}({})", d.name, args.join(", "));
+        // Names as written (escaped ones with their terminating space).
+        let args: Vec<String> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| c.kind == DeclKind::Argument).map(|c| super::instances::ident(&c.name)).collect();
+        let call = format!("super.{}({})", super::instances::ident(&d.name), args.join(", "));
         // A call of the base's version: always in a constructor; else unless that version is
         // known to do nothing (pure, or an empty body).
         let delegate = d.name == "new" || !o.pure && self.has_body(o.method) != Some(false);
@@ -211,7 +213,7 @@ impl Analysis {
     /// The header of a method as written (`virtual function void build_phase(uvm_phase phase);`),
     /// on one line, without `extern` or `pure`, with the owner's parameters replaced as in
     /// `subst`; and whether it returns a value.
-    fn method_header(&self, m: DeclRef, subst: &Substitution) -> Option<(String, bool)> {
+    fn method_header(&self, m: DeclRef, subst: &Substitution, into: DeclRef) -> Option<(String, bool)> {
         let d = self.decl(m);
         let text = self.file_text(d.span.file)?;
         let src = text.get(d.span.start as usize..d.span.end as usize)?;
@@ -219,6 +221,11 @@ impl Analysis {
         let semi = header_end(&toks)?;
         let toks = &toks[..=semi];
         let f = toks.iter().position(|t| t.is_kw("function") || t.is_kw("task"))?;
+        // Arguments declared in the body (a non-ANSI header): not copied, so not offered.
+        let has_args = self.unit(m.unit).parsed.decl(m.decl).children.iter().any(|c| self.unit(m.unit).parsed.decl(*c).kind == DeclKind::Argument);
+        if has_args && !toks[f..].iter().any(|t| t.is_punct("(")) {
+            return None;
+        }
         // `function [automatic|static] void name(...)`
         let returns = toks[f].is_kw("function") && d.name != "new" && !toks[f + 1..].iter().find(|t| !t.is_kw("automatic") && !t.is_kw("static")).is_some_and(|t| t.is_kw("void"));
         // The source spelling of each token (backticks, escaped names), one space where the
@@ -237,15 +244,48 @@ impl Analysis {
             }
             match subst.get(t.text.as_str()).filter(|_| t.kind == TokKind::Ident) {
                 Some(v) => out.push_str(v),
-                None => out.push_str(spelled),
+                None => {
+                    // A package's name the class it goes in does not see: qualified.
+                    if let Some(p) = self.package_qualifier(m, d.span.start, t, &toks, into) {
+                        out.push_str(&p);
+                        out.push_str("::");
+                    }
+                    out.push_str(spelled);
+                }
             }
-            // An escaped name ends at white space.
+            // An escaped name ends at white space (the one after it in the source counts).
             if spelled.starts_with('\\') {
                 out.push(' ');
+                prev_end = Some(t.span.end + 1);
+                continue;
             }
             prev_end = Some(t.span.end);
         }
         Some((out, returns))
+    }
+
+    /// For a name in method `m`'s header (`t`, offsets from `base`): the package to qualify it
+    /// with, when it is a package's type or constant that class `into` does not see by that
+    /// name.
+    fn package_qualifier(&self, m: DeclRef, base: u32, t: &dvi_syntax::Token, toks: &[dvi_syntax::Token], into: DeclRef) -> Option<String> {
+        if t.kind != TokKind::Ident {
+            return None;
+        }
+        let k = toks.iter().position(|x| std::ptr::eq(x, t))?;
+        if k > 0 && toks[k - 1].is_punct("::") {
+            return None;
+        }
+        let file = self.decl(m).span.file;
+        let at = dvi_syntax::Span::new(file, base + t.span.start, base + t.span.end);
+        let r = self.resolve_at_span(m.unit, at)?;
+        let rd = self.decl(r);
+        let parent = rd.parent.map(|p| DeclRef { unit: r.unit, decl: p })?;
+        if self.decl(parent).kind != DeclKind::Package {
+            return None;
+        }
+        let key = self.decl_key(self.canonical(r));
+        let seen = self.lookup(into.unit, into.decl, &t.text).map(|x| self.decl_key(self.canonical(x)));
+        (seen != Some(key)).then(|| self.decl(parent).name.to_string())
     }
 
     /// Whether the definition of `m` (its body outside the class, for a prototype) does
@@ -319,7 +359,7 @@ impl Analysis {
             insert.push_str(nl);
         }
         for o in &missing {
-            let t = self.override_text(o, &step, "\n", false)?;
+            let t = self.override_text(o, class, &step, "\n", false)?;
             insert.push_str(nl);
             for line in t.lines() {
                 insert.push_str(&member_indent);
@@ -377,7 +417,10 @@ fn specialization_args(written: &str) -> Vec<(Option<String>, String)> {
         .map(|s| {
             let s = s.trim().to_string();
             match s.strip_prefix('.').and_then(|r| r.split_once('(')) {
-                Some((n, v)) => (Some(n.trim().to_string()), v.trim_end().trim_end_matches(')').trim().to_string()),
+                Some((n, v)) => {
+                    let v = v.trim_end();
+                    (Some(n.trim().to_string()), v.strip_suffix(')').unwrap_or(v).trim().to_string())
+                }
                 None => (None, s),
             }
         })

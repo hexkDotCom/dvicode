@@ -80,7 +80,8 @@ impl Client {
     }
 
     fn start_with(root: &Path, options: Value, hooks: Hooks) -> (Client, Value) {
-        Client::start_full(root, options, hooks, json!({}))
+        // As VS Code: versioned document edits.
+        Client::start_full(root, options, hooks, json!({ "workspace": { "workspaceEdit": { "documentChanges": true } } }))
     }
 
     /// [`Client::start_with`] for a client with `capabilities`.
@@ -549,6 +550,18 @@ fn formatting_gives_whitespace_edits_by_the_settings_and_the_project_file() {
     std::fs::write(root.join(".dvicode/format.json"), r#"{ "enable": false }"#).unwrap();
     let off = c.request_ok("textDocument/formatting", json!({ "textDocument": { "uri": uri }, "options": options }));
     assert!(off.is_null(), "{off}");
+    c.shutdown();
+}
+
+#[test]
+fn a_client_without_document_changes_gets_plain_changes() {
+    let m = "module m;\n  logic sig;\n  assign sig = 1'b0;\nendmodule\n";
+    let root = project("plainedits", &[("m.sv", m)]);
+    let (mut c, _) = Client::start_full(&root, Value::Null, Hooks::default(), json!({}));
+    let uri = uri(&root, "m.sv");
+    let r = c.request_ok("textDocument/rename", json!({ "textDocument": { "uri": uri }, "position": at(m, "sig;"), "newName": "s2" }));
+    assert!(r.get("documentChanges").is_none(), "{r}");
+    assert_eq!(r["changes"][uri.as_str()].as_array().map(|e| e.len()), Some(2), "{r}");
     c.shutdown();
 }
 

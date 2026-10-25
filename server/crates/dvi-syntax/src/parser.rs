@@ -3279,7 +3279,10 @@ impl<'t> Parser<'t> {
             "if" => {
                 self.bump();
                 if self.at_p("(") {
+                    let (from, r0) = (self.pos, self.refs_len());
                     self.paren_group(RefKind::Expr);
+                    let (to, r1) = (self.pos, self.refs_len());
+                    self.nested_incdec(from, to, r0, r1);
                 } else {
                     let sp = self.tok().span;
                     self.error(sp, "Expected '(' after 'if'");
@@ -3842,6 +3845,9 @@ impl<'t> Parser<'t> {
         } else if pre || (to > from && (self.toks[to - 1].is_punct("++") || self.toks[to - 1].is_punct("--"))) {
             let targets = self.lhs_targets(from, to, r0, r1);
             self.push_access(AccessKind::IncDec, start, targets, None);
+        } else {
+            // An expression statement (`$display(i++)`): the increments inside it.
+            self.nested_incdec(from, to, r0, r1);
         }
     }
 

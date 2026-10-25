@@ -218,6 +218,8 @@ pub struct AddressHit {
 #[derive(Clone, Default)]
 struct Env {
     locals: FxHashMap<String, Handle>,
+    /// The declared width of integral locals (`int unsigned off`): values assigned are cut.
+    widths: FxHashMap<String, u128>,
 }
 
 /// What `this` is in a method being interpreted.
@@ -371,7 +373,17 @@ impl Analysis {
             }
         }
         used.sort();
-        let overlaps: Vec<usize> = used.windows(2).filter(|w| w[1].0 < w[0].1).flat_map(|w| [w[0].2, w[1].2]).collect();
+        // Every pair that overlaps: each field against the ones still open where it starts.
+        let mut overlaps: Vec<usize> = Vec::new();
+        let mut open: Vec<(u128, usize)> = Vec::new();
+        for &(lo, hi, i) in &used {
+            open.retain(|(end, _)| *end > lo);
+            for &(_, j) in &open {
+                overlaps.push(i);
+                overlaps.push(j);
+            }
+            open.push((hi, i));
+        }
         for i in overlaps {
             if !fields[i].notes.iter().any(|n| n == "overlaps another field") {
                 fields[i].notes.push("overlaps another field".into());
@@ -397,7 +409,8 @@ impl Analysis {
                 let (Some(lo), Some(hi)) = (at(a.lo), at(a.hi)) else { return };
                 let hit = |note: Option<String>| AddressHit { path: path.to_vec(), map: model.maps[map].name.clone(), address: range_text(lo, hi), note };
                 if r.memory {
-                    if (lo..=hi).contains(&addr) {
+                    let last = a.byte_width.and_then(|bw| hi.checked_add(bw.saturating_sub(1))).unwrap_or(hi);
+                    if (lo..=last).contains(&addr) {
                         exact.push(hit(Some("in this memory".into())));
                     }
                     return;
@@ -846,6 +859,10 @@ impl<'a> Interp<'a> {
             // Loops: unrolled when their bounds are constant.
             if (x.is_kw("for") || x.is_kw("foreach")) && t.get(k + 1).is_some_and(|p| p.is_punct("(")) {
                 let hdr_end = skip_group(t, k + 1);
+                // An unfinished header (while typing): nothing more to interpret.
+                if hdr_end > b || hdr_end < k + 3 || !t.get(hdr_end - 1).is_some_and(|c| c.is_punct(")")) {
+                    return;
+                }
                 let body_end = statement_end(t, hdr_end, b);
                 self.exec_loop(t, k, hdr_end, body_end, m, env, this, depth, frames);
                 k = body_end;
@@ -875,7 +892,9 @@ impl<'a> Interp<'a> {
             if !self.spend(end.saturating_sub(k).max(1)) {
                 return;
             }
-            let conditional = frames.is_some_and(|f| in_condition(f, k));
+            // Under a condition: by the statement map, or (when the map is cut short by code
+            // being typed) right after an `if (...)`, an `else` or a case label.
+            let conditional = frames.is_some_and(|f| in_condition(f, k)) || k.checked_sub(1).is_some_and(|p| t[p].is_punct(")") || t[p].is_kw("else") || t[p].is_punct(":"));
             self.exec_statement(&t[k..end.min(t.len())], m, env, this, depth, conditional);
             k = end.max(k + 1);
         }
@@ -1048,6 +1067,9 @@ impl<'a> Interp<'a> {
         if let Some(eq) = top_level(s, "=") {
             let lhs = &s[..eq];
             let rhs = &s[eq + 1..];
+            if let (Some(w), Some(name)) = (declared_width(lhs), lhs.last().filter(|x| x.is_ident())) {
+                env.widths.insert(name.text.to_string(), w);
+            }
             let target = assigned_name(lhs, self, m, env, this);
             if let Some(target) = target {
                 self.assign(&target, rhs, m, env, this, depth, conditional, s[0].span);
@@ -1057,10 +1079,14 @@ impl<'a> Interp<'a> {
         // A declaration without a value (`uvm_reg_map m;`, `int unsigned i, j;`): locals.
         let decl_tok = |x: &Token| matches!(x.kind, TokKind::Ident | TokKind::Keyword | TokKind::Number) || ["[", "]", ":", ",", "::"].iter().any(|p| x.is_punct(p));
         if s.len() >= 2 && s.iter().all(decl_tok) && s[0].kind != TokKind::Number && s.last().is_some_and(|x| x.is_ident()) {
+            let width = declared_width(s);
             for (i, x) in s.iter().enumerate() {
                 let next = s.get(i + 1);
                 if i > 0 && x.is_ident() && next.is_none_or(|n| n.is_punct(",") || n.is_punct("[")) {
                     env.locals.insert(x.text.to_string(), Handle::Val(Val::Unknown(x.text.to_string())));
+                    if let Some(w) = width {
+                        env.widths.insert(x.text.to_string(), w);
+                    }
                 }
             }
             return;
@@ -1335,7 +1361,10 @@ impl<'a> Interp<'a> {
             return;
         }
         if target.local {
-            let v = self.eval(rhs, m, env, this);
+            let v = match (self.eval(rhs, m, env, this), env.widths.get(&target.key)) {
+                (Val::Num(n), Some(w)) => Val::Num(mask(n, Some(*w))),
+                (v, _) => v,
+            };
             env.locals.insert(target.key.clone(), Handle::Val(v));
         }
     }
@@ -1448,7 +1477,8 @@ impl<'a> Interp<'a> {
         if on_self {
             match method {
                 "lock_model" => {
-                    if matches!(this, This::Block(0)) {
+                    // Only a lock that surely runs ends the construction.
+                    if matches!(this, This::Block(0)) && !conditional {
                         self.locked = true;
                     }
                 }
@@ -1621,7 +1651,7 @@ impl<'a> Interp<'a> {
             }
         }
         let text = super::views::tokens_text(t);
-        let mut ev = Eval { it: self, m, env, this, t, k: 0 };
+        let mut ev = Eval { it: self, m, env, this, t, k: 0, nest: 0 };
         match ev.expr(0) {
             Some(v) if ev.k == t.len() => Val::Num(v),
             _ => Val::Unknown(text),
@@ -1802,6 +1832,28 @@ fn bind_obj(args: &[(Option<String>, Option<Obj>)], names: &[&str], i: usize) ->
     args.get(i).filter(|(n, _)| n.is_none()).and_then(|(_, v)| *v)
 }
 
+/// The width of an integral type at the start of a declaration (`int unsigned x`, `bit [7:0] y`),
+/// when it is a keyword type with constant bounds.
+fn declared_width(t: &[Token]) -> Option<u128> {
+    let base = t.first().filter(|x| x.kind == TokKind::Keyword)?;
+    let w = match base.text.as_str() {
+        "int" | "integer" => 32,
+        "shortint" => 16,
+        "longint" | "time" => 64,
+        "byte" => 8,
+        "bit" | "logic" | "reg" => {
+            // A range `[a:b]` of numbers, or one bit.
+            let k = t.iter().position(|x| x.is_punct("["))?;
+            match (t.get(k + 1).and_then(|x| tokens_number(std::slice::from_ref(x))), t.get(k + 2).filter(|x| x.is_punct(":")), t.get(k + 3).and_then(|x| tokens_number(std::slice::from_ref(x))), t.get(k + 4).filter(|x| x.is_punct("]"))) {
+                (Some(a), Some(_), Some(b), Some(_)) => a.abs_diff(b) + 1,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(w)
+}
+
 fn mask(v: u128, size: Option<u128>) -> u128 {
     match size {
         Some(s) if s < 128 => v & ((1u128 << s) - 1),
@@ -1850,6 +1902,8 @@ struct Eval<'e, 'a> {
     this: This,
     t: &'e [Token],
     k: usize,
+    /// Parentheses and unary operators entered.
+    nest: usize,
 }
 
 impl Eval<'_, '_> {
@@ -1905,6 +1959,13 @@ impl Eval<'_, '_> {
     }
 
     fn atom(&mut self) -> Option<u128> {
+        self.nest += 1;
+        let r = if self.nest > 200 { None } else { self.atom_inner() };
+        self.nest -= 1;
+        r
+    }
+
+    fn atom_inner(&mut self) -> Option<u128> {
         let x = self.t.get(self.k)?.clone();
         self.k += 1;
         if x.is_punct("(") {

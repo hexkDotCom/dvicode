@@ -337,6 +337,14 @@ struct Server {
     /// Build and argument files open in the editor, and when to check them again.
     build_docs: FxHashMap<Url, BuildDoc>,
     inspect_at: Option<Instant>,
+    /// A hint refresh held back by the once-a-second limit: sent when it allows.
+    hints_due: Option<Instant>,
+    /// The client applies workspace edits given as `documentChanges` (else as `changes`).
+    document_changes: bool,
+    /// The request creating the build's progress token, until the client answers it.
+    progress_request: Option<RequestId>,
+    /// The client accepted the build's progress token: progress may be reported on it.
+    progress_live: bool,
     /// Numbers the checks of build documents (`BuildDoc::seq`).
     inspect_seq: u64,
     /// The update thread's jobs, the one running (or queued), and the last job number.
@@ -425,6 +433,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let hint_kinds = params.initialization_options.as_ref().map(hint_kinds_of).unwrap_or_default();
     let format_settings = params.initialization_options.as_ref().and_then(|v| v.get("format")).cloned().unwrap_or(Value::Null);
     let hint_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false);
+    let document_changes = params.capabilities.workspace.as_ref().and_then(|w| w.workspace_edit.as_ref()).and_then(|e| e.document_changes).unwrap_or(false);
     log::info!("workspace root: {:?}; settings: {:?}", root, settings);
     let vfs = Arc::new(Vfs::new());
     let empty_setup = Arc::new(ProjectSetup::new(root.as_deref().unwrap_or(std::path::Path::new("/")), Default::default(), Default::default()));
@@ -478,6 +487,10 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         logged_at: Instant::now(),
         build_docs: FxHashMap::default(),
         inspect_at: None,
+        hints_due: None,
+        progress_request: None,
+        progress_live: false,
+        document_changes,
         inspect_seq: 0,
         update_tx,
         update: None,
@@ -513,6 +526,9 @@ impl Server {
             if let Some(t) = self.inspect_at {
                 timeout = timeout.min(t.saturating_duration_since(Instant::now()));
             }
+            if let Some(t) = self.hints_due {
+                timeout = timeout.min(t.saturating_duration_since(Instant::now()));
+            }
             select! {
                 recv(conn.receiver) -> msg => {
                     let Ok(msg) = msg else {
@@ -543,7 +559,24 @@ impl Server {
                             crash::catch(&method, Some(&tx), || self.on_notification(n));
                         }
                         Message::Response(r) => {
-                            if r.error.is_some() && self.watch_request.as_ref() == Some(&r.id) {
+                            if self.progress_request.as_ref() == Some(&r.id) {
+                                self.progress_request = None;
+                                if r.error.is_none() && self.building {
+                                    self.progress_live = true;
+                                    self.notify(
+                                        "$/progress",
+                                        ProgressParams {
+                                            token: NumberOrString::String("dvicode-build".into()),
+                                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                                                title: "DVICode: building project".into(),
+                                                cancellable: Some(false),
+                                                message: None,
+                                                percentage: None,
+                                            })),
+                                        },
+                                    );
+                                }
+                            } else if r.error.is_some() && self.watch_request.as_ref() == Some(&r.id) {
                                 log::warn!("the editor did not take the watchers of the build's files: {:?}", r.error);
                                 self.watch_inputs = false;
                                 self.watched.clear();
@@ -584,6 +617,10 @@ impl Server {
             if self.inspect_at.is_some_and(|t| Instant::now() >= t) {
                 self.inspect_at = None;
                 self.inspect_build_docs();
+            }
+            if self.hints_due.is_some_and(|t| Instant::now() >= t) {
+                self.hints_due = None;
+                self.refresh_hints(true);
             }
         }
     }
@@ -665,7 +702,7 @@ impl Server {
     fn report_build_progress(&mut self) {
         let Some(p) = self.build_progress.clone() else { return };
         let (message, percentage) = (p.message(), p.percentage());
-        if self.progress && (self.reported.0 != message || self.reported.1 != percentage) {
+        if self.progress_live && (self.reported.0 != message || self.reported.1 != percentage) {
             self.notify(
                 "$/progress",
                 ProgressParams {
@@ -728,19 +765,10 @@ impl Server {
         self.logged_at = Instant::now();
         self.reported = (String::new(), 0);
         if self.progress {
-            self.request_client("window/workDoneProgress/create", WorkDoneProgressCreateParams { token: NumberOrString::String("dvicode-build".into()) });
-            self.notify(
-                "$/progress",
-                ProgressParams {
-                    token: NumberOrString::String("dvicode-build".into()),
-                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                        title: "DVICode: building project".into(),
-                        cancellable: Some(false),
-                        message: None,
-                        percentage: None,
-                    })),
-                },
-            );
+            // The progress begins once the client has accepted the token.
+            self.progress_live = false;
+            let id = self.request_client("window/workDoneProgress/create", WorkDoneProgressCreateParams { token: NumberOrString::String("dvicode-build".into()) });
+            self.progress_request = Some(id);
         }
         let (root, settings) = (self.root.clone(), self.settings.clone());
         let vfs = self.vfs.clone();
@@ -888,8 +916,10 @@ impl Server {
         }
     }
 
-    fn end_progress(&self) {
-        if self.progress {
+    fn end_progress(&mut self) {
+        // Ended only on a token the client accepted (a build may end before it answers).
+        self.progress_request = None;
+        if std::mem::take(&mut self.progress_live) {
             self.notify(
                 "$/progress",
                 ProgressParams {
@@ -1385,13 +1415,18 @@ impl Server {
                         self.changed_while_building.insert(path.clone());
                     }
                     if self.is_build_input(&path) {
+                        // Its new text, for the build and for the ranges of its problems.
+                        self.vfs.invalidate_all(&path);
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(500));
                         continue;
                     }
+                    let known = self.vfs.lookup(&path).is_some();
                     let ids = self.vfs.invalidate_all(&path);
                     // A new or deleted source changes what auto-configuration finds, which files
-                    // a build-file wildcard matches, and whether an `include resolves.
-                    if c.typ != FileChangeType::CHANGED && (auto || is_sv_file(&path)) {
+                    // a build-file wildcard matches, and whether an `include resolves; so does a
+                    // directory holding files of the build.
+                    let directory = !known && ids.iter().any(|id| !self.analysis.units_of_file(*id).is_empty());
+                    if c.typ != FileChangeType::CHANGED && (auto || is_sv_file(&path) || directory) {
                         self.rebuild_at = Some(Instant::now() + Duration::from_millis(1500));
                     }
                     for id in ids {
@@ -1452,9 +1487,15 @@ impl Server {
 
     /// Asks the client to request inlay hints again (at most once a second unless `now`).
     fn refresh_hints(&mut self, now: bool) {
-        if !self.hint_refresh || !now && self.hints_refreshed.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+        if !self.hint_refresh {
             return;
         }
+        if let Some(t) = self.hints_refreshed.filter(|t| !now && t.elapsed() < Duration::from_secs(1)) {
+            // Held back, not dropped: the last change's hints are asked for when it allows.
+            self.hints_due = Some(t + Duration::from_secs(1));
+            return;
+        }
+        self.hints_due = None;
         self.hints_refreshed = Some(Instant::now());
         self.request_client("workspace/inlayHint/refresh", Value::Null);
     }
@@ -1560,6 +1601,7 @@ impl Server {
         let (sender, running, hooks) = (self.sender.clone(), self.running.clone(), self.hooks.clone());
         let method = req.method.clone();
         let rid = id.clone();
+        let plain = !self.document_changes && matches!(method.as_str(), "textDocument/rename" | "textDocument/codeAction");
         let run = move |a: Arc<Analysis>| {
             rayon::spawn(move || {
                 let t0 = Instant::now();
@@ -1573,11 +1615,17 @@ impl Server {
                     }
                     let mut a = (*a).clone();
                     a.cancel = Some(cancel.clone());
-                    let resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
+                    let mut resp = match crash::catch(&method, Some(&sender), || f(&a, params)) {
                         Some(Ok(v)) => Response::new_ok(rid, v),
                         Some(Err(msg)) => Response::new_err(rid, ErrorCode::RequestFailed as i32, msg),
                         None => Response::new_err(rid, ErrorCode::InternalError as i32, format!("{method} failed")),
                     };
+                    // A client without `documentChanges`: the same edits as `changes`.
+                    if plain {
+                        if let Some(r) = resp.result.as_mut() {
+                            plain_edits(r);
+                        }
+                    }
                     if cancel.load(Ordering::Relaxed) {
                         cancelled(resp.id)
                     } else {
@@ -1784,10 +1832,12 @@ impl Server {
                 let settings = self.format_settings.clone();
                 let (id, sender) = (req.id.clone(), self.sender.clone());
                 rayon::spawn(move || {
-                    let result = match (text, format::options(&settings, path.as_deref(), &editor)) {
+                    // A panic is reported and answered with no edit, never left to the pool.
+                    let result = crash::catch("formatting", Some(&sender), || match (text, format::options(&settings, path.as_deref(), &editor)) {
                         (Some(text), Some(o)) => format::edits(&text, &o, lines).map_or(Value::Null, |e| json!(e)),
                         _ => Value::Null,
-                    };
+                    })
+                    .unwrap_or(Value::Null);
                     let _ = sender.send(Message::Response(Response::new_ok(id, result)));
                 });
             }
@@ -2349,3 +2399,27 @@ fn pos(a: &Analysis, uri: &Url, p: Position) -> Option<(FileId, u32)> {
 
 #[cfg(test)]
 mod tests;
+
+/// Workspace edits in `v` given as `documentChanges` (text edits only), given as `changes` by
+/// document instead, for a client that does not take the former.
+fn plain_edits(v: &mut Value) {
+    match v {
+        Value::Array(a) => a.iter_mut().for_each(plain_edits),
+        Value::Object(o) => {
+            let text_only = o.get("documentChanges").and_then(Value::as_array).is_some_and(|d| d.iter().all(|e| e.get("textDocument").is_some() && e.get("edits").is_some()));
+            if text_only {
+                let mut changes = serde_json::Map::new();
+                for e in o.remove("documentChanges").and_then(|d| if let Value::Array(a) = d { Some(a) } else { None }).unwrap_or_default() {
+                    let uri = e["textDocument"]["uri"].as_str().unwrap_or_default().to_string();
+                    let edits = e["edits"].as_array().cloned().unwrap_or_default();
+                    if let Value::Array(list) = changes.entry(uri).or_insert_with(|| Value::Array(Vec::new())) {
+                        list.extend(edits);
+                    }
+                }
+                o.insert("changes".into(), Value::Object(changes));
+            }
+            o.values_mut().for_each(plain_edits);
+        }
+        _ => {}
+    }
+}

@@ -359,7 +359,7 @@ impl P<'_> {
                 }
                 literal(&t.text)
             }
-            TokKind::String => Ok(Ex::Str(t.text.trim_matches('"').to_string())),
+            TokKind::String => Ok(Ex::Str(unescape(&t.text)?)),
             TokKind::Directive => {
                 if self.at("(") {
                     return unsupported(format!("the macro call `{}`", t.text));
@@ -467,6 +467,64 @@ impl P<'_> {
     }
 }
 
+/// A string literal's value: its escapes decoded (IEEE 1800 §5.9.1).
+fn unescape(text: &str) -> R<String> {
+    if text.starts_with("\"\"\"") {
+        return unsupported("a triple-quoted string");
+    }
+    let inner = text.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(text);
+    let mut out = String::new();
+    let mut it = inner.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('v') => out.push('\x0b'),
+            Some('f') => out.push('\x0c'),
+            Some('a') => out.push('\x07'),
+            Some(d @ '0'..='7') => {
+                let mut v = d.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    match it.peek().and_then(|x| x.to_digit(8)) {
+                        Some(x) => {
+                            v = v * 8 + x;
+                            it.next();
+                        }
+                        None => break,
+                    }
+                }
+                out.push(char::from_u32(v & 0xff).unwrap_or('?'));
+            }
+            Some('x') => {
+                let mut v = 0;
+                let mut n = 0;
+                while n < 2 {
+                    match it.peek().and_then(|x| x.to_digit(16)) {
+                        Some(x) => {
+                            v = v * 16 + x;
+                            it.next();
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if n == 0 {
+                    return unsupported("a string escape");
+                }
+                out.push(char::from_u32(v).unwrap_or('?'));
+            }
+            _ => return unsupported("a string escape"),
+        }
+    }
+    Ok(out)
+}
+
 /// The type of an integral type keyword.
 fn keyword_type(k: &str) -> Option<IntType> {
     let (width, signed, four) = match k {
@@ -516,12 +574,13 @@ fn literal(s: &str) -> R<Ex> {
     if digits.chars().any(|c| matches!(c, 'x' | 'X' | 'z' | 'Z' | '?')) {
         return unsupported("an x or z value");
     }
-    let width = size.unwrap_or(32);
+    let v = u128::from_str_radix(digits, radix).map_err(|_| bad())?;
+    // An unsized number is at least 32 bits, wider when its value needs it.
+    let width = size.unwrap_or_else(|| (128 - v.leading_zeros()).max(32));
     if width == 0 || width > MAX_WIDTH {
         return unsupported(format!("a {width}-bit value"));
     }
     // More digits than the size: cut (as a simulator does, with a warning).
-    let v = u128::from_str_radix(digits, radix).map_err(|_| bad())?;
     let v = (v & mask(width) as u128) as u64;
     Ok(Ex::Num(Val::Int { bits: v, width, signed }))
 }
@@ -1488,6 +1547,9 @@ impl<'a> Eval<'a> {
                             // A signal: its declared type.
                             if let Some(r) = self.a.resolve_at_span(unit, *sp) {
                                 if matches!(self.a.decl(r).kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port) {
+                                    if self.a.decl(r).unpacked_dims() > 0 {
+                                        return unsupported("`$bits` of an unpacked array");
+                                    }
                                     return self.signal_width(r, frame).map(|w| Val::int(w as i128, 32, true));
                                 }
                             }
@@ -1742,7 +1804,7 @@ impl<'a> Eval<'a> {
         }
         let end = t.iter().rposition(|x| x.is_kw("endfunction"))?;
         let body_toks = self.expand(&t[j + 1..end]);
-        let mut sp = StmtParser { e: self, t: &body_toks, k: 0, unit: r.unit, func: r };
+        let mut sp = StmtParser { e: self, t: &body_toks, k: 0, unit: r.unit, func: r, depth: 0 };
         let mut body = Vec::new();
         while sp.k < body_toks.len() {
             body.push(sp.stmt()?);
@@ -1878,6 +1940,8 @@ struct StmtParser<'e, 'a, 't> {
     unit: UnitId,
     /// The function parsed.
     func: DeclRef,
+    /// Statements being parsed inside each other.
+    depth: usize,
 }
 
 impl StmtParser<'_, '_, '_> {
@@ -1945,6 +2009,13 @@ impl StmtParser<'_, '_, '_> {
     }
 
     fn stmt(&mut self) -> Option<Stmt> {
+        self.depth += 1;
+        let r = if self.depth > MAX_NEST { None } else { self.stmt_inner() };
+        self.depth -= 1;
+        r
+    }
+
+    fn stmt_inner(&mut self) -> Option<Stmt> {
         let t = self.t.get(self.k)?.clone();
         if t.is_punct(";") {
             self.k += 1;

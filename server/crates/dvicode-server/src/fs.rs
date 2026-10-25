@@ -17,6 +17,9 @@ pub struct FsError {
     pub message: String,
 }
 
+/// Files read for the editor at most (a larger one is refused, not read whole).
+const MAX_READ: u64 = 512 << 20;
+
 fn err(e: std::io::Error, path: &Path) -> FsError {
     use std::io::ErrorKind::*;
     let code = match e.kind() {
@@ -126,7 +129,19 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
             if path.is_dir() {
                 return Err(FsError { code: "FileIsADirectory", message: path.display().to_string() });
             }
-            let b = std::fs::read(&path).map_err(|e| err(e, &path))?;
+            // A regular file of a bounded size (not a FIFO or a device that never ends).
+            let meta = std::fs::metadata(&path).map_err(|e| err(e, &path))?;
+            if !meta.is_file() {
+                return Err(FsError { code: "Unavailable", message: format!("not a regular file: {}", path.display()) });
+            }
+            if meta.len() > MAX_READ {
+                return Err(FsError { code: "Unavailable", message: format!("larger than {} MB: {}", MAX_READ >> 20, path.display()) });
+            }
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(&path).map_err(|e| err(e, &path))?, MAX_READ + 1), &mut b).map_err(|e| err(e, &path))?;
+            if b.len() as u64 > MAX_READ {
+                return Err(FsError { code: "Unavailable", message: format!("larger than {} MB: {}", MAX_READ >> 20, path.display()) });
+            }
             Ok(json!({ "content": base64::engine::general_purpose::STANDARD.encode(b) }))
         }
         "writeFile" => {
@@ -137,16 +152,27 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
                 return Err(FsError { code: "FileIsADirectory", message: path.display().to_string() });
             }
             let exists = path.exists();
-            if exists && !p.overwrite {
-                return Err(FsError { code: "FileExists", message: path.display().to_string() });
-            }
-            if !exists && !p.create {
-                return Err(FsError { code: "FileNotFound", message: path.display().to_string() });
-            }
             let data = base64::engine::general_purpose::STANDARD
                 .decode(p.content.as_bytes())
                 .map_err(|e| FsError { code: "Unavailable", message: format!("bad content: {e}") })?;
-            std::fs::write(&path, data).map_err(|e| err(e, &path))?;
+            // The flags are kept by the open itself (two writes at once cannot both create).
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true);
+            match (p.create, p.overwrite) {
+                (true, true) => o.create(true).truncate(true),
+                (true, false) => o.create_new(true),
+                (false, true) => o.truncate(true),
+                (false, false) => {
+                    let code = if exists { "FileExists" } else { "FileNotFound" };
+                    return Err(FsError { code, message: path.display().to_string() });
+                }
+            };
+            let mut f = o.open(&path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => FsError { code: "FileExists", message: path.display().to_string() },
+                std::io::ErrorKind::NotFound if !p.create => FsError { code: "FileNotFound", message: path.display().to_string() },
+                _ => err(e, &path),
+            })?;
+            std::io::Write::write_all(&mut f, &data).map_err(|e| err(e, &path))?;
             Ok(json!({ "created": !exists }))
         }
         "createDirectory" => {
@@ -166,8 +192,10 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
             let (from, to) = (path_of(&p.from)?, path_of(&p.to)?);
             std::fs::symlink_metadata(&from).map_err(|e| err(e, &from))?;
             // A change of case only (`a.sv` -> `A.sv`) names the same entry where case does not
-            // matter: nothing to replace.
-            let same = std::fs::canonicalize(&from).ok().is_some_and(|f| std::fs::canonicalize(&to).ok() == Some(f));
+            // matter: nothing to replace. (Not a link to the target: that is another entry.)
+            let same_dir = from.parent().and_then(|d| std::fs::canonicalize(d).ok()).is_some_and(|d| to.parent().and_then(|t| std::fs::canonicalize(t).ok()) == Some(d));
+            let case_only = from.file_name().zip(to.file_name()).is_some_and(|(a, b)| a != b && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase());
+            let same = same_dir && case_only && from.parent().is_some_and(dvi_project::fsx::ignores_case);
             if std::fs::symlink_metadata(&to).is_ok() && !same {
                 if !p.overwrite {
                     return Err(FsError { code: "FileExists", message: to.display().to_string() });

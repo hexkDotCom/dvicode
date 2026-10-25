@@ -60,7 +60,7 @@ pub fn options(settings: &Value, path: Option<&Path>, editor: &FormattingOptions
     };
     apply(settings, "settings");
     if let Some(p) = path.and_then(project_file) {
-        match std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+        match dvi_project::fsx::read(&p).ok().and_then(|t| serde_json::from_slice::<Value>(&t).ok()) {
             Some(v) => apply(&v, &p.display().to_string()),
             None => log::warn!("format: {} is not valid JSON (ignored)", p.display()),
         }
@@ -74,7 +74,8 @@ fn project_file(file: &Path) -> Option<std::path::PathBuf> {
     let mut n = 0;
     while let Some(d) = dir {
         let p = d.join(".dvicode").join("format.json");
-        if p.is_file() {
+        // Through the guarded reads: a network host the editor does not allow is not asked.
+        if dvi_project::fsx::is_file(&p) {
             return Some(p);
         }
         n += 1;

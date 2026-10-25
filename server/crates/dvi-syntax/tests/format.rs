@@ -150,7 +150,9 @@ endclass
 
 #[test]
 fn indentation_follows_the_constructs() {
-    assert_eq!(fmt(MESSY, &Options::default()), MESSY_FORMATTED, "blocks, if/else, case items and bodies, fork, headers, a function, directives kept, a define and a block comment untouched, UVM macro pairs, a constraint and a covergroup");
+    let got = fmt(MESSY, &Options::default());
+    let diff: Vec<String> = got.lines().zip(MESSY_FORMATTED.lines()).enumerate().filter(|(_, (g, w))| g != w).map(|(i, (g, w))| format!("{}: {g:?} want {w:?}", i + 1)).collect();
+    assert!(diff.is_empty() && got == MESSY_FORMATTED, "blocks, if/else, case items and bodies, fork, headers, a function, directives kept, a define and a block comment untouched, UVM macro pairs, a constraint and a covergroup:\n{}", diff.join("\n"));
 }
 
 #[test]
@@ -219,4 +221,47 @@ fn a_range_formats_the_lines_it_touches() {
     let src = "module m;\nlogic a;\nlogic b;\nlogic c;\nendmodule\n";
     let f = format(src, &Options::default()).unwrap();
     assert_eq!(apply(src, &f, Some((2, 3))), "module m;\nlogic a;\n  logic b;\nlogic c;\nendmodule\n");
+}
+
+#[test]
+fn incomplete_and_non_ascii_text_does_not_break_the_scanner() {
+    // A lone backtick at the end, non-ASCII text in a triple-quoted string and after a `\`.
+    for src in ["module m;\nlogic a; `", "module m;\nstring s = \"\"\"é\"\"\";\nendmodule\n", "module m;\nx = \"\\é\";\nendmodule\n", "`"] {
+        let _ = format(src, &Options::default());
+    }
+}
+
+#[test]
+fn review_cases_of_the_formatter() {
+    let o = Options::default();
+    // An attribute before a module.
+    assert_eq!(fmt("(* keep = \"true\" *)\nmodule m;\nlogic x;\nendmodule\n", &o), "(* keep = \"true\" *)\nmodule m;\n  logic x;\nendmodule\n");
+    // `always @*` and `always #5` end their event control.
+    assert_eq!(fmt("module m;\nalways @*\nbegin\nx = y;\nend\nalways #5\nclk = ~clk;\nendmodule\n", &o), "module m;\n  always @*\n  begin\n    x = y;\n  end\n  always #5\n    clk = ~clk;\nendmodule\n");
+    // `if` and `foreach` in a constraint.
+    assert_eq!(
+        fmt("class c;\nrand int x;\nconstraint c1 {\nif (x > 0)\nx < 10;\nforeach (a[i]) {\na[i] < 4;\n}\n}\nendclass\n", &o),
+        "class c;\n  rand int x;\n  constraint c1 {\n    if (x > 0)\n      x < 10;\n    foreach (a[i]) {\n      a[i] < 4;\n    }\n  }\nendclass\n"
+    );
+    // `do ... while` in an unbraced `if`.
+    assert_eq!(fmt("module m;\ninitial begin\nif (a)\ndo\nx++;\nwhile (b);\nend\nendmodule\n", &o), "module m;\n  initial begin\n    if (a)\n      do\n        x++;\n      while (b);\n  end\nendmodule\n");
+    // An assertion's `else` is the assertion's.
+    assert_eq!(
+        fmt("module m;\ninitial begin\nif (enable)\nassert (ready)\npass();\nelse\nfail();\nend\nendmodule\n", &o),
+        "module m;\n  initial begin\n    if (enable)\n      assert (ready)\n        pass();\n      else\n        fail();\n  end\nendmodule\n"
+    );
+    // A string continued with `\` and a CRLF line break.
+    assert_eq!(fmt("module m;\r\ninitial $display(\"a \\\r\n   b\");\r\nendmodule\r\n", &o), "module m;\r\n  initial $display(\"a \\\r\n   b\");\r\nendmodule\r\n");
+    // A macro call's argument on a line at column 0 stays there (stringification).
+    assert_eq!(fmt("`define S(x) `\"x`\"\nmodule m;\ninitial $display(`S(a\n+b));\nendmodule\n", &o), "`define S(x) `\"x`\"\nmodule m;\n  initial $display(`S(a\n+b));\nendmodule\n");
+    // A long line: columns in one pass.
+    let long = format!("module m;\nassign x = {};\nendmodule\n", vec!["a"; 100_000].join(" + "));
+    let t0 = std::time::Instant::now();
+    assert!(format(&long, &o).is_some());
+    assert!(t0.elapsed().as_secs() < 20, "{:?}", t0.elapsed());
+    // Astral characters before trailing blanks, no final newline.
+    assert_eq!(fmt("module m;\nlogic a; // 😀   \nendmodule", &o), "module m;\n  logic a; // 😀\nendmodule");
+    // An unterminated protected envelope: kept to the end.
+    let src = "module m;\n`pragma protect begin_protected\n  x  \n   y\n";
+    assert_eq!(fmt(src, &o), src);
 }

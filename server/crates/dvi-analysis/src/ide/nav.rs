@@ -276,7 +276,11 @@ impl Analysis {
         if toks.get(i).is_some_and(|t| t.span != span) || toks.get(i + 1).is_some_and(|t| t.is_punct("(")) {
             return new_name.to_string();
         }
-        let old = self.file_text(span.file).map(|t| t[span.start as usize..span.end as usize].to_string()).unwrap_or_default();
+        let mut old = self.file_text(span.file).map(|t| t[span.start as usize..span.end as usize].to_string()).unwrap_or_default();
+        // An escaped name ends at white space: before the `)` or `(` that follows it.
+        if old.starts_with('\\') {
+            old.push(' ');
+        }
         if port_side {
             format!("{new_name}({old})")
         } else {

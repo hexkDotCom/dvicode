@@ -278,3 +278,13 @@ fn rename_does_not_change_a_linked_file_outside_the_workspace() {
     assert!(a.prepare_rename(f, off).is_none(), "declared in a file outside the workspace");
     assert!(a.rename(f, off, "w32_t").is_err());
 }
+
+#[test]
+fn an_escaped_implicit_connection_keeps_its_terminating_space() {
+    let sub = "module sub(input logic \\a.b );\nendmodule\n";
+    let top = "module top;\n  logic \\a.b ;\n  sub u(.\\a.b );\nendmodule\n";
+    let (a, root) = project("escrename", &[("sub.sv", sub), ("top.sv", top)]);
+    let (f, off) = at(&a, &root, "sub.sv", "a.b", 0);
+    let texts = apply(&a, a.rename(f, off, "p").unwrap());
+    assert_eq!(texts["top.sv"], "module top;\n  logic \\a.b ;\n  sub u(.p(\\a.b ) );\nendmodule\n", "the escaped name keeps a space before the `)`: valid");
+}

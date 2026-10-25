@@ -385,8 +385,9 @@ impl Analysis {
             let header = self.port_header(def);
             let named: Vec<&str> = l.items.iter().filter_map(|i| if let ItemKind::Named { name, .. } = &i.kind { Some(name.as_str()) } else { None }).collect();
             let star = l.items.iter().position(|i| i.kind == ItemKind::DotStar);
-            let ordered = l.items.iter().any(|i| i.kind == ItemKind::Ordered);
-            let empty_list = l.items.iter().all(|i| i.kind == ItemKind::Empty);
+            // `u(,,)`: empty slots of an ordered list; `u()`: an empty list.
+            let ordered = l.items.iter().any(|i| i.kind == ItemKind::Ordered) || (l.items.len() > 1 && l.items.iter().all(|i| i.kind == ItemKind::Empty));
+            let empty_list = l.items.len() == 1 && l.items[0].kind == ItemKind::Empty;
             // Connect missing ports (a named or empty list).
             if !ordered && star.is_none() && header.known {
                 let mut left = Vec::new();
