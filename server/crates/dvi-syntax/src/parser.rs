@@ -1055,6 +1055,8 @@ impl<'t> Parser<'t> {
         self.bump(); // (
         let mut kind = DeclKind::Parameter;
         let mut last_ty: Option<TypeRef> = None;
+        // The last declaration was `type`: `type T = int, U = byte` declares two types.
+        let mut types = false;
         loop {
             self.skip_attributes();
             if self.at_eof() {
@@ -1068,12 +1070,15 @@ impl<'t> Parser<'t> {
             if self.eat_kw("parameter") {
                 kind = DeclKind::Parameter;
                 last_ty = None;
+                types = false;
             } else if self.eat_kw("localparam") {
                 kind = DeclKind::LocalParam;
                 last_ty = None;
+                types = false;
             }
             if self.eat_kw("type") {
                 is_type = true;
+                types = true;
             }
             let mut ty = None;
             if !is_type && !self.at_list_name() {
@@ -1084,6 +1089,9 @@ impl<'t> Parser<'t> {
             }
             if ty.is_some() {
                 last_ty = ty.clone();
+                types = false;
+            } else if types {
+                is_type = true;
             }
             if self.at_ident() {
                 let n = self.tok().clone();
@@ -1582,7 +1590,25 @@ impl<'t> Parser<'t> {
     // ----------------------------------------------------------------- types
 
     /// Parses a data type if one starts here. `modport` allows `if_name.modport` (ports).
+    /// A type, guarded like statements: net type keywords, `$unit::` and `enum` base types
+    /// nest types in types (`wire wire wire ...`).
     fn parse_type(&mut self, modport: bool, kind: RefKind) -> Option<TypeInfo> {
+        if self.stmt_depth >= MAX_STMT_DEPTH {
+            if !self.too_deep {
+                self.too_deep = true;
+                let span = self.tok().span;
+                self.error(span, "Types are nested too deeply; this one is skipped");
+            }
+            self.bump();
+            return None;
+        }
+        self.stmt_depth += 1;
+        let t = self.parse_type_inner(modport, kind);
+        self.stmt_depth -= 1;
+        t
+    }
+
+    fn parse_type_inner(&mut self, modport: bool, kind: RefKind) -> Option<TypeInfo> {
         let from = self.pos;
         let t = self.tok().clone();
         let mut named = false;

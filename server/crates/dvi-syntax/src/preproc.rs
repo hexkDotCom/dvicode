@@ -1225,6 +1225,9 @@ const COMPILER_DIRECTIVES: &[&str] = &[
 ];
 
 /// `called` gives the macro an actual names after a backtick (see [`Pp::called_name`]).
+/// Bytes of a `` `"...`" `` string built at most.
+const MAX_STRINGIFIED: usize = 1 << 20;
+
 fn substitute(
     def: &MacroDef,
     args: &[Vec<Token>],
@@ -1269,6 +1272,12 @@ fn substitute(
                 let mut first = true;
                 i += 1;
                 while i < def.body.len() && def.body[i].kind != TokKind::MacroQuote {
+                    // A formal repeated in the string, given a long actual, would make a string
+                    // of gigabytes: past this size the rest is left out.
+                    if s.len() > MAX_STRINGIFIED {
+                        i += 1;
+                        continue;
+                    }
                     let b = &def.body[i];
                     if !first && b.ws_before() {
                         s.push(' ');

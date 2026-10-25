@@ -2423,6 +2423,35 @@ fn completion_in_files_that_include_each_other_ends() {
 }
 
 #[test]
+fn general_review_cases() {
+    // Net type keywords and enum base types nest types: a long run of them ends with a problem.
+    let run = || {
+        let n = 100_000;
+        let nets = format!("module m; {}x; endmodule\n", "wire ".repeat(n));
+        let enums = format!("package p; typedef {}{{A}} t; endpackage\n", "enum ".repeat(n));
+        let parse = |t: &str| dvi_syntax::parser::parse(&dvi_syntax::lexer::lex(t, 0), 0).diags.iter().filter(|d| d.message.contains("nested too deeply")).count();
+        (parse(&nets), parse(&enums))
+    };
+    let r = std::thread::Builder::new().stack_size(16 << 20).spawn(run).unwrap().join().expect("no stack overflow");
+    assert_eq!(r, (1, 1));
+    // A formal repeated in a `"...`" string, given a long actual: a bounded string.
+    let text = format!("`define S(x) `\"{}`\"\nmodule m;\n  string s = `S({});\nendmodule\n", "x ".repeat(100_000), "a".repeat(100_000));
+    let (a, _) = project("bigstring", &[("t.sv", &text)]);
+    let _ = problems(&a);
+    // An explicit import wins over a wildcard one written before it.
+    let src = "package a; int x; endpackage\npackage b; int x; endpackage\nmodule m;\n  import a::*;\n  import b::x;\n  initial x = 1;\nendmodule\n";
+    let (a, root) = project("explicitimport", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let off = src.find("x = 1").unwrap() as u32;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![1]);
+    // `type T = int, U = byte`: U is a type too.
+    let u = dvi_syntax::parser::parse(&dvi_syntax::lexer::lex("class C #(type T = int, U = byte, int N = 1);\n  U value;\nendclass\n", 0), 0);
+    let kinds: Vec<_> = ["T", "U", "N"].iter().map(|n| u.decls.iter().find(|d| d.name == *n).map(|d| d.kind)).collect();
+    use dvi_syntax::ast::DeclKind;
+    assert_eq!(kinds, [Some(DeclKind::TypeParam), Some(DeclKind::TypeParam), Some(DeclKind::Parameter)]);
+}
+
+#[test]
 fn deeply_nested_constraints_and_structs_end() {
     // On a stack the size of the engine's worker threads.
     let run = || {

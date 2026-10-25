@@ -1562,6 +1562,13 @@ fn split_defines(s: &str) -> Vec<String> {
                 && !unsized_literal(i.checked_sub(1).map(|p| chars[p]), chars.get(i + 1).copied(), chars.get(i + 2).copied())
                 && chars[i + 1..].contains(&'\''));
         match quote {
+            // `"a\"+b"`: an escaped quote does not end the string (nor its define).
+            Some('"') if c == '\\' && i + 1 < chars.len() => {
+                cur.push(c);
+                cur.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
             Some(q) if c == q => quote = None,
             None if quote_start => quote = Some(c),
             None if c == '+' => {
@@ -1873,6 +1880,17 @@ b.sv
         assert_eq!(inv.files, vec![dir.join("a.sv"), dir.join("b.sv"), dir.join("x y.sv"), dir.join("1 z.sv")]);
         let d: Vec<_> = inv.defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
         assert_eq!(d, vec!["MASK=8'hFF", "ALL='1", "W='hA", "MSG='a b'", "ONES='1", "ZERO='0", "HIZ='z"]);
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_a_define() {
+        let dir = std::env::temp_dir().join("dvicode_build_test_escquote");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = parse_build(&dir, &dir.join("x.build"), "+define+MSG=\"a\\\"+B\"+N=1\n", &FxHashMap::default());
+        let d: Vec<_> = cfg.invocations[0].defines.iter().map(|(n, v)| format!("{n}={}", v.as_deref().unwrap_or(""))).collect();
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(d[0].starts_with("MSG=") && d[0].contains("+B"), "{d:?}");
+        assert_eq!(d[1], "N=1");
     }
 
     #[test]

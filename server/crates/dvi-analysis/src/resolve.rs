@@ -322,13 +322,17 @@ impl Analysis {
                 }
                 _ => {}
             }
-            for imp in &d.imports {
-                if imp.item.as_ref().is_some_and(|i| i != name) {
-                    continue;
-                }
-                if let Some(p) = self.package_with(unit, &imp.pkg, name) {
-                    if let Some(m) = self.member_of(p, name) {
-                        return Some(m);
+            // An explicit import of the name (`import b::x;`) before the wildcards
+            // (`import a::*;`), wherever they are written.
+            for explicit in [true, false] {
+                for imp in &d.imports {
+                    if imp.item.is_some() != explicit || imp.item.as_ref().is_some_and(|i| i != name) {
+                        continue;
+                    }
+                    if let Some(p) = self.package_with(unit, &imp.pkg, name) {
+                        if let Some(m) = self.member_of(p, name) {
+                            return Some(m);
+                        }
                     }
                 }
             }
