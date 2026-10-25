@@ -146,9 +146,11 @@ testbench; it needs no UVM installation.
 
 ## Commands and views
 
-- **DVICode** in the activity bar: Design Hierarchy (pick the top with **Select Design
-  Hierarchy Top...**), Verification Hierarchy (pick the test with **Select UVM Test...**),
-  Compiled Files and Structure. Each view's title bar has:
+- **DVICode** in the activity bar, open: Design Hierarchy (pick the top with **Select Design
+  Hierarchy Top...**), Verification Hierarchy (pick the test with **Select UVM Test...**) and
+  Structure; collapsed below them (click a title to open): Register Model, Assertions and
+  Coverage, Drivers and Loads, and Compiled Files. The hierarchies, Structure and Compiled
+  Files have in their title bar:
   - **Filter...** (funnel button): show only what matches and its parents. Plain text matches
     anywhere in a name or path, ignoring case (`fifo` finds `tb.dut.u_rx_fifo`); `*` matches
     within one level of a path, `**` across levels, `?` one character

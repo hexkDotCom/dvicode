@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The DVICode panel opens with Design Hierarchy, Verification Hierarchy and Structure
+  expanded, and Register Model, Assertions and Coverage, Drivers and Loads and Compiled Files
+  collapsed below them. A layout you arranged yourself is kept.
+
 ## 0.5.0 (preview)
 
 **Formatter**

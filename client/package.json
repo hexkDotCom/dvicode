@@ -1093,35 +1093,42 @@
       "dvicode": [
         {
           "id": "dvicode.designHierarchy",
-          "name": "Design Hierarchy"
+          "name": "Design Hierarchy",
+          "visibility": "visible"
         },
         {
           "id": "dvicode.verificationHierarchy",
-          "name": "Verification Hierarchy"
-        },
-        {
-          "id": "dvicode.compiledFiles",
-          "name": "Compiled Files"
-        },
-        {
-          "id": "dvicode.registerModel",
-          "name": "Register Model",
-          "when": "dvicode.engine.registers"
-        },
-        {
-          "id": "dvicode.checks",
-          "name": "Assertions and Coverage",
-          "when": "dvicode.engine.checks"
-        },
-        {
-          "id": "dvicode.accesses",
-          "name": "Drivers and Loads",
-          "when": "dvicode.engine.accesses"
+          "name": "Verification Hierarchy",
+          "visibility": "visible"
         },
         {
           "id": "dvicode.structure",
           "name": "Structure",
-          "when": "dvicode.engine.structure"
+          "when": "dvicode.engine.structure",
+          "visibility": "visible"
+        },
+        {
+          "id": "dvicode.registerModel",
+          "name": "Register Model",
+          "when": "dvicode.engine.registers",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "dvicode.checks",
+          "name": "Assertions and Coverage",
+          "when": "dvicode.engine.checks",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "dvicode.accesses",
+          "name": "Drivers and Loads",
+          "when": "dvicode.engine.accesses",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "dvicode.compiledFiles",
+          "name": "Compiled Files",
+          "visibility": "collapsed"
         }
       ]
     }
