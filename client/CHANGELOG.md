@@ -61,6 +61,13 @@
 
 **Performance and memory**
 
+- Files share the macro tables they do not change. A project where many files each define
+  macros no longer builds in time and memory that grow with files times macros: a stress
+  project of 5,000 such files after a 10,000-macro header builds in 64 ms and 84 MB instead
+  of 2.7 s and 4.1 GB. Ordinary projects build as before.
+- After an edit that moves or redefines a header's macros, go to definition and hover find
+  them where a full build does (an open file's copy of a macro no longer shows up in other
+  files).
 - After a build, files no longer compiled keep no text in memory (another build
   configuration, a branch switch).
 - Large answers (trees, remote file reads) are no longer copied once more before they are
