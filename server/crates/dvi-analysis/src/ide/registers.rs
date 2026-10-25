@@ -1022,7 +1022,7 @@ impl<'a> Interp<'a> {
     /// The indexes of the first unpacked dimension of member `name` of the method's class.
     fn declared_indexes(&mut self, name: &str, m: DeclRef, env: &Env, this: This) -> Option<Vec<u128>> {
         let class = self.class_of_method(m)?;
-        let member = self.a.members_list(class).into_iter().find(|d| self.a.decl(*d).name == name)?;
+        let member = self.a.member_of(class, name)?;
         let span = self.a.decl(member).name_span;
         let toks = self.a.file_tokens(span.file)?;
         let k = toks.partition_point(|t| t.span.start < span.start);
@@ -1630,7 +1630,7 @@ impl<'a> Interp<'a> {
     fn declared_class(&self, recv: &[Token], m: DeclRef, _this: This) -> Option<DeclRef> {
         let name = recv.iter().rev().find(|x| x.is_ident())?;
         let class = self.class_of_method(m)?;
-        let member = self.a.members_list(class).into_iter().find(|d| self.a.decl(*d).name == name.text)?;
+        let member = self.a.member_of(class, &name.text)?;
         self.a.type_of(member).and_then(|c| self.a.follow_typedef(c))
     }
 
@@ -1695,7 +1695,8 @@ fn assigned_name(lhs: &[Token], it: &mut Interp, m: DeclRef, env: &Env, this: Th
     let key = parts[0].clone();
     let base = key.split('[').next().unwrap_or(&key).to_string();
     let local = env.locals.contains_key(&base);
-    let member = it.class_of_method(m).and_then(|c| it.a.members_list(c).into_iter().find(|d| it.a.decl(*d).name == base.as_str()));
+    // Through the class's member index (not a list of all its members, for every assignment).
+    let member = it.class_of_method(m).and_then(|c| it.a.member_of(c, &base));
     Some(Target { key: key.clone(), display: key, local, member })
 }
 

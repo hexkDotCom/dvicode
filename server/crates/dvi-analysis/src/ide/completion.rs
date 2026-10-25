@@ -271,6 +271,11 @@ impl Analysis {
             if md.name.is_empty() || md.has(dflags::OUT_OF_BLOCK) || !starts_like(&md.name, prefix) {
                 continue;
             }
+            // Past the limit only the name typed (the list is incomplete: asked again as the
+            // name grows).
+            if out.len() >= MAX_ITEMS && md.name != prefix {
+                continue;
+            }
             // Through `::` only static items and types make sense; keep all, VS Code filters.
             if seen.insert(md.name.clone()) {
                 out.push(self.decl_completion(m));
@@ -384,7 +389,9 @@ impl Analysis {
             if d.name.is_empty() || d.has(dflags::OUT_OF_BLOCK) || d.has(dflags::FROM_MACRO) && d.kind == DeclKind::Generate {
                 return;
             }
-            if !starts_like(&d.name, prefix) || !seen.insert(d.name.clone()) {
+            // Past the limit only the name typed: the list is incomplete, asked again as the
+            // name grows (a scope of 100,000 names makes no 100,000 items).
+            if !starts_like(&d.name, prefix) || out.len() >= MAX_ITEMS && d.name != prefix || !seen.insert(d.name.clone()) {
                 return;
             }
             out.push(this.decl_completion(r));

@@ -227,13 +227,14 @@ impl Analysis {
         let Some(l) = conn_list(&toks, j + 1) else { return Header::default() };
         let mut known = !l.macros && !d.has(dflags::ENCRYPTED) && !self.has_inactive_between(def.unit, d.name_span.file, toks[j].span.start, toks[l.close].span.end);
         let mut slots = Vec::new();
+        let declared: rustc_hash::FxHashSet<&str> = params.iter().map(|p| self.decl(*p).name.as_str()).collect();
         for it in &l.items {
             let item = &toks[it.body..it.end];
             if item.iter().any(|t| t.is_kw("localparam")) {
                 known = false;
             }
             let (name, default) = slot_name(item);
-            if name.as_ref().is_none_or(|n| !params.iter().any(|p| self.decl(*p).name == n.as_str())) {
+            if name.as_ref().is_none_or(|n| !declared.contains(n.as_str())) {
                 known = false;
             }
             slots.push(Slot { name, default, interface: false });
@@ -383,7 +384,7 @@ impl Analysis {
         let name = self.decl(inst).name.to_string();
         if let Some(l) = ports.as_ref().filter(|l| !l.macros) {
             let header = self.port_header(def);
-            let named: Vec<&str> = l.items.iter().filter_map(|i| if let ItemKind::Named { name, .. } = &i.kind { Some(name.as_str()) } else { None }).collect();
+            let named: rustc_hash::FxHashSet<&str> = l.items.iter().filter_map(|i| if let ItemKind::Named { name, .. } = &i.kind { Some(name.as_str()) } else { None }).collect();
             let star = l.items.iter().position(|i| i.kind == ItemKind::DotStar);
             // `u(,,)`: empty slots of an ordered list; `u()`: an empty list.
             let ordered = l.items.iter().any(|i| i.kind == ItemKind::Ordered) || (l.items.len() > 1 && l.items.iter().all(|i| i.kind == ItemKind::Empty));
@@ -738,8 +739,13 @@ impl Analysis {
         } else {
             kids.iter().filter(|c| if params { matches!(self.decl(**c).kind, DeclKind::Parameter | DeclKind::TypeParam) && !self.decl(**c).has(dflags::LOCAL_PARAM) } else { self.decl(**c).kind == DeclKind::Port }).map(|c| self.decl(*c).name.to_string()).collect()
         };
+        // The first child of each name.
+        let mut by_name: rustc_hash::FxHashMap<&str, DeclRef> = rustc_hash::FxHashMap::default();
+        for c in &kids {
+            by_name.entry(self.decl(*c).name.as_str()).or_insert(*c);
+        }
         for (k, n) in names.iter().enumerate() {
-            let d = kids.iter().find(|c| self.decl(**c).name == n.as_str()).map(|c| self.decl(*c));
+            let d = by_name.get(n.as_str()).map(|c| self.decl(*c));
             let connected = used.contains(n);
             let detail = d.map(|d| d.detail.to_string()).filter(|s| !s.is_empty());
             items.push(CompletionItem {

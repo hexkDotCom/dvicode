@@ -402,7 +402,10 @@ impl Build<'_> {
             self.incomplete = true;
         }
         // Methods seen so far, most derived first: name -> (class, virtual).
-        let mut below: Vec<(String, String)> = own_methods.iter().map(|(n, _)| (n.clone(), d.name.to_string())).collect();
+        // Each method name defined below the base looked at: the nearest class that defines it.
+        let mut below: rustc_hash::FxHashMap<String, String> = own_methods.iter().map(|(n, _)| (n.clone(), d.name.to_string())).collect();
+        // A class of the derived class's name is below (the derived class, a base named like it).
+        let mut own_below = !below.is_empty();
         let mut base_groups = Vec::new();
         let mut listed = 0;
         for (k, &base) in chain.iter().enumerate() {
@@ -426,7 +429,7 @@ impl Build<'_> {
                 let mut n = self.member(mr, Some(bd.name.to_string()));
                 if method {
                     // The nearest class below that defines the same name.
-                    if let Some((_, by)) = below.iter().rev().find(|(name, _)| *name == md.name) {
+                    if let Some(by) = below.get(md.name.as_str()) {
                         let virtual_ = self.is_virtual(&chain[k..], &md.name, library);
                         n.mark = Some(if virtual_ { format!("overridden in {by}") } else { format!("hidden in {by}") });
                     }
@@ -434,12 +437,16 @@ impl Build<'_> {
                 kids.push(n);
             }
             // Mark the own methods that override or hide this base's.
-            if k == 0 || below.iter().any(|(_, c)| *c == d.name) {
+            if k == 0 || own_below {
+                let base_methods: rustc_hash::FxHashSet<&str> = bd
+                    .children
+                    .iter()
+                    .map(|&m| a.decl(DeclRef { unit: base.unit, decl: m }))
+                    .filter(|md| matches!(md.kind, DeclKind::Function | DeclKind::Task))
+                    .map(|md| md.name.as_str())
+                    .collect();
                 for (name, at) in &own_methods {
-                    if bd.children.iter().any(|&m| {
-                        let md = a.decl(DeclRef { unit: base.unit, decl: m });
-                        matches!(md.kind, DeclKind::Function | DeclKind::Task) && md.name == *name
-                    }) {
+                    if base_methods.contains(name.as_str()) {
                         if let Some(n) = g.get_mut("Methods", *at) {
                             if n.mark.is_none() {
                                 let virtual_ = self.is_virtual(&chain[k..], name, library);
@@ -452,7 +459,8 @@ impl Build<'_> {
             for &m in &bd.children {
                 let md = a.decl(DeclRef { unit: base.unit, decl: m });
                 if matches!(md.kind, DeclKind::Function | DeclKind::Task) {
-                    below.push((md.name.to_string(), bd.name.to_string()));
+                    below.insert(md.name.to_string(), bd.name.to_string());
+                    own_below |= bd.name == d.name;
                 }
             }
             if !kids.is_empty() {

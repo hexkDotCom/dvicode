@@ -27,15 +27,27 @@ pub fn to_lsp_diag(a: &Analysis, d: &Diag) -> Option<Diagnostic> {
 /// Applies LSP content changes (UTF-16 positions) to a text.
 pub fn apply_changes(text: &str, changes: Vec<TextDocumentContentChangeEvent>) -> String {
     let mut text = text.to_string();
+    // A line index, and the position up to which it still holds: lines before an edit keep
+    // their starts. VS Code sends a multi-cursor edit's changes last first, so one index
+    // serves them all instead of one scan of the document each.
+    let mut index: Option<(LineIndex, (u32, u32))> = None;
     for c in changes {
         match c.range {
-            None => text = c.text,
+            None => {
+                text = c.text;
+                index = None;
+            }
             Some(r) => {
-                let li = LineIndex::new(&text);
+                let holds = index.as_ref().is_some_and(|(_, upto)| (r.end.line, r.end.character) <= *upto);
+                if !holds {
+                    index = Some((LineIndex::new(&text), (0, 0)));
+                }
+                let Some((li, upto)) = index.as_mut() else { continue };
                 let s = li.offset(&text, r.start.line, r.start.character) as usize;
                 let e = li.offset(&text, r.end.line, r.end.character) as usize;
                 let (s, e) = (s.min(text.len()), e.min(text.len()).max(s.min(text.len())));
                 text.replace_range(s..e, &c.text);
+                *upto = (r.start.line, r.start.character);
             }
         }
     }
@@ -56,5 +68,17 @@ mod tests {
             text: "top".into(),
         }];
         assert_eq!(apply_changes(t, ch), "module top;\nendmodule\n");
+    }
+
+    #[test]
+    fn several_changes_apply_one_after_the_other_in_any_order() {
+        let t = "a = 1;\nb = 2;\nc = 3;\n";
+        let ch = |l: u32, c0: u32, c1: u32, s: &str| TextDocumentContentChangeEvent { range: Some(Range::new(Position::new(l, c0), Position::new(l, c1))), range_length: None, text: s.into() };
+        // Last first (as a multi-cursor edit comes), with line breaks inserted.
+        assert_eq!(apply_changes(t, vec![ch(2, 0, 1, "cc\nx"), ch(1, 0, 1, "bb"), ch(0, 4, 5, "10\n")]), "a = 10\n;\nbb = 2;\ncc\nx = 3;\n");
+        // First first: each later range is in the text the earlier changes made.
+        assert_eq!(apply_changes(t, vec![ch(0, 4, 5, "10\n"), ch(2, 0, 2, "bb"), ch(3, 0, 1, "cc")]), "a = 10\n;\nbb= 2;\ncc = 3;\n");
+        // Two on one line, the right one first.
+        assert_eq!(apply_changes(t, vec![ch(1, 4, 5, "20"), ch(1, 0, 1, "B")]), "a = 1;\nB = 20;\nc = 3;\n");
     }
 }

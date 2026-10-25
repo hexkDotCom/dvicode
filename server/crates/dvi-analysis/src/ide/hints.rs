@@ -7,7 +7,6 @@
 
 use crate::world::{Analysis, DeclRef};
 use dvi_syntax::ast::{dflags, DeclKind, RefKind};
-use dvi_syntax::lexer::lex;
 use dvi_syntax::token::{TokKind, Token};
 use dvi_syntax::FileId;
 use rustc_hash::FxHashMap;
@@ -160,10 +159,11 @@ impl Analysis {
         let params = kids.iter().filter(|c| is_param(c) && (!header || c.has(dflags::PARAM_PORT))).map(|c| c.name.to_string()).collect();
         // The header ends at the first `;` of the design element: a port declared only after
         // it was not a plain name in the header.
-        let header_end = self
-            .file_text(d.span.file)
-            .and_then(|t| t.get(d.span.start as usize..d.span.end as usize).map(|s| s.to_string()))
-            .and_then(|s| first_semicolon(&s).map(|i| d.span.start + i as u32));
+        // From the file's tokens (kept), not by lexing the whole body again.
+        let header_end = self.file_tokens(d.span.file).and_then(|toks| {
+            let lo = toks.partition_point(|t| t.span.start < d.span.start);
+            first_semicolon(toks[lo..].iter().take_while(|t| t.span.start < d.span.end))
+        });
         let ports: Vec<&&dvi_syntax::ast::Decl> = kids.iter().filter(|c| c.kind == DeclKind::Port).collect();
         let plain = header_end.is_some_and(|e| ports.iter().all(|p| p.name_span.file == d.span.file && p.name_span.start < e));
         let ports = if plain { ports.iter().map(|c| c.name.to_string()).collect() } else { Vec::new() };
@@ -177,17 +177,19 @@ impl Analysis {
     }
 }
 
-/// Where the first `;` outside parentheses is in `src`.
-fn first_semicolon(src: &str) -> Option<usize> {
+/// Where the first `;` outside parentheses among `toks` starts.
+fn first_semicolon<'t>(toks: impl Iterator<Item = &'t Token>) -> Option<u32> {
     let mut depth = 0i32;
-    lex(src, 0).into_iter().find(|t| {
-        if t.is_punct("(") {
-            depth += 1;
-        } else if t.is_punct(")") {
-            depth -= 1;
-        }
-        depth == 0 && t.is_punct(";")
-    }).map(|t| t.span.start as usize)
+    toks.into_iter()
+        .find(|t| {
+            if t.is_punct("(") {
+                depth += 1;
+            } else if t.is_punct(")") {
+                depth -= 1;
+            }
+            depth == 0 && t.is_punct(";")
+        })
+        .map(|t| t.span.start)
 }
 
 /// The items of the parenthesized list opening at `toks[open]` (`(`), as token index ranges
