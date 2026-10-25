@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 smol_str.workspace = true
 rustc-hash.workspace = true
+
+[features]
+# Counts the trie nodes that table comparisons and relocations visit (tests bound the work
+# of an update with it).
+work-count = []

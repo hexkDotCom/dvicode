@@ -3,7 +3,7 @@
 use crate::vfs::{Pin, Reader, Vfs, BUILTIN_DIR};
 use dvi_project::{BuildConfig, Phase, Progress};
 use dvi_syntax::ast::{DeclId, DeclKind, ParsedUnit, RefId, RefKind};
-use dvi_syntax::preproc::{command_line_define, def_identity, preprocess, IncludeInfo, MacroDef, MacroName, MacroTable, MacroUse, PpConfig, PpResult};
+use dvi_syntax::preproc::{command_line_define, def_identity, preprocess, IncludeInfo, MacroDef, MacroName, MacroTable, MacroUse, PpConfig, PpResult, SameMemo};
 use dvi_syntax::{parser, Diag, FileId, SourceProvider, Span};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -144,7 +144,7 @@ impl ProjectSetup {
             pp_configs.push(PpConfig { incdirs: inv.incdirs.clone(), root_dir: root.to_path_buf() });
             let mut m = MacroTable::new();
             for (n, v) in &inv.defines {
-                m.insert(SmolStr::new(n), Arc::new(command_line_define(n, v.as_deref())));
+                m.insert(Arc::new(command_line_define(n, v.as_deref())));
             }
             for n in &inv.undefines {
                 m.remove(n.as_str());
@@ -305,6 +305,178 @@ fn make_unit(
         parse_ms: t0.elapsed().as_millis(),
         library: false,
         root_path: Arc::from(src.path(root)),
+    }
+}
+
+/// The macro definitions of one invocation that only moved during an update (see
+/// `Analysis::propagate_macros`), and the macro tables already pointed at their new places.
+#[derive(Default)]
+struct Relocation {
+    /// Identity of the old definition -> the new one (same name, same text).
+    defs: FxHashMap<usize, Arc<MacroDef>>,
+    /// Each change of `defs` in order: the identity and name of the old definition, and
+    /// whether it was new in `defs`. Its length is the generation of `defs`.
+    log: Vec<(usize, SmolStr, bool)>,
+    /// By identity of the table: the table pointed at the moved definitions known when it was
+    /// last asked for, brought up to date from there when it is asked for again.
+    current: FxHashMap<usize, Relocated>,
+    /// The table pointed at the moved definitions last: the next one is usually made from it
+    /// with a few changes (the next unit's table, or the same unit's table before an edit).
+    last: Option<Relocated>,
+    /// The old and new tables after of the last unit whose moved definitions were looked for.
+    seen: Option<(MacroTable, MacroTable)>,
+}
+
+/// A macro table pointed at the moved definitions.
+#[derive(Clone)]
+struct Relocated {
+    /// `None` when the table holds none of them.
+    table: Option<MacroTable>,
+    /// How many of its definitions moved.
+    count: usize,
+    /// The generation of [`Relocation::defs`] it was made for.
+    generation: usize,
+    /// The table itself (it also keeps its identity, an address, its own while it is a key).
+    original: MacroTable,
+}
+
+impl Relocation {
+    /// `old` only moved, to `new`.
+    fn add(&mut self, old: &Arc<MacroDef>, new: Arc<MacroDef>) {
+        let id = def_identity(old);
+        let first = match self.defs.get(&id) {
+            Some(d) if Arc::ptr_eq(d, &new) => return,
+            Some(_) => false,
+            None => true,
+        };
+        self.defs.insert(id, new);
+        self.log.push((id, old.name.clone(), first));
+    }
+
+    /// `r` pointed at the definitions that moved since it was made.
+    fn caught_up(&self, r: &Relocated) -> Relocated {
+        if r.generation == self.log.len() {
+            return r.clone();
+        }
+        let (table, count) = r.original.relocated_more((r.table.as_ref(), r.count), &self.log[r.generation..], &self.defs);
+        Relocated { table, count, generation: self.log.len(), original: r.original.clone() }
+    }
+
+    /// `t` pointed at the moved definitions known now (as from scratch): brought up to date
+    /// from when `t` was last asked for, or made from the table pointed at them last, at the
+    /// cost of their differences.
+    fn current(&mut self, t: &MacroTable) -> Relocated {
+        let r = if self.defs.is_empty() {
+            Relocated { table: None, count: 0, generation: 0, original: t.clone() }
+        } else if let Some(r) = self.current.get(&t.identity()) {
+            self.caught_up(r)
+        } else {
+            match self.last.as_ref().map(|l| self.caught_up(l)) {
+                Some(l) if l.original.identity() == t.identity() => l,
+                Some(l) => {
+                    let (table, count) = t.relocated_from(&l.original, l.table.as_ref(), l.count, &self.defs);
+                    Relocated { table, count, generation: self.log.len(), original: t.clone() }
+                }
+                None => {
+                    let (table, count) = t.relocated(&self.defs);
+                    Relocated { table, count, generation: self.log.len(), original: t.clone() }
+                }
+            }
+        };
+        self.remember(&r);
+        r
+    }
+
+    /// Records what a unit compiled again leaves behind that only moved: each definition of
+    /// its old table after (`old`) that the new one (`new`) has elsewhere, with the same text.
+    ///
+    /// Only where the tables differ from what is known already. After the first unit of the
+    /// invocation, every pair of definitions (old, new) of the last unit looked at that only
+    /// moved is in `defs`, and only this method changes `defs`: so a name can tell something
+    /// new only where this unit's old or new table differs from that unit's (for the files
+    /// compiled again after a changed macro, the names each changes itself). For the first,
+    /// where the new table has what the old one pointed at the moved definitions has (the old
+    /// definition, or where it already moved), there is nothing new.
+    fn discover(&mut self, old: &MacroTable, new: &MacroTable) {
+        let add = |this: &mut Self, od: Option<&Arc<MacroDef>>, nd: Option<&Arc<MacroDef>>| {
+            if let (Some(od), Some(nd)) = (od, nd) {
+                if !Arc::ptr_eq(od, nd) && od.same_as(nd) {
+                    this.add(od, nd.clone());
+                }
+            }
+        };
+        match self.seen.take() {
+            Some((so, sn)) => {
+                let mut names: Vec<SmolStr> = Vec::new();
+                for (a, b) in [(&so, old), (&sn, new)] {
+                    let _ = a.diff(b, |x, y| {
+                        names.extend(x.or(y).map(|d| d.name.clone()));
+                        std::ops::ControlFlow::Continue(())
+                    });
+                }
+                for name in names {
+                    add(self, old.get(&name), new.get(&name));
+                }
+            }
+            _ => {
+                let known = self.current(old);
+                let known = known.table.unwrap_or_else(|| old.clone());
+                let _ = known.diff(new, |_, nd| {
+                    add(self, nd.and_then(|nd| old.get(&nd.name)), nd);
+                    std::ops::ControlFlow::Continue(())
+                });
+            }
+        }
+        self.seen = Some((old.clone(), new.clone()));
+    }
+
+    /// `r` is the table pointed at the moved definitions known now.
+    fn remember(&mut self, r: &Relocated) {
+        if !self.defs.is_empty() {
+            self.current.insert(r.original.identity(), r.clone());
+        }
+        self.last = Some(r.clone());
+    }
+
+    /// A copy of `u` whose macro uses and tables refer to the new places of the moved
+    /// definitions; `None` when it refers to none of them.
+    fn unit(&mut self, u: &Unit) -> Option<Unit> {
+        let (mut macros_before, mut macros_after) = (u.macros_before.clone(), u.macros_after.clone());
+        let tables_moved = self.tables(&mut macros_before, &mut macros_after);
+        let is_moved = |d: &Option<Arc<MacroDef>>| d.as_ref().is_some_and(|d| self.defs.contains_key(&def_identity(d)));
+        let uses = u.macro_uses.iter().any(|m| is_moved(&m.def)) || u.macro_names.iter().any(|m| is_moved(&m.def));
+        if !tables_moved && !uses {
+            return None;
+        }
+        let mut nu = u.clone();
+        nu.macros_before = macros_before;
+        nu.macros_after = macros_after;
+        Analysis::relocate_uses(&mut nu.macro_uses, &mut nu.macro_names, &self.defs);
+        Some(nu)
+    }
+
+    /// Points a unit's two macro tables at the new places of the definitions that moved
+    /// before it (in compile order); whether either of them changed.
+    ///
+    /// Each table is what pointing it at those definitions from scratch gives, as a full
+    /// build has it, even when a table shared with earlier units (a file that defines nothing
+    /// passes its table on) was pointed at fewer: a file in between may have defined a macro
+    /// again the same way. (Each table used to keep its first result.) But each is made from
+    /// the table pointed at them last: the table after is the one before with the unit's own
+    /// changes, and the next unit starts with it. So each costs about as much as those changes
+    /// and shares the rest (copying every table in full made an edit above a header's
+    /// definitions cost each later unit the whole table).
+    fn tables(&mut self, macros_before: &mut MacroTable, macros_after: &mut MacroTable) -> bool {
+        let before = self.current(macros_before);
+        let after = self.current(macros_after);
+        let mut changed = false;
+        for (t, n) in [(macros_before, before.table), (macros_after, after.table)] {
+            if let Some(n) = n {
+                *t = n;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -961,6 +1133,7 @@ impl Analysis {
     /// came or went (ad-hoc units aside, which library files do not depend on).
     fn library_inputs_same(&self, old: &Analysis) -> bool {
         let n = self.units.len().max(old.units.len());
+        let mut same = SameMemo::default();
         (0..n).all(|i| match (self.units.get(i).and_then(|u| u.as_ref()), old.units.get(i).and_then(|u| u.as_ref())) {
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => true,
             (Some(a), Some(b)) if a.kind == UnitKind::AdHoc && b.kind == UnitKind::AdHoc => true,
@@ -968,7 +1141,7 @@ impl Analysis {
                 a.library == b.library
                     && a.invocation == b.invocation
                     && library_names(a) == library_names(b)
-                    && a.macros_after.same_definitions(&b.macros_after)
+                    && a.macros_after.same_definitions_memo(&b.macros_after, &mut same)
             }
             (None, None) => true,
             (Some(a), None) | (None, Some(a)) => a.kind == UnitKind::AdHoc,
@@ -1000,10 +1173,11 @@ impl Analysis {
     ) -> Option<Vec<(UnitId, PpResult, MacroTable)>> {
         // Pending macro state per invocation, valid for the next unit of that invocation.
         let mut carry: FxHashMap<usize, MacroTable> = FxHashMap::default();
-        // Moved definitions: identity of the old one -> the new one.
-        let mut moved: FxHashMap<usize, Arc<MacroDef>> = FxHashMap::default();
-        // Tables already pointed at the moved definitions, by identity.
-        let mut replaced: FxHashMap<usize, Option<MacroTable>> = FxHashMap::default();
+        // Moved definitions, and the tables pointed at them, per invocation: macros do not
+        // carry over from one invocation to the next.
+        let mut relocations: FxHashMap<usize, Relocation> = FxHashMap::default();
+        // Old and new tables of consecutive units share most of their parts on each side.
+        let mut same = SameMemo::default();
         let mut jobs = Vec::new();
         // In compile order: the build's files, its library files, then files outside it.
         let mut ids: Vec<(u8, UnitId)> = self
@@ -1048,8 +1222,7 @@ impl Analysis {
                     if let Some(m) = carry.get(&u.invocation).cloned() {
                         // A file before this one changed the macros: preprocess again with them.
                         let pp = self.preprocess_unit(&u, m.clone());
-                        let same = old_after.as_ref().is_some_and(|o| pp.macros_after.same_definitions(o));
-                        if same {
+                        if old_after.as_ref().is_some_and(|o| pp.macros_after.same_definitions_memo(o, &mut same)) {
                             carry.remove(&u.invocation);
                         } else {
                             carry.insert(u.invocation, pp.macros_after.clone());
@@ -1057,8 +1230,7 @@ impl Analysis {
                         (Some((pp, m)), true)
                     } else {
                         if let Some(pp) = &pre {
-                            let same = old_after.as_ref().is_some_and(|o| pp.macros_after.same_definitions(o));
-                            if !same {
+                            if !old_after.as_ref().is_some_and(|o| pp.macros_after.same_definitions_memo(o, &mut same)) {
                                 carry.insert(u.invocation, pp.macros_after.clone());
                             }
                         }
@@ -1066,31 +1238,34 @@ impl Analysis {
                     }
                 }
             };
+            let moved = relocations.entry(u.invocation).or_default();
             // Compiled with its previous macro state (edited, or not compiled again): point it
             // at definitions that moved before it.
-            if !recompiled && !moved.is_empty() {
+            if !recompiled && !moved.defs.is_empty() {
                 match &mut job {
                     Some((pp, macros_before)) => {
-                        Self::relocate_tables(macros_before, &mut pp.macros_after, &moved, &mut replaced);
-                        Self::relocate_uses(&mut pp.macro_uses, &mut pp.macro_names, &moved);
+                        moved.tables(macros_before, &mut pp.macros_after);
+                        Self::relocate_uses(&mut pp.macro_uses, &mut pp.macro_names, &moved.defs);
                     }
                     None => {
-                        if let Some(nu) = Self::relocated(&u, &moved, &mut replaced) {
+                        if let Some(nu) = moved.unit(&u) {
                             self.units[uid as usize] = Some(Arc::new(nu));
                         }
                     }
                 }
-            }
-            if recompiled || is_edited {
-                // What this unit leaves behind that only moved.
-                if let (Some(o), Some((pp, _))) = (old, &job) {
-                    for (name, od) in o.macros_after.iter() {
-                        if let Some(nd) = pp.macros_after.get(name) {
-                            if !Arc::ptr_eq(od, nd) && od.same_as(nd) {
-                                moved.insert(def_identity(od), nd.clone());
-                            }
-                        }
+                // The files after an edited one that leaves other macros behind start from its
+                // table pointed at the moved definitions too, as a full build has it.
+                if let (Some((pp, _)), Some(c)) = (&job, carry.get_mut(&u.invocation)) {
+                    if is_edited && u.kind == UnitKind::Project {
+                        *c = pp.macros_after.clone();
                     }
+                }
+            }
+            // Ad-hoc units each start from the end of their invocation: what one of them moves,
+            // no other unit sees.
+            if (recompiled || is_edited) && u.kind != UnitKind::AdHoc {
+                if let (Some(o), Some((pp, _))) = (old, &job) {
+                    moved.discover(&o.macros_after, &pp.macros_after);
                 }
             }
             if let Some((pp, macros_before)) = job {
@@ -1098,41 +1273,6 @@ impl Analysis {
             }
         }
         Some(jobs)
-    }
-
-    /// A copy of `u` whose macro uses and tables refer to the new places of `moved`
-    /// definitions; `None` when it refers to none of them.
-    fn relocated(u: &Unit, moved: &FxHashMap<usize, Arc<MacroDef>>, tables: &mut FxHashMap<usize, Option<MacroTable>>) -> Option<Unit> {
-        let (mut macros_before, mut macros_after) = (u.macros_before.clone(), u.macros_after.clone());
-        let tables_moved = Self::relocate_tables(&mut macros_before, &mut macros_after, moved, tables);
-        let is_moved = |d: &Option<Arc<MacroDef>>| d.as_ref().is_some_and(|d| moved.contains_key(&def_identity(d)));
-        let uses = u.macro_uses.iter().any(|m| is_moved(&m.def)) || u.macro_names.iter().any(|m| is_moved(&m.def));
-        if !tables_moved && !uses {
-            return None;
-        }
-        let mut nu = u.clone();
-        nu.macros_before = macros_before;
-        nu.macros_after = macros_after;
-        Self::relocate_uses(&mut nu.macro_uses, &mut nu.macro_names, moved);
-        Some(nu)
-    }
-
-    /// Points two macro tables at the new places of `moved` definitions (each table is
-    /// replaced once, by identity, in `tables`); whether either of them changed.
-    fn relocate_tables(
-        macros_before: &mut MacroTable,
-        macros_after: &mut MacroTable,
-        moved: &FxHashMap<usize, Arc<MacroDef>>,
-        tables: &mut FxHashMap<usize, Option<MacroTable>>,
-    ) -> bool {
-        let mut changed = false;
-        for t in [macros_before, macros_after] {
-            if let Some(n) = tables.entry(t.identity()).or_insert_with(|| t.replaced(moved)).clone() {
-                *t = n;
-                changed = true;
-            }
-        }
-        changed
     }
 
     /// Points macro uses and macro names at the new places of `moved` definitions.
@@ -1279,17 +1419,19 @@ impl Analysis {
     /// they leave behind. When not, only the edited files' problems can have changed.
     pub fn interface_changed(&self, old: &Analysis) -> bool {
         let n = self.units.len().max(old.units.len());
+        // The units' old and new tables share most of their parts on each side.
+        let mut same = SameMemo::default();
         (0..n).any(|i| match (self.units.get(i).and_then(|u| u.as_ref()), old.units.get(i).and_then(|u| u.as_ref())) {
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => false,
             // Only pointed at moved macro definitions: the same declarations.
-            (Some(a), Some(b)) if Arc::ptr_eq(&a.parsed, &b.parsed) => !a.macros_after.same_definitions(&b.macros_after),
+            (Some(a), Some(b)) if Arc::ptr_eq(&a.parsed, &b.parsed) => !a.macros_after.same_definitions_memo(&b.macros_after, &mut same),
             (Some(a), Some(b)) => {
                 // Connections pick a copy only without a build file, among copies.
                 let twice = |n: &str| {
                     (self.nearest_wins_unit(a) || old.nearest_wins_unit(b))
                         && (self.global.definitions.get(n).is_some_and(|v| v.len() > 1) || old.global.definitions.get(n).is_some_and(|v| v.len() > 1))
                 };
-                interface_fingerprint(a, &twice) != interface_fingerprint(b, &twice) || !a.macros_after.same_definitions(&b.macros_after)
+                interface_fingerprint(a, &twice) != interface_fingerprint(b, &twice) || !a.macros_after.same_definitions_memo(&b.macros_after, &mut same)
             }
             (None, None) => false,
             _ => true,

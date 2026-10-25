@@ -628,3 +628,271 @@ fn closing_an_unsaved_empty_library_file_brings_back_the_one_on_disk() {
     let c = b.update_with(&[p], &dvi_project::Progress::new()).unwrap();
     assert_eq!(lib(&c), ["fallback"]);
 }
+
+/// Trie nodes the macro tables of all units hold (tables share what they did not change).
+fn table_nodes(a: &Analysis) -> usize {
+    dvi_syntax::preproc::MacroTable::distinct_nodes(a.units.iter().flatten().flat_map(|u| [&u.macros_before, &u.macros_after]))
+}
+
+/// Every unit's macro tables are as a full build of the same texts (with `open` open) makes
+/// them: the same names, each with the same text and at the same place.
+fn tables_like_a_full_build(b: &Analysis, open: &[FileId]) {
+    let full = Analysis::build(b.vfs.clone(), b.setup.clone()).sync_open_files(open);
+    let mut compared = 0;
+    for u in b.units.iter().flatten() {
+        let v = full.units.iter().flatten().find(|v| v.root == u.root && v.kind == u.kind && v.library == u.library && v.invocation == u.invocation).unwrap();
+        for (t, w) in [(&u.macros_before, &v.macros_before), (&u.macros_after, &v.macros_after)] {
+            assert!(t.same_definitions(w), "{}", b.path(u.root).display());
+            for (name, d) in t.iter() {
+                assert_eq!(d.name_span, w.get(name).unwrap().name_span, "{name} in {}", b.path(u.root).display());
+            }
+        }
+        compared += 1;
+    }
+    assert_eq!(compared, full.units.iter().flatten().count());
+}
+
+const HEADER_MACROS: usize = 1000;
+const FILES: usize = 200;
+
+/// A header of `HEADER_MACROS` macros, then `FILES` files (`file_text`: each using one of the
+/// header's), a top that instantiates a library module using one, and an open file outside the
+/// build using one. Returns the build (with the open file), its root and the open file.
+fn header_project(name: &str, file_text: fn(usize) -> String) -> (Analysis, PathBuf, FileId) {
+    let root = std::env::temp_dir().join(format!("dvicode-incr-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    std::fs::write(root.join("defs.sv"), header_text()).unwrap();
+    let mut build = String::from("-y lib\n+libext+.v\ndefs.sv\n");
+    for i in 0..FILES {
+        let f = format!("f{i:03}.sv");
+        std::fs::write(root.join(&f), file_text(i)).unwrap();
+        build.push_str(&f);
+        build.push('\n');
+    }
+    std::fs::write(root.join("top.sv"), "module top;\n  L l();\nendmodule\n").unwrap();
+    build.push_str("top.sv\n");
+    std::fs::write(root.join("lib/L.v"), "module L;\n  localparam int Q = `HDR_3(1);\nendmodule\n").unwrap();
+    std::fs::write(root.join(".dvicode/default.build"), build).unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let extra = edit(&a, &root, "extra.sv", "module extra;\n  localparam int E = `HDR_5(2);\nendmodule\n");
+    let a = a.sync_open_files(&[extra]);
+    assert!(a.units.iter().flatten().any(|u| u.library), "lib/L.v is compiled");
+    assert!(a.is_adhoc_root(extra));
+    (a, root, extra)
+}
+
+fn header_text() -> String {
+    (0..HEADER_MACROS).map(|i| format!("`define HDR_{i}(x) ((x) + {i})\n")).collect()
+}
+
+fn file_text(i: usize) -> String {
+    format!("`define F{i} {i}\nmodule m{i};\n  localparam int P = `F{i} + `HDR_{i}(1);\nendmodule\n")
+}
+
+/// Trie nodes of the header's own table.
+fn header_nodes(a: &Analysis, root: &Path) -> usize {
+    let defs = a.vfs.file_id(&root.join("defs.sv"));
+    dvi_syntax::preproc::MacroTable::distinct_nodes([&a.unit(a.units_for(defs)[0]).macros_after])
+}
+
+/// At most a path of new nodes per unit and table, besides the header's.
+fn node_bound(header: usize) -> usize {
+    header + (FILES + 10) * 13
+}
+
+#[test]
+fn macro_tables_share_what_files_do_not_change_and_follow_moved_definitions() {
+    let (a, root, extra) = header_project("sharedtables", file_text);
+    let header_nodes = header_nodes(&a, &root);
+    // Each file adds one macro: a path of new nodes, not a copy of the 1,000 others.
+    assert!(table_nodes(&a) <= node_bound(header_nodes), "{} nodes for a header of {header_nodes}", table_nodes(&a));
+
+    // A line above the header's definitions: they all move, and every later table follows.
+    let defs = edit(&a, &root, "defs.sv", &format!("// moved\n{}", header_text()));
+    let work = dvi_syntax::preproc::macro_table_work();
+    let b = a.update(&[defs]);
+    assert!(!b.interface_changed(&a), "the definitions only moved");
+    let work = dvi_syntax::preproc::macro_table_work() - work;
+    assert!(table_nodes(&b) <= node_bound(2 * header_nodes), "{} nodes after the move", table_nodes(&b));
+    assert!(work as usize <= 2 * node_bound(header_nodes), "{work} nodes visited");
+    assert_eq!(definition_lines(&b, &root, "f150.sv", "`HDR_150"), vec![("defs.sv".into(), 152)]);
+    assert_eq!(definition_lines(&b, &root, "lib/L.v", "`HDR_3"), vec![("defs.sv".into(), 5)]);
+    assert_eq!(definition_lines(&b, &root, "extra.sv", "`HDR_5"), vec![("defs.sv".into(), 7)]);
+    tables_like_a_full_build(&b, &[extra]);
+}
+
+#[test]
+fn moving_a_header_and_every_file_at_once_costs_as_much_as_the_changes() {
+    // As a checkout that changes a header and every file: one update.
+    let (a, root, extra) = header_project("batchmove", file_text);
+    let header_nodes = header_nodes(&a, &root);
+    let mut files = vec![edit(&a, &root, "defs.sv", &format!("// moved\n{}", header_text()))];
+    for i in 0..FILES {
+        files.push(edit(&a, &root, &format!("f{i:03}.sv"), &format!("// moved too\n{}", file_text(i))));
+    }
+    let work = dvi_syntax::preproc::macro_table_work();
+    let b = a.update(&files);
+    assert!(!b.interface_changed(&a), "the definitions only moved");
+    let work = dvi_syntax::preproc::macro_table_work() - work;
+    assert!(table_nodes(&b) <= node_bound(2 * header_nodes), "{} nodes after the move", table_nodes(&b));
+    assert!(work as usize <= 3 * node_bound(header_nodes), "{work} nodes visited");
+    assert_eq!(definition_lines(&b, &root, "f150.sv", "`HDR_150"), vec![("defs.sv".into(), 152)]);
+    assert_eq!(definition_lines(&b, &root, "f151.sv", "`F151"), vec![("f151.sv".into(), 2)]);
+    assert_eq!(definition_lines(&b, &root, "extra.sv", "`HDR_5"), vec![("defs.sv".into(), 7)]);
+    tables_like_a_full_build(&b, &[extra]);
+    // Then a macro of the header changes: every later file is compiled again, from the tables
+    // the batch left.
+    edit(&b, &root, "defs.sv", &format!("// moved\n{}", header_text().replacen("((x) + 0)", "((x) - 0)", 1)));
+    let work = dvi_syntax::preproc::macro_table_work();
+    let c = b.update(&files[..1]);
+    assert!(c.interface_changed(&b));
+    let work = dvi_syntax::preproc::macro_table_work() - work;
+    assert!(work as usize <= 3 * node_bound(header_nodes), "{work} nodes visited after the batch");
+    tables_like_a_full_build(&c, &[extra]);
+}
+
+#[test]
+fn a_file_that_redefines_a_moved_macro_identically_is_where_later_files_find_it() {
+    // p.sv defines and undefines a name: its tables before and after hold the same
+    // definitions but are different tables, and must stay so once pointed at moved ones.
+    let files = [
+        ("defs.svh", "`define A 1\n"),
+        ("h.sv", "`include \"defs.svh\"\nmodule h; endmodule\n"),
+        ("p.sv", "`define TMP 1\n`undef TMP\nmodule p; endmodule\n"),
+        ("q.sv", "module q;\n  localparam int X = `A;\nendmodule\n"),
+    ];
+    let (a, root) = project("redefinemoved", &files);
+    let defs = edit(&a, &root, "defs.svh", "\n`define A 1\n");
+    let b = a.update(&[defs]);
+    assert_eq!(definition_lines(&b, &root, "q.sv", "`A"), vec![("defs.svh".into(), 2)]);
+    tables_like_a_full_build(&b, &[]);
+    // Moved again, and p.sv now defines A the same way: q.sv finds p.sv's.
+    edit(&b, &root, "defs.svh", "\n\n`define A 1\n");
+    let p = edit(&b, &root, "p.sv", "`define TMP 1\n`undef TMP\nmodule p; endmodule\n`define A 1\n");
+    let c = b.update(&[defs, p]);
+    assert_eq!(definition_lines(&c, &root, "q.sv", "`A"), vec![("p.sv".into(), 4)]);
+    tables_like_a_full_build(&c, &[]);
+}
+
+/// A file that defines nothing: the files share the header's table.
+fn plain_file_text(i: usize) -> String {
+    format!("module m{i};\n  localparam int P = `HDR_{i}(1);\nendmodule\n")
+}
+
+#[test]
+fn a_batch_where_files_redefine_moved_header_macros_costs_as_much_as_the_changes() {
+    // Each file redefines a macro of the header the same way (another one each, or all the
+    // same one), as the header's definitions move: each file then is where the next ones find
+    // it.
+    for same in [false, true] {
+        let (a, root, extra) = header_project(if same { "redefinesame" } else { "redefineeach" }, plain_file_text);
+        let header_nodes = header_nodes(&a, &root);
+        let mut files = vec![edit(&a, &root, "defs.sv", &format!("// moved\n{}", header_text()))];
+        for i in 0..FILES {
+            let m = if same { 0 } else { i };
+            files.push(edit(&a, &root, &format!("f{i:03}.sv"), &format!("{}`define HDR_{m}(x) ((x) + {m})\n", plain_file_text(i))));
+        }
+        let work = dvi_syntax::preproc::macro_table_work();
+        let b = a.update(&files);
+        b.interface_changed(&a);
+        let work = dvi_syntax::preproc::macro_table_work() - work;
+        assert!(table_nodes(&b) <= node_bound(2 * header_nodes), "{} nodes", table_nodes(&b));
+        assert!(work as usize <= 3 * node_bound(header_nodes), "{work} nodes visited (same: {same})");
+        if same {
+            assert_eq!(definition_lines(&b, &root, "extra.sv", "`HDR_5"), vec![("defs.sv".into(), 7)]);
+            assert_eq!(definition_lines(&b, &root, "f000.sv", "`HDR_0"), vec![("defs.sv".into(), 2)]);
+        } else {
+            assert_eq!(definition_lines(&b, &root, "extra.sv", "`HDR_5"), vec![("f005.sv".into(), 4)]);
+            assert_eq!(definition_lines(&b, &root, "f150.sv", "`HDR_150"), vec![("defs.sv".into(), 152)]);
+        }
+        tables_like_a_full_build(&b, &[extra]);
+    }
+}
+
+#[test]
+fn what_an_open_file_moves_no_other_open_file_sees() {
+    let files = [("defs.svh", "`define A 1\n"), ("h.sv", "`include \"defs.svh\"\nmodule h; endmodule\n")];
+    for (i, a_first) in [true, false].into_iter().enumerate() {
+        let (a, root) = project(&format!("adhocmoves{i}"), &files);
+        let x = edit(&a, &root, "x.sv", "module x;\n  localparam int X = `A;\nendmodule\n");
+        let y = edit(&a, &root, "y.sv", "module y;\n  localparam int Y = `A;\nendmodule\n");
+        let open = if a_first { [x, y] } else { [y, x] };
+        let a = a.sync_open_files(&open);
+        // The header's definition moves, and x.sv defines A again the same way at its end.
+        let defs = edit(&a, &root, "defs.svh", "\n`define A 1\n");
+        edit(&a, &root, "x.sv", "module x;\n  localparam int X = `A;\nendmodule\n`define A 1\n");
+        let b = a.update(&[defs, x]);
+        assert_eq!(definition_lines(&b, &root, "y.sv", "`A"), vec![("defs.svh".into(), 2)], "order {i}");
+        assert_eq!(definition_lines(&b, &root, "x.sv", "`A"), vec![("defs.svh".into(), 2)], "order {i}");
+        tables_like_a_full_build(&b, &open);
+    }
+}
+
+#[test]
+fn moving_the_headers_of_many_invocations_at_once_costs_as_much_as_the_changes() {
+    // Each invocation: a header, a file that defines nothing, and a library module (in a
+    // folder of its own: library files are looked for in the invocations in order), all
+    // sharing the header's table.
+    const N: usize = 200;
+    let root = std::env::temp_dir().join(format!("dvicode-incr-invocations-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".dvicode")).unwrap();
+    let mut build = String::new();
+    for i in 0..N {
+        std::fs::write(root.join(format!("h{i}.sv")), format!("`define M{i} {i}\n")).unwrap();
+        std::fs::write(root.join(format!("t{i}.sv")), format!("module t{i};\n  L{i} l();\nendmodule\n")).unwrap();
+        std::fs::create_dir_all(root.join(format!("lib{i}"))).unwrap();
+        std::fs::write(root.join(format!("lib{i}/L{i}.v")), format!("module L{i};\n  localparam int Q = `M{i};\nendmodule\n")).unwrap();
+        build.push_str(&format!("+dvicode_init\n-y lib{i}\n+libext+.v\nh{i}.sv\nt{i}.sv\n"));
+    }
+    std::fs::write(root.join(".dvicode/default.build"), build).unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    let a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    assert_eq!(a.units.iter().flatten().filter(|u| u.library).count(), N);
+    let files: Vec<FileId> = (0..N).map(|i| edit(&a, &root, &format!("h{i}.sv"), &format!("\n`define M{i} {i}\n"))).collect();
+    let work = dvi_syntax::preproc::macro_table_work();
+    let b = a.update(&files);
+    let work = dvi_syntax::preproc::macro_table_work() - work;
+    assert!(work as usize <= 10 * N, "{work} nodes visited");
+    assert_eq!(definition_lines(&b, &root, "lib150/L150.v", "`M150"), vec![("h150.sv".into(), 2)]);
+    tables_like_a_full_build(&b, &[]);
+}
+
+#[test]
+fn changing_a_header_macro_compiles_the_later_files_again_at_the_cost_of_their_changes() {
+    // HDR_0 expands differently: every later file is compiled again with the new table.
+    for (name, file_text) in [("changeplain", plain_file_text as fn(usize) -> String), ("changedefining", file_text)] {
+        let (a, root, extra) = header_project(name, file_text);
+        let header_nodes = header_nodes(&a, &root);
+        let defs = edit(&a, &root, "defs.sv", &header_text().replacen("((x) + 0)", "((x) - 0)", 1));
+        let work = dvi_syntax::preproc::macro_table_work();
+        let b = a.update(&[defs]);
+        assert!(b.interface_changed(&a));
+        let work = dvi_syntax::preproc::macro_table_work() - work;
+        assert!(work as usize <= 3 * node_bound(header_nodes), "{work} nodes visited ({name})");
+        assert!(table_nodes(&b) <= node_bound(2 * header_nodes), "{} nodes", table_nodes(&b));
+        tables_like_a_full_build(&b, &[extra]);
+        // And with the header's definitions moved too, and a file in the middle edited.
+        let mid = edit(&b, &root, "f100.sv", &format!("// edited\n{}", file_text(100)));
+        edit(&b, &root, "defs.sv", &format!("// moved\n{}", header_text().replacen("((x) + 1)", "((x) - 1)", 1)));
+        let c = b.update(&[defs, mid]);
+        assert_eq!(definition_lines(&c, &root, "f150.sv", "`HDR_150"), vec![("defs.sv".into(), 152)]);
+        tables_like_a_full_build(&c, &[extra]);
+    }
+}
+
+#[test]
+fn files_after_a_changed_macro_see_where_the_header_definitions_moved_in_the_same_update() {
+    // One update: the header's definitions move, and a later file changes its own macro, so
+    // the files after it are compiled again, from its table.
+    let (a, root, extra) = header_project("moveandchange", file_text);
+    let defs = edit(&a, &root, "defs.sv", &format!("// moved\n{}", header_text()));
+    let f50 = edit(&a, &root, "f050.sv", &file_text(50).replacen("`define F50 50", "`define F50 51", 1));
+    let b = a.update(&[defs, f50]);
+    assert_eq!(definition_lines(&b, &root, "f150.sv", "`HDR_150"), vec![("defs.sv".into(), 152)]);
+    assert_eq!(definition_lines(&b, &root, "extra.sv", "`HDR_5"), vec![("defs.sv".into(), 7)]);
+    tables_like_a_full_build(&b, &[extra]);
+}

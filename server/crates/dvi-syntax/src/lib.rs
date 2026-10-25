@@ -5,6 +5,7 @@ pub mod diag;
 pub mod format;
 pub mod lexer;
 pub mod parser;
+mod macro_table;
 pub mod preproc;
 pub mod span;
 pub mod token;

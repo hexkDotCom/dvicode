@@ -6,6 +6,7 @@ license.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+dvi-syntax = { workspace = true, features = ["work-count"] }
 
 [dependencies]
 dvi-syntax.workspace = true

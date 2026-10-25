@@ -82,80 +82,9 @@ impl MacroDef {
 /// File id used for macros defined on the command line (`+define+`).
 pub const COMMAND_LINE_FILE: FileId = u32::MAX;
 
-/// Macro definitions by name.
-///
-/// Every compilation root keeps a snapshot of the table it started with, so cloning must be
-/// cheap: clones share one map, and the first change after a clone copies it (copy-on-write),
-/// which happens at most once per root.
-#[derive(Clone, Debug, Default)]
-pub struct MacroTable(Arc<FxHashMap<SmolStr, Arc<MacroDef>>>);
-
-impl MacroTable {
-    pub fn new() -> MacroTable {
-        MacroTable::default()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Arc<MacroDef>> {
-        self.0.get(name)
-    }
-
-    pub fn contains_key(&self, name: &str) -> bool {
-        self.0.contains_key(name)
-    }
-
-    pub fn insert(&mut self, name: SmolStr, def: Arc<MacroDef>) {
-        Arc::make_mut(&mut self.0).insert(name, def);
-    }
-
-    pub fn remove(&mut self, name: &str) {
-        if self.0.contains_key(name) {
-            Arc::make_mut(&mut self.0).remove(name);
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.0 = Arc::default();
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&SmolStr, &Arc<MacroDef>)> {
-        self.0.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Identity of the shared map: tables with the same identity are equal.
-    pub fn identity(&self) -> usize {
-        Arc::as_ptr(&self.0) as *const () as usize
-    }
-
-    /// A copy in which the definitions found in `moved` (keyed by the address of the old
-    /// definition, see [`def_identity`]) are replaced; `None` when the table has none of them.
-    pub fn replaced(&self, moved: &FxHashMap<usize, Arc<MacroDef>>) -> Option<MacroTable> {
-        if !self.0.values().any(|d| moved.contains_key(&def_identity(d))) {
-            return None;
-        }
-        let map = self.0.iter().map(|(k, d)| (k.clone(), moved.get(&def_identity(d)).unwrap_or(d).clone())).collect();
-        Some(MacroTable(Arc::new(map)))
-    }
-
-    /// Same macro names with the same parameters and bodies (locations may differ): files
-    /// compiled after a table expand identically with either.
-    pub fn same_definitions(&self, other: &MacroTable) -> bool {
-        if Arc::ptr_eq(&self.0, &other.0) {
-            return true;
-        }
-        self.0.len() == other.0.len()
-            && self.0.iter().all(|(k, a)| {
-                other.0.get(k).is_some_and(|b| Arc::ptr_eq(a, b) || a.same_as(b))
-            })
-    }
-}
+pub use crate::macro_table::{MacroTable, SameMemo};
+#[cfg(feature = "work-count")]
+pub use crate::macro_table::visited as macro_table_work;
 
 /// Identity of a definition (its address), for maps from old to new definitions.
 pub fn def_identity(d: &Arc<MacroDef>) -> usize {
@@ -875,7 +804,7 @@ impl<'a> Pp<'a> {
         if self.in_macro().is_none() {
             self.res.macro_defs.push(def.clone());
         }
-        self.macros.insert(name.text.clone(), def);
+        self.macros.insert(def);
     }
 
     fn include(&mut self, tok: Token) {
