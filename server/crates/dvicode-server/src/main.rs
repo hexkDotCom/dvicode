@@ -8,6 +8,7 @@
 
 mod check;
 mod crash;
+mod format;
 mod fs;
 mod fuzz;
 mod logger;

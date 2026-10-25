@@ -24,6 +24,13 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
 - **Design Hierarchy** and **UVM Verification Hierarchy** views, worked out from the source:
   filter them by name or path, and let them follow the editor (jump with F12 and the view
   selects where you landed).
+- **Formatter**: Format Document and Format Selection fix indentation and trailing blanks (and,
+  when asked, runs of blank lines), nothing else: every result is checked to change whitespace
+  only. Indentation follows the constructs (blocks, `case` items, one-statement bodies,
+  headers, continuation lines, UVM `*_begin`/`*_end` macros); lines aligned by hand under the
+  line above are kept. `` `define `` definitions, block comments, strings and protected
+  regions are never touched. Settings under `dvicode.format`, or a `.dvicode/format.json` in
+  the project. Alignment of declarations and connections is not done yet.
 - **Parameters per instance**: the Design Hierarchy shows the parameter values each instance
   gets (overrides, `defparam`s, defaults, localparams and constant functions evaluated), the
   generate branches that exist in it and one block per generate loop copy (`g[0]`, `g[1]`);

@@ -2,7 +2,7 @@
 
 mod build_docs;
 
-use crate::{crash, fs, util};
+use crate::{crash, format, fs, util};
 use build_docs::{BuildDoc, Inspected};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::hints::HintKinds;
@@ -103,6 +103,8 @@ fn capabilities() -> ServerCapabilities {
         })),
         document_link_provider: Some(DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        document_range_formatting_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
             legend: SemanticTokensLegend { token_types: TOKEN_TYPES.to_vec(), token_modifiers: TOKEN_MODIFIERS.to_vec() },
             full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
@@ -288,6 +290,8 @@ struct Server {
     settings: Settings,
     /// Which inlay hints to give (`dvicode.inlayHints`): no build depends on them.
     hint_kinds: HintKinds,
+    /// The `dvicode.format` settings: no build depends on them.
+    format_settings: Value,
     /// The client can be asked to request inlay hints again.
     hint_refresh: bool,
     hints_refreshed: Option<Instant>,
@@ -419,6 +423,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let watch_inputs = watched_files.and_then(|d| d.dynamic_registration).unwrap_or(false);
     let relative_patterns = watched_files.and_then(|d| d.relative_pattern_support).unwrap_or(false);
     let hint_kinds = params.initialization_options.as_ref().map(hint_kinds_of).unwrap_or_default();
+    let format_settings = params.initialization_options.as_ref().and_then(|v| v.get("format")).cloned().unwrap_or(Value::Null);
     let hint_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false);
     log::info!("workspace root: {:?}; settings: {:?}", root, settings);
     let vfs = Arc::new(Vfs::new());
@@ -442,6 +447,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         root,
         settings,
         hint_kinds,
+        format_settings,
         hint_refresh,
         hints_refreshed: None,
         open: FxHashMap::default(),
@@ -1412,6 +1418,7 @@ impl Server {
                 let kinds = hint_kinds_of(&v);
                 let hints_changed = kinds != self.hint_kinds;
                 self.hint_kinds = kinds;
+                self.format_settings = v.get("format").cloned().unwrap_or(Value::Null);
                 let mut rebuild = false;
                 if let Ok(s) = serde_json::from_value::<Settings>(v) {
                     // The client sends its configuration once at start-up too.
@@ -1765,6 +1772,25 @@ impl Server {
                 let Some((f, off)) = pos(a, &tp.text_document.uri, tp.position) else { return Ok(None) };
                 a.rename(f, off, &p.new_name).map(Some)
             }),
+            // Formatting: of the document's text as it is now (unsaved edits too, a file outside
+            // the build too), off the main loop.
+            "textDocument/formatting" | "textDocument/rangeFormatting" => {
+                let range = req.method == "textDocument/rangeFormatting";
+                let uri = req.params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| serde_json::from_value::<Url>(u.clone()).ok());
+                let path = uri.as_ref().and_then(path_of);
+                let text = path.as_ref().and_then(|p| self.vfs.lookup(p)).and_then(|id| self.vfs.text(id));
+                let editor: FormattingOptions = req.params.get("options").cloned().and_then(|o| serde_json::from_value(o).ok()).unwrap_or(FormattingOptions { tab_size: 2, insert_spaces: true, ..Default::default() });
+                let lines = range.then(|| req.params.get("range").cloned().and_then(|r| serde_json::from_value::<Range>(r).ok())).flatten().map(|r| dvi_syntax::format::range_lines(r.start.line as usize, r.end.line as usize, r.end.character as usize));
+                let settings = self.format_settings.clone();
+                let (id, sender) = (req.id.clone(), self.sender.clone());
+                rayon::spawn(move || {
+                    let result = match (text, format::options(&settings, path.as_deref(), &editor)) {
+                        (Some(text), Some(o)) => format::edits(&text, &o, lines).map_or(Value::Null, |e| json!(e)),
+                        _ => Value::Null,
+                    };
+                    let _ = sender.send(Message::Response(Response::new_ok(id, result)));
+                });
+            }
             "textDocument/inlayHint" => {
                 let kinds = self.hint_kinds;
                 self.spawn(req, move |a, p: InlayHintParams| {

@@ -106,7 +106,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 sweep = true;
             }
-            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--format-check" | "--format" | "--format-twice" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -292,6 +292,93 @@ fn show_loc(l: &lsp_types::Location) -> String {
 fn run_query(a: &Analysis, q: &str, arg: &str) {
     println!("== {q} {arg}");
     match q {
+        "--format-twice" => {
+            // The lines a second formatting (default options) changes, with the first's.
+            let Some(f) = a.vfs.lookup(std::path::Path::new(arg)) else {
+                println!("not a file of the project: {arg}");
+                return;
+            };
+            let Some(text) = a.vfs.text(f) else { return };
+            let o = dvi_syntax::format::Options::default();
+            let Some(r1) = dvi_syntax::format::format(&text, &o) else { return println!("refused") };
+            let p1 = dvi_syntax::format::apply(&text, &r1, None);
+            let Some(r2) = dvi_syntax::format::format(&p1, &o) else { return println!("second refused") };
+            let p2 = dvi_syntax::format::apply(&p1, &r2, None);
+            let (l0, l1, l2): (Vec<&str>, Vec<&str>, Vec<&str>) = (text.lines().collect(), p1.lines().collect(), p2.lines().collect());
+            for (i, (a1, a2)) in l1.iter().zip(&l2).enumerate() {
+                if a1 != a2 {
+                    for j in i.saturating_sub(3)..=i {
+                        println!("{:>6} orig {:?}", j + 1, l0.get(j).unwrap_or(&""));
+                        println!("{:>6} one  {:?}", j + 1, l1[j]);
+                    }
+                    println!("{:>6} two  {:?}", i + 1, a2);
+                    println!("--");
+                }
+            }
+        }
+        "--format" => {
+            // A file formatted with the default options.
+            let Some(f) = a.vfs.lookup(std::path::Path::new(arg)) else {
+                println!("not a file of the project: {arg}");
+                return;
+            };
+            let Some(text) = a.vfs.text(f) else { return };
+            match dvi_syntax::format::format(&text, &dvi_syntax::format::Options::default()) {
+                Some(r) => print!("{}", dvi_syntax::format::apply(&text, &r, None)),
+                None => println!("refused"),
+            }
+        }
+        "--format-check" => {
+            // Every file formatted with two option sets: refused results (more than whitespace
+            // would change), results that change when formatted again, time.
+            use dvi_syntax::format::{apply, difference, format, candidate, Directives, Options};
+            let sets = [Options::default(), Options { indent_size: 4, use_tabs: true, align_lists: true, directives: Directives::Indent, max_blank_lines: 1, indent_case_items: false, continuation: 2, trim_trailing: true }];
+            let mut files: Vec<_> = a.project_files().into_iter().filter(|f| !a.vfs.is_builtin(*f)).collect();
+            files.sort_by_key(|f| a.path(*f));
+            let (mut refused, mut unstable, mut changed, mut bytes) = (0, 0, 0, 0usize);
+            let (mut lines, mut reindented) = (0usize, 0usize);
+            // `DVICODE_FORMAT_SAMPLES`: print up to this many re-indented lines (set 0).
+            let mut samples: usize = std::env::var("DVICODE_FORMAT_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let t0 = std::time::Instant::now();
+            for f in &files {
+                let Some(text) = a.vfs.text(*f) else { continue };
+                bytes += text.len();
+                for (k, o) in sets.iter().enumerate() {
+                    match format(&text, o) {
+                        None => {
+                            refused += 1;
+                            let out = apply(&text, &candidate(&text, o), None);
+                            println!("refused (set {k}) {}: {:?}", a.path(*f).display(), difference(&text, &out, o.max_blank_lines > 0));
+                        }
+                        Some(r) => {
+                            if !r.edits.is_empty() {
+                                changed += 1;
+                            }
+                            if k == 0 {
+                                lines += text.lines().count();
+                                for (line, e) in &r.edits {
+                                    if let dvi_syntax::format::LineEdit::Indent { new, .. } | dvi_syntax::format::LineEdit::Both { new, .. } = e {
+                                        reindented += 1;
+                                        if samples > 0 {
+                                            samples -= 1;
+                                            let old = text.lines().nth(*line).unwrap_or("");
+                                            println!("reindent {}:{}: {:?} -> {} spaces", a.path(*f).display(), line + 1, old, new.len());
+                                        }
+                                    }
+                                }
+                            }
+                            let out = apply(&text, &r, None);
+                            if let Some(again) = format(&out, o).filter(|x| !x.edits.is_empty()) {
+                                unstable += 1;
+                                let (line, _) = &again.edits[0];
+                                println!("not idempotent (set {k}) {}:{}: {:?}", a.path(*f).display(), line + 1, out.lines().nth(*line).unwrap_or(""));
+                            }
+                        }
+                    }
+                }
+            }
+            println!("format: {} files, {} KB, {changed} results with changes, {refused} refused, {unstable} not idempotent, {reindented} of {lines} lines re-indented, {} ms", files.len(), bytes / 1024, t0.elapsed().as_millis());
+        }
         "--files" => {
             let mut files: Vec<_> = a.project_files().into_iter().map(|f| a.vfs.path(f)).collect();
             files.sort();

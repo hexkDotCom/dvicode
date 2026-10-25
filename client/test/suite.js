@@ -410,6 +410,27 @@ async function run() {
     return `W=${w.value} (${w.origin}); ${md.split('\n').filter((l) => l.startsWith('- ')).join(' ')}`;
   });
 
+  await test('format document: whitespace edits on an unsaved buffer', async () => {
+    const doc = await open('rtl/fifo.sv');
+    const ed = await vscode.window.showTextDocument(doc);
+    const line = lineOf(doc, 'logic [AW:0]   count;').line;
+    const lead = doc.lineAt(line).firstNonWhitespaceCharacterIndex;
+    // Unindent one line and add trailing blanks to another (not saved).
+    await ed.edit((e) => {
+      e.delete(new vscode.Range(line, 0, line, lead));
+      e.insert(doc.lineAt(line + 1).range.end, '   ');
+    });
+    try {
+      const edits = await vscode.commands.executeCommand('vscode.executeFormatDocumentProvider', doc.uri, { tabSize: 2, insertSpaces: true });
+      const got = (edits || []).map((x) => `${x.range.start.line - line}:${x.range.start.character}-${x.range.end.character}=${JSON.stringify(x.newText)}`).join(' ');
+      const want = `0:0-0=${JSON.stringify(' '.repeat(lead))} 1:${doc.lineAt(line + 1).text.trimEnd().length}-${doc.lineAt(line + 1).text.length}=""`;
+      if (got !== want) throw new Error(`edits: ${got}; want ${want}`);
+      return got;
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   await test('drivers and loads view: through an output port and back', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

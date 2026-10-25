@@ -519,6 +519,40 @@ endmodule
 }
 
 #[test]
+fn formatting_gives_whitespace_edits_by_the_settings_and_the_project_file() {
+    let m = "module m;\nlogic a;   \n  logic b;\nendmodule\n";
+    let root = project("formatting", &[("m.sv", m)]);
+    let (mut c, init) = Client::start(&root, json!({ "format": { "indentSize": 3 } }));
+    assert_eq!(init["capabilities"]["documentFormattingProvider"], true, "{init}");
+    assert_eq!(init["capabilities"]["documentRangeFormattingProvider"], true, "{init}");
+    let uri = uri(&root, "m.sv");
+    let options = json!({ "tabSize": 8, "insertSpaces": true });
+    let edits = c.request_ok("textDocument/formatting", json!({ "textDocument": { "uri": uri }, "options": options }));
+    assert_eq!(
+        edits,
+        json!([
+            { "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } }, "newText": "   " },
+            { "range": { "start": { "line": 1, "character": 8 }, "end": { "line": 1, "character": 11 } }, "newText": "" },
+            { "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 2 } }, "newText": "   " }
+        ]),
+        "the setting's 3 spaces over the editor's tab size"
+    );
+    // A range: the lines it touches only.
+    let edits = c.request_ok("textDocument/rangeFormatting", json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 3, "character": 0 } }, "options": options }));
+    assert_eq!(edits.as_array().map(|e| e.len()), Some(1), "{edits}");
+    // The project's .dvicode/format.json over the settings; an unsaved buffer.
+    std::fs::write(root.join(".dvicode/format.json"), r#"{ "indentSize": 4, "trimTrailingWhitespace": false, "bogus": 1 }"#).unwrap();
+    c.open(&uri, 2, "module m;\nlogic a;   \nendmodule\n");
+    let edits = c.request_ok("textDocument/formatting", json!({ "textDocument": { "uri": uri }, "options": options }));
+    assert_eq!(edits, json!([{ "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } }, "newText": "    " }]));
+    // Turned off.
+    std::fs::write(root.join(".dvicode/format.json"), r#"{ "enable": false }"#).unwrap();
+    let off = c.request_ok("textDocument/formatting", json!({ "textDocument": { "uri": uri }, "options": options }));
+    assert!(off.is_null(), "{off}");
+    c.shutdown();
+}
+
+#[test]
 fn closing_a_file_outside_the_build_clears_its_problems() {
     let root = project("adhoc", &[("pkg.sv", PKG), ("top.sv", TOP)]);
     let (mut c, _) = Client::start(&root, Value::Null);

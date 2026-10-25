@@ -303,6 +303,81 @@
           "default": "",
           "description": "UVM library location on the server (used by -uvm and auto-configuration when $UVM_HOME is not set)."
         },
+        "dvicode.format.enable": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Format SystemVerilog documents and selections (Format Document, Format Selection). The formatter changes whitespace only: indentation, trailing blanks and, when asked, runs of blank lines. A `.dvicode/format.json` in the project (the nearest above the file) overrides these settings key by key."
+        },
+        "dvicode.format.indentSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1,
+          "maximum": 16,
+          "markdownDescription": "Spaces per indentation level. Unset: the editor's tab size."
+        },
+        "dvicode.format.useTabs": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "markdownDescription": "Indent with tabs. Unset: as the editor inserts (`#editor.insertSpaces#`)."
+        },
+        "dvicode.format.indentCaseItems": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Indent `case` items one level inside their `case`."
+        },
+        "dvicode.format.listIndent": {
+          "type": "string",
+          "enum": [
+            "indent",
+            "align"
+          ],
+          "enumDescriptions": [
+            "Lines inside parentheses (ports, parameters, arguments) one level in; lines already lined up after the `(` or under the line above are kept.",
+            "Lines inside parentheses line up after the `(` when something follows it on its line."
+          ],
+          "default": "indent",
+          "markdownDescription": "How lines inside parentheses are indented."
+        },
+        "dvicode.format.continuationIndent": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 4,
+          "markdownDescription": "Levels added to the continuation lines of a statement. Continuation lines lined up by hand under the line above are kept."
+        },
+        "dvicode.format.preprocessorIndent": {
+          "type": "string",
+          "enum": [
+            "keep",
+            "column0",
+            "indent"
+          ],
+          "enumDescriptions": [
+            "Compiler directive lines (`ifdef, `include...) keep their indentation.",
+            "Directive lines at column 0.",
+            "Directive lines at the level of the code around them."
+          ],
+          "default": "keep",
+          "markdownDescription": "Where compiler directive lines go. `` `define `` definitions are never changed."
+        },
+        "dvicode.format.trimTrailingWhitespace": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Remove trailing blanks (never inside block comments, strings, macro definitions, or before a `\\`)."
+        },
+        "dvicode.format.maxBlankLines": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "Blank lines kept in a row at most (0: all kept). Removing lines changes the line numbers `` `__LINE__ `` gives."
+        },
         "dvicode.designHierarchy.showInactiveGenerate": {
           "type": "boolean",
           "default": false,
