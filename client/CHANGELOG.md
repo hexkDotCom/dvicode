@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.5.0 (preview)
+
+**Formatter**
+
+- Format Document and Format Selection fix indentation and trailing blanks (and, when asked,
+  runs of blank lines), nothing else: every result is checked to change only white space.
+  Indentation follows the constructs (blocks, `case` items, one-statement bodies, headers,
+  continuation lines, UVM `*_begin`/`*_end` macros); lines aligned by hand under the line
+  above keep that alignment. `` `define `` bodies, block comments, strings and protected
+  regions are never touched.
+- Settings under `dvicode.format` (indent size, tabs, `case` items, list and continuation
+  indentation, directives, trailing blanks, blank lines), or a `.dvicode/format.json` in the
+  project. Alignment of declarations and connections is not done yet.
+
+**Parameters per instance**
+
+- The Design Hierarchy shows the parameter values each instance gets (overrides,
+  `defparam`s, defaults, localparams and constant functions evaluated), the generate branches
+  that exist in it, and one block per generate loop copy (`g[0]`, `g[1]`).
+- Hover a parameter or a signal for its value or width in each instance. What cannot be
+  evaluated is said, never guessed: a branch whose condition is unknown is marked
+  *undetermined*.
+
+**Design and verification views**
+
+- **Drivers and Loads**: Show Drivers and Show Loads on a signal or port list where it is
+  written (assignments, `force`, output arguments, gate outputs) or read, following port
+  connections down into instances and up to where its module is instantiated.
+- **Register Model**: the maps, registers, addresses and fields a UVM register block's
+  `build()` creates, read from its construction code, with search by address.
+- **Assertions and Coverage**: the assertions, covers and coverpoints that use a signal or
+  field (as the checked value, a clock or a reset), through named properties, port
+  connections and `bind`s, and covergroup `sample()` arguments.
+
+**UVM**
+
+- `uvm_config_db`: hover a `get` for the `set` calls that can provide it (field, type and
+  scope matched as UVM 1.2 matches them, through the test's component hierarchy), and a
+  `set` for the `get` calls it reaches; go to definition from a field name to its sets.
+- Factory overrides: hover a `set_*_override*` call to see which components it changes in
+  the test's modeled build, which it may change, and why others are not changed.
+- Override and implement: complete an inherited method's name in a class to override it, or
+  implement every pure virtual method left with one code action.
+
+**Editing**
+
+- Inlay hints: port, parameter and argument names on positional connections and calls,
+  only where the binding is certain.
+- Instance repair: complete port and parameter names in an instance's lists, connect the
+  missing ports, expand `.*`, turn ordered connections into named ones, and see ports
+  connected twice or ordered and named connections mixed.
+
+**Checks**
+
+- A name in the selects of a port connection (`.p(sig[idx])`) or of a gate terminal must be
+  declared; only the connected nets themselves may be implicit.
+- Single names in a parameter value (`#(W)`) must be declared. Names of a `bind` target and
+  of a `defparam` are never reported, and no longer excuse the same name elsewhere.
+
+**Performance and memory**
+
+- After a build, files no longer compiled keep no text in memory (another build
+  configuration, a branch switch).
+- Large answers (trees, remote file reads) are no longer copied once more before they are
+  sent.
+- The register model of a large generated block no longer searches every member of the
+  block for each assignment.
+- Completion in a scope with very many names stops at 3,000 items and is asked for again as
+  you type.
+- A multi-cursor edit in a big file no longer rescans the file once per cursor.
+
+**Fixes**
+
+- After switching engines (another SSH host, say), documents still open from the previous one
+  are not taken for the new one's files, and the Assertions and Drivers results of the
+  previous one are dropped.
+- Restart Server and a full build mark every view's results out of date.
+- Deleting or renaming a folder in a `dvicode://` workspace updates the project.
+- A new Assertions or Drivers search cancels the one still running.
+- `dvicode.server.path` is run as written over WSL and SSH (a leading `~/` is still the home
+  folder).
+- Select Build Configuration stores a build file inside the project relative to it.
+- The editor's file access (remote engines) reads only regular files, and keeps the create
+  and overwrite flags when two writes race.
+- Rename and quick fixes work with editors that take workspace edits only as `changes`.
+- An inlay-hint refresh held back by the once-a-second limit is sent later instead of
+  dropped.
+- `dvicode-server check` fails (exit code 1) when a configured source file is missing.
+
 ## 0.4.2 (preview)
 
 **Fewer false errors in large projects**
