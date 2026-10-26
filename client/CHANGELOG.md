@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (preview)
 
 - **TLM connections**: with ports shown, the Verification Hierarchy shows what each port,
   export and imp is connected to (from the `connect()` calls of `connect_phase`, including the
@@ -13,9 +13,29 @@
   copies further down, the macros the file uses or tests as defined there, lines removed by
   `` `ifdef ``, definitions that exist more than once and the one used, and preprocessing
   problems. Hovering an `` `include `` says what found the file.
+- **Compile This File As**: for a header that several roots or invocations compile, choose
+  the compile context the editor uses (editor and Compiled Files menus). Hover, definition,
+  problems, highlighting, inactive regions and completion then read the file in that context;
+  the status bar shows it, and the choice is kept per workspace. Project-wide searches still
+  use every context.
 - The DVICode panel opens with Design Hierarchy, Verification Hierarchy and Structure
   expanded, and Register Model, Assertions and Coverage, Drivers and Loads and Compiled Files
   collapsed below them. A layout you arranged yourself is kept.
+- Rename of a class method also renames its overrides and the methods it overrides. Rename
+  refuses a change that would mean another declaration or macro definition where a shared
+  file is included or compiled again, and rename and quick-fix edits are refused when files
+  change while they are computed.
+- Macro arguments: a macro passed as an argument and pasted with ``` `` ``` is expanded first
+  (`` `CFG(`TC) `` with the body ``` tc``_cfg ``` gives `demo_cfg`), and a `` `"...`" `` string
+  written in an argument becomes a string with the macros inside it expanded, as simulators
+  do ([#13](https://github.com/hexkDotCom/dvicode/issues/13)).
+- Fixes found by reviews: file renames on remote and WSL engines never replace a file created
+  meanwhile; `check` fails on build inputs it cannot read; the register model follows
+  conditions into helpers and `else` branches inside loops, and survives very deep nesting;
+  Implement and Override keep formal names, qualified names and string arguments; the
+  formatter leaves indentation past 512 columns as written. Faster `uvm_config_db` hover,
+  Structure and Compiled Files on large projects, and less memory for closed files and hidden
+  views.
 
 ## 0.5.0 (preview)
 
