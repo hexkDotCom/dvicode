@@ -4401,3 +4401,36 @@ fn macro_actuals_are_expanded_before_pasting_and_quoted_when_they_hold_backtick_
     let e = a.expand_macro_use(uid, idx, usize::MAX).unwrap();
     assert!(e.contains("\"demo run(): Finished!\""), "{e}");
 }
+
+#[test]
+fn backtick_quotes_keep_slashes_paste_and_escaped_names() {
+    let src = "`define S(x) `\"x // not a comment`\"\n`define VIF(x) `\"x``_vif`\"\n`define T(type) `\"type`\"\n`define E(x) int x ;\nmodule m;\n  string a = `S(p);\n  string b = `VIF(bus);\n  string c = `T(int);\n  `E(\\a.b )\n  initial \\a.b = 1;\nendmodule\n";
+    let (a, _) = project("ppquote", &[("t.sv", src)]);
+    assert!(codes(&a, "t.sv").is_empty(), "{:?}", codes(&a, "t.sv"));
+    let uid = a.units_for(a.project_files()[0])[0];
+    let exp = |name: &str| {
+        let idx = a.unit(uid).macro_uses.iter().position(|m| m.name == name).unwrap();
+        a.expand_macro_use(uid, idx, usize::MAX).unwrap()
+    };
+    assert_eq!(exp("S"), "\"p // not a comment\"", "`//` inside `\"...`\" is text");
+    assert_eq!(exp("VIF"), "\"bus_vif\"", "`` inside `\"...`\" pastes");
+    assert_eq!(exp("T"), "\"int\"", "a keyword-named formal inside `\"...`\"");
+    assert_eq!(exp("E"), "int \\a.b ;", "an escaped name keeps its backslash and space");
+}
+
+#[test]
+fn a_guarded_include_cycle_is_not_recursive_and_an_unguarded_one_is() {
+    let a14 = "`ifndef A_SVH\n`define A_SVH\nint a1;\n`include \"b.svh\"\n`endif\n";
+    let b14 = "`ifndef B_SVH\n`define B_SVH\nint b1;\n`include \"a.svh\"\n`endif\n";
+    let top = "module m;\n  `include \"a.svh\"\n  initial begin a1 = 1; b1 = 1; end\nendmodule\n";
+    let (a, _) = project("ppguard", &[("a.svh", a14), ("b.svh", b14), ("t.sv", top)]);
+    assert!(codes(&a, "t.sv").is_empty(), "{:?}", codes(&a, "t.sv"));
+    let all: Vec<&str> = a.project_files().into_iter().flat_map(|f| a.file_diagnostics(f)).map(|d| d.code).collect();
+    assert!(!all.contains(&"RECURSIVE_INCLUDE"), "{all:?}");
+    let c = "int c1;\n`include \"d.svh\"\n";
+    let d = "int d1;\n`include \"c.svh\"\n";
+    let top = "module m;\n  `include \"c.svh\"\nendmodule\n";
+    let (a, _) = project("ppcycle", &[("c.svh", c), ("d.svh", d), ("t.sv", top)]);
+    let all: Vec<&str> = a.project_files().into_iter().flat_map(|f| a.file_diagnostics(f)).map(|d| d.code).collect();
+    assert!(all.contains(&"RECURSIVE_INCLUDE"), "an unguarded cycle is still reported: {all:?}");
+}

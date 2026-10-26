@@ -270,19 +270,36 @@ pub fn expand_snippet(
 /// Joins tokens back to text, using the whitespace flags.
 pub fn join_tokens(toks: &[Token]) -> String {
     let mut s = String::new();
+    // An escaped name ends at white space: one is put after it when the next token has none.
+    let mut escaped = false;
     for (i, t) in toks.iter().enumerate() {
-        if i > 0 && t.ws_before() {
+        if i > 0 && (t.ws_before() || escaped) {
             s.push(' ');
         }
+        escaped = false;
         match t.kind {
             TokKind::Directive => {
                 s.push('`');
                 s.push_str(&t.text);
             }
+            TokKind::Ident if !plain_name(&t.text) => {
+                s.push('\\');
+                s.push_str(&t.text);
+                escaped = true;
+            }
             _ => s.push_str(&t.text),
         }
     }
+    if escaped {
+        s.push(' ');
+    }
     s
+}
+
+/// Whether `n` can be written as it is (not an escaped identifier's text).
+fn plain_name(n: &str) -> bool {
+    let mut c = n.chars();
+    c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_' || x == '$') && !crate::token::is_keyword(n)
 }
 
 struct Frame {
@@ -935,7 +952,11 @@ impl<'a> Pp<'a> {
             return;
         };
         let depth = self.frames.iter().filter(|f| matches!(f.kind, FrameKind::File(_))).count();
-        if depth >= MAX_INCLUDE_DEPTH || self.frames.iter().any(|f| matches!(f.kind, FrameKind::File(x) if x == id)) {
+        // A file already being read may be included once more: a cycle of guarded headers
+        // (a.svh includes b.svh, which includes a.svh) ends there, its guard defined. A third
+        // entry is a cycle nothing stops.
+        let open = self.frames.iter().filter(|f| matches!(f.kind, FrameKind::File(x) if x == id)).count();
+        if depth >= MAX_INCLUDE_DEPTH || open >= 2 {
             self.res.diags.push(Diag::error(span, "RECURSIVE_INCLUDE", format!("Recursive include of \"{path_text}\"")));
             return;
         }
@@ -1260,6 +1281,8 @@ fn substitute(
                 // Stringify up to the closing `".
                 let mut s = String::from("\"");
                 let mut first = true;
+                // After a `` the next token is glued on (`"x``_vif`" is "a_vif").
+                let mut glue = false;
                 i += 1;
                 while i < def.body.len() && def.body[i].kind != TokKind::MacroQuote {
                     // A formal repeated in the string, given a long actual, would make a string
@@ -1269,13 +1292,19 @@ fn substitute(
                         continue;
                     }
                     let b = &def.body[i];
-                    if !first && b.ws_before() {
+                    if b.kind == TokKind::MacroPaste {
+                        glue = true;
+                        i += 1;
+                        continue;
+                    }
+                    if !first && !glue && b.ws_before() {
                         s.push(' ');
                     }
                     first = false;
+                    glue = false;
                     match b.kind {
                         TokKind::MacroEscQuote => s.push_str("\\\""),
-                        TokKind::Ident if param_index(&b.text).is_some() => {
+                        TokKind::Ident | TokKind::Keyword if param_index(&b.text).is_some() => {
                             s.push_str(&join_tokens(&actual(param_index(&b.text).unwrap())));
                         }
                         // Macros inside `" are expanded (IEEE 1800 22.5.1): `"dir/`VENDOR/x`",

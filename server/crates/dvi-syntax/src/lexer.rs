@@ -235,7 +235,8 @@ impl<'a> Lexer<'a> {
                     self.pos += if self.peek(1) == b'\r' { 3 } else { 2 };
                     continue;
                 }
-                b'/' if self.peek(1) == b'/' => {
+                // Inside `"...`" a `//` is part of the string (two `/` tokens), not a comment.
+                b'/' if self.peek(1) == b'/' && !self.in_macro_str => {
                     while self.pos < self.src.len() && self.peek(0) != b'\n' {
                         self.pos += 1;
                     }
