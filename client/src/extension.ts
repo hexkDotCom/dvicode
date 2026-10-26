@@ -410,8 +410,11 @@ async function selectBuildConfig(): Promise<void> {
     const target = folder ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
     // Inside the project, relative to it (the engine takes it from its root): the workspace
     // settings hold no path of this machine or checkout.
-    const root = folder && launch.mapper.serverPath(folder.uri)?.replace(/\/+$/, '');
-    const value = root && pick.value.startsWith(`${root}/`) ? pick.value.slice(root.length + 1) : pick.value;
+    const slash = (p: string): string => p.replace(/\\/g, '/');
+    const root = folder && launch.mapper.serverPath(folder.uri)?.replace(/[\\/]+$/, '');
+    const windows = !!root && /^[a-zA-Z]:/.test(root);
+    const key = (p: string): string => (windows ? slash(p).toLowerCase() : p);
+    const value = root && key(pick.value).startsWith(`${key(root)}/`) ? slash(pick.value.slice(root.length + 1)) : pick.value;
     await vscode.workspace.getConfiguration('dvicode').update('buildFile', value, target);
   }
 }
@@ -527,8 +530,14 @@ async function openRemoteFolder(): Promise<void> {
     authority = `ssh+${encodeURIComponent(h)}`;
   }
   if (authority === 'wsl+default') {
-    const { execFileSync } = await import('child_process');
-    const name = execFileSync('wsl.exe', ['-e', 'sh', '-c', 'echo $WSL_DISTRO_NAME']).toString().replace(/\u0000/g, '').trim();
+    const { execFile } = await import('child_process');
+    const name = await new Promise<string | undefined>((resolve) => {
+      execFile('wsl.exe', ['-e', 'sh', '-c', 'echo $WSL_DISTRO_NAME'], { timeout: 30000, windowsHide: true }, (err, out) => resolve(err ? undefined : String(out).replace(/\u0000/g, '').trim()));
+    });
+    if (!name) {
+      void vscode.window.showErrorMessage('DVICode: WSL did not say its default distribution (is WSL installed and running?).');
+      return;
+    }
     authority = `wsl+${encodeURIComponent(name)}`;
   }
   const folder = await vscode.window.showInputBox({ prompt: 'Absolute folder path on that machine', placeHolder: '/home/me/project', value: '/home/' });

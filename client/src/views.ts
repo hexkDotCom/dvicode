@@ -137,6 +137,8 @@ export type ViewName = 'design' | 'verification' | 'files' | 'registers';
 /** A node of a view. */
 export class Item<N extends TreeNode> extends vscode.TreeItem {
   kids: Item<N>[] = [];
+  /** The engine whose answer it shows (its paths are that engine's). */
+  endpoint: string | undefined;
   constructor(
     readonly placed: Placed<N>,
     readonly parent: Item<N> | undefined,
@@ -398,6 +400,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       ps.map((p) => {
         // With a filter the parents of matches are open.
         const item = this.makeItem(p, parent, this.filter !== undefined || (parent === undefined && this.expandRoots(tree)));
+        item.endpoint = this.conn.endpoint();
         item.id = `${this.name}:${prefix}${p.key}`;
         this.items.set(p.key, item);
         item.kids = make(p.children, item);
@@ -596,10 +599,15 @@ function openCommand(conn: Conn, uri: string | null, line: number, character: nu
  * `ssh+user%40host` where the settings give `ssh+user@host`.
  */
 export function canonAuthority(a: string): string {
+  // Host names and WSL distributions ignore case; an SSH login name does not.
+  const lower = (s: string): string => {
+    const m = /^ssh\+([^@]*)@(.*)$/i.exec(s);
+    return m ? `ssh+${m[1]}@${m[2].toLowerCase()}` : s.toLowerCase();
+  };
   try {
-    return decodeURIComponent(a).toLowerCase();
+    return lower(decodeURIComponent(a));
   } catch {
-    return a.toLowerCase();
+    return lower(a);
   }
 }
 
@@ -880,6 +888,11 @@ export function componentClassLocation(item: unknown, conn: Conn): { uri: vscode
   }
   const n = item.node as Partial<VerifNode>;
   const m = conn.mapper();
+  // An item of another engine's answer: its paths are not this engine's files.
+  if (item.endpoint !== undefined && item.endpoint !== conn.endpoint()) {
+    void vscode.window.showInformationMessage('DVICode: this view shows another engine\'s answer; refresh it first.');
+    return undefined;
+  }
   return n.def_uri && typeof n.class === 'string' && m ? { uri: m.toClient(n.def_uri), line: n.def_line ?? 0 } : undefined;
 }
 
@@ -957,6 +970,7 @@ export class RegisterModel extends TreeBase<RegNode> {
       const node: RegNode = { ...f, children: [] };
       const placed: Placed<RegNode> = { node, parent: e.placed, children: [], names: [...e.placed.names, f.name], key: `${e.placed.key}\u0000${segment}` };
       const item = this.makeItem(placed, e, false);
+      item.endpoint = this.conn.endpoint();
       item.id = `${e.id}\u0000${segment}`;
       return item;
     });

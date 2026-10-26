@@ -218,7 +218,9 @@ pub fn run(args: &[String]) -> i32 {
     let mut missing = 0usize;
     for p in &a.setup.config.problems {
         eprintln!("{}:{}: build config: {}", p.file.display(), p.line + 1, p.message);
-        if p.message.starts_with("File not found") {
+        // Sources, argument files, logs, libraries or directories the build names and that are
+        // not there: what they hold was not checked.
+        if p.message.contains(" not found") || p.message.contains("matches nothing") {
             missing += 1;
         }
     }
@@ -664,5 +666,21 @@ mod tests {
     fn a_missing_folder_is_an_error() {
         let dir = std::env::temp_dir().join(format!("dvicode-check-missing-{}", std::process::id()));
         assert_eq!(super::run(&[dir.display().to_string(), "-q".into()]), 2);
+    }
+}
+
+#[cfg(test)]
+mod build_inputs {
+    #[test]
+    fn a_build_input_not_found_fails_the_check() {
+        let d = std::env::temp_dir().join(format!("dvicode-check-inputs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".dvicode")).unwrap();
+        std::fs::write(d.join(".dvicode/default.build"), "-f missing.f\n").unwrap();
+        assert_eq!(super::run(&[d.display().to_string(), "-q".to_string()]), 1);
+        std::fs::write(d.join("a.sv"), "module a; endmodule\n").unwrap();
+        std::fs::write(d.join(".dvicode/default.build"), "a.sv\n").unwrap();
+        assert_eq!(super::run(&[d.display().to_string(), "-q".to_string()]), 0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

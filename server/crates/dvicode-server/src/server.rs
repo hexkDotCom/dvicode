@@ -1697,7 +1697,8 @@ impl Server {
         let (sender, running, hooks) = (self.sender.clone(), self.running.clone(), self.hooks.clone());
         let method = req.method.clone();
         let rid = id.clone();
-        let plain = !self.document_changes && matches!(method.as_str(), "textDocument/rename" | "textDocument/codeAction");
+        let edits = matches!(method.as_str(), "textDocument/rename" | "textDocument/codeAction");
+        let plain = !self.document_changes && edits;
         let run = move |a: Arc<Analysis>| {
             rayon::spawn(move || {
                 let t0 = Instant::now();
@@ -1716,6 +1717,11 @@ impl Server {
                         Some(Err(msg)) => Response::new_err(rid, ErrorCode::RequestFailed as i32, msg),
                         None => Response::new_err(rid, ErrorCode::InternalError as i32, format!("{method} failed")),
                     };
+                    // Edits made from a snapshot whose documents have changed since (opened, edited,
+                    // closed while it ran) would land on other text.
+                    if edits && resp.result.as_ref().is_some_and(|r| stale_edits(&a, r)) {
+                        resp = Response::new_err(resp.id, ErrorCode::ContentModified as i32, "the documents changed while the edits were made: ask again".into());
+                    }
                     // A client without `documentChanges`: the same edits as `changes`.
                     if plain {
                         if let Some(r) = resp.result.as_mut() {
@@ -2515,7 +2521,14 @@ fn project_setup(root: Option<&std::path::Path>, settings: &Settings, progress: 
             base.join(p)
         }
     });
-    let cfg = if root.is_some() { dvi_project::load_with(&base, bf.as_deref(), &env, progress) } else { Default::default() };
+    // Without a folder, an absolute build file still names a project: the folder holding its
+    // `.dvicode` folder (or the build file).
+    let given = std::path::Path::new(wanted).is_absolute();
+    let base = match (&bf, root) {
+        (Some(b), None) if given => b.parent().map(|d| if d.file_name().is_some_and(|n| n == ".dvicode") { d.parent().unwrap_or(d) } else { d }).map(|d| d.to_path_buf()).unwrap_or(base),
+        _ => base,
+    };
+    let cfg = if root.is_some() || (given && bf.is_some()) { dvi_project::load_with(&base, bf.as_deref(), &env, progress) } else { Default::default() };
     ProjectSetup::new(&base, cfg, env)
 }
 
@@ -2612,4 +2625,27 @@ fn into_value<R: serde::Serialize + 'static>(r: R) -> Value {
         return v.take().unwrap_or(Value::Null);
     }
     slot.map_or(Value::Null, |r| serde_json::to_value(r).unwrap_or(Value::Null))
+}
+
+/// Whether a result's versioned document edits (`documentChanges`) name a version that is not
+/// the document's now: a document opened, edited or closed after the snapshot was taken.
+fn stale_edits(a: &Analysis, v: &Value) -> bool {
+    match v {
+        Value::Array(x) => x.iter().any(|e| stale_edits(a, e)),
+        Value::Object(o) => {
+            if let Some(changes) = o.get("documentChanges").and_then(Value::as_array) {
+                for c in changes {
+                    let Some(doc) = c.get("textDocument") else { continue };
+                    let Some(uri) = doc.get("uri").and_then(Value::as_str).and_then(|u| Url::parse(u).ok()) else { continue };
+                    let made = doc.get("version").and_then(Value::as_i64).map(|v| v as i32);
+                    let now = path_of(&uri).and_then(|p| a.vfs.lookup(&p)).and_then(|f| a.vfs.editor_version(f));
+                    if made != now {
+                        return true;
+                    }
+                }
+            }
+            o.values().any(|x| stale_edits(a, x))
+        }
+        _ => false,
+    }
 }

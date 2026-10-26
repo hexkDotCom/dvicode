@@ -9,11 +9,16 @@ import type { LanguageClient } from 'vscode-languageclient/node';
  * "Open Folder on the Server" writes `ssh+user%40host` where the settings give `ssh+user@host`.
  */
 export function sameAuthority(a: string, b: string): boolean {
+  // Host names and WSL distributions ignore case; an SSH login name does not.
+  const lower = (s: string): string => {
+    const m = /^ssh\+([^@]*)@(.*)$/i.exec(s);
+    return m ? `ssh+${m[1]}@${m[2].toLowerCase()}` : s.toLowerCase();
+  };
   const canon = (s: string) => {
     try {
-      return decodeURIComponent(s).toLowerCase();
+      return lower(decodeURIComponent(s));
     } catch {
-      return s.toLowerCase();
+      return lower(s);
     }
   };
   return canon(a) === canon(b);

@@ -233,6 +233,13 @@ impl Vfs {
         ids
     }
 
+    /// The editor (LSP) version of the file's open document; `None` when it is not open.
+    pub fn editor_version(&self, id: FileId) -> Option<i32> {
+        let g = self.inner.read().unwrap();
+        let e = g.entries.get(id as usize)?;
+        e.overlay.as_ref().and(e.overlay_version)
+    }
+
     pub fn version(&self, id: FileId) -> u64 {
         self.inner.read().unwrap().entries.get(id as usize).map_or(0, |e| e.version)
     }

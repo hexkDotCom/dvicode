@@ -755,27 +755,27 @@
       "editor/context": [
         {
           "command": "dvicode.expandMacro",
-          "when": "editorLangId == systemverilog",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog)",
           "group": "navigation@90"
         },
         {
           "command": "dvicode.showIncludingFiles",
-          "when": "editorLangId == systemverilog",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog)",
           "group": "navigation@91"
         },
         {
           "command": "dvicode.showChecks",
-          "when": "editorLangId == systemverilog && dvicode.engine.checks",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.checks",
           "group": "navigation@92"
         },
         {
           "command": "dvicode.showDrivers",
-          "when": "editorLangId == systemverilog && dvicode.engine.accesses",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.accesses",
           "group": "navigation@93"
         },
         {
           "command": "dvicode.showLoads",
-          "when": "editorLangId == systemverilog && dvicode.engine.accesses",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.accesses",
           "group": "navigation@94"
         },
         {
@@ -1081,7 +1081,7 @@
         },
         {
           "command": "dvicode.showChecks",
-          "when": "editorLangId == systemverilog && dvicode.engine.checks"
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.checks"
         },
         {
           "command": "dvicode.checks.refresh",
@@ -1097,11 +1097,11 @@
         },
         {
           "command": "dvicode.showDrivers",
-          "when": "editorLangId == systemverilog && dvicode.engine.accesses"
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.accesses"
         },
         {
           "command": "dvicode.showLoads",
-          "when": "editorLangId == systemverilog && dvicode.engine.accesses"
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.accesses"
         },
         {
           "command": "dvicode.accesses.refresh",

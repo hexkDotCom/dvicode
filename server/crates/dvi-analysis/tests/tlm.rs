@@ -330,3 +330,42 @@ fn connections_respect_filters_targets_and_limits() {
     let (h, _) = a.verification_tree(Some("t2"), &q);
     assert!(find(&h.roots[0], "uvm_test_top.c.f.put_export").is_some());
 }
+
+#[test]
+fn a_library_port_with_its_own_connection_is_followed() {
+    // The driver's library `rsp_port` gets its monitor's port, and goes on to a scoreboard.
+    let tb = r#"package tb3;
+  import uvm_pkg::*;
+  class mon extends uvm_monitor;
+    uvm_analysis_port #(int) ap;
+    function new(string name, uvm_component parent); super.new(name, parent); ap = new("ap", this); endfunction
+  endclass
+  class drv extends uvm_driver #(int);
+    mon m;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); m = mon::type_id::create("m", this); endfunction
+    function void connect_phase(uvm_phase phase); m.ap.connect(rsp_port); endfunction
+  endclass
+  class sb extends uvm_scoreboard;
+    uvm_analysis_imp #(int, sb) imp;
+    function new(string name, uvm_component parent); super.new(name, parent); imp = new("imp", this); endfunction
+  endclass
+  class env extends uvm_env;
+    drv d;
+    sb s;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); d = drv::type_id::create("d", this); s = sb::type_id::create("s", this); endfunction
+    function void connect_phase(uvm_phase phase); d.rsp_port.connect(s.imp); endfunction
+  endclass
+  class t3 extends uvm_test;
+    env e;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); e = env::type_id::create("e", this); endfunction
+  endclass
+endpackage
+"#;
+    let (a, _) = project("libport", &[("uvm_pkg.sv", UVM), ("tb3.sv", tb)]);
+    let (h, _) = a.verification_tree(Some("t3"), &TreeQuery::new(10_000));
+    let n = find(&h.roots[0], "uvm_test_top.e.d.m.ap").expect("the monitor's port");
+    assert_eq!(n.connection.as_deref(), Some("analysis port · → e.s.imp"));
+}

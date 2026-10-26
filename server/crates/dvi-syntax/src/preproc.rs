@@ -363,7 +363,14 @@ impl<'a> Pp<'a> {
         }
         let (text, toks) = match self.src.source(id) {
             Some((t, k)) => (t, k),
-            None => (Arc::from(""), Arc::default()),
+            None => {
+                // Not an empty file: one that could not be read (permissions, a device).
+                // (A file that is not there is the build's "File not found".)
+                if first && self.src.is_file(&self.src.path(id)) {
+                    self.res.diags.push(Diag::error(Span::new(id, 0, 0), "UNREADABLE_FILE", format!("Cannot read {}", self.src.path(id).display())));
+                }
+                (Arc::from(""), Arc::default())
+            }
         };
         if first {
             self.res.sources.push((id, text));

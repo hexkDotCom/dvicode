@@ -105,6 +105,8 @@ export class DriversView implements vscode.TreeDataProvider<Node>, vscode.Dispos
   /** The project was built again: the result is kept, marked out of date. */
   rebuilt(): void {
     this.restarted ||= this.result !== undefined;
+    this.gen++;
+    this.search?.cancel();
     this.present();
   }
 

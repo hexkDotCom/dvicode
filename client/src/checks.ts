@@ -105,6 +105,8 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
   /** The project was built again: the result is kept, marked out of date. */
   rebuilt(): void {
     this.restarted ||= this.result !== undefined;
+    this.gen++;
+    this.search?.cancel();
     this.present();
   }
 
@@ -214,7 +216,8 @@ export class ChecksView implements vscode.TreeDataProvider<Node>, vscode.Disposa
     const stale = this.restarted || r.revision < this.latest ? ' · out of date' : '';
     const shown = this.valuesOnly ? ' · values only' : '';
     this.view.description = `${r.target.name} (${r.target.kind})${shown}${stale}`;
-    this.view.message = checksMessage(r.target.name, this.hits().length, r.limits, r.notes);
+    const visible = this.hits().length;
+    this.view.message = checksMessage(r.target.name, visible, r.limits, r.notes, (r.hits?.length ?? 0) - visible);
   }
 
   getTreeItem(n: Node): vscode.TreeItem {

@@ -294,6 +294,7 @@ test.describe('assertions and coverage texts', () => {
   });
   test.it('say why nothing is shown or what limited the search', () => {
     assert.equal(vm.checksMessage('req', 0, [], []), "No assertion or coverage uses 'req' in this build configuration.");
+    assert.equal(vm.checksMessage('clk', 0, [], [], 2), "'clk' is used only as a clock or reset (2 uses hidden: show all roles to see them).");
     assert.equal(vm.checksMessage('req', 3, ['candidates'], []), 'Search incomplete: too many names to look at.');
     assert.equal(vm.checksMessage('req', 3, [], ['not followed: bind to an instance path (dut.u)']), 'Not followed: bind to an instance path (dut.u).');
     assert.equal(vm.checksMessage('req', 3, [], []), undefined);

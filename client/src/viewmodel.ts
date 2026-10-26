@@ -602,11 +602,13 @@ export function valuesOnly<H extends CheckInfo>(hits: H[]): H[] {
 }
 
 /** The view's message for a result: nothing found, or what limited the search. */
-export function checksMessage(name: string, hits: number, limits: string[], notes: string[]): string | undefined {
+export function checksMessage(name: string, hits: number, limits: string[], notes: string[], hidden = 0): string | undefined {
   const why: Record<string, string> = { candidates: 'too many names to look at', hits: 'too many results', depth: 'connections followed only 3 levels deep', cancelled: 'the search was cancelled' };
   const limited = limits.map((l) => why[l] ?? l);
   const parts: string[] = [];
-  if (!hits) {
+  if (!hits && hidden) {
+    parts.push(`'${name}' is used only as a clock or reset (${hidden} use${hidden === 1 ? '' : 's'} hidden: show all roles to see them).`);
+  } else if (!hits) {
     parts.push(`No assertion or coverage uses '${name}' in this build configuration.`);
   }
   if (limited.length) {

@@ -283,6 +283,8 @@ export class ContextChooser implements vscode.Disposable {
         if (timer) {
           clearTimeout(timer);
         }
+        // An answer for the text before is no answer for this one.
+        seq++;
         timer = setTimeout(() => void load(v.trim(), 0), 150);
       });
       qp.onDidAccept(() => {

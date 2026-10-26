@@ -216,6 +216,19 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
                 remove(&aside, true).map_err(|e| err(e, &aside))?;
                 return Ok(Value::Null);
             }
+            // Without overwrite, a file is linked under the new name (refused when the name was
+            // taken meanwhile: two renames at once cannot both win) and then unlinked; where
+            // links are not possible (another file system), renamed.
+            if !p.overwrite && !same && std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
+                match std::fs::hard_link(&from, &to) {
+                    Ok(()) => {
+                        std::fs::remove_file(&from).map_err(|e| err(e, &from))?;
+                        return Ok(Value::Null);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(FsError { code: "FileExists", message: to.display().to_string() }),
+                    Err(_) => {}
+                }
+            }
             std::fs::rename(&from, &to).map_err(|e| err(e, &from))?;
             Ok(Value::Null)
         }
@@ -296,6 +309,10 @@ mod tests {
         assert_eq!(r(true), Ok(Value::Null));
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "a");
         assert_eq!(std::fs::read_to_string(&other).unwrap(), "other");
+        // Without overwrite to a free name: moved (linked, then unlinked), the source gone.
+        let c = d.join("c.sv");
+        assert_eq!(call("rename", json!({ "from": b.display().to_string(), "to": c.display().to_string(), "overwrite": false })), Ok(Value::Null));
+        assert!(!b.exists() && std::fs::read_to_string(&c).unwrap() == "a");
 
         let sub = d.join("sub");
         call("createDirectory", json!({ "path": sub.display().to_string() })).unwrap();

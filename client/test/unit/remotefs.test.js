@@ -35,6 +35,9 @@ test.describe('sameAuthority', () => {
   });
   test.it('treats encoded and plain user@host alike', () => {
     assert.ok(remotefs.sameAuthority('ssh+me@build01', 'ssh+me%40build01'));
+    // A login name keeps its case; the host does not.
+    assert.ok(remotefs.sameAuthority('ssh+Alice@Build01', 'ssh+Alice%40build01'));
+    assert.ok(!remotefs.sameAuthority('ssh+Alice@host', 'ssh+alice@host'));
     assert.ok(remotefs.sameAuthority('tcp+127.0.0.1:7777', 'tcp+127.0.0.1%3A7777'));
   });
   test.it('tells servers apart', () => {

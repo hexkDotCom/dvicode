@@ -543,7 +543,7 @@ fn reach(at: &str, next: &FxHashMap<&str, Vec<(&str, bool)>>, open: &FxHashSet<&
     for &(to, cond) in next.get(at).map(|v| v.as_slice()).unwrap_or(&[]) {
         // An imp, or an endpoint the library makes (what it leads to is inside the library),
         // ends the search.
-        let terminal = kinds.get(to).is_some_and(|k| k.role == Role::Imp || k.library);
+        let terminal = kinds.get(to).is_some_and(|k| k.role == Role::Imp || (k.library && !next.contains_key(to)));
         let sub = if terminal { Reach { ends: vec![to.to_string()], ..Default::default() } } else { reach(to, next, open, kinds, memo, on_path, depth + 1, visits) };
         r.incomplete |= sub.incomplete;
         r.more += sub.more;
