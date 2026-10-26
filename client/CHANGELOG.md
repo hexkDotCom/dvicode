@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (preview)
 
 - **Clickable simulator logs**: in `*.log` files, `transcript` and terminals, source locations
   open the file at the line (UVM report lines, VCS messages, and the common `file(line)` and
@@ -9,10 +9,20 @@
   component in the Verification Hierarchy, in the test the log ran, and opens its class.
   On by default: `dvicode.logs.links` turns it off; a log is read a part at a time without
   holding up the editor, and logs above `dvicode.logs.maxFileSizeMB` (50) get no links.
-- Preprocessor: `//` inside a `` `"...`" `` string is part of it, ``` `` ``` inside one pastes
-  (`` `"x``_vif`" ``), and a cycle of guarded headers (a.svh includes b.svh, which includes
-  a.svh) is no longer a recursive include. Escaped names keep their backslash in macro
-  expansions.
+- Preprocessor: `//` and `/* */` inside a `` `"...`" `` string are part of it, ``` `` ```
+  inside one pastes (`` `"x``_vif`" ``), and a macro passed to a stringifying macro is
+  expanded (an undefined one is reported). A header may include itself again until its guard
+  stops it (a cycle of guarded headers is no longer a recursive include); includes nested past
+  64 levels say whether they loop. Escaped names keep their backslash in macro expansions.
+- Rename refuses a method whose overrides include a library's (such as a UVM phase) at once,
+  and leaves a `local` method's namesakes in subclasses alone; it finds macros written in the
+  arguments of other macros.
+- Fixes found by reviews: the register model follows `+=`, `++` and values set under a
+  condition; instantiation templates leave out local parameters and escape escaped names;
+  `pathMappings` to a Windows engine map paths back; quick fixes never edit a library file;
+  `check` fails on build files it cannot follow; large or crafted inputs (pasted names,
+  stringified macros, compile logs naming devices, sources over 1 GB) stay within bounds; long
+  edits on one line and many overrides no longer slow the engine.
 
 ## 0.6.0 (preview)
 
