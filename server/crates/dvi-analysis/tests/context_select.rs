@@ -453,3 +453,18 @@ fn skipped_code_notices_are_those_of_the_chosen_context() {
     choose(&mut a, &root, "h.svh", "pb.sv");
     assert_eq!(notices(&a), 0, "{:?}", a.file_diagnostics(h));
 }
+
+#[cfg(windows)]
+#[test]
+fn the_files_before_a_root_spelt_in_another_case_end_at_it() {
+    // The second section names a.sv in capitals: the files after it are not "before" it.
+    let root = write_project("spelling", "a.sv\n", &[("h.svh", HEADER), ("a.sv", "module ma;\n`include \"h.svh\"\nendmodule\n"), ("z.sv", "module z; endmodule\n"), ("w.sv", "module w; endmodule\n")]);
+    let a = rebuild(&root, "a.sv\n+dvicode_init+default\nA.sv\nz.sv\n");
+    let h = file(&a, &root, "h.svh");
+    let units = a.units_for(h);
+    assert_eq!(units.len(), 2);
+    let key = a.context_key(units[1]);
+    let a2 = rebuild(&root, "a.sv\n+dvicode_init+default\nA.sv\nz.sv\nw.sv\n");
+    let h2 = file(&a2, &root, "h.svh");
+    assert_eq!(a2.resolve_context(h2, &key), Some(a2.units_for(h2)[1]), "a file added after the root changes nothing");
+}

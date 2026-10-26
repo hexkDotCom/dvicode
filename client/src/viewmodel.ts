@@ -1107,3 +1107,13 @@ export function contextPickRows(l: ContextListInfo, name: (uri: string) => strin
   }
   return rows;
 }
+
+/**
+ * The kept choices but those of `file` (a client uri): the same file under another client uri
+ * (mapped to the same engine file by `serverOf`) or one of the engine's `aliases` (other
+ * spellings it replaced). `norm` makes two writings of one uri equal (`%3A`, drive letter case).
+ */
+export function othersKept<T extends { file: string }>(kept: T[], file: string, aliases: string[], serverOf: (file: string) => string, norm: (uri: string) => string): T[] {
+  const gone = new Set([serverOf(file), ...aliases].map(norm));
+  return kept.filter((k) => k.file !== file && !gone.has(norm(serverOf(k.file))));
+}

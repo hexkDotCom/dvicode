@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import type { LanguageClient } from 'vscode-languageclient/node';
 import type { Mapper } from './pathmap';
 import type { Conn } from './views';
-import { contextPickRows, contextStatus, type ContextListInfo, type ContextPickRow, type ContextRef } from './viewmodel';
+import { contextPickRows, contextStatus, othersKept, type ContextListInfo, type ContextPickRow, type ContextRef } from './viewmodel';
 
 const STATE_KEY = 'dvicode.compileContexts';
 /** Choices kept at most (the oldest go, in the engine too). */
@@ -150,7 +150,8 @@ export class ContextChooser implements vscode.Disposable {
    */
   private async keep(c: LanguageClient, file: vscode.Uri, choice: ContextRef | null, aliases: string[], m: Mapper): Promise<void> {
     const key = file.toString();
-    let v = this.kept().filter((k) => k.file !== key && !aliases.includes(m.toServer(vscode.Uri.parse(k.file))));
+    const serverOf = (f: string): string => m.toServer(vscode.Uri.parse(f));
+    let v = othersKept(this.kept(), key, aliases, serverOf, (u) => vscode.Uri.parse(u).toString());
     let evicted = false;
     if (choice) {
       v.push({ file: key, root: m.toClient(choice.root).toString(), invocation_key: choice.invocation_key, nth: choice.nth, before: choice.before ?? null, at: Date.now() });

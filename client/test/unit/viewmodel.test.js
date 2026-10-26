@@ -362,6 +362,15 @@ test.describe('choosing the compile context', () => {
     // A search answer, or a further page: the page only.
     assert.deepEqual(vm.contextPickRows({ ...list, matched: 2 }, name, true).map((r) => r.label), ['1. r1.sv', '2. r2.sv']);
   });
+  test.it('forgets every kept choice of the file, whatever its spelling', () => {
+    // Two client uris of one engine file (a drive and its WSL path), and the engine's spelling
+    // of another case, written as VS Code and as the engine write them.
+    const serverOf = (f) => (f.startsWith('file://wsl.localhost/') ? 'file:///mnt/c/p/h.svh' : f.replace('file:///c%3A/', 'file:///mnt/c/'));
+    const norm = (u) => u.replace('%3A', ':').toLowerCase();
+    const kept = [{ file: 'file:///c%3A/p/h.svh' }, { file: 'file://wsl.localhost/u/mnt/c/p/h.svh' }, { file: 'file:///c%3A/p/H.SVH' }, { file: 'file:///c%3A/p/other.svh' }];
+    const left = vm.othersKept(kept, 'file://wsl.localhost/u/mnt/c/p/h.svh', ['file:///mnt/c/p/H.SVH'], serverOf, norm);
+    assert.deepEqual(left.map((k) => k.file), ['file:///c%3A/p/other.svh']);
+  });
   test.it('marks the chosen context in the report', () => {
     const c = {
       uri: 'file:///p/h.svh', known: true, auto: false, build_file: null, skip_matches: [], detail: null, contexts_total: 2, choice: 'chosen',

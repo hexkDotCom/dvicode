@@ -198,8 +198,8 @@ impl Analysis {
             }
         } else if let (UnitKind::Project, Some(inv)) = (u.kind, inv) {
             h.put(b"top");
-            let root = self.path(u.root);
-            for f in inv.files.iter().take_while(|f| **f != root) {
+            // The build's spelling of the root may differ from the file table's (case).
+            for f in inv.files.iter().take_while(|f| self.vfs.lookup(f) != Some(u.root)) {
                 h.put(f.to_string_lossy().as_bytes());
             }
         } else {

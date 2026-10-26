@@ -303,9 +303,9 @@ struct Server {
     /// the number of their changes: each snapshot installed resolves them (`Server::install`).
     contexts: ContextChoices,
     context_generation: u64,
-    /// The snapshots the one in use was copied from with other choices only (the same units),
-    /// since the last one with other units: an update started from any of them is still good.
-    reselected_from: Vec<Arc<Analysis>>,
+    /// The base of the running update, when the snapshot in use was copied from it with other
+    /// choices only (the same units): the update is still good.
+    reselected_from: Option<Arc<Analysis>>,
     hints_refreshed: Option<Instant>,
     open: FxHashMap<FileId, Url>,
     pending: FxHashSet<FileId>,
@@ -474,7 +474,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         token_refresh,
         contexts: ContextChoices::default(),
         context_generation: 0,
-        reselected_from: Vec::new(),
+        reselected_from: None,
         hints_refreshed: None,
         open: FxHashMap::default(),
         pending: FxHashSet::default(),
@@ -1056,7 +1056,7 @@ impl Server {
         let mut recompiled = Vec::new();
         let base = self.built.as_ref().unwrap_or(&self.analysis);
         // A copy of its base with other compile contexts chosen has the same units.
-        let same_base = Arc::ptr_eq(&job.base, base) || self.built.is_none() && self.reselected_from.iter().any(|r| Arc::ptr_eq(&job.base, r));
+        let same_base = Arc::ptr_eq(&job.base, base) || self.built.is_none() && self.reselected_from.as_ref().is_some_and(|r| Arc::ptr_eq(&job.base, r));
         let mut reselected = Vec::new();
         match done {
             Some(_) if !same_base => {
@@ -1523,7 +1523,7 @@ impl Server {
         self.revision += 1;
         a.revision = self.revision;
         self.analysis = Arc::new(a);
-        self.reselected_from.clear();
+        self.reselected_from = None;
         self.watch_build_inputs();
         // An edit elsewhere (a function's arguments renamed) changes other files' hints.
         self.refresh_hints(false);
@@ -1535,8 +1535,9 @@ impl Server {
     /// they change asked for again.
     fn reselect(&mut self) {
         self.context_generation += 1;
-        let mut from = std::mem::take(&mut self.reselected_from);
-        from.push(self.analysis.clone());
+        // Only the running update's base is kept (nothing else needs an older copy).
+        let base = self.update.as_ref().map(|j| j.base.clone());
+        let from = base.filter(|b| Arc::ptr_eq(b, &self.analysis) || self.reselected_from.as_ref().is_some_and(|r| Arc::ptr_eq(r, b)));
         let mut files = self.install((*self.analysis).clone());
         self.reselected_from = from;
         self.notify("dvicode/revision", &json!({ "revision": self.revision }));
