@@ -945,7 +945,7 @@ export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string
     const steps: Record<string, string> = { absolute: 'as an absolute path', folder: "in this file's folder", root: 'in the project folder' };
     for (const r of d.includes) {
       const how = r.step === 'incdir' && r.incdir ? `in include directory ${r.incdir[0]} (${code(r.incdir[1])})` : (steps[r.step ?? ''] ?? '');
-      const what = r.resolved ? `${file(r.resolved)}, found ${how}${r.entered ? '' : ' (not read: recursive)'}` : '**not found**';
+      const what = r.resolved ? `${file(r.resolved)}, found ${how}${r.entered ? '' : ' (not read: recursive, or included too deeply)'}` : '**not found**';
       out.push(`- Line ${r.line + 1}: ${code(`\`include "${r.text}"`)} → ${what}`);
       if (r.shadowed.length) {
         out.push(`  - Also there today, later in the search: ${r.shadowed.map(file).join(', ')}`);

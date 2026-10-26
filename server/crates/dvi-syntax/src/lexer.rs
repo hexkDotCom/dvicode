@@ -252,7 +252,7 @@ impl<'a> Lexer<'a> {
                     *fl |= flags::WS_BEFORE;
                     continue;
                 }
-                b'/' if self.peek(1) == b'*' => {
+                b'/' if self.peek(1) == b'*' && !self.in_macro_str => {
                     self.pos += 2;
                     while self.pos < self.src.len() && !(self.peek(0) == b'*' && self.peek(1) == b'/') {
                         if self.peek(0) == b'\n' {

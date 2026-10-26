@@ -575,7 +575,10 @@ impl Analysis {
         let n = if l.contains("include") { units.len() } else { 1 };
         for uid in units.into_iter().take(n) {
             let u = self.unit(uid);
-            let Some(inc) = u.includes.iter().find(|i| i.span.file == file && i.span.start <= off && off <= i.span.end) else { continue };
+            // One directive read several times (a file included again): a time it was refused
+            // (recursive, too deep) is what is said.
+            let here = |i: &&dvi_syntax::preproc::IncludeInfo| i.span.file == file && i.span.start <= off && off <= i.span.end;
+            let Some(inc) = u.includes.iter().filter(here).find(|i| i.resolved.is_some() && !i.entered).or_else(|| u.includes.iter().find(here)) else { continue };
             let pp = self.setup.pp_configs.get(u.invocation).unwrap_or(&self.setup.pp_configs[0]);
             let how = match inc.step {
                 Some(IncludeStep::Absolute) => "an absolute path".to_string(),
@@ -586,7 +589,7 @@ impl Analysis {
                 None => format!("not found: looked in the including file's folder, {} include director{} and the project folder", pp.incdirs.len(), if pp.incdirs.len() == 1 { "y" } else { "ies" }),
             };
             let resolved = inc.resolved.map(|f| self.path(f).display().to_string());
-            let how = if inc.resolved.is_some() && !inc.entered { format!("{how}; not read here (recursive include)") } else { how };
+            let how = if inc.resolved.is_some() && !inc.entered { format!("{how}; not read here (recursive, or included too deeply)") } else { how };
             return Some((inc.path_text.clone(), resolved, how, inc.span));
         }
         None

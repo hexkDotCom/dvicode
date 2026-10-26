@@ -4434,3 +4434,36 @@ fn a_guarded_include_cycle_is_not_recursive_and_an_unguarded_one_is() {
     let all: Vec<&str> = a.project_files().into_iter().flat_map(|f| a.file_diagnostics(f)).map(|d| d.code).collect();
     assert!(all.contains(&"RECURSIVE_INCLUDE"), "an unguarded cycle is still reported: {all:?}");
 }
+
+#[test]
+fn includes_end_by_their_guards_at_any_depth_and_quotes_keep_comments_and_expand_actuals() {
+    // A header that ends on its third entry (review case): not a recursion.
+    let a = "`ifndef PASS1\n`define PASS1\n`include \"a.svh\"\n`else\n`ifndef PASS2\n`define PASS2\n`include \"a.svh\"\n`else\nint done;\n`endif\n`endif\n";
+    let top = "module m;\n  `include \"a.svh\"\n  initial done = 1;\nendmodule\n";
+    let (an, _) = project("ppthree", &[("a.svh", a), ("t.sv", top)]);
+    let all: Vec<&str> = an.project_files().into_iter().flat_map(|f| an.file_diagnostics(f)).map(|d| d.code).collect();
+    assert!(all.is_empty(), "{all:?}");
+    // An unguarded cycle: reported, and its include's hover says it was not read there.
+    let c = "int c1;\n`include \"d.svh\"\n";
+    let d = "int d1;\n`include \"c.svh\"\n";
+    let top = "module m;\n  `include \"c.svh\"\nendmodule\n";
+    let (an, root) = project("ppcycle2", &[("c.svh", c), ("d.svh", d), ("t.sv", top)]);
+    // The include refused at the depth limit is one of the two directives of the cycle.
+    let hover = |file: &str, text: &str, target: &str| {
+        let f = an.vfs.lookup(&root.join(file)).unwrap();
+        an.include_at(f, text.find(target).unwrap() as u32).map(|x| x.2).unwrap_or_default()
+    };
+    let (hc, hd) = (hover("c.svh", c, "d.svh"), hover("d.svh", d, "c.svh"));
+    assert!(hc.contains("not read here") || hd.contains("not read here"), "{hc} / {hd}");
+    // `/* */` inside `"...`" is text; a macro passed to a stringifying macro is expanded.
+    let src = "`define BUS bus\n`define VIF(x) `\"x``_vif`\"\n`define C(x) `\"x /* kept */ y`\"\nmodule m2;\n  string a = `VIF(`BUS);\n  string b = `C(p);\nendmodule\n";
+    let (an, _) = project("ppquote2", &[("t.sv", src)]);
+    assert!(codes(&an, "t.sv").is_empty(), "{:?}", codes(&an, "t.sv"));
+    let uid = an.units_for(an.project_files()[0])[0];
+    let exp = |name: &str| {
+        let idx = an.unit(uid).macro_uses.iter().position(|m| m.name == name).unwrap();
+        an.expand_macro_use(uid, idx, usize::MAX).unwrap()
+    };
+    assert_eq!(exp("VIF"), "\"bus_vif\"");
+    assert_eq!(exp("C"), "\"p /* kept */ y\"");
+}

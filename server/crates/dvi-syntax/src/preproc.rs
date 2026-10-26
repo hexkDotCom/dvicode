@@ -951,13 +951,17 @@ impl<'a> Pp<'a> {
             self.res.diags.push(Diag::error(span, "INCLUDE_NOT_FOUND", format!("Cannot find include file \"{path_text}\"")));
             return;
         };
+        // A file already being read may be included again (IEEE 1800 22.4): a cycle of guarded
+        // headers ends when the guards are defined, whatever its length. Only the depth bounds
+        // it: past it, a cycle when the file is being read already, else a chain too long.
         let depth = self.frames.iter().filter(|f| matches!(f.kind, FrameKind::File(_))).count();
-        // A file already being read may be included once more: a cycle of guarded headers
-        // (a.svh includes b.svh, which includes a.svh) ends there, its guard defined. A third
-        // entry is a cycle nothing stops.
-        let open = self.frames.iter().filter(|f| matches!(f.kind, FrameKind::File(x) if x == id)).count();
-        if depth >= MAX_INCLUDE_DEPTH || open >= 2 {
-            self.res.diags.push(Diag::error(span, "RECURSIVE_INCLUDE", format!("Recursive include of \"{path_text}\"")));
+        if depth >= MAX_INCLUDE_DEPTH {
+            let open = self.frames.iter().any(|f| matches!(f.kind, FrameKind::File(x) if x == id));
+            self.res.diags.push(if open {
+                Diag::error(span, "RECURSIVE_INCLUDE", format!("Recursive include of \"{path_text}\" ({MAX_INCLUDE_DEPTH} levels deep and not stopped by a guard)"))
+            } else {
+                Diag::error(span, "INCLUDE_TOO_DEEP", format!("Includes nested more than {MAX_INCLUDE_DEPTH} deep at \"{path_text}\""))
+            });
             return;
         }
         self.res.includes[index as usize].entered = true;
@@ -1305,7 +1309,20 @@ fn substitute(
                     match b.kind {
                         TokKind::MacroEscQuote => s.push_str("\\\""),
                         TokKind::Ident | TokKind::Keyword if param_index(&b.text).is_some() => {
-                            s.push_str(&join_tokens(&actual(param_index(&b.text).unwrap())));
+                            let a = actual(param_index(&b.text).unwrap());
+                            // Macros in the actual are expanded here too, as they are in the body
+                            // (`VIF(`BUS) with `"x``_vif`" is "bus_vif").
+                            match a.iter().any(|x| x.kind == TokKind::Directive && !COMPILER_DIRECTIVES.contains(&x.text.as_str())).then(|| expand(&a)).flatten() {
+                                Some(toks) => {
+                                    for (k, e) in toks.iter().enumerate() {
+                                        if k > 0 && e.ws_before() {
+                                            s.push(' ');
+                                        }
+                                        s.push_str(if e.kind == TokKind::String { e.text.trim_matches('"') } else { &e.text });
+                                    }
+                                }
+                                None => s.push_str(&join_tokens(&a)),
+                            }
                         }
                         // Macros inside `" are expanded (IEEE 1800 22.5.1): `"dir/`VENDOR/x`",
                         // with their arguments (`"dir/`ID(vcs)/x`"), formals replaced.
