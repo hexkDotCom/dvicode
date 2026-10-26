@@ -358,7 +358,8 @@ struct Pp<'a> {
     nested_runs: std::rc::Rc<std::cell::Cell<u32>>,
     /// Line starts of the files `` `__LINE__ `` was used in (counting from the start of the
     /// file at each use made a file of UVM report macros quadratic).
-    line_index: FxHashMap<FileId, LineIndex>,
+    /// Shared with the nested preprocessors (a `__LINE__` in each of many stringified actuals).
+    line_index: std::rc::Rc<std::cell::RefCell<FxHashMap<FileId, LineIndex>>>,
     /// Tokens read from macro expansions and repeated includes so far for one file, shared
     /// with the nested preprocessors: macros that each call the previous one twice, or headers
     /// that include the previous one twice, double the work at every level within the depth
@@ -651,7 +652,7 @@ impl<'a> Pp<'a> {
             "__LINE__" => {
                 let span = self.real_span(&tok);
                 let line = match self.read_text(span.file) {
-                    Some(t) => self.line_index.entry(span.file).or_insert_with(|| LineIndex::new(&t)).line_of(span.start) as usize + 1,
+                    Some(t) => self.line_index.borrow_mut().entry(span.file).or_insert_with(|| LineIndex::new(&t)).line_of(span.start) as usize + 1,
                     None => 0,
                 };
                 self.emit_generated(&tok, TokKind::Number, SmolStr::new(line.to_string()));
@@ -1156,7 +1157,7 @@ impl<'a> Pp<'a> {
             outer_depth: depth,
             outer_names,
             nested_runs: self.nested_runs.clone(),
-            line_index: Default::default(),
+            line_index: self.line_index.clone(),
             work: self.work.clone(),
             adopted: Default::default(),
         })
@@ -1327,6 +1328,9 @@ fn substitute(
                             match a.iter().any(expands).then(|| expand(&a)).flatten() {
                                 Some(toks) => {
                                     for (k, e) in toks.iter().enumerate() {
+                                        if s.len() > MAX_STRINGIFIED {
+                                            break;
+                                        }
                                         if k > 0 && e.ws_before() {
                                             s.push(' ');
                                         }
@@ -1375,6 +1379,9 @@ fn substitute(
                         }).flatten() {
                             Some(toks) => {
                                 for (k, e) in toks.iter().enumerate() {
+                                    if s.len() > MAX_STRINGIFIED {
+                                        break;
+                                    }
                                     if k > 0 && e.ws_before() {
                                         s.push(' ');
                                     }
@@ -1390,6 +1397,14 @@ fn substitute(
                         _ => s.push_str(&b.text),
                     }
                     i += 1;
+                }
+                // One long actual may have gone past the limit: cut there.
+                if s.len() > MAX_STRINGIFIED {
+                    let mut cut = MAX_STRINGIFIED;
+                    while !s.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    s.truncate(cut);
                 }
                 s.push('"');
                 let mut st = body_tok(t);

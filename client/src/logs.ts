@@ -9,8 +9,9 @@ import { LinkScanner, LogLink, lineLinks, locationLine, logTest } from './logpar
 
 /** Links listed per document at most. */
 const MAX_LINKS = 20_000;
-/** Lines read between two yields of the extension host's thread. */
+/** Lines, and bytes, read between two yields of the extension host's thread. */
 const LINES_PER_STEP = 20_000;
+const BYTES_PER_STEP = 1_000_000;
 /** Log files: the editor's Log language, `*.log`, and Questa's `transcript`. */
 const SELECTOR: vscode.DocumentSelector = [{ language: 'log' }, { pattern: '**/*.log' }, { pattern: '**/transcript' }];
 /** Languages that have links of their own. */
@@ -114,13 +115,15 @@ export class LogLinks implements vscode.Disposable {
     if (!this.enabled() || NOT_LOGS.has(doc.languageId)) {
       return [];
     }
+    // The size from the document's end, before its text is taken (memory 9).
     const maxMB = vscode.workspace.getConfiguration('dvicode').get<number>('logs.maxFileSizeMB', 50);
-    const text = doc.getText();
-    if (text.length > maxMB * 1_000_000) {
+    const size = doc.offsetAt(doc.lineAt(doc.lineCount - 1).range.end);
+    if (size > maxMB * 1_000_000 || token.isCancellationRequested) {
       return [];
     }
+    const text = doc.getText();
     const scan = new LinkScanner(text, MAX_LINKS);
-    while (!scan.step(LINES_PER_STEP)) {
+    while (!scan.step(LINES_PER_STEP, BYTES_PER_STEP)) {
       await new Promise((r) => setImmediate(r));
       if (token.isCancellationRequested) {
         return [];

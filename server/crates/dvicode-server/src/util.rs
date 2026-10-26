@@ -30,7 +30,9 @@ pub fn apply_changes(text: &str, changes: Vec<TextDocumentContentChangeEvent>) -
     // A line index, and the position up to which it still holds: lines before an edit keep
     // their starts. VS Code sends a multi-cursor edit's changes last first, so one index
     // serves them all instead of one scan of the document each.
-    let mut index: Option<(LineIndex, (u32, u32))> = None;
+    // The index, and the last line whose start it still holds (the line of the last change:
+    // its start is unchanged, its end may not be).
+    let mut index: Option<(LineIndex, u32)> = None;
     for c in changes {
         match c.range {
             None => {
@@ -38,22 +40,38 @@ pub fn apply_changes(text: &str, changes: Vec<TextDocumentContentChangeEvent>) -
                 index = None;
             }
             Some(r) => {
-                let holds = index.as_ref().is_some_and(|(_, upto)| (r.end.line, r.end.character) <= *upto);
+                let holds = index.as_ref().is_some_and(|(_, upto)| r.end.line <= *upto);
                 if !holds {
-                    index = Some((LineIndex::new(&text), (0, 0)));
+                    index = Some((LineIndex::new(&text), u32::MAX));
                 }
                 let Some((li, upto)) = index.as_mut() else { continue };
-                let s = li.offset(&text, r.start.line, r.start.character) as usize;
-                let e = li.offset(&text, r.end.line, r.end.character) as usize;
+                let s = offset_in(&text, li, r.start.line, r.start.character);
+                let e = offset_in(&text, li, r.end.line, r.end.character);
                 let (s, e) = (s.min(text.len()), e.min(text.len()).max(s.min(text.len())));
                 text.replace_range(s..e, &c.text);
-                // Lines before the edited one keep their starts; the edited line does not keep its
-                // end (a later change on it converts columns against the new text).
-                *upto = (r.start.line, 0);
+                // Lines up to the edited one keep their starts; columns are read in the text.
+                *upto = r.start.line;
             }
         }
     }
     text
+}
+
+/// The byte offset of a line and UTF-16 column: the line's start from `li`, its columns read
+/// in `text` itself (a change on the line before this one moved its end); clamped to the line.
+fn offset_in(text: &str, li: &LineIndex, line: u32, col: u32) -> usize {
+    if line >= li.line_count() {
+        return text.len();
+    }
+    let start = (li.line_start(line) as usize).min(text.len());
+    let mut units = 0u32;
+    for (i, ch) in text[start..].char_indices() {
+        if ch == '\n' || units >= col {
+            return start + i;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    text.len()
 }
 
 #[cfg(test)]

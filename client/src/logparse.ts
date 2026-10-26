@@ -173,10 +173,12 @@ export class LinkScanner {
     }
   }
 
-  /** Reads up to `lines` more lines; whether the log is read through. */
-  step(lines: number): boolean {
+  /** Reads up to `lines` more lines, and up to about `bytes` (long lines); whether the log is
+   * read through. */
+  step(lines: number, bytes = Infinity): boolean {
     const text = this.text;
-    for (let k = 0; k < lines && !this.done; k++) {
+    const until = this.pos + bytes;
+    for (let k = 0; k < lines && !this.done && this.pos < until; k++) {
       const pos = this.pos;
       let nl = text.indexOf('\n', pos);
       if (nl < 0) {

@@ -197,7 +197,7 @@ pub fn load(root: &Path, build_file: Option<&Path>, env: &FxHashMap<String, Stri
 const MAX_ARG_FILE: u64 = 256 << 20;
 const MAX_LOG: u64 = 2 << 30;
 /// The largest source file the auto-configuration scans.
-pub(crate) const MAX_SOURCE: u64 = 2 << 30;
+pub(crate) const MAX_SOURCE: u64 = fsx::MAX_REGULAR;
 
 /// Reads a build input: a regular file (a FIFO or a device such as `/dev/zero` could block or
 /// never end) of at most `limit` bytes.
@@ -1135,7 +1135,8 @@ impl Builder {
         self.link(file, &path);
         self.input(&path);
         let text = match read_input(&path, MAX_LOG) {
-            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            // Valid UTF-8 (most logs) taken as it is: no second copy of a large log.
+            Ok(b) => String::from_utf8(b).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
             Err(_) if !fsx::exists(&path) => {
                 self.note(file, self.describe_path(log, &e, &path, "simulation log"));
                 return self.problem(file, line, format!("Simulation log not found: {}", path.display()));

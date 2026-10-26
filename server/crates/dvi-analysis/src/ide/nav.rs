@@ -586,6 +586,10 @@ impl Analysis {
                 let mut spans = Vec::new();
                 let mut conflict = None;
                 let family = self.method_family(r);
+                // A member in a library (an override of a UVM method): refused before any search.
+                if let Some(x) = family.iter().find(|x| !self.is_editable(self.decl(**x).name_span.file)) {
+                    return Err(format!("Renaming would change {}, which is outside the workspace", self.vfs.path(self.decl(*x).name_span.file).display()));
+                }
                 let keys: FxHashSet<(u32, u32)> = family.iter().map(|x| self.decl_key(*x)).collect();
                 for x in family {
                     let (s, c) = self.decl_references_checked(x, true, true, Some(&keys));

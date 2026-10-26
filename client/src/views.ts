@@ -1215,16 +1215,17 @@ export class Views implements vscode.Disposable {
   async revealComponent(hit: { test: string; names: string[]; revision?: number }): Promise<boolean> {
     const v = this.verification;
     await vscode.commands.executeCommand('dvicode.verificationHierarchy.focus');
-    // A tree older than the answer (left out of date while large, or not fetched yet) is
-    // fetched again first: the node selected must be the one the answer describes.
-    if (!v.size || !v.last || v.stale || (hit.revision !== undefined && v.shownRevision < hit.revision)) {
-      await v.refresh();
-    }
-    // All tests shown (`*`) have the test class as a root too.
+    // The answer's test first (all tests shown, `*`, have it as a root too); then one fetch
+    // when the tree is older than the answer (left out of date while large, not fetched yet,
+    // or of another test): the node selected must be the one the answer describes.
+    let fetch = !v.size || !v.last || v.stale || (hit.revision !== undefined && v.shownRevision < hit.revision);
     if (v.test !== '*' && v.last?.test !== hit.test) {
       this.followGen++;
       v.test = hit.test;
-      await v.refresh();
+      fetch = true;
+    }
+    if (fetch) {
+      await v.refresh(hit.names);
     }
     if (await v.selectExact(hit.names)) {
       return true;

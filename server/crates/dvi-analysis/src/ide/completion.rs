@@ -126,6 +126,9 @@ impl Analysis {
         }
         let mut out = Vec::new();
         for o in self.overridable_methods(class) {
+            if out.len() >= MAX_ITEMS {
+                break;
+            }
             if !starts_like(&o.name, prefix) {
                 continue;
             }
@@ -493,8 +496,9 @@ impl Analysis {
         let d = u.parsed.decl(module.decl);
         let params: Vec<&Decl> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| matches!(c.kind, DeclKind::Parameter | DeclKind::TypeParam)).collect();
         let ports: Vec<&Decl> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| c.kind == DeclKind::Port).collect();
-        let w = ports.iter().map(|p| p.name.len()).max().unwrap_or(0);
-        let wp = params.iter().map(|p| p.name.len()).max().unwrap_or(0);
+        // Names aligned up to 40 columns (one long generated name does not pad every line).
+        let w = ports.iter().map(|p| p.name.len()).max().unwrap_or(0).min(40);
+        let wp = params.iter().map(|p| p.name.len()).max().unwrap_or(0).min(40);
         let mut s = d.name.to_string();
         let mut n = 1;
         if !params.is_empty() {

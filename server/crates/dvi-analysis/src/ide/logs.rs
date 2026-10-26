@@ -185,6 +185,10 @@ impl Analysis {
                 let incomplete = matched < segs.len() && node.truncated;
                 best = Some(ComponentHit { test: t, names, matched, segments: segs.len(), class: node.class.clone(), uri: node.def_uri.clone(), line: node.def_line, unknown_test: unknown_test.clone(), incomplete });
             }
+            // Found whole: no other test can do better (ties keep the first).
+            if best.as_ref().is_some_and(|b| b.matched == segs.len()) {
+                break;
+            }
         }
         best
     }

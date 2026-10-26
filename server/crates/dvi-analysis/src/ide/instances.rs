@@ -747,7 +747,8 @@ impl Analysis {
         for c in &kids {
             by_name.entry(self.decl(*c).name.as_str()).or_insert(*c);
         }
-        for (k, n) in names.iter().enumerate() {
+        // As many as other completions give at most.
+        for (k, n) in names.iter().enumerate().take(3000) {
             let d = by_name.get(n.as_str()).map(|c| self.decl(*c));
             let connected = used.contains(n);
             let detail = d.map(|d| d.detail.to_string()).filter(|s| !s.is_empty());

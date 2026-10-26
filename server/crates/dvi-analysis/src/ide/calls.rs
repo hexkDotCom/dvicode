@@ -11,11 +11,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 struct Groups {
     order: Vec<(u32, u32)>,
     by_key: FxHashMap<(u32, u32), (DeclRef, Vec<Span>)>,
+    seen: rustc_hash::FxHashSet<((u32, u32), Span)>,
 }
 
 impl Groups {
     fn new() -> Groups {
-        Groups { order: Vec::new(), by_key: FxHashMap::default() }
+        Groups { order: Vec::new(), by_key: FxHashMap::default(), seen: Default::default() }
     }
 
     fn add(&mut self, key: (u32, u32), r: DeclRef, span: Span) {
@@ -23,7 +24,7 @@ impl Groups {
             self.order.push(key);
             (r, Vec::new())
         });
-        if !e.1.contains(&span) {
+        if self.seen.insert((key, span)) {
             e.1.push(span);
         }
     }
