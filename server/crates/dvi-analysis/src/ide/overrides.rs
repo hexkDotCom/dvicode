@@ -314,7 +314,7 @@ impl Analysis {
     /// "Implement the pure virtual methods" for the class around `off`, when it lacks some:
     /// their definitions inserted before its `endclass`.
     pub fn implement_pure_methods(&self, file: FileId, off: u32) -> Option<Refactor> {
-        let &uid = self.units_for(file).first()?;
+        let uid = self.context_unit(file)?;
         let scope = self.scope_at(uid, file, off);
         let class = self.enclosing_class(uid, scope)?;
         let cd = self.decl(class);

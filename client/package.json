@@ -743,6 +743,12 @@
         "command": "dvicode.copyCompileContext",
         "title": "Copy Compile Context",
         "category": "DVICode"
+      },
+      {
+        "command": "dvicode.selectCompileContext",
+        "title": "Compile This File As...",
+        "category": "DVICode",
+        "icon": "$(layers)"
       }
     ],
     "menus": {
@@ -776,6 +782,11 @@
           "command": "dvicode.showCompileContext",
           "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.compileContext",
           "group": "navigation@93"
+        },
+        {
+          "command": "dvicode.selectCompileContext",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.chooseContext",
+          "group": "navigation@94"
         }
       ],
       "view/title": [
@@ -1032,6 +1043,11 @@
           "command": "dvicode.showCompileContext",
           "when": "view == dvicode.compiledFiles && viewItem == dvicode.fileNode && dvicode.engine.compileContext",
           "group": "navigation@1"
+        },
+        {
+          "command": "dvicode.selectCompileContext",
+          "when": "view == dvicode.compiledFiles && viewItem == dvicode.fileNode && dvicode.engine.chooseContext",
+          "group": "navigation@2"
         }
       ],
       "commandPalette": [
@@ -1106,6 +1122,10 @@
         {
           "command": "dvicode.copyCompileContext",
           "when": "dvicode.engine.compileContext"
+        },
+        {
+          "command": "dvicode.selectCompileContext",
+          "when": "dvicode.engine.chooseContext"
         }
       ]
     },

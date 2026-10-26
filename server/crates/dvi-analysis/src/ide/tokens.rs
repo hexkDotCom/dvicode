@@ -113,7 +113,7 @@ impl Analysis {
                 }
             }
         };
-        let Some(&uid) = self.units_for(file).first() else { return Vec::new() };
+        let Some(uid) = self.context_unit(file) else { return Vec::new() };
         let u = self.unit(uid);
         if let Some(pos) = u.positions.get(&file) {
             for did in &pos.decls {
@@ -184,7 +184,7 @@ impl Analysis {
                 out.push(FoldingRange { start_line: l1, start_character: None, end_line: l2, end_character: None, kind, collapsed_text: None });
             }
         };
-        for uid in self.units_for(file).into_iter().take(1) {
+        if let Some(uid) = self.context_unit(file) {
             let u = self.unit(uid);
             for d in &u.parsed.decls {
                 if d.span.file != file || d.has(dflags::FROM_MACRO) && d.kind != DeclKind::Block {

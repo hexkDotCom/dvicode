@@ -116,7 +116,7 @@ impl Analysis {
         let k = toks.partition_point(|t| t.span.end < off);
         let t = toks.get(k).filter(|t| t.span.start <= off && t.kind == TokKind::Ident && t.text.starts_with("set_") && t.text.contains("_override"))?;
         let at = t.span;
-        let &uid = self.units_for(file).first()?;
+        let uid = self.context_unit(file)?;
         // The method around it.
         let mut d = Some(self.scope_at(uid, file, off));
         let u = self.unit(uid);
@@ -142,7 +142,7 @@ impl Analysis {
         let from_key = self.decl_key(self.canonical(call.from));
         let what = if call.instance { format!("instance override `{from}` → `{to}` at `{}`", call.path) } else { format!("type override `{from}` → `{to}`") };
         let mut md = format!("**Factory {what}**");
-        let &uid = self.units_for(file).first()?;
+        let uid = self.context_unit(file)?;
         let class = self.enclosing_class(uid, self.scope_at(uid, file, off));
         let (tests, mut notes) = self.hover_tests(class);
         if tests.is_empty() {

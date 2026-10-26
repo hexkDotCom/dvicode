@@ -86,6 +86,13 @@ impl Client {
 
     /// [`Client::start_with`] for a client with `capabilities`.
     fn start_full(root: &Path, options: Value, hooks: Hooks, capabilities: Value) -> (Client, Value) {
+        let (mut c, init) = Client::connect(root, options, hooks, capabilities);
+        c.wait_note("dvicode/status", |_| true);
+        (c, init)
+    }
+
+    /// Starts a server on `root` without waiting for its first build.
+    fn connect(root: &Path, options: Value, hooks: Hooks, capabilities: Value) -> (Client, Value) {
         // The server's panic hook (internal error locations), and the test harness's after it.
         static HOOK: Once = Once::new();
         HOOK.call_once(|| {
@@ -112,7 +119,6 @@ impl Client {
             }),
         );
         c.notify("initialized", json!({}));
-        c.wait_note("dvicode/status", |_| true);
         (c, init)
     }
 
@@ -2030,5 +2036,168 @@ fn a_line_that_ends_a_loop_waits_for_its_update() {
     assert!(c.reply(&w, Duration::from_millis(300)).is_none(), "answered before its edit was analysed");
     gate.open();
     assert!(c.reply(&w, WAIT).is_some_and(|r| r.error.is_none()));
+    c.shutdown();
+}
+
+const CTX_HEADER: &str = "`ifdef X
+  int only_x;
+`else
+  int only_nox;
+  initial only_nox = missing_nox;
+`endif
+";
+
+/// A header that two invocations compile, through a.sv (with `X`) and b.sv (without).
+fn two_contexts(name: &str) -> PathBuf {
+    let root = project(name, &[("h.svh", CTX_HEADER), ("a.sv", "module ma;\n`include \"h.svh\"\nendmodule\n"), ("b.sv", "module mb;\n`include \"h.svh\"\nendmodule\n")]);
+    std::fs::write(root.join(".dvicode/default.build"), "+define+X\na.sv\n+dvicode_init+second\nb.sv\n").unwrap();
+    root
+}
+
+/// The `ContextRef` of a `dvicode/compileContexts` item.
+fn context_ref(item: &Value) -> Value {
+    json!({ "root": item["root"], "invocation_key": item["invocation_key"], "nth": item["nth"] })
+}
+
+fn has_undeclared(p: &PublishDiagnosticsParams) -> bool {
+    codes(p).iter().any(|c| c == "UNDECLARED_IDENTIFIER")
+}
+
+const REFRESHES: &str = r#"{ "workspace": { "workspaceEdit": { "documentChanges": true }, "semanticTokens": { "refreshSupport": true }, "inlayHint": { "refreshSupport": true } } }"#;
+
+#[test]
+fn choosing_a_compile_context_republishes_the_header_and_refreshes_tokens() {
+    let root = two_contexts("ctxchoose");
+    let (mut c, init) = Client::start_full(&root, Value::Null, Hooks::default(), serde_json::from_str(REFRESHES).unwrap());
+    assert_eq!(init["capabilities"]["experimental"]["dvicode"]["compileContext"], 2, "{init}");
+    let h = uri(&root, "h.svh");
+    c.open(&h, 1, CTX_HEADER);
+    let doc = json!({ "textDocument": { "uri": h } });
+    let list = c.request_ok("dvicode/compileContexts", doc.clone());
+    assert_eq!((list["total"].as_u64(), list["state"].as_str()), (Some(2), Some("default")), "{list}");
+    let before = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    let b = &list["items"][1];
+    assert!(b["root"].as_str().unwrap().ends_with("/b.sv"), "{list}");
+    let r = c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(b) }));
+    let rev = r["revision"].as_u64().unwrap();
+    c.wait_note("dvicode/revision", |v| v["revision"].as_u64() == Some(rev));
+    c.wait_problems(&h, has_undeclared);
+    assert!(c.requests.iter().any(|q| q.method == "workspace/semanticTokens/refresh"), "{:?}", c.requests.iter().map(|q| &q.method).collect::<Vec<_>>());
+    let after = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    assert_ne!(before["data"], after["data"], "the inactive branch moved");
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h }, "limit": 0 }));
+    assert_eq!((list["state"].as_str(), list["chosen"]["ordinal"].as_u64()), (Some("chosen"), Some(2)), "{list}");
+    // A context that does not compile the file is refused; the default comes back with none.
+    let mut bad = context_ref(b);
+    bad["nth"] = json!(7);
+    let e = c.request("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": bad }));
+    assert!(e.error.is_some(), "{e:?}");
+    c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": null }));
+    c.wait_problems(&h, |p| !has_undeclared(p));
+    // Chosen again, then a build in which b.sv's invocation has another define: the choice no
+    // longer applies, and the header's tokens are asked for again with no edit of it.
+    c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(b) }));
+    c.wait_problems(&h, has_undeclared);
+    let refreshes = |c: &Client| c.requests.iter().filter(|q| q.method == "workspace/semanticTokens/refresh").count();
+    let before = refreshes(&c);
+    std::fs::write(root.join(".dvicode/default.build"), "+define+X
+a.sv
++dvicode_init+second
++define+Y
+b.sv
+").unwrap();
+    c.request_ok("dvicode/rebuild", Value::Null);
+    c.wait_problems(&h, |p| !has_undeclared(p));
+    c.sync();
+    assert!(refreshes(&c) > before);
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h }, "limit": 0 }));
+    assert_eq!(list["state"], "unavailable", "{list}");
+    c.shutdown();
+}
+
+#[test]
+fn an_update_running_while_contexts_are_chosen_is_not_done_again() {
+    let root = two_contexts("ctxupdate");
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.hooks());
+    let (h, a) = (uri(&root, "h.svh"), uri(&root, "a.sv"));
+    let a_text = "module ma;
+`include \"h.svh\"
+endmodule
+";
+    c.open(&a, 1, a_text);
+    gate.wait_entered(1);
+    c.wait_note("dvicode/revision", |_| true);
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h } }));
+    // An edit's update held while the context is chosen twice.
+    gate.close();
+    c.change(&a, 2, &a_text.replace("module ma;", "module ma;
+  int extra;"));
+    gate.wait_entered(2);
+    c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(&list["items"][1]) }));
+    let r = c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(&list["items"][0]) }));
+    let chosen = r["revision"].as_u64().unwrap();
+    gate.open();
+    // The update's result comes in after the choices, with them.
+    c.wait_note("dvicode/revision", |v| v["revision"].as_u64() > Some(chosen));
+    c.sync();
+    assert_eq!(gate.entered.load(Ordering::SeqCst), 2, "the update was not started again");
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h }, "limit": 0 }));
+    assert_eq!((list["state"].as_str(), list["chosen"]["ordinal"].as_u64()), (Some("chosen"), Some(1)), "{list}");
+    c.shutdown();
+}
+
+#[test]
+fn a_token_request_from_before_a_choice_does_not_answer_after_it() {
+    let root = two_contexts("ctxtokens");
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.request_hooks("textDocument/semanticTokens/full"));
+    let h = uri(&root, "h.svh");
+    c.open(&h, 1, CTX_HEADER);
+    let doc = json!({ "textDocument": { "uri": h } });
+    let default_tokens = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    // Held with the snapshot of the default context while the choice is made.
+    gate.close();
+    let old = c.send_request("textDocument/semanticTokens/full", doc.clone());
+    gate.wait_entered(2);
+    let list = c.request_ok("dvicode/compileContexts", doc.clone());
+    c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(&list["items"][1]) }));
+    gate.open();
+    let old = c.reply(&old, WAIT).unwrap().result.unwrap();
+    assert_eq!(old["data"], default_tokens["data"], "answered from its own snapshot");
+    let now = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    assert_ne!(now["data"], default_tokens["data"], "not the older answer kept for the new snapshot");
+    c.shutdown();
+}
+
+#[test]
+fn choices_restored_before_the_first_build_apply_once_it_is_in() {
+    let root = two_contexts("ctxrestore");
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let h = uri(&root, "h.svh");
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h } }));
+    let b = context_ref(&list["items"][1]);
+    c.shutdown();
+    // Restarted, the first build held until the choices are in (as the extension sends them
+    // right after starting the engine).
+    let gate = Arc::new(Gate::default());
+    let _opener = Opener(gate.clone());
+    gate.close();
+    let g = gate.clone();
+    let hooks = Hooks { after_build: Some(Box::new(move || g.pass())), ..Default::default() };
+    let (mut c, _) = Client::connect(&root, Value::Null, hooks, json!({}));
+    gate.wait_entered(1);
+    c.request_ok("dvicode/restoreCompileContexts", json!({ "entries": [{ "uri": h, "context": b }, { "uri": uri(&root, "gone.svh"), "context": b }] }));
+    gate.open();
+    c.wait_note("dvicode/status", |_| true);
+    c.open(&h, 1, CTX_HEADER);
+    c.wait_problems(&h, has_undeclared);
+    // A rebuild keeps it.
+    c.request_ok("dvicode/rebuild", Value::Null);
+    c.wait_note("dvicode/status", |_| true);
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h }, "limit": 0 }));
+    assert_eq!(list["state"], "chosen", "{list}");
     c.shutdown();
 }

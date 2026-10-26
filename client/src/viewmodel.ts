@@ -799,10 +799,16 @@ export interface CompileContextInfo {
     root: string;
     order: [number, number] | null;
     is_root: boolean;
+    ordinal?: number;
+    chosen?: boolean;
     chain: ContextPlace[];
     chain_cut: boolean;
   }[];
   contexts_total: number;
+  /** Engines before the choice of contexts send none (`default`). */
+  choice?: 'default' | 'chosen' | 'unavailable';
+  chosen_context?: CompileContextInfo['contexts'][number] | null;
+  unavailable?: [string, string, number] | null;
   skip_matches: [number, string][];
   detail: {
     invocation: {
@@ -880,28 +886,37 @@ export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string
   }
   const roles: Record<string, string> = { top: 'top file', library: 'library file', adhoc: 'open in the editor, not part of the build', builtin: 'built-in file' };
   out.push(`## Compiled in ${c.contexts_total} context${c.contexts_total === 1 ? '' : 's'}`, '');
-  if (c.contexts_total > 1) {
-    out.push('The editor features (problems, hover, highlighting) use the first one.', '');
+  const chosen = c.choice === 'chosen';
+  if (chosen) {
+    out.push('The editor features (problems, hover, highlighting) use the context chosen with **Compile This File As...** (marked).', '');
+  } else if (c.choice === 'unavailable' && c.unavailable) {
+    out.push(`The context chosen for this file (from ${file(c.unavailable[0])}) is not compiled in this build: the editor features use the first one. **Compile This File As...** chooses again.`, '');
+  } else if (c.contexts_total > 1) {
+    out.push('The editor features (problems, hover, highlighting) use the first one; **Compile This File As...** chooses another.', '');
   }
-  c.contexts.forEach((x, i) => {
+  const entry = (x: CompileContextInfo['contexts'][number], n: number): string => {
     const order = x.order ? `, ${x.order[0]} of ${x.order[1]} top files` : '';
     const mode = x.mode && x.mode !== 'default' ? ` (${plain(x.mode)})` : '';
     const root = `${file(x.root)} (${roles[x.root_role] ?? x.root_role}${order}) in invocation ${x.invocation + 1}${mode}`;
+    const mark = x.chosen ? ' — **chosen**' : '';
     if (x.is_root) {
-      out.push(`${i + 1}. As ${root}`);
-    } else {
-      const chain = x.chain.map(at).join(' → ');
-      out.push(`${i + 1}. From ${root}: ${chain || 'included'}${x.chain_cut ? ' → …' : ''}`);
+      return `${n}. As ${root}${mark}`;
     }
-  });
+    const chain = x.chain.map(at).join(' → ');
+    return `${n}. From ${root}: ${chain || 'included'}${x.chain_cut ? ' → …' : ''}${mark}`;
+  };
+  c.contexts.forEach((x, i) => out.push(entry(x, x.ordinal ?? i + 1)));
   if (c.contexts_total > c.contexts.length) {
     out.push(`${c.contexts.length + 1}. … and ${c.contexts_total - c.contexts.length} more`);
+    if (c.chosen_context) {
+      out.push(entry(c.chosen_context, c.chosen_context.ordinal ?? 0));
+    }
   }
   const d = c.detail;
   if (!d) {
     return out.join('\n') + '\n';
   }
-  out.push('', '## In the first context', '');
+  out.push('', chosen ? '## In the chosen context' : '## In the first context', '');
   const inv = d.invocation;
   if (inv) {
     out.push(`**Invocation ${inv.index + 1}**${inv.auto ? ' (auto-configured)' : ''}: ${inv.top_files} top files, ${inv.incdirs_total} include directories, ${inv.lib_dirs} \`-y\` and ${inv.lib_files} \`-v\` libraries.`, '');
@@ -985,4 +1000,107 @@ export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string
     out.push('');
   }
   return out.join('\n') + '\n';
+}
+
+/** A context of `dvicode/compileContexts` (see the engine's `select.rs`). */
+export interface ContextItemInfo {
+  root: string;
+  invocation_key: string;
+  nth: number;
+  index?: number | null;
+  ordinal: number;
+  invocation: number;
+  mode: string;
+  root_role: string;
+  includer: ContextPlace | null;
+  chosen: boolean;
+}
+
+/** `dvicode/compileContexts`: the contexts of a file, a page of them, and the choice. */
+export interface ContextListInfo {
+  revision?: number;
+  total: number;
+  matched: number;
+  offset: number;
+  state: 'default' | 'chosen' | 'unavailable';
+  chosen?: ContextItemInfo | null;
+  default?: ContextItemInfo | null;
+  unavailable?: [string, string, number] | null;
+  items: ContextItemInfo[];
+}
+
+/** What the client sends back to choose a context. */
+export interface ContextRef {
+  root: string;
+  invocation_key: string;
+  nth: number;
+  index?: number | null;
+}
+
+export function contextRef(i: ContextItemInfo): ContextRef {
+  return { root: i.root, invocation_key: i.invocation_key, nth: i.nth, index: i.index ?? null };
+}
+
+/** The status bar text and tooltip of the active file's contexts; none for one or none. */
+export function contextStatus(l: ContextListInfo, name: (uri: string) => string): { text: string; tooltip: string } | undefined {
+  if (l.total <= 1) {
+    return undefined;
+  }
+  const inUse = l.state === 'chosen' && l.chosen ? l.chosen : l.default;
+  const n = inUse?.ordinal ?? 1;
+  const about = (i: ContextItemInfo | null | undefined): string => (i ? `${name(i.root)}, invocation ${i.invocation + 1}${i.mode && i.mode !== 'default' ? ` (${i.mode})` : ''}` : 'unknown');
+  if (l.state === 'unavailable') {
+    return {
+      text: `$(warning) ${n} of ${l.total}`,
+      tooltip: `The compile context chosen for this file is not compiled in this build; the first one is used: ${about(inUse)}. Click to choose another.`,
+    };
+  }
+  const how = l.state === 'chosen' ? 'chosen' : 'the default (first in build order)';
+  return { text: `$(layers) ${n} of ${l.total}${l.state === 'chosen' ? ' *' : ''}`, tooltip: `Compiled as ${about(inUse)}: ${how}, of ${l.total} contexts. Click to choose another.` };
+}
+
+/** One row of the Compile This File As... picker. */
+export interface ContextPickRow {
+  label: string;
+  description?: string;
+  detail?: string;
+  /** The context it chooses; `null`: the default (no choice); undefined: none (a note). */
+  choice?: ContextRef | null;
+  /** A row that asks for the next page: its offset. */
+  more?: number;
+}
+
+const ROLE_NAMES: Record<string, string> = { top: 'top file', library: 'library file', adhoc: 'open file, not in the build' };
+
+/**
+ * The rows of the picker for a page of contexts: the default and the choice first (unless the
+ * page answers a search or follows another), then the page, then a row for the next one.
+ */
+export function contextPickRows(l: ContextListInfo, name: (uri: string) => string, searched: boolean): ContextPickRow[] {
+  const base = (uri: string): string => name(uri).split('/').pop() ?? uri;
+  const row = (i: ContextItemInfo): ContextPickRow => ({
+    label: `${i.chosen ? '$(check) ' : ''}${i.ordinal}. ${base(i.root)}`,
+    description: `invocation ${i.invocation + 1}${i.mode && i.mode !== 'default' ? ` (${i.mode})` : ''} · ${ROLE_NAMES[i.root_role] ?? i.root_role}`,
+    detail: `${name(i.root)}${i.includer ? ` — included at ${name(i.includer.uri)}:${i.includer.line + 1}` : ''}`,
+    choice: contextRef(i),
+  });
+  const rows: ContextPickRow[] = [];
+  if (!searched) {
+    const d = l.default;
+    rows.push({
+      label: `${l.state === 'chosen' ? '' : '$(check) '}Default (first in build order)`,
+      description: d ? `${base(d.root)}, invocation ${d.invocation + 1}` : undefined,
+      detail: l.state === 'unavailable' && l.unavailable ? `The context chosen before (from ${name(l.unavailable[0])}) is not compiled in this build.` : undefined,
+      choice: null,
+    });
+    if (l.chosen && !l.items.some((i) => i.chosen)) {
+      rows.push(row(l.chosen));
+    }
+  }
+  rows.push(...l.items.map(row));
+  const next = l.offset + l.items.length;
+  if (l.matched > next) {
+    rows.push({ label: `$(ellipsis) ${l.matched - next} more: show the next ${Math.min(l.items.length || 1, l.matched - next)}`, description: 'or type to search', more: next });
+  }
+  return rows;
 }

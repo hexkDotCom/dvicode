@@ -134,6 +134,9 @@ pub struct ProjectSetup {
     pub pp_configs: Vec<PpConfig>,
     pub initial_macros: Vec<MacroTable>,
     pub env: FxHashMap<String, String>,
+    /// Each invocation's fingerprint (`select::invocation_key`): what names it in a chosen
+    /// compile context.
+    pub inv_keys: Vec<String>,
 }
 
 impl ProjectSetup {
@@ -155,7 +158,8 @@ impl ProjectSetup {
             pp_configs.push(PpConfig { incdirs: Vec::new(), root_dir: root.to_path_buf() });
             initial_macros.push(MacroTable::new());
         }
-        ProjectSetup { root: root.to_path_buf(), config, pp_configs, initial_macros, env }
+        let inv_keys = config.invocations.iter().map(crate::select::invocation_key).collect();
+        ProjectSetup { root: root.to_path_buf(), config, pp_configs, initial_macros, env, inv_keys }
     }
 }
 
@@ -170,6 +174,9 @@ pub struct Analysis {
     pub build_ms: u128,
     /// Set by the server: a number that grows with each snapshot it uses.
     pub revision: u64,
+    /// The compile contexts chosen for files several units compile, resolved in this snapshot
+    /// (set by the server, `Analysis::select_contexts`).
+    pub selection: Arc<crate::select::Selection>,
     /// Without a build file: uses not checked because code that may declare them is removed by
     /// `` `ifdef ``. Counted for each snapshot when first needed (`Analysis::hidden_uses`).
     pub hidden_uses: Arc<std::sync::OnceLock<HiddenUses>>,
@@ -664,6 +671,7 @@ impl Analysis {
             file_units: Arc::new(FxHashMap::default()),
             build_ms: 0,
             revision: 0,
+            selection: Arc::default(),
             hidden_uses: Arc::default(),
             hidden_seed: None,
             instance_defs: Arc::default(),
@@ -1479,7 +1487,9 @@ impl Analysis {
     /// The text of a file as this snapshot compiled it; for files no unit read (build files,
     /// for example), the current text.
     pub fn source(&self, f: FileId) -> Option<Arc<Source>> {
-        for uid in self.units_of_file(f) {
+        // The chosen unit's copy: positions it gives are converted with the text it read.
+        let chosen = self.chosen_unit(f);
+        for uid in chosen.iter().chain(self.units_of_file(f)) {
             if let Some(s) = self.try_unit(*uid).and_then(|u| u.sources.get(&f)) {
                 return Some(s.clone());
             }

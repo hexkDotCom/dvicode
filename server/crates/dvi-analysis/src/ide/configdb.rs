@@ -297,7 +297,8 @@ impl Analysis {
                 break;
             }
             for &f in &u.files {
-                if !files.insert(f) {
+                // Each file once, in the unit it is read in (the chosen one, if any).
+                if self.chosen_unit(f).is_some_and(|c| c != u.id) || !files.insert(f) {
                     continue;
                 }
                 if !self.file_text(f).is_some_and(|t| t.contains("uvm_config_db")) {

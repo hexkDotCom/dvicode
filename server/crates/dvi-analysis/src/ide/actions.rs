@@ -37,7 +37,7 @@ impl Analysis {
     /// The reference chain whose first segment is written at `span`, in the unit that
     /// reports the problems of `file`.
     fn ref_starting_at(&self, file: FileId, span: Span) -> Option<(UnitId, RefId)> {
-        for uid in self.units_for(file) {
+        for uid in self.editor_units(file) {
             let u = self.unit(uid);
             let Some(pos) = u.positions.get(&file) else { continue };
             let i = pos.refs.partition_point(|(s, _, _)| (s.start, s.end) < (span.start, span.end));

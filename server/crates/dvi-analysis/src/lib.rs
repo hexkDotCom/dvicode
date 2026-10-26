@@ -2,6 +2,7 @@
 
 pub mod ide;
 pub mod resolve;
+pub mod select;
 pub mod vfs;
 pub mod world;
 

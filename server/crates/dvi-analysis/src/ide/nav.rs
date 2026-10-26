@@ -141,7 +141,7 @@ impl Analysis {
     fn macro_spans(&self, m: &dvi_syntax::preproc::MacroDef, include_decl: bool, only: Option<FileId>) -> Vec<Span> {
         let here = |s: &Span| only.is_none_or(|f| s.file == f);
         let units: Vec<UnitId> = match only {
-            Some(f) => self.units_for(f),
+            Some(f) => self.editor_units(f),
             None => self.units.iter().flatten().map(|u| u.id).collect(),
         };
         let mut out = Vec::new();
@@ -375,7 +375,7 @@ impl Analysis {
                 if d.name_span.file == file && seen.insert(d.name_span) {
                     out.push(d.name_span);
                 }
-                for uid in self.units_for(file) {
+                for uid in self.editor_units(file) {
                     let u = self.unit(uid);
                     if let Some(pos) = u.positions.get(&file) {
                         for (span, rid, seg) in &pos.refs {

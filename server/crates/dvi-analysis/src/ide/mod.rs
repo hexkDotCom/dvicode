@@ -127,7 +127,7 @@ impl Analysis {
 
     /// The navigable element at `off` in `file`.
     pub fn hit_at(&self, file: FileId, off: u32) -> Option<Hit> {
-        for uid in self.units_for(file) {
+        for uid in self.editor_units(file) {
             let u = self.unit(uid);
             if let Some(pos) = u.positions.get(&file) {
                 // References: innermost span containing the offset.

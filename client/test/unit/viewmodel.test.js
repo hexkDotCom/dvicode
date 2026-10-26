@@ -335,3 +335,45 @@ test.describe('design hierarchy parameters', () => {
     assert.ok(tip.includes('- `N` = ? (unresolved: a defparam with a path this version does not follow may set it) · defparam'), tip);
   });
 });
+
+test.describe('choosing the compile context', () => {
+  const item = (n, root, chosen = false, invocation = 0) => ({ root: `file:///p/${root}`, invocation_key: 'v1-k', nth: 0, index: null, ordinal: n, invocation, mode: 'default', root_role: 'top', includer: { uri: `file:///p/${root}`, line: 1 }, chosen });
+  const name = (u) => u.replace('file:///p/', '');
+  const list = { total: 450, matched: 450, offset: 0, state: 'chosen', chosen: item(300, 'r300.sv', true), default: item(1, 'r1.sv'), unavailable: null, items: [item(1, 'r1.sv'), item(2, 'r2.sv', false, 4)] };
+  test.it('shows the context in use in the status bar, nothing for one', () => {
+    assert.deepEqual(vm.contextStatus(list, name), { text: '$(layers) 300 of 450 *', tooltip: 'Compiled as r300.sv, invocation 1: chosen, of 450 contexts. Click to choose another.' });
+    assert.equal(vm.contextStatus({ ...list, total: 1 }, name), undefined);
+    const gone = vm.contextStatus({ ...list, state: 'unavailable', chosen: null, unavailable: ['file:///p/b.sv', 'v1-x', 0] }, name);
+    assert.match(gone.text, /^\$\(warning\) 1 of 450$/);
+    assert.match(gone.tooltip, /not compiled in this build/);
+  });
+  test.it('lists the default, the choice beyond the page, the page and a row for the next one', () => {
+    const rows = vm.contextPickRows(list, name, false);
+    assert.deepEqual(
+      rows.map((r) => r.label),
+      ['Default (first in build order)', '$(check) 300. r300.sv', '1. r1.sv', '2. r2.sv', '$(ellipsis) 448 more: show the next 2'],
+    );
+    assert.equal(rows[0].choice, null);
+    assert.deepEqual(rows[1].choice, { root: 'file:///p/r300.sv', invocation_key: 'v1-k', nth: 0, index: null });
+    assert.equal(rows[3].description, 'invocation 5 · top file');
+    assert.equal(rows[2].detail, 'r1.sv — included at r1.sv:2');
+    assert.equal(rows[4].more, 2);
+    assert.equal(rows[4].choice, undefined);
+    // A search answer, or a further page: the page only.
+    assert.deepEqual(vm.contextPickRows({ ...list, matched: 2 }, name, true).map((r) => r.label), ['1. r1.sv', '2. r2.sv']);
+  });
+  test.it('marks the chosen context in the report', () => {
+    const c = {
+      uri: 'file:///p/h.svh', known: true, auto: false, build_file: null, skip_matches: [], detail: null, contexts_total: 2, choice: 'chosen',
+      contexts: [
+        { invocation: 0, mode: 'default', root_role: 'top', root: 'file:///p/a.sv', order: null, is_root: false, ordinal: 1, chosen: false, chain: [], chain_cut: false },
+        { invocation: 1, mode: 'default', root_role: 'top', root: 'file:///p/b.sv', order: null, is_root: false, ordinal: 2, chosen: true, chain: [], chain_cut: false },
+      ],
+    };
+    const md = vm.compileContextMarkdown(c, (u) => `<${u}>`, name);
+    assert.match(md, /use the context chosen with \*\*Compile This File As\.\.\.\*\*/);
+    assert.match(md, /2\. From \[b\.sv\]\(<file:\/\/\/p\/b\.sv>\) .* — \*\*chosen\*\*/);
+    const gone = vm.compileContextMarkdown({ ...c, choice: 'unavailable', unavailable: ['file:///p/b.sv', 'v1-x', 0] }, (u) => `<${u}>`, name);
+    assert.match(gone, /The context chosen for this file \(from \[b\.sv\]\(<file:\/\/\/p\/b\.sv>\)\) is not compiled in this build/);
+  });
+});

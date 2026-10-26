@@ -9,6 +9,7 @@ import { RemoteFs } from './remotefs';
 import { InternalError, LogChannel, Reporter } from './report';
 import { ChecksView } from './checks';
 import { CompileContextReports } from './context';
+import { ContextChooser } from './contextchoice';
 import { DriversView } from './drivers';
 import { Structure } from './structure';
 import { VerificationHierarchy, Views, componentClassLocation, hierarchyPath } from './views';
@@ -52,6 +53,7 @@ let structure: Structure;
 let checks: ChecksView;
 let drivers: DriversView;
 let contexts: CompileContextReports;
+let chooser: ContextChooser;
 
 const SV_SELECTOR = [
   { scheme: 'file', language: 'systemverilog' },
@@ -156,6 +158,12 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   };
   const c = new LanguageClient('dvicode', 'DVICode', launch.serverOptions, clientOptions);
   c.onDidChangeState((e) => {
+    // Each engine that starts, a restart after a crash included, gets the compile contexts
+    // chosen: they are the engine's to apply from its first build.
+    if (e.newState === State.Running && (client === c || pendingClient === c)) {
+      const exp = c.initializeResult?.capabilities.experimental as { dvicode?: { compileContext?: number } } | undefined;
+      void chooser.started(c, (exp?.dvicode?.compileContext ?? 0) >= 2);
+    }
     // A client a restart dropped stops later: the status is the current one's.
     if (e.newState === State.Stopped && (client === c || pendingClient === c)) {
       statusItem.text = '$(debug-disconnect) DVICode';
@@ -165,6 +173,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
       structure.reset();
       checks.reset();
       drivers.reset();
+      chooser.stopped();
     }
   });
   c.onNotification('dvicode/internalError', (e: InternalError) => {
@@ -188,6 +197,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.checks', (experimental?.dvicode?.checks ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.accesses', (experimental?.dvicode?.accesses ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.compileContext', (experimental?.dvicode?.compileContext ?? 0) >= 1);
+  void vscode.commands.executeCommand('setContext', 'dvicode.engine.chooseContext', (experimental?.dvicode?.compileContext ?? 0) >= 2);
   c.onNotification('dvicode/status', (s: Status) => {
     lastStatus = s;
     if (s.build_error) {
@@ -209,6 +219,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     checks.rebuilt();
     contexts.refresh();
     drivers.rebuilt();
+    chooser.refresh();
   });
   c.onNotification('dvicode/revision', (r: { revision?: number }) => {
     views.onRevision(r?.revision);
@@ -216,6 +227,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     checks.onRevision(r?.revision);
     drivers.onRevision(r?.revision);
     contexts.refresh();
+    chooser.refresh();
   });
   client = c;
   statusItem.text = '$(sync~spin) DVICode';
@@ -289,6 +301,7 @@ function restart(ctx: vscode.ExtensionContext): Promise<void> {
     structure.reset();
     checks.reset();
     drivers.reset();
+    chooser.stopped();
     if (c) {
       await stopClient(c);
     }
@@ -573,12 +586,14 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   checks = new ChecksView(ctx, conn);
   drivers = new DriversView(conn);
   contexts = new CompileContextReports(conn);
+  chooser = new ContextChooser(ctx.workspaceState, conn);
   ctx.subscriptions.push(
     views,
     structure,
     checks,
     drivers,
     contexts,
+    chooser,
     vscode.commands.registerCommand('dvicode.selectUvmTest', selectUvmTest),
     vscode.commands.registerCommand('dvicode.openComponentClass', async (item: unknown) => {
       const l = componentClassLocation(item, conn);

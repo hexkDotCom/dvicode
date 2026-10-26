@@ -57,7 +57,7 @@ impl Analysis {
         let before = text.get(..off as usize)?;
         let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
         let line = before[line_start..].to_string();
-        let unit = *self.units_for(file).first()?;
+        let unit = self.context_unit(file)?;
         let scope = self.scope_at(unit, file, off);
         Some(Ctx { unit, scope, line, line_start: line_start as u32 })
     }
@@ -71,7 +71,7 @@ impl Analysis {
     /// line before the cursor: the editor's, newer than this snapshot, while an update of edits
     /// on that line only is under way (`Analysis::line_local_scope`).
     pub fn completions_with_line(&self, file: FileId, off: u32, line: &str) -> Vec<CompletionItem> {
-        let Some(&unit) = self.units_for(file).first() else { return Vec::new() };
+        let Some(unit) = self.context_unit(file) else { return Vec::new() };
         let line_start = self.file_text(file).and_then(|t| t.get(..off as usize).map(|b| b.rfind('\n').map_or(0, |i| i + 1))).unwrap_or(0) as u32;
         let ctx = Ctx { unit, scope: self.scope_at(unit, file, off), line: line.to_string(), line_start };
         self.completions_in(&ctx, file)
@@ -586,7 +586,7 @@ impl Analysis {
         if open == 0 {
             return None;
         }
-        let ctx = Ctx { unit: *self.units_for(file).first()?, scope: 0, line: String::new(), line_start: 0 };
+        let ctx = Ctx { unit: self.context_unit(file)?, scope: 0, line: String::new(), line_start: 0 };
         let ctx = Ctx { scope: self.scope_at(ctx.unit, file, off), ..ctx };
         let before = &toks[..open];
         // Macro call.
@@ -744,7 +744,7 @@ impl Analysis {
     /// edit of that line only (see [`line_local_edit`]) changes nothing a completion sees but
     /// the line. The offset to resolve at (`start`).
     pub fn line_scope(&self, file: FileId, start: u32, end: u32) -> Option<u32> {
-        let &unit = self.units_for(file).first()?;
+        let unit = self.context_unit(file)?;
         let u = self.unit(unit);
         if u.kind != crate::world::UnitKind::Project {
             return None;

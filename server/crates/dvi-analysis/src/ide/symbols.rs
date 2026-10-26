@@ -59,7 +59,7 @@ fn outline_children(d: &Decl) -> bool {
 
 impl Analysis {
     pub fn document_symbols(&self, file: FileId) -> Vec<DocumentSymbol> {
-        let Some(&uid) = self.units_for(file).first() else { return Vec::new() };
+        let Some(uid) = self.context_unit(file) else { return Vec::new() };
         let u = self.unit(uid);
         let Some(tops) = u.parsed.file_tops.get(&file) else { return Vec::new() };
         let mut out = Vec::new();

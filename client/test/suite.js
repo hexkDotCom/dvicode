@@ -514,6 +514,46 @@ async function run() {
     return `${hover.slice(0, 80)}; ${text.split('\n').find((l) => l.startsWith('1. ')) ?? ''}`;
   });
 
+  await test('compile context: Compile This File As changes the problems of a shared header', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    const client = await api.ready();
+    // Two files outside the build include one header: each open one compiles it (ad hoc), one
+    // with X defined. Written for this test and removed after it.
+    const dir = vscode.Uri.joinPath(folder, 'ctx_e2e');
+    const write = (f, text) => vscode.workspace.fs.writeFile(vscode.Uri.joinPath(dir, f), Buffer.from(text));
+    await write('h.svh', '`ifdef X\n  int only_x;\n`else\n  int only_nox;\n  initial only_nox = missing_nox;\n`endif\n');
+    await write('x.sv', 'module mx;\n`include "h.svh"\nendmodule\n');
+    await write('y.sv', '`define X\nmodule my;\n`include "h.svh"\nendmodule\n');
+    try {
+      await open('ctx_e2e/x.sv');
+      await open('ctx_e2e/y.sv');
+      const h = await open('ctx_e2e/h.svh');
+      await vscode.window.showTextDocument(h);
+      const undeclared = () => vscode.languages.getDiagnostics(h.uri).some((d) => d.message.includes('missing_nox'));
+      const list = await waitFor('two contexts', async () => {
+        const l = await client.sendRequest('dvicode/compileContexts', { textDocument: { uri: api.toServer(h.uri) } });
+        return l.total === 2 ? l : undefined;
+      }, 30000);
+      // By default the first by path, x.sv: X is not defined there.
+      await waitFor('the problem of x.sv\'s context', async () => undeclared(), 30000);
+      const y = list.items.find((i) => i.root.endsWith('/y.sv'));
+      if (!y) throw new Error(JSON.stringify(list));
+      const choice = { root: y.root, invocation_key: y.invocation_key, nth: y.nth, index: y.index };
+      if (!(await vscode.commands.executeCommand('dvicode.selectCompileContext', h.uri, choice))) throw new Error('not chosen');
+      await waitFor('no problem in y.sv\'s context', async () => !undeclared(), 30000);
+      const report = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'dvicode-context', path: '/h.svh (compile context).md', query: h.uri.toString() }));
+      const md = report.getText();
+      if (!/use the context chosen/.test(md) || !/y\.sv.*\*\*chosen\*\*/.test(md)) throw new Error(`report: ${md.slice(0, 800)}`);
+      // Back to the default.
+      await vscode.commands.executeCommand('dvicode.selectCompileContext', h.uri, null);
+      await waitFor('the problem again', async () => undeclared(), 30000);
+      return `${list.total} contexts; chosen ${y.root.split('/').pop()}, then the default`;
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.workspace.fs.delete(dir, { recursive: true, useTrash: false });
+    }
+  });
+
   await test('config_db: hover and go to definition from a get to its set', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

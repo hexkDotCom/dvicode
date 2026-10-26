@@ -88,7 +88,7 @@ impl Analysis {
                 out.push(d);
             }
         };
-        let units = self.units_for(file);
+        let units = self.editor_units(file);
         for &uid in &units {
             let u = self.unit(uid);
             for d in u.pp_diags.iter().chain(u.parsed.diags.iter()) {
@@ -412,7 +412,7 @@ impl Analysis {
                     return (file, v.clone());
                 }
                 let mut hidden = Vec::new();
-                for uid in self.units_for(file) {
+                for uid in self.editor_units(file) {
                     let _ = self.semantic_check(uid, file, &mut hidden);
                     // A header is analysed once, in its first unit (as for its problems).
                     if self.unit(uid).root != file {
@@ -461,11 +461,16 @@ impl Analysis {
             return;
         }
         // Counting needs every file: only for a file with removed code.
-        if !self.units_for(file).iter().any(|u| self.unit(*u).inactive.iter().any(|s| s.file == file)) {
+        if !self.editor_units(file).iter().any(|u| self.unit(*u).inactive.iter().any(|s| s.file == file)) {
             return;
         }
         let Some(text) = self.file_text(file) else { return };
         let mut regions: Vec<(u32, usize)> = self.hidden_uses().iter().filter(|((f, _), _)| *f == file).map(|((_, s), n)| (*s, *n)).collect();
+        // A context chosen: the regions it removes only (another unit may remove other code).
+        if let Some(u) = self.chosen_unit(file) {
+            let removed: FxHashSet<u32> = self.unit(u).inactive.iter().filter(|s| s.file == file).map(|s| s.start).collect();
+            regions.retain(|(s, _)| removed.contains(s));
+        }
         regions.sort_unstable();
         for (start, uses) in regions {
             let Some((span, name, defined)) = guarding_macro(&text, start) else { continue };

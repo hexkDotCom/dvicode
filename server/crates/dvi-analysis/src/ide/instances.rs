@@ -253,7 +253,7 @@ impl Analysis {
 
     /// The instance (not a bound one) of `file` around `off`, in the file's first unit.
     fn instance_at(&self, file: FileId, off: u32) -> Option<DeclRef> {
-        let &uid = self.units_for(file).first()?;
+        let uid = self.context_unit(file)?;
         let p = &self.unit(uid).parsed;
         // Instances of one statement share its start; the one whose name or list holds `off`.
         let toks = self.file_tokens(file)?;
@@ -519,7 +519,7 @@ impl Analysis {
     /// The problems of the instance connections of `file` (in its first unit) that are certain.
     pub fn instance_problems(&self, file: FileId) -> Vec<Diag> {
         let mut out = Vec::new();
-        let Some(&uid) = self.units_for(file).first() else { return out };
+        let Some(uid) = self.context_unit(file) else { return out };
         let p = &self.unit(uid).parsed;
         let mut seen: FxHashSet<u32> = FxHashSet::default();
         let mut headers: rustc_hash::FxHashMap<((u32, u32), bool), Arc<Header>> = rustc_hash::FxHashMap::default();
@@ -718,7 +718,7 @@ impl Analysis {
             (k, false)
         };
         let def_name = all.get(def_tok).filter(|t| t.kind == TokKind::Ident)?;
-        let &uid = self.units_for(file).first()?;
+        let uid = self.context_unit(file)?;
         let scope = self.scope_at(uid, file, line_start);
         let def = self.resolve_at_span(uid, def_name.span).or_else(|| self.lookup(uid, scope, &def_name.text)).or_else(|| self.lookup_design(&def_name.text))?;
         if !self.decl(def).kind.is_definition() {

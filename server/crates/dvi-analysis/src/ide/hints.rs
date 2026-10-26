@@ -50,7 +50,7 @@ impl Analysis {
             return Vec::new();
         }
         let Some(toks) = self.file_tokens(file) else { return Vec::new() };
-        let Some(&uid) = self.units_for(file).first() else { return Vec::new() };
+        let Some(uid) = self.context_unit(file) else { return Vec::new() };
         let u = self.unit(uid);
         let Some(pos) = u.positions.get(&file) else { return Vec::new() };
         let first = toks.partition_point(|t| t.span.end < start).saturating_sub(LOOK_BACK);

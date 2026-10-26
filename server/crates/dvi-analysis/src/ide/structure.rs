@@ -79,8 +79,8 @@ impl Analysis {
     /// The Structure of `file` (`filter`: only the nodes whose name matches, with their
     /// ancestors and their contents).
     pub fn structure(&self, file: FileId, filter: Option<&Filter>, max_nodes: usize) -> StructTree {
-        let units = self.units_for(file);
-        let Some(&unit) = units.first() else { return StructTree { status: "none", ..Default::default() } };
+        let units = self.units_of_file(file);
+        let Some(unit) = self.context_unit(file) else { return StructTree { status: "none", ..Default::default() } };
         let u = self.unit(unit);
                 let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false, toks: FxHashMap::default() };
         let mut nodes = Vec::new();

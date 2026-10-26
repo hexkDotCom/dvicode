@@ -10,7 +10,7 @@
 //! present-time look is at include candidates that also exist (shadowed copies), labelled so.
 
 use crate::ide::url_of;
-use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
+use crate::world::{Analysis, DeclRef, UnitId};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, ParsedUnit};
 use dvi_syntax::preproc::{include_candidates, IncludeStep, MacroDef, COMMAND_LINE_FILE};
 use dvi_syntax::{FileId, Span, TokKind};
@@ -49,13 +49,20 @@ pub struct CompileContext {
     /// The project has no build file: auto-configuration.
     pub auto: bool,
     pub build_file: Option<String>,
-    /// The units compiling the file, the one the editor features use first.
+    /// The units compiling the file, in the default order (the first is the default context).
     pub contexts: Vec<Context>,
     pub contexts_total: usize,
+    /// `default` (no context chosen), `chosen`, or `unavailable` (the context chosen is not
+    /// compiled in this build: the default is used).
+    pub choice: &'static str,
+    /// The chosen context when it is not among those listed.
+    pub chosen_context: Option<Context>,
+    /// The unavailable choice: its root (uri), invocation fingerprint and nth.
+    pub unavailable: Option<(String, String, u32)>,
     /// `+dvicode_skip_compile+` patterns the file matches: (invocation, pattern). They remove
     /// top-file entries only; the file can still be included.
     pub skip_matches: Vec<(usize, String)>,
-    /// About the first context.
+    /// About the context the editor features use (the chosen one, else the first).
     pub detail: Option<Detail>,
 }
 
@@ -73,6 +80,10 @@ pub struct Context {
     pub order: Option<(usize, usize)>,
     /// The file is the root itself (no chain).
     pub is_root: bool,
+    /// Its 1-based position in the default order.
+    pub ordinal: usize,
+    /// The editor features use this context because it was chosen.
+    pub chosen: bool,
     /// The includes from the root down to this file: each the file holding the `` `include ``
     /// and its line (the directive, or the macro call that made it).
     pub chain: Vec<Place>,
@@ -197,16 +208,29 @@ impl Analysis {
         let Some(file) = file else { return out };
         let units = self.units_for(file);
         out.contexts_total = units.len();
-        for &uid in units.iter().take(MAX_CONTEXTS) {
-            out.contexts.push(self.context_of(uid, file));
+        let chosen = self.chosen_unit(file);
+        out.choice = match (chosen, self.selection.unavailable.get(&file)) {
+            (Some(_), _) => "chosen",
+            (None, Some(k)) => {
+                out.unavailable = Some((url_of(&k.root).to_string(), k.invocation.clone(), k.nth));
+                "unavailable"
+            }
+            (None, None) => "default",
+        };
+        for (i, &uid) in units.iter().enumerate() {
+            if i < MAX_CONTEXTS {
+                out.contexts.push(self.context_of(uid, file, i + 1, chosen));
+            } else if Some(uid) == chosen {
+                out.chosen_context = Some(self.context_of(uid, file, i + 1, chosen));
+            }
         }
-        if let Some(&first) = units.first() {
-            out.detail = Some(self.context_detail(first, file));
+        if let Some(uid) = self.context_unit(file) {
+            out.detail = Some(self.context_detail(uid, file));
         }
         out
     }
 
-    fn place(&self, span: Span) -> Option<Place> {
+    pub(crate) fn place(&self, span: Span) -> Option<Place> {
         if span.file == COMMAND_LINE_FILE || self.vfs.is_builtin(span.file) {
             return None;
         }
@@ -214,16 +238,11 @@ impl Analysis {
         Some(Place { uri: url_of(&self.path(span.file)).to_string(), line: r.start.line })
     }
 
-    fn context_of(&self, uid: UnitId, file: FileId) -> Context {
+    fn context_of(&self, uid: UnitId, file: FileId, ordinal: usize, chosen: Option<UnitId>) -> Context {
         let u = self.unit(uid);
         let inv = self.setup.config.invocations.get(u.invocation);
         let root_path = self.path(u.root);
-        let root_role = match u.kind {
-            UnitKind::Project if u.library => "library",
-            UnitKind::Project => "top",
-            UnitKind::AdHoc => "adhoc",
-            UnitKind::Builtin => "builtin",
-        };
+        let root_role = crate::select::root_role(u);
         let order = (root_role == "top").then(|| inv.and_then(|i| i.files.iter().position(|f| *f == root_path).map(|k| (k + 1, i.files.len())))).flatten();
         let mut chain = Vec::new();
         let mut chain_cut = false;
@@ -252,6 +271,8 @@ impl Analysis {
             root: url_of(&root_path).to_string(),
             order,
             is_root: u.root == file,
+            ordinal,
+            chosen: chosen == Some(uid),
             chain,
             chain_cut,
         }
@@ -537,7 +558,7 @@ impl Analysis {
         if !text.get(a..b.max(a)).is_some_and(|l| l.contains('`')) {
             return None;
         }
-        for uid in self.units_for(file) {
+        for uid in self.editor_units(file) {
             let u = self.unit(uid);
             let Some(inc) = u.includes.iter().find(|i| i.span.file == file && i.span.start <= off && off <= i.span.end) else { continue };
             let pp = self.setup.pp_configs.get(u.invocation).unwrap_or(&self.setup.pp_configs[0]);

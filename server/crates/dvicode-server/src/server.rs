@@ -8,6 +8,7 @@ use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use dvi_analysis::ide::hints::HintKinds;
 use dvi_analysis::ide::tokens::{TOKEN_MODIFIERS, TOKEN_TYPES};
 use dvi_analysis::ide::{path_of, url_of};
+use dvi_analysis::select::{ContextChoices, ContextKey};
 use dvi_analysis::{Analysis, Pin, ProjectSetup, UnitKind, Vfs};
 use dvi_project::Progress;
 use dvi_syntax::{FileId, SourceProvider};
@@ -113,7 +114,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1, "compileContext": 1 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1, "compileContext": 2 } })),
         ..Default::default()
     }
 }
@@ -296,6 +297,15 @@ struct Server {
     format_settings: Value,
     /// The client can be asked to request inlay hints again.
     hint_refresh: bool,
+    /// The client can be asked to request semantic tokens again.
+    token_refresh: bool,
+    /// The compile contexts the client chose for files several units compile (by path), and
+    /// the number of their changes: each snapshot installed resolves them (`Server::install`).
+    contexts: ContextChoices,
+    context_generation: u64,
+    /// The snapshot the one in use was copied from with other choices only (same units): an
+    /// update started from it is still good.
+    reselected_from: Option<Arc<Analysis>>,
     hints_refreshed: Option<Instant>,
     open: FxHashMap<FileId, Url>,
     pending: FxHashSet<FileId>,
@@ -435,6 +445,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let hint_kinds = params.initialization_options.as_ref().map(hint_kinds_of).unwrap_or_default();
     let format_settings = params.initialization_options.as_ref().and_then(|v| v.get("format")).cloned().unwrap_or(Value::Null);
     let hint_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false);
+    let token_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.semantic_tokens.as_ref()).and_then(|t| t.refresh_support).unwrap_or(false);
     let document_changes = params.capabilities.workspace.as_ref().and_then(|w| w.workspace_edit.as_ref()).and_then(|e| e.document_changes).unwrap_or(false);
     log::info!("workspace root: {:?}; settings: {:?}", root, settings);
     let vfs = Arc::new(Vfs::new());
@@ -460,6 +471,10 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         hint_kinds,
         format_settings,
         hint_refresh,
+        token_refresh,
+        contexts: ContextChoices::default(),
+        context_generation: 0,
+        reselected_from: None,
         hints_refreshed: None,
         open: FxHashMap::default(),
         pending: FxHashSet::default(),
@@ -1040,8 +1055,11 @@ impl Server {
         let mut interface_changed = false;
         let mut recompiled = Vec::new();
         let base = self.built.as_ref().unwrap_or(&self.analysis);
+        // A copy of its base with other compile contexts chosen has the same units.
+        let same_base = Arc::ptr_eq(&job.base, base) || self.built.is_none() && self.reselected_from.as_ref().is_some_and(|r| Arc::ptr_eq(&job.base, r));
+        let mut reselected = Vec::new();
         match done {
-            Some(_) if !Arc::ptr_eq(&job.base, base) => {
+            Some(_) if !same_base => {
                 // Started from a snapshot that was replaced since (replacing one cancels the
                 // update, so this is a safety net): again, from the one in use.
                 log::warn!("update of {} file(s) started from an older snapshot; updating again", job.files.len());
@@ -1053,7 +1071,7 @@ impl Server {
                 interface_changed = u.interface_changed;
                 recompiled = u.recompiled;
                 self.built = None;
-                self.install(u.analysis);
+                reselected = self.install(u.analysis);
                 // The views refresh what they show.
                 self.notify("dvicode/revision", &json!({ "revision": self.revision }));
             }
@@ -1108,6 +1126,8 @@ impl Server {
             // of the open files.
             let mut targets: FxHashSet<FileId> = job.files.iter().copied().collect();
             targets.extend(recompiled);
+            // Files whose chosen context came or went with the update.
+            targets.extend(reselected);
             for f in self.open.keys() {
                 targets.insert(*f);
             }
@@ -1485,14 +1505,75 @@ impl Server {
 
     // ------------------------------------------------------------------ requests
 
-    /// Makes `a` the analysis requests use, with the next revision.
-    fn install(&mut self, mut a: Analysis) {
+    /// Makes `a` the analysis requests use, with the next revision and the compile contexts
+    /// chosen resolved in it. The files whose chosen unit is not the one `a` had.
+    fn install(&mut self, mut a: Analysis) -> Vec<FileId> {
+        let mut changed = a.select_contexts(&self.contexts, self.context_generation);
+        // Against the snapshot in use too (a full build starts with no choice of its own).
+        let (old, new) = (&self.analysis.selection.chosen, &a.selection.chosen);
+        changed.extend(old.iter().filter(|(f, u)| new.get(f) != Some(u)).map(|(f, _)| *f));
+        changed.extend(new.iter().filter(|(f, u)| old.get(f) != Some(u)).map(|(f, _)| *f));
+        changed.sort_unstable();
+        changed.dedup();
+        // A file read in another context now (chosen, or the choice came or went with the
+        // build): its tokens and inactive regions change without an edit.
+        if !changed.is_empty() && self.token_refresh {
+            self.request_client("workspace/semanticTokens/refresh", Value::Null);
+        }
         self.revision += 1;
         a.revision = self.revision;
         self.analysis = Arc::new(a);
+        self.reselected_from = None;
         self.watch_build_inputs();
         // An edit elsewhere (a function's arguments renamed) changes other files' hints.
         self.refresh_hints(false);
+        changed
+    }
+
+    /// The compile contexts chosen changed: the snapshot in use again with them, under a new
+    /// revision (so nothing cached for the old one is used), and everything shown of the files
+    /// they change asked for again.
+    fn reselect(&mut self) {
+        self.context_generation += 1;
+        let from = self.reselected_from.clone().unwrap_or_else(|| self.analysis.clone());
+        let mut files = self.install((*self.analysis).clone());
+        self.reselected_from = Some(from);
+        self.notify("dvicode/revision", &json!({ "revision": self.revision }));
+        if files.is_empty() {
+            return;
+        }
+        // Their SKIPPED_CODE notices count uses in every file, read in each file's context.
+        files.extend(self.analysis.files_with_skipped_code());
+        files.sort_unstable();
+        files.dedup();
+        self.publish(files, false);
+        self.refresh_hints(true);
+    }
+
+    /// `dvicode/setCompileContext`: chooses (or with no context, forgets) the compile context
+    /// of a file. The context must be one of the file's in the snapshot in use.
+    fn set_context(&mut self, p: SetContextParams) -> Result<Value, String> {
+        let path = path_of(&p.text_document.uri).ok_or("not a file")?;
+        // Another spelling of the same file (case, links) loses its choice to this one.
+        if let Some(f) = self.analysis.file_of_url(&p.text_document.uri) {
+            let vfs = &self.analysis.vfs;
+            self.contexts.0.retain(|q, _| *q == path || vfs.lookup(q) != Some(f));
+        }
+        match p.context {
+            None => {
+                self.contexts.0.remove(&path);
+            }
+            Some(c) => {
+                let key = c.key().ok_or("the root is not a file")?;
+                let file = self.analysis.file_of_url(&p.text_document.uri);
+                if file.and_then(|f| self.analysis.resolve_context(f, &key)).is_none() {
+                    return Err("that context does not compile this file in the current build".into());
+                }
+                self.contexts.0.insert(path, key);
+            }
+        }
+        self.reselect();
+        Ok(json!({ "revision": self.revision }))
     }
 
     /// Asks the client to request inlay hints again (at most once a second unless `now`).
@@ -2062,6 +2143,35 @@ impl Server {
                 let Some(path) = path_of(&p.text_document.uri) else { return Err("not a file".to_string()) };
                 Ok(a.compile_context(&path, a.file_of_url(&p.text_document.uri)))
             }),
+            "dvicode/compileContexts" => self.spawn(req, |a, p: ContextListParams| {
+                let list = match a.file_of_url(&p.text_document.uri) {
+                    Some(f) => a.context_list(f, p.filter.as_deref(), p.offset.unwrap_or(0), p.limit.unwrap_or(200)),
+                    None => a.unknown_context_list(&path_of(&p.text_document.uri).unwrap_or_default()),
+                };
+                let mut v = serde_json::to_value(list).map_err(|e| e.to_string())?;
+                v["revision"] = json!(a.revision);
+                Ok(v)
+            }),
+            "dvicode/setCompileContext" => {
+                let r = serde_json::from_value::<SetContextParams>(req.params.clone()).map_err(|e| e.to_string()).and_then(|p| self.set_context(p));
+                let resp = match r {
+                    Ok(v) => ok_response(req.id, v),
+                    Err(e) => Response::new_err(req.id, ErrorCode::RequestFailed as i32, e),
+                };
+                self.send(Message::Response(resp));
+            }
+            "dvicode/restoreCompileContexts" => {
+                let r = serde_json::from_value::<RestoreContextsParams>(req.params.clone()).map_err(|e| e.to_string()).map(|p| {
+                    self.contexts = ContextChoices(p.entries.iter().filter_map(|e| Some((path_of(&e.uri)?, e.context.key()?))).collect());
+                    self.reselect();
+                    json!({ "revision": self.revision })
+                });
+                let resp = match r {
+                    Ok(v) => ok_response(req.id, v),
+                    Err(e) => Response::new_err(req.id, ErrorCode::InvalidParams as i32, e),
+                };
+                self.send(Message::Response(resp));
+            }
             "dvicode/includingFiles" => self.spawn_project(req, |a, p: TextDocumentIdentifierParams| {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(Vec::new()) };
                 Ok(a.including_files(f))
@@ -2175,6 +2285,53 @@ fn update_thread(jobs: Receiver<UpdateJob>, events: Sender<Event>, client: Sende
 #[serde(rename_all = "camelCase")]
 struct TextDocumentIdentifierParams {
     text_document: TextDocumentIdentifier,
+}
+
+/// `dvicode/compileContexts`: the contexts of a file, a page of those `filter` matches.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextListParams {
+    text_document: TextDocumentIdentifier,
+    filter: Option<String>,
+    offset: Option<usize>,
+    /// 0: the counts and the choice only.
+    limit: Option<usize>,
+}
+
+/// A compile context as the client names it: the key fields of a `ContextItem`, as given.
+#[derive(Deserialize)]
+struct ContextRef {
+    root: Url,
+    invocation_key: String,
+    nth: u32,
+    #[serde(default)]
+    index: Option<u32>,
+}
+
+impl ContextRef {
+    fn key(&self) -> Option<ContextKey> {
+        Some(ContextKey { root: path_of(&self.root)?, invocation: self.invocation_key.clone(), nth: self.nth, index: self.index })
+    }
+}
+
+/// `dvicode/setCompileContext`: the context to compile a file as; `None`: the default.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetContextParams {
+    text_document: TextDocumentIdentifier,
+    context: Option<ContextRef>,
+}
+
+#[derive(Deserialize)]
+struct RestoreEntry {
+    uri: Url,
+    context: ContextRef,
+}
+
+/// `dvicode/restoreCompileContexts`: every choice, replacing those the server has.
+#[derive(Deserialize)]
+struct RestoreContextsParams {
+    entries: Vec<RestoreEntry>,
 }
 
 /// `dvicode/tree`: the tree of a view (`design`, `verification` or `files`).

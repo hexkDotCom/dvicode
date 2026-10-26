@@ -1327,7 +1327,7 @@ impl Analysis {
     /// The design element, instance and class around a position.
     pub fn locate(&self, file: FileId, off: u32) -> Located {
         let mut out = Located::default();
-        let Some(&unit) = self.units_for(file).first() else { return out };
+        let Some(unit) = self.context_unit(file) else { return out };
         let u = self.unit(unit);
         let scope = self.scope_at(unit, file, off);
         let named = |r: DeclRef| NamedDef { name: self.decl(r).name.to_string(), uri: self.decl_location(r).map(|l| l.uri.to_string()), kind: None };
@@ -2772,7 +2772,7 @@ impl Analysis {
 
     /// Text of a macro expansion at a position (`levels`: 1 or all).
     pub fn expand_macro_at(&self, file: FileId, off: u32, levels: usize) -> Option<String> {
-        for uid in self.units_for(file) {
+        for uid in self.editor_units(file) {
             let u = self.unit(uid);
             for (i, m) in u.macro_uses.iter().enumerate() {
                 if m.call_span.file == file && m.call_span.start <= off && off <= m.call_span.end {
