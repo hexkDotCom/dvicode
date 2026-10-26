@@ -1,6 +1,7 @@
 //! Semantic analysis for DVICode: project compilation, name resolution and IDE features.
 
 pub mod ide;
+pub mod lint;
 pub mod resolve;
 pub mod select;
 pub mod vfs;

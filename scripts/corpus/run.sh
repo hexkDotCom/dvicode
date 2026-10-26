@@ -21,6 +21,7 @@ FUZZ_EDITS=60
 FUZZ_SEED=1
 RENAMES=40
 JOBS=""
+LINT_RULESETS="${LINT_RULESETS:-recommended,hexk}"
 CHUNK=2000
 PY=python3
 
@@ -33,6 +34,8 @@ Commands:
              local checkouts (`path` projects) are left alone
   build      build the release engine with scripts/wsl-cargo.sh
   check      run `dvicode-server check` for every configuration: OUT/<config>.json
+  lint       run `dvicode-server lint` (all rulesets) for every configuration:
+             OUT/lint/<config>.json; lint-table summarizes them per rule
   sweep      run IDE queries on every file of every configuration: OUT/<config>.sweep.json
   fuzz       random edits, each incremental update compared with a full build:
              OUT/<config>.fuzz.txt has a reproducer per difference; exit 1 on any
@@ -227,7 +230,7 @@ run_engine() {
     local t0 ms
     t0=$(date +%s%N)
     # In a subshell with stderr closed, so that a crash does not print "Segmentation fault".
-    RC=$({ timeout --kill-after=10 "$timeout" "$BIN" check "$@" >"$stdout" 2>"$stderr"; echo $?; } 2>/dev/null)
+    RC=$({ timeout --kill-after=10 "$timeout" "$BIN" "${ENGINE_CMD:-check}" "$@" >"$stdout" 2>"$stderr"; echo $?; } 2>/dev/null)
     ms=$(( ($(date +%s%N) - t0) / 1000000 ))
     WALL=$(printf "%d.%03d" $((ms / 1000)) $((ms % 1000)))
     TIMED_OUT=""
@@ -337,6 +340,30 @@ cmd_check() {
     return $rc
 }
 
+# --- lint ----------------------------------------------------------------------------------
+
+# `dvicode lint` with every ruleset on a configuration: OUT/lint/<config>.json (the lint JSON
+# output) and <config>.run.json (exit status, time, stderr summary).
+lint_one() {
+    local name="$1" project="$2" dir="$3" build="$4" timeout="$5" optional="$6" envs="$7"
+    if [ ! -d "$dir" ]; then
+        rm -f "$OUT/lint/$name.json" "$OUT/lint/$name.run.json"
+        [ "$optional" = 1 ] && { log "$name: $dir missing, skipped"; return 0; }
+        log "$name: $dir missing (run fetch)"; return 1
+    fi
+    engine_args "$dir" "$build" "$envs"
+    ENGINE_CMD=lint run_engine "$timeout" "$OUT/lint/$name.json" "$OUT/lint/$name.stderr.txt" "${ARGS[@]}"         --format json --rulesets "$LINT_RULESETS" --allow-incomplete --fail-on never --no-fail-on-compile-errors --stats
+    $PY "$HERE/corpus.py" lint-run --config "$name" --exit $RC --wall "$WALL" $TIMED_OUT         --stderr "$OUT/lint/$name.stderr.txt" --output "$OUT/lint/$name.run.json"
+    log "$name: lint exit $RC in ${WALL}s: $(grep '^dvicode lint:' "$OUT/lint/$name.stderr.txt" | head -1 | sed 's/^dvicode lint: //')"
+    [ $RC -le 1 ] && [ -z "$TIMED_OUT" ]
+}
+
+cmd_lint() {
+    need_bin
+    mkdir -p "$OUT/lint"
+    each_config lint_one
+}
+
 # --- sweep ---------------------------------------------------------------------------------
 
 # The queries of all configurations go to one pool of --jobs engine processes, in chunks of
@@ -408,6 +435,8 @@ case "$CMD" in
     fetch) cmd_fetch ;;
     build) cmd_build ;;
     check) cmd_check ;;
+    lint) cmd_lint ;;
+    lint-table) $PY "$HERE/corpus.py" lint-table "$OUT/lint" ;;
     sweep) cmd_sweep ;;
     fuzz) cmd_fuzz ;;
     writes) cmd_writes ;;

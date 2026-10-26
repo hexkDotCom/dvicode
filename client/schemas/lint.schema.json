@@ -1,0 +1,1817 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "level": {
+      "description": "off, hint, info, warning or error",
+      "enum": [
+        "off",
+        "hint",
+        "info",
+        "warning",
+        "error"
+      ]
+    },
+    "path": {
+      "description": "A path or glob relative to the folder holding .dvicode, with / separators; a folder covers what is in it",
+      "type": "string"
+    },
+    "paths": {
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/definitions/path"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "comment": {
+                "type": "string"
+              },
+              "path": {
+                "$ref": "#/definitions/path"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "rules": {
+      "additionalProperties": false,
+      "description": "Rule IDs or style guide rule IDs, with a level or { \"level\", \"comment\", parameters }",
+      "properties": {
+        "CFG-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-1 (no lint rule checks it yet)"
+        },
+        "CFG-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-10 (no lint rule checks it yet)"
+        },
+        "CFG-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-2 (no lint rule checks it yet)"
+        },
+        "CFG-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-3 (no lint rule checks it yet)"
+        },
+        "CFG-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-4 (no lint rule checks it yet)"
+        },
+        "CFG-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-5 (no lint rule checks it yet)"
+        },
+        "CFG-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-6 (no lint rule checks it yet)"
+        },
+        "CFG-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-7 (no lint rule checks it yet)"
+        },
+        "CFG-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-8 (no lint rule checks it yet)"
+        },
+        "CFG-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CFG-9 (no lint rule checks it yet)"
+        },
+        "CHK-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-1 (no lint rule checks it yet)"
+        },
+        "CHK-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-2 (no lint rule checks it yet)"
+        },
+        "CHK-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-3 (no lint rule checks it yet)"
+        },
+        "CHK-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-4 (no lint rule checks it yet)"
+        },
+        "CHK-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-5 (no lint rule checks it yet)"
+        },
+        "CHK-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-6 (no lint rule checks it yet)"
+        },
+        "CHK-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CHK-7 (no lint rule checks it yet)"
+        },
+        "CLS-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-1 (no lint rule checks it yet)"
+        },
+        "CLS-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-2 (no lint rule checks it yet)"
+        },
+        "CLS-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-3 (no lint rule checks it yet)"
+        },
+        "CLS-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-4 (no lint rule checks it yet)"
+        },
+        "CLS-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-5 (no lint rule checks it yet)"
+        },
+        "CLS-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-6 (no lint rule checks it yet)"
+        },
+        "CLS-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-7 (no lint rule checks it yet)"
+        },
+        "CLS-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CLS-8 (no lint rule checks it yet)"
+        },
+        "CMP-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-1 (no lint rule checks it yet)"
+        },
+        "CMP-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-10 (no lint rule checks it yet)"
+        },
+        "CMP-11": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-11 (no lint rule checks it yet)"
+        },
+        "CMP-12": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-12 (no lint rule checks it yet)"
+        },
+        "CMP-13": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-13 (no lint rule checks it yet)"
+        },
+        "CMP-14": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-14 (no lint rule checks it yet)"
+        },
+        "CMP-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-2 (no lint rule checks it yet)"
+        },
+        "CMP-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-3 (no lint rule checks it yet)"
+        },
+        "CMP-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-4 (no lint rule checks it yet)"
+        },
+        "CMP-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-5 (no lint rule checks it yet)"
+        },
+        "CMP-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-6 (no lint rule checks it yet)"
+        },
+        "CMP-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-7 (no lint rule checks it yet)"
+        },
+        "CMP-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-8 (no lint rule checks it yet)"
+        },
+        "CMP-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule CMP-9 (no lint rule checks it yet)"
+        },
+        "COV-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-1 (no lint rule checks it yet)"
+        },
+        "COV-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-2 (no lint rule checks it yet)"
+        },
+        "COV-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-3 (no lint rule checks it yet)"
+        },
+        "COV-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-4 (no lint rule checks it yet)"
+        },
+        "COV-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-5 (no lint rule checks it yet)"
+        },
+        "COV-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-6 (no lint rule checks it yet)"
+        },
+        "COV-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-7 (no lint rule checks it yet)"
+        },
+        "COV-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-8 (no lint rule checks it yet)"
+        },
+        "COV-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule COV-9 (no lint rule checks it yet)"
+        },
+        "DOC-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-1 (no lint rule checks it yet)"
+        },
+        "DOC-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-2 (no lint rule checks it yet)"
+        },
+        "DOC-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-3 (no lint rule checks it yet)"
+        },
+        "DOC-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-4 (no lint rule checks it yet)"
+        },
+        "DOC-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-5 (no lint rule checks it yet)"
+        },
+        "DOC-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-6 (no lint rule checks it yet)"
+        },
+        "DOC-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-7 (no lint rule checks it yet)"
+        },
+        "DOC-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule DOC-8 (no lint rule checks it yet)"
+        },
+        "FAC-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-1 (no lint rule checks it yet)"
+        },
+        "FAC-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-10 (no lint rule checks it yet)"
+        },
+        "FAC-11": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-11 (no lint rule checks it yet)"
+        },
+        "FAC-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-2: sets uvm-registration-mismatch"
+        },
+        "FAC-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-3 (no lint rule checks it yet)"
+        },
+        "FAC-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-4 (no lint rule checks it yet)"
+        },
+        "FAC-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-5 (no lint rule checks it yet)"
+        },
+        "FAC-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-6 (no lint rule checks it yet)"
+        },
+        "FAC-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-7 (no lint rule checks it yet)"
+        },
+        "FAC-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-8 (no lint rule checks it yet)"
+        },
+        "FAC-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FAC-9 (no lint rule checks it yet)"
+        },
+        "FIL-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-1 (no lint rule checks it yet)"
+        },
+        "FIL-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-10 (no lint rule checks it yet)"
+        },
+        "FIL-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-2 (no lint rule checks it yet)"
+        },
+        "FIL-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-3 (no lint rule checks it yet)"
+        },
+        "FIL-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-4 (no lint rule checks it yet)"
+        },
+        "FIL-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-5 (no lint rule checks it yet)"
+        },
+        "FIL-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-6 (no lint rule checks it yet)"
+        },
+        "FIL-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-7 (no lint rule checks it yet)"
+        },
+        "FIL-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-8 (no lint rule checks it yet)"
+        },
+        "FIL-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FIL-9 (no lint rule checks it yet)"
+        },
+        "FMT-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-1 (no lint rule checks it yet)"
+        },
+        "FMT-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-10 (no lint rule checks it yet)"
+        },
+        "FMT-11": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-11 (no lint rule checks it yet)"
+        },
+        "FMT-12": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-12 (no lint rule checks it yet)"
+        },
+        "FMT-13": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-13 (no lint rule checks it yet)"
+        },
+        "FMT-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-2: sets trailing-whitespace"
+        },
+        "FMT-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-3 (no lint rule checks it yet)"
+        },
+        "FMT-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-4 (no lint rule checks it yet)"
+        },
+        "FMT-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-5 (no lint rule checks it yet)"
+        },
+        "FMT-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-6 (no lint rule checks it yet)"
+        },
+        "FMT-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-7 (no lint rule checks it yet)"
+        },
+        "FMT-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-8 (no lint rule checks it yet)"
+        },
+        "FMT-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule FMT-9 (no lint rule checks it yet)"
+        },
+        "IFC-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-1 (no lint rule checks it yet)"
+        },
+        "IFC-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-2 (no lint rule checks it yet)"
+        },
+        "IFC-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-3 (no lint rule checks it yet)"
+        },
+        "IFC-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-4 (no lint rule checks it yet)"
+        },
+        "IFC-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-5 (no lint rule checks it yet)"
+        },
+        "IFC-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-6 (no lint rule checks it yet)"
+        },
+        "IFC-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-7 (no lint rule checks it yet)"
+        },
+        "IFC-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-8 (no lint rule checks it yet)"
+        },
+        "IFC-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule IFC-9 (no lint rule checks it yet)"
+        },
+        "LNG-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-1 (no lint rule checks it yet)"
+        },
+        "LNG-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-10: sets randomize-result-discarded"
+        },
+        "LNG-11": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-11 (no lint rule checks it yet)"
+        },
+        "LNG-12": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-12 (no lint rule checks it yet)"
+        },
+        "LNG-13": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-13 (no lint rule checks it yet)"
+        },
+        "LNG-14": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-14 (no lint rule checks it yet)"
+        },
+        "LNG-15": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-15 (no lint rule checks it yet)"
+        },
+        "LNG-16": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-16 (no lint rule checks it yet)"
+        },
+        "LNG-17": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-17 (no lint rule checks it yet)"
+        },
+        "LNG-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-2 (no lint rule checks it yet)"
+        },
+        "LNG-20": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-20 (no lint rule checks it yet)"
+        },
+        "LNG-21": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-21 (no lint rule checks it yet)"
+        },
+        "LNG-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-3 (no lint rule checks it yet)"
+        },
+        "LNG-30": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-30 (no lint rule checks it yet)"
+        },
+        "LNG-31": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-31 (no lint rule checks it yet)"
+        },
+        "LNG-32": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-32 (no lint rule checks it yet)"
+        },
+        "LNG-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-4 (no lint rule checks it yet)"
+        },
+        "LNG-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule LNG-5 (no lint rule checks it yet)"
+        },
+        "MSG-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-1 (no lint rule checks it yet)"
+        },
+        "MSG-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-2 (no lint rule checks it yet)"
+        },
+        "MSG-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-3 (no lint rule checks it yet)"
+        },
+        "MSG-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-4 (no lint rule checks it yet)"
+        },
+        "MSG-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-5 (no lint rule checks it yet)"
+        },
+        "MSG-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-6 (no lint rule checks it yet)"
+        },
+        "MSG-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-7 (no lint rule checks it yet)"
+        },
+        "MSG-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-8 (no lint rule checks it yet)"
+        },
+        "MSG-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule MSG-9 (no lint rule checks it yet)"
+        },
+        "NAM-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-1 (no lint rule checks it yet)"
+        },
+        "NAM-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-2 (no lint rule checks it yet)"
+        },
+        "NAM-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-3 (no lint rule checks it yet)"
+        },
+        "NAM-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-4 (no lint rule checks it yet)"
+        },
+        "NAM-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-5 (no lint rule checks it yet)"
+        },
+        "NAM-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-6 (no lint rule checks it yet)"
+        },
+        "NAM-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-7 (no lint rule checks it yet)"
+        },
+        "NAM-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-8 (no lint rule checks it yet)"
+        },
+        "NAM-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule NAM-9 (no lint rule checks it yet)"
+        },
+        "OBJ-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-1 (no lint rule checks it yet)"
+        },
+        "OBJ-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-2 (no lint rule checks it yet)"
+        },
+        "OBJ-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-3 (no lint rule checks it yet)"
+        },
+        "OBJ-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-4 (no lint rule checks it yet)"
+        },
+        "OBJ-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-5 (no lint rule checks it yet)"
+        },
+        "OBJ-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-6 (no lint rule checks it yet)"
+        },
+        "OBJ-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule OBJ-7 (no lint rule checks it yet)"
+        },
+        "REG-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-1 (no lint rule checks it yet)"
+        },
+        "REG-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-2 (no lint rule checks it yet)"
+        },
+        "REG-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-3 (no lint rule checks it yet)"
+        },
+        "REG-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-4 (no lint rule checks it yet)"
+        },
+        "REG-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-5 (no lint rule checks it yet)"
+        },
+        "REG-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-6 (no lint rule checks it yet)"
+        },
+        "REG-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REG-7 (no lint rule checks it yet)"
+        },
+        "REU-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REU-1 (no lint rule checks it yet)"
+        },
+        "REU-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REU-2 (no lint rule checks it yet)"
+        },
+        "REU-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REU-3 (no lint rule checks it yet)"
+        },
+        "REU-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REU-4 (no lint rule checks it yet)"
+        },
+        "REU-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REU-5 (no lint rule checks it yet)"
+        },
+        "REU-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule REU-6 (no lint rule checks it yet)"
+        },
+        "SEQ-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-1 (no lint rule checks it yet)"
+        },
+        "SEQ-10": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-10 (no lint rule checks it yet)"
+        },
+        "SEQ-11": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-11 (no lint rule checks it yet)"
+        },
+        "SEQ-12": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-12 (no lint rule checks it yet)"
+        },
+        "SEQ-13": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-13 (no lint rule checks it yet)"
+        },
+        "SEQ-14": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-14 (no lint rule checks it yet)"
+        },
+        "SEQ-15": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-15 (no lint rule checks it yet)"
+        },
+        "SEQ-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-2 (no lint rule checks it yet)"
+        },
+        "SEQ-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-3 (no lint rule checks it yet)"
+        },
+        "SEQ-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-4 (no lint rule checks it yet)"
+        },
+        "SEQ-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-5 (no lint rule checks it yet)"
+        },
+        "SEQ-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-6 (no lint rule checks it yet)"
+        },
+        "SEQ-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-7 (no lint rule checks it yet)"
+        },
+        "SEQ-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-8 (no lint rule checks it yet)"
+        },
+        "SEQ-9": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule SEQ-9 (no lint rule checks it yet)"
+        },
+        "TLM-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TLM-1 (no lint rule checks it yet)"
+        },
+        "TLM-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TLM-2 (no lint rule checks it yet)"
+        },
+        "TLM-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TLM-3 (no lint rule checks it yet)"
+        },
+        "TLM-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TLM-4 (no lint rule checks it yet)"
+        },
+        "TLM-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TLM-5 (no lint rule checks it yet)"
+        },
+        "TLM-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TLM-6 (no lint rule checks it yet)"
+        },
+        "TRN-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TRN-1 (no lint rule checks it yet)"
+        },
+        "TRN-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TRN-2 (no lint rule checks it yet)"
+        },
+        "TRN-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TRN-3 (no lint rule checks it yet)"
+        },
+        "TRN-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TRN-4 (no lint rule checks it yet)"
+        },
+        "TRN-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TRN-5 (no lint rule checks it yet)"
+        },
+        "TRN-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TRN-6 (no lint rule checks it yet)"
+        },
+        "TST-1": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-1 (no lint rule checks it yet)"
+        },
+        "TST-2": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-2 (no lint rule checks it yet)"
+        },
+        "TST-3": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-3 (no lint rule checks it yet)"
+        },
+        "TST-4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-4 (no lint rule checks it yet)"
+        },
+        "TST-5": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-5 (no lint rule checks it yet)"
+        },
+        "TST-6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-6 (no lint rule checks it yet)"
+        },
+        "TST-7": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-7 (no lint rule checks it yet)"
+        },
+        "TST-8": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/setting"
+            }
+          ],
+          "description": "Style guide rule TST-8 (no lint rule checks it yet)"
+        },
+        "randomize-result-discarded": {
+          "markdownDescription": "The result of randomize() is discarded.\n\nrandomize() returns 0 when the constraints cannot be met and then leaves the variables unchanged; a discarded result lets the test run on with stale values.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "suppression-unmatched": {
+          "markdownDescription": "`dvicode-lint: enable=` without a `disable=` before it.\n\nAn enable that ends no suppression usually means the disable was removed or misspelled.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "trailing-whitespace": {
+          "markdownDescription": "A line ends in spaces or tabs.\n\nTrailing whitespace is invisible noise in diffs and reviews.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "uvm-registration-mismatch": {
+          "markdownDescription": "A UVM registration macro does not fit its class.\n\nThe factory creates what the macro registers: another class's name, the object macro on a component, or a non-parameterized macro on a parameterized class registers the wrong thing or fails to compile only where the factory is used.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "waiver-unattached": {
+          "markdownDescription": "A waiver is followed by no statement or declaration it could cover.\n\nA waiver covers the statement or declaration right after it; one before `end`, `else` or the end of the file covers nothing.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "waiver-unknown-id": {
+          "markdownDescription": "A waiver or suppression names a rule that does not exist.\n\nA misspelled rule ID waives nothing, so the finding it was meant for stays (or a later one goes unnoticed).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "waiver-without-reason": {
+          "markdownDescription": "A waiver or suppression gives no reason.\n\nThe style guide (§0) requires every waiver to say why the rule does not apply; a reason is what reviewers and later readers check.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "rulesets": {
+      "description": "recommended: provable correctness rules; recommended-preview: correctness rules still under review; hexk: the HEXK SV/UVM Style Guide (includes the others)",
+      "items": {
+        "enum": [
+          "recommended",
+          "recommended-preview",
+          "hexk"
+        ]
+      },
+      "type": "array"
+    },
+    "setting": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/level"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "comment": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/definitions/level"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "comment": {
+      "type": "string"
+    },
+    "examples": {
+      "$ref": "#/definitions/paths"
+    },
+    "exclude": {
+      "$ref": "#/definitions/paths"
+    },
+    "extends": {
+      "description": "parent (default): start from the configuration above; none: from the defaults",
+      "enum": [
+        "parent",
+        "none"
+      ]
+    },
+    "include": {
+      "$ref": "#/definitions/paths"
+    },
+    "overrides": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "comment": {
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "$ref": "#/definitions/path"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Why these paths are linted differently",
+            "type": "string"
+          },
+          "rules": {
+            "$ref": "#/definitions/rules"
+          },
+          "rulesets": {
+            "$ref": "#/definitions/rulesets"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "owned": {
+      "$ref": "#/definitions/paths"
+    },
+    "rules": {
+      "$ref": "#/definitions/rules"
+    },
+    "rulesets": {
+      "$ref": "#/definitions/rulesets"
+    },
+    "uvm": {
+      "enum": [
+        "1.2",
+        "ieee"
+      ]
+    }
+  },
+  "title": "DVICode lint configuration",
+  "type": "object"
+}

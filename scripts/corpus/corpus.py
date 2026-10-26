@@ -671,6 +671,55 @@ def cmd_table(a):
         print(f"{n:28} {st[:10]:10} {r.get('total', '-'):>8} {r.get('files', '-'):>6} {r.get('build_ms', '-'):>9}  {codes}")
 
 
+def cmd_lint_run(a):
+    """Records how a `dvicode lint` run ended (its JSON output is next to it)."""
+    with open(a.stderr, encoding="utf-8", errors="replace") as f:
+        err = f.read()
+    sig, panic = crash_info(a.exit, err)
+    m = re.search(r"^dvicode lint: build (\d+) ms, lint (\d+) ms", err, re.M)
+    r = {"config": a.config, "exit": a.exit, "wall_s": round(a.wall, 2), "timeout": a.timed_out, "signal": sig, "panic": panic,
+         "build_ms": int(m.group(1)) if m else None, "lint_ms": int(m.group(2)) if m else None}
+    with open(a.output, "w", encoding="utf-8") as f:
+        json.dump(r, f, indent=1)
+        f.write("\n")
+
+
+def cmd_lint_table(a):
+    """Per configuration: lint time, findings per rule, unknowns; then totals per rule."""
+    totals, unknown = {}, {}
+    rows = []
+    for p in sorted(glob.glob(os.path.join(a.results, "*.run.json"))):
+        run = json.load(open(p))
+        out = p[:-len(".run.json")] + ".json"
+        per = {}
+        res = None
+        try:
+            res = json.load(open(out))
+        except (OSError, ValueError):
+            pass
+        if res:
+            for f in res.get("findings", []):
+                if f.get("suppressed"):
+                    continue
+                k = f["rule"] + ("/" + f["subcheck"] if f.get("subcheck") else "")
+                per[k] = per.get(k, 0) + 1
+                totals[k] = totals.get(k, 0) + 1
+            for k, n in res.get("unknown", {}).items():
+                unknown[k] = unknown.get(k, 0) + n
+        state = "TIMEOUT" if run["timeout"] else run["signal"] or ("PANIC" if run["panic"] else ("ok" if res else f"exit {run['exit']}"))
+        inc = "" if not res or res.get("complete") else " incomplete"
+        rows.append((run["config"], state + inc, run.get("lint_ms"), sum(per.values()), per))
+    for name, state, ms, n, per in rows:
+        top = ", ".join(f"{k} {v}" for k, v in sorted(per.items(), key=lambda kv: -kv[1])[:4])
+        print(f"{name:40} {state:12} {str(ms or '-'):>7} ms {n:6}  {top}")
+    print("\nfindings per rule:")
+    for k, v in sorted(totals.items(), key=lambda kv: -kv[1]):
+        print(f"  {k:48} {v}")
+    print("unknown (rule: reason):")
+    for k, v in sorted(unknown.items(), key=lambda kv: -kv[1]):
+        print(f"  {k:48} {v}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -683,6 +732,12 @@ def main():
         s.add_argument("--" + k, default="")
     s.add_argument("--exit", type=int, default=0); s.add_argument("--wall", type=float, default=0)
     s.add_argument("--timed-out", action="store_true"); s.set_defaults(f=cmd_result)
+    s = sub.add_parser("lint-run")
+    for k in ("config", "stderr", "output"):
+        s.add_argument("--" + k, default="")
+    s.add_argument("--exit", type=int, default=0); s.add_argument("--wall", type=float, default=0)
+    s.add_argument("--timed-out", action="store_true"); s.set_defaults(f=cmd_lint_run)
+    s = sub.add_parser("lint-table"); s.add_argument("results"); s.set_defaults(f=cmd_lint_table)
     s = sub.add_parser("queries"); s.add_argument("--files", required=True); s.add_argument("--output", required=True)
     s.add_argument("--every", type=int, default=20); s.add_argument("--cap", type=int, default=30)
     s.add_argument("--refs-every", type=int, default=3); s.add_argument("--skip", action="append", default=[])

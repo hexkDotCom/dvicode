@@ -2218,3 +2218,81 @@ fn choices_restored_before_the_first_build_apply_once_it_is_in() {
     assert_eq!(list["state"], "chosen", "{list}");
     c.shutdown();
 }
+
+const RND: &str = "package r;
+  class c;
+    rand int a;
+    function void f();
+      randomize();
+      undeclared_x = 1;
+    endfunction
+  endclass
+endpackage
+";
+
+fn sources(p: &PublishDiagnosticsParams) -> Vec<(String, String)> {
+    p.diagnostics
+        .iter()
+        .map(|d| {
+            let code = match &d.code {
+                Some(lsp_types::NumberOrString::String(s)) => s.clone(),
+                other => format!("{other:?}"),
+            };
+            (d.source.clone().unwrap_or_default(), code)
+        })
+        .collect()
+}
+
+#[test]
+fn lint_findings_are_published_with_the_compile_problems() {
+    let root = project("lint-pub", &[("r.sv", RND), ("top.sv", TOP), ("pkg.sv", PKG)]);
+    let (mut c, init) = Client::start(&root, Value::Null);
+    assert_eq!(init["capabilities"]["experimental"]["dvicode"]["lint"], 1, "{init}");
+    let r = uri(&root, "r.sv");
+    // Not open: compile problems first, then the same file again with its lint findings.
+    let p = c.wait_problems(&r, |p| p.diagnostics.len() == 2);
+    let s = sources(&p);
+    assert!(s.contains(&("dvicode".into(), "UNDECLARED_IDENTIFIER".into())), "{s:?}");
+    assert!(s.contains(&("dvicode-lint".into(), "randomize-result-discarded".into())), "{s:?}");
+    let d = p.diagnostics.iter().find(|d| d.source.as_deref() == Some("dvicode-lint")).unwrap();
+    assert!(d.message.ends_with("(LNG-10)"), "{}", d.message);
+    assert_eq!(d.code_description.as_ref().map(|c| c.href.as_str()), Some("https://hexkdotcom.github.io/dvicode/lint/randomize-result-discarded"));
+    // Open: one list.
+    c.open(&r, 1, RND);
+    let p = c.wait_problems(&r, |p| p.version == Some(1));
+    assert_eq!(p.diagnostics.len(), 2, "{:?}", sources(&p));
+    // The setting turns lint off without a rebuild.
+    c.notify("workspace/didChangeConfiguration", json!({ "settings": { "dvicode": { "lint": { "enable": false } } } }));
+    let p = c.wait_problems(&r, |p| p.diagnostics.len() == 1);
+    assert_eq!(sources(&p), [("dvicode".to_string(), "UNDECLARED_IDENTIFIER".to_string())]);
+    let rules = c.request_ok("dvicode/lintRules", Value::Null);
+    assert!(rules["rules"].as_array().unwrap().iter().any(|r| r["id"] == "randomize-result-discarded"), "{rules}");
+    c.shutdown();
+}
+
+#[test]
+fn a_lint_configuration_change_republishes_and_shows_its_problems() {
+    let root = project("lint-cfg", &[("r.sv", RND)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let r = uri(&root, "r.sv");
+    c.open(&r, 1, RND);
+    c.wait_problems(&r, |p| p.diagnostics.len() == 2);
+    let cfg = root.join(".dvicode/lint.json");
+    let cfg_uri = Url::from_file_path(&cfg).unwrap();
+    std::fs::write(&cfg, r#"{ "rules": { "LNG-10": "off" } }"#).unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": cfg_uri, "type": 1 }] }));
+    c.wait_problems(&r, |p| p.diagnostics.len() == 1);
+    // A broken configuration: its problem is shown in it; the defaults apply meanwhile.
+    std::fs::write(&cfg, r#"{ "rules": { "LNG-10": "loud" } }"#).unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": cfg_uri, "type": 2 }] }));
+    let p = c.wait_problems(&cfg_uri, |p| !p.diagnostics.is_empty());
+    assert_eq!(sources(&p), [("dvicode-lint".to_string(), "lint-config".to_string())]);
+    assert!(p.diagnostics[0].message.contains("level"), "{:?}", p.diagnostics);
+    // Fixed: the problem goes.
+    std::fs::write(&cfg, r#"{ "rules": { "LNG-10": "error" } }"#).unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": cfg_uri, "type": 2 }] }));
+    c.wait_problems(&cfg_uri, |p| p.diagnostics.is_empty());
+    let p = c.wait_problems(&r, |p| p.diagnostics.iter().any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) && d.source.as_deref() == Some("dvicode-lint")));
+    assert_eq!(p.diagnostics.len(), 2);
+    c.shutdown();
+}

@@ -183,6 +183,32 @@ async function run() {
     return `new declaration found${d ? '; typo reported' : ''}`;
   });
 
+  await test('lint: a finding as typed, and the setting turns lint off', async () => {
+    const doc = await open('rtl/top.sv');
+    const ed = await vscode.window.showTextDocument(doc);
+    const p = lineOf(doc, 'state_e state;');
+    await ed.edit((b) => b.insert(new vscode.Position(p.line + 1, 0), '  int lint_v;\n  initial std::randomize(lint_v);\n'));
+    const lintOf = () => vscode.languages.getDiagnostics(doc.uri).filter((x) => x.source === 'dvicode-lint');
+    const cfg = vscode.workspace.getConfiguration('dvicode');
+    try {
+      const d = await waitFor('lint finding', async () => {
+        const ds = lintOf();
+        return ds.length ? ds : undefined;
+      }, 20000);
+      const code = typeof d[0].code === 'object' ? d[0].code.value : d[0].code;
+      const href = typeof d[0].code === 'object' ? String(d[0].code.target) : '';
+      if (code !== 'randomize-result-discarded' || d[0].range.start.line !== p.line + 2 || !href.endsWith('/lint/randomize-result-discarded')) {
+        throw new Error(`finding: ${code} at ${d[0].range.start.line + 1} (${href})`);
+      }
+      await cfg.update('lint.enable', false, vscode.ConfigurationTarget.Workspace);
+      await waitFor('lint findings gone', async () => lintOf().length === 0, 20000);
+      return `${code} at line ${d[0].range.start.line + 1}; gone when turned off`;
+    } finally {
+      await cfg.update('lint.enable', undefined, vscode.ConfigurationTarget.Workspace);
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   await test('design hierarchy request', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     const c = await api.ready();

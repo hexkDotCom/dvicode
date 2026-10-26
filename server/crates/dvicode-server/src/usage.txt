@@ -33,6 +33,17 @@ USAGE:
                                                 --write-check N [--seed S]: N renames and
                                                 quick fixes applied like the editor does,
                                                 each result checked (exit 1 on findings)
+  dvicode-server lint <dir> [PATH...] [--build FILE] [--config FILE]
+                 [--rulesets r1,r2] [--rule ID=LEVEL] [--format text|json]
+                 [--output FILE] [--fail-on error|warning|info|never]
+                                                Lint a project (DVICode Lint) with its
+                                                .dvicode/lint.json files. Exit 0: clean;
+                                                1: findings at or above --fail-on (default
+                                                warning) or compile errors; 2: usage or
+                                                configuration error; 3: internal error;
+                                                4: analysis incomplete. `lint --help` lists
+                                                every option; --list-rules, --explain ID,
+                                                --print-config FILE, --schema.
   dvicode-server --version
 
 OPTIONS:

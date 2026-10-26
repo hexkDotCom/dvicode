@@ -33,6 +33,44 @@ pub struct StmtMap {
 
 pub const NONE: u32 = u32::MAX;
 
+/// A statement that is not a compound one, as the walker found it (token ranges as in
+/// [`FrameKind`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Simple {
+    /// Up to its `;` (excluded): an expression statement, a declaration, a `return`...
+    Expr(usize, usize),
+    /// An immediate assertion's condition (inside its parentheses).
+    Assert(usize, usize),
+    /// A macro call used as a statement: the call (with its arguments).
+    Macro(usize, usize),
+}
+
+/// The simple statements of a function or task, in order; `None` as for [`walk_method`].
+pub fn method_statements(t: &[Token]) -> Option<Vec<Simple>> {
+    let mut w = Walker { t, frames: Vec::new(), at: Vec::new(), steps: 0, depth: 0, simple: Some(Vec::new()) };
+    let kw = t.iter().position(|x| x.is_kw("function") || x.is_kw("task"))?;
+    let mut k = kw;
+    while k < t.len() && !t[k].is_punct(";") {
+        k = if t[k].is_punct("(") || t[k].is_punct("[") || t[k].is_punct("{") { w.group(k)? } else { k + 1 };
+    }
+    k += 1;
+    loop {
+        let x = t.get(k)?;
+        if x.is_kw("endfunction") || x.is_kw("endtask") {
+            return w.simple;
+        }
+        k = w.stmt(k, NONE)?;
+    }
+}
+
+/// The simple statements of the statement starting at `t[k]` (the body of an `initial`,
+/// `always*` or `final` process, after its keyword); `None` when it cannot be followed.
+pub fn statements_from(t: &[Token], k: usize) -> Option<(Vec<Simple>, usize)> {
+    let mut w = Walker { t, frames: Vec::new(), at: Vec::new(), steps: 0, depth: 0, simple: Some(Vec::new()) };
+    let end = w.stmt(k, NONE)?;
+    Some((w.simple?, end))
+}
+
 impl StmtMap {
     /// The frames around token `k`, outermost first.
     pub fn frames_at(&self, k: usize) -> Vec<&Frame> {
@@ -55,7 +93,7 @@ impl StmtMap {
 /// Walks the tokens of a function or task (header to `endfunction`/`endtask`). `None` when the
 /// body uses something the walker cannot follow: then nothing is known about its conditions.
 pub fn walk_method(t: &[Token]) -> Option<StmtMap> {
-    let mut w = Walker { t, frames: Vec::new(), at: vec![NONE; t.len()], steps: 0, depth: 0 };
+    let mut w = Walker { t, frames: Vec::new(), at: vec![NONE; t.len()], steps: 0, depth: 0, simple: None };
     // The header ends at the first `;` outside brackets after `function` or `task`.
     let kw = t.iter().position(|x| x.is_kw("function") || x.is_kw("task"))?;
     let mut k = kw;
@@ -76,7 +114,7 @@ pub fn walk_method(t: &[Token]) -> Option<StmtMap> {
 /// assignment...); `None` when it cannot be followed.
 pub fn statement_end(t: &[Token], k: usize) -> Option<usize> {
     // No frames are recorded (`mark` does nothing without `at`): this costs what the statement does.
-    let mut w = Walker { t, frames: Vec::new(), at: Vec::new(), steps: 0, depth: 0 };
+    let mut w = Walker { t, frames: Vec::new(), at: Vec::new(), steps: 0, depth: 0, simple: None };
     w.stmt(k, NONE)
 }
 
@@ -87,6 +125,8 @@ struct Walker<'a> {
     /// Statements walked, and statements nested; bounds against pathological input.
     steps: usize,
     depth: usize,
+    /// Simple statements, when asked for.
+    simple: Option<Vec<Simple>>,
 }
 
 /// Statements nested at most (the parser's limit is similar).
@@ -275,6 +315,9 @@ impl Walker<'_> {
             let x = t.get(j)?;
             if x.is_punct(";") {
                 self.mark(k, j + 1, f);
+                if let Some(s) = &mut self.simple {
+                    s.push(Simple::Expr(k, j));
+                }
                 return Some(j + 1);
             }
             if x.is_punct("(") || x.is_punct("[") || x.is_punct("{") {
@@ -339,6 +382,12 @@ impl Walker<'_> {
         }
         let (cond, after) = self.parens(j)?;
         self.mark(k, after, f);
+        // Immediate and deferred assertions (not `assert property`, not `cover sequence`).
+        if !t[k + 1].is_kw("property") && !t[k + 1].is_kw("sequence") {
+            if let Some(s) = &mut self.simple {
+                s.push(Simple::Assert(cond.0, cond.1));
+            }
+        }
         if t.get(after)?.is_punct(";") {
             self.mark(after, after + 1, f);
             return Some(after + 1);
@@ -444,14 +493,19 @@ impl Walker<'_> {
                 if t.get(j).is_some_and(|y| y.is_punct("(") && !y.ws_before()) {
                     j = self.group(j)?;
                 }
-                match t.get(j) {
+                let call = j;
+                let next = match t.get(j) {
                     Some(y) if y.is_punct(";") => j + 1,
                     // The next statement starts on a new line.
                     Some(y) if y.nl_before() => j,
                     None => j,
                     // Part of an expression (`` `CFG.x = 1; ``).
                     Some(_) => return self.expr_stmt(k, f),
+                };
+                if let Some(s) = &mut self.simple {
+                    s.push(Simple::Macro(k, call));
                 }
+                next
             }
         };
         self.mark(k, j, f);

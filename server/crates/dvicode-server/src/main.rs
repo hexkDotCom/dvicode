@@ -4,9 +4,11 @@
 //!   dvicode-server [--stdio]                    LSP over stdin/stdout (default)
 //!   dvicode-server --listen HOST:PORT [--token T] LSP over TCP (one client), token-protected
 //!   dvicode-server check <dir> [--build FILE] [-q]  compile a project and print problems
+//!   dvicode-server lint <dir> [...]              lint a project (see `lint --help`)
 //!   dvicode-server --version
 
 mod check;
+mod lint_cmd;
 mod crash;
 mod format;
 mod fs;
@@ -73,6 +75,11 @@ fn main() {
             "--help" | "-h" => {
                 println!("{}", include_str!("usage.txt"));
                 return;
+            }
+            "lint" => {
+                let rest: Vec<String> = args[i + 1..].to_vec();
+                logger::init(log::LevelFilter::Warn, None);
+                std::process::exit(lint_cmd::run(&rest));
             }
             "check" => {
                 // `check ... --log-level debug` shows how the build file or the folder was read.

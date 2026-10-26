@@ -43,8 +43,9 @@ let startGeneration = 0;
 /** serverSettingsKey() of the last start, and of the last restart offered. */
 let startedWith: string | undefined;
 let offeredFor: string | undefined;
-/** File watcher of the current client; the language client does not dispose it. */
+/** File watchers of the current client; the language client does not dispose them. */
 let watcher: vscode.FileSystemWatcher | undefined;
+let lintWatcher: vscode.FileSystemWatcher | undefined;
 let output: LogChannel;
 let reporter: Reporter;
 let statusItem: vscode.StatusBarItem;
@@ -80,6 +81,7 @@ function settingsForServer(): object {
     maxProblems,
     uncHosts,
     inlayHints: c.get<Record<string, boolean>>('inlayHints', {}),
+    lint: { enable: c.get<boolean>('lint.enable', true), rulesets: c.get<string[]>('lint.rulesets', ['recommended']) },
   };
 }
 
@@ -140,6 +142,9 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   output.appendLine(`Server: ${launch.target} (mode ${launch.mode}); path mapping: ${mapper.describe()}`);
   watcher?.dispose();
   watcher = vscode.workspace.createFileSystemWatcher('**/*.{sv,svh,svi,svp,sva,v,vh,vp,vlib,build,f,F}');
+  // Lint configurations: the engine reads them for every problem check.
+  lintWatcher?.dispose();
+  lintWatcher = vscode.workspace.createFileSystemWatcher('**/.dvicode/lint.json');
   const clientOptions: LanguageClientOptions = {
     documentSelector: SV_SELECTOR,
     outputChannel: output,
@@ -150,7 +155,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     initializationOptions: () => settingsForServer(),
     synchronize: {
       configurationSection: 'dvicode',
-      fileEvents: watcher,
+      fileEvents: [watcher, lintWatcher],
     },
     uriConverters: {
       code2Protocol: (uri) => mapper.toServer(uri),
@@ -469,6 +474,42 @@ async function selectUvmTest(): Promise<void> {
   }
 }
 
+interface LintRule {
+  id: string;
+  guide: string[];
+  rulesets: string[];
+  defaultLevel: string;
+  summary: string;
+  why: string;
+  docs: string;
+}
+
+/** The lint rules of the engine, as a Markdown preview. */
+async function showLintRules(): Promise<void> {
+  if (!client) {
+    return;
+  }
+  const exp = client.initializeResult?.capabilities.experimental as { dvicode?: { lint?: number } } | undefined;
+  if (!exp?.dvicode?.lint) {
+    void vscode.window.showInformationMessage('This DVICode engine has no lint rules (it is older than the extension).');
+    return;
+  }
+  const r = await client.sendRequest<{ rules: LintRule[] }>('dvicode/lintRules');
+  const esc = (s: string): string => s.replace(/\|/g, '\\|');
+  const lines = [
+    '# DVICode lint rules',
+    '',
+    'Choose rulesets and levels in `.dvicode/lint.json` or with the `dvicode.lint.*` settings. ' +
+      'Waive one finding with `// <rule or guide ID> waived: <reason>` on the line before it.',
+    '',
+    '| Rule | Guide | Rulesets | Level | What it finds |',
+    '|---|---|---|---|---|',
+    ...r.rules.map((x) => `| [\`${x.id}\`](${x.docs}) | ${x.guide.join(', ')} | ${x.rulesets.join(', ')} | ${x.defaultLevel} | ${esc(x.summary)} |`),
+  ];
+  const doc = await vscode.workspace.openTextDocument({ language: 'markdown', content: lines.join('\n') + '\n' });
+  await vscode.commands.executeCommand('markdown.showPreview', doc.uri);
+}
+
 async function showStatus(): Promise<void> {
   if (!client) {
     return;
@@ -629,6 +670,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     vscode.commands.registerCommand('dvicode.restartServer', () => restart(ctx)),
     vscode.commands.registerCommand('dvicode.rebuild', () => client?.sendRequest('dvicode/rebuild')),
     vscode.commands.registerCommand('dvicode.showStatus', showStatus),
+    vscode.commands.registerCommand('dvicode.lint.showRules', showLintRules),
     vscode.commands.registerCommand('dvicode.selectBuildConfig', selectBuildConfig),
     vscode.commands.registerCommand('dvicode.expandMacro', () => expandMacro(false)),
     vscode.commands.registerCommand('dvicode.expandMacroAll', () => expandMacro(true)),
@@ -693,4 +735,5 @@ export async function deactivate(): Promise<void> {
     await stopClient(client);
   }
   watcher?.dispose();
+  lintWatcher?.dispose();
 }

@@ -1,6 +1,7 @@
 //! The LSP main loop.
 
 mod build_docs;
+mod lint_pub;
 
 use crate::{crash, format, fs, util};
 use build_docs::{BuildDoc, Inspected};
@@ -114,7 +115,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1, "compileContext": 2 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1, "compileContext": 2, "lint": 1 } })),
         ..Default::default()
     }
 }
@@ -295,6 +296,10 @@ struct Server {
     hint_kinds: HintKinds,
     /// The `dvicode.format` settings: no build depends on them.
     format_settings: Value,
+    /// The `dvicode.lint` settings: no build depends on them either.
+    lint: lint_pub::LintSettings,
+    /// The project's lint configurations, as the problem checks read them.
+    lint_configs: Arc<lint_pub::LintConfigs>,
     /// The client can be asked to request inlay hints again.
     hint_refresh: bool,
     /// The client can be asked to request semantic tokens again.
@@ -447,6 +452,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let relative_patterns = watched_files.and_then(|d| d.relative_pattern_support).unwrap_or(false);
     let hint_kinds = params.initialization_options.as_ref().map(hint_kinds_of).unwrap_or_default();
     let format_settings = params.initialization_options.as_ref().and_then(|v| v.get("format")).cloned().unwrap_or(Value::Null);
+    let lint = params.initialization_options.as_ref().map(lint_pub::LintSettings::of).unwrap_or_default();
     let hint_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false);
     let token_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.semantic_tokens.as_ref()).and_then(|t| t.refresh_support).unwrap_or(false);
     let document_changes = params.capabilities.workspace.as_ref().and_then(|w| w.workspace_edit.as_ref()).and_then(|e| e.document_changes).unwrap_or(false);
@@ -473,6 +479,8 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         settings,
         hint_kinds,
         format_settings,
+        lint,
+        lint_configs: Arc::default(),
         hint_refresh,
         token_refresh,
         contexts: ContextChoices::default(),
@@ -1203,11 +1211,16 @@ impl Server {
         self.publish(files, true);
     }
 
-    /// Computes and publishes problems in the background. With `full`, files that had
-    /// problems before and are not in `files` are cleared.
+    /// Computes and publishes problems in the background, compile problems and lint
+    /// findings of a file as one list. With `full`, files that had problems before and are not
+    /// in `files` are cleared.
     ///
     /// Jobs run concurrently and may finish in any order, so each job gets a sequence number
     /// and only publishes a file while it is the newest job covering that file.
+    ///
+    /// Compile problems come first: the files of a job are published with their compile
+    /// problems (open files with their lint findings too), then the other files again with
+    /// their lint findings, in what the problem limit leaves.
     fn publish(&self, files: Vec<FileId>, full: bool) {
         let a = self.analysis.clone();
         // Open build files have problems of their own, as typed (`on_inspected`).
@@ -1236,6 +1249,7 @@ impl Server {
         let open: FxHashSet<FileId> = self.open.keys().copied().collect();
         let limit = self.settings.max_problems.unwrap_or(1000);
         let hooks = self.hooks.clone();
+        let lint = self.lint_configs.get(&a.setup.root, &self.lint);
         if let Some(h) = &hooks.problem_check {
             h(true);
         }
@@ -1245,6 +1259,13 @@ impl Server {
             let mut files = files;
             // Open files first so they are never cut by the limit.
             files.sort_by_key(|f| !open.contains(f));
+            // Files whose lint findings are added after every file's compile problems.
+            let mut later: Vec<(FileId, Url, Vec<Diagnostic>)> = Vec::new();
+            let lint_of = |f: FileId| -> Vec<Diagnostic> {
+                let Some(set) = &lint else { return Vec::new() };
+                crash::catch("lint", None, || lint_pub::file_diagnostics(&a, set, f))
+                    .unwrap_or_else(|| vec![lint_pub::notice("Lint failed on this file (see the DVICode log)".into())])
+            };
             for f in files {
                 if a.vfs.is_builtin(f) {
                     continue;
@@ -1273,32 +1294,62 @@ impl Server {
                     continue;
                 };
                 let mut lsp: Vec<Diagnostic> = diags.iter().filter_map(|d| util::to_lsp_diag(&a, d)).collect();
-                if !open.contains(&f) && limit > 0 {
-                    if total >= limit {
-                        lsp.clear();
-                    } else {
-                        lsp.truncate(limit - total);
+                if open.contains(&f) {
+                    lsp.extend(lint_of(f));
+                } else {
+                    if limit > 0 {
+                        if total >= limit {
+                            lsp.clear();
+                        } else {
+                            lsp.truncate(limit - total);
+                        }
+                    }
+                    if lint.is_some() {
+                        later.push((f, uri.clone(), lsp.clone()));
                     }
                 }
                 total += lsp.len();
-                // Check and send under the lock, so a newer job cannot publish in between.
-                let mut st = published.lock().unwrap();
-                if st.latest.get(&uri) != Some(&generation) {
-                    continue; // a newer job owns this file
+                if send_problems(&published, &sender, &a, generation, f, uri.clone(), lsp) {
+                    now.insert(uri);
                 }
-                now.insert(uri.clone());
-                if lsp.is_empty() && !st.published.contains_key(&uri) {
+            }
+            for (f, uri, compile) in later {
+                if published.lock().unwrap().latest.get(&uri) != Some(&generation) {
                     continue;
                 }
-                if lsp.is_empty() {
-                    st.published.remove(&uri);
-                } else {
-                    st.published.insert(uri.clone(), lsp.len());
+                let mut extra = lint_of(f);
+                if limit > 0 {
+                    extra.truncate(limit.saturating_sub(total));
                 }
-                // The document version these problems belong to (open files only).
-                let version = a.source(f).and_then(|s| s.lsp_version);
-                let p = PublishDiagnosticsParams { uri, diagnostics: lsp, version };
-                let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
+                if extra.is_empty() {
+                    continue;
+                }
+                total += extra.len();
+                let mut lsp = compile;
+                lsp.extend(extra);
+                send_problems(&published, &sender, &a, generation, f, uri, lsp);
+            }
+            // The problems of the lint configurations read (one that is fixed is cleared).
+            if let Some(set) = &lint {
+                for c in set.loaded() {
+                    let (uri, diags) = lint_pub::config_diagnostics(&c);
+                    let mut st = published.lock().unwrap();
+                    if st.latest.get(&uri).is_some_and(|g| *g > generation) {
+                        continue;
+                    }
+                    st.latest.insert(uri.clone(), generation);
+                    now.insert(uri.clone());
+                    if diags.is_empty() && !st.published.contains_key(&uri) {
+                        continue;
+                    }
+                    if diags.is_empty() {
+                        st.published.remove(&uri);
+                    } else {
+                        st.published.insert(uri.clone(), diags.len());
+                    }
+                    let p = PublishDiagnosticsParams { uri, diagnostics: diags, version: None };
+                    let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
+                }
             }
             if full {
                 let mut st = published.lock().unwrap();
@@ -1451,8 +1502,14 @@ impl Server {
                 if !self.build_docs.is_empty() && p.changes.iter().any(|c| c.typ != FileChangeType::CHANGED) {
                     self.inspect_at = Some(Instant::now() + INSPECT_DELAY);
                 }
+                let mut lint_config = false;
                 for c in p.changes {
                     let Some(path) = path_of(&c.uri) else { continue };
+                    // Read by the problem checks, not by the build.
+                    if lint_pub::is_config(&path) {
+                        lint_config = true;
+                        continue;
+                    }
                     if self.building && !is_log(&path) {
                         self.changed_while_building.insert(path.clone());
                     }
@@ -1488,6 +1545,10 @@ impl Server {
                         }
                     }
                 }
+                if lint_config {
+                    self.lint_configs.invalidate();
+                    self.publish_all();
+                }
             }
             "workspace/didChangeConfiguration" => {
                 let Ok(p) = serde_json::from_value::<DidChangeConfigurationParams>(n.params) else { return };
@@ -1496,6 +1557,9 @@ impl Server {
                 let hints_changed = kinds != self.hint_kinds;
                 self.hint_kinds = kinds;
                 self.format_settings = v.get("format").cloned().unwrap_or(Value::Null);
+                let lint = lint_pub::LintSettings::of(&v);
+                let lint_changed = lint != self.lint;
+                self.lint = lint;
                 let mut rebuild = false;
                 if let Ok(s) = serde_json::from_value::<Settings>(v) {
                     // The client sends its configuration once at start-up too.
@@ -1509,6 +1573,10 @@ impl Server {
                 // With a build coming, the hints are asked for again once it is in.
                 if hints_changed && !rebuild {
                     self.refresh_hints(true);
+                }
+                // A build publishes problems when it is in.
+                if lint_changed && !rebuild {
+                    self.publish_all();
                 }
             }
             _ => {}
@@ -2161,6 +2229,10 @@ impl Server {
             }),
             // Simulator log links: a source file by a path from the log (perhaps from another
             // machine), and a UVM component by its path.
+            "dvicode/lintRules" => {
+                let rules: Vec<Value> = dvi_analysis::lint::rules::all().iter().map(|r| crate::lint_cmd::rule_json(r.meta())).collect();
+                self.send(Message::Response(ok_response(req.id, json!({ "rules": rules }))));
+            }
             "dvicode/findFile" => self.spawn_project(req, |a, p: Value| {
                 let path = p.get("path").and_then(Value::as_str).unwrap_or_default();
                 let base = p.get("base").and_then(Value::as_str).and_then(|u| Url::parse(u).ok()).and_then(|u| path_of(&u));
@@ -2655,6 +2727,29 @@ fn plain_edits(v: &mut Value) {
 }
 
 /// A success answer holding `v` itself (`Response::new_ok` would serialize it into a copy).
+/// Publishes `lsp` as the problems of `f` while job `generation` still owns the file (checked
+/// and sent under the lock, so a newer job cannot publish in between). Whether this job now
+/// shows the file (published, or already without problems).
+fn send_problems(published: &Mutex<PubState>, sender: &Sender<Message>, a: &Analysis, generation: u64, f: FileId, uri: Url, lsp: Vec<Diagnostic>) -> bool {
+    let mut st = published.lock().unwrap();
+    if st.latest.get(&uri) != Some(&generation) {
+        return false; // a newer job owns this file
+    }
+    if lsp.is_empty() && !st.published.contains_key(&uri) {
+        return true;
+    }
+    if lsp.is_empty() {
+        st.published.remove(&uri);
+    } else {
+        st.published.insert(uri.clone(), lsp.len());
+    }
+    // The document version these problems belong to (open files only).
+    let version = a.source(f).and_then(|s| s.lsp_version);
+    let p = PublishDiagnosticsParams { uri, diagnostics: lsp, version };
+    let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
+    true
+}
+
 fn ok_response(id: RequestId, v: Value) -> Response {
     Response { id, result: Some(v), error: None }
 }

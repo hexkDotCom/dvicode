@@ -199,6 +199,8 @@ pub struct Analysis {
     pub elab_index: Arc<std::sync::Mutex<Option<Arc<crate::ide::elab::ElabIndex>>>>,
     /// The class each factory name registers (`class_by_factory_name`), as asked.
     pub factory_names: Arc<std::sync::Mutex<FxHashMap<SmolStr, Option<DeclRef>>>>,
+    /// Lint facts of this snapshot (classes, method bodies), computed when a rule asks.
+    pub lint_facts: Arc<crate::lint::facts::FactCache>,
     /// The `-y`/`-v` library units in the order they are compiled (after the build's own
     /// files): the order a full build and every update give them, whatever their ids.
     pub library_order: Arc<Vec<UnitId>>,
@@ -681,6 +683,7 @@ impl Analysis {
             override_models: Arc::default(),
             elab_index: Arc::default(),
             factory_names: Arc::default(),
+            lint_facts: Arc::default(),
             library_order: Arc::default(),
             cancel: None,
             pin: None,
@@ -986,6 +989,7 @@ impl Analysis {
         self.override_models = Arc::default();
         self.elab_index = Arc::default();
         self.factory_names = Arc::default();
+        self.lint_facts = Arc::default();
     }
 
     pub fn unit(&self, id: UnitId) -> &Arc<Unit> {
@@ -1077,6 +1081,7 @@ impl Analysis {
         next.override_models = Arc::default();
         next.elab_index = Arc::default();
         next.factory_names = Arc::default();
+        next.lint_facts = Arc::default();
         // Preprocess the edited units in parallel with the macros they started with: that is
         // their result unless a file before them now leaves different macros behind.
         let edited: Vec<Option<(UnitId, PpResult)>> = affected
@@ -1359,6 +1364,7 @@ impl Analysis {
         next.override_models = Arc::default();
         next.elab_index = Arc::default();
         next.factory_names = Arc::default();
+        next.lint_facts = Arc::default();
         let inv = self.setup.config.invocations.len().saturating_sub(1);
         let macros = self.last_macros(inv);
         let src = self.reader();
@@ -1391,6 +1397,7 @@ impl Analysis {
         next.override_models = Arc::default();
         next.elab_index = Arc::default();
         next.factory_names = Arc::default();
+        next.lint_facts = Arc::default();
         for id in ids {
             next.units[id as usize] = None;
         }

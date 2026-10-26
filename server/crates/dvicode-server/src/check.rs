@@ -127,27 +127,11 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("usage: dvicode-server check <dir> [--build FILE] [-q] [--max N] [--goto F:L:C] ...");
         return 2;
     };
-    let root = canonical(&dir);
-    if !root.is_dir() {
-        eprintln!("check: {} is not a folder", dir.display());
-        return 2;
-    }
-    let t0 = std::time::Instant::now();
-    // `--build auto` auto-configures even when the project has a build file, like the setting.
-    let cfg = match build.as_deref() {
-        Some(b) if b == Path::new("auto") => dvi_project::load_auto(&root, &env),
-        b => dvi_project::load(&root, b, &env),
+    let (setup, cfg_ms) = match load_setup("check", &dir, build.as_deref(), env) {
+        Ok(x) => x,
+        Err(code) => return code,
     };
-    let cfg_ms = t0.elapsed().as_millis();
-    // Nothing was checked: say so in the exit status, not only in a message.
-    if let Some(bf) = cfg.build_file.as_ref() {
-        let unread = cfg.problems.iter().find(|p| p.message.starts_with("Cannot read the build file"));
-        if !bf.is_file() || unread.is_some() {
-            eprintln!("check: {}", unread.map_or_else(|| format!("cannot read the build file {}", bf.display()), |p| p.message.clone()));
-            return 2;
-        }
-    }
-    let setup = Arc::new(ProjectSetup::new(&root, cfg, env));
+    let setup = Arc::new(setup);
     if let Some(file) = replay {
         return match crate::fuzz::replay_file(setup, &file) {
             Ok(d) if d.is_empty() => {
@@ -218,12 +202,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut missing = 0usize;
     for p in &a.setup.config.problems {
         eprintln!("{}:{}: build config: {}", p.file.display(), p.line + 1, p.message);
-        // Sources, argument files, logs, libraries or directories the build names and that are
-        // not there: what they hold was not checked.
-        // Also an option without its value, an argument file or log that includes itself, and
-        // argument files nested too deeply: the build was not read as written.
-        let structural = p.message.contains(" needs ") || p.message.contains("includes itself") || p.message.contains("reads itself") || p.message.contains("nested too deeply");
-        if structural || p.message.contains(" not found") || p.message.contains("matches nothing") || p.message.starts_with("No files match") || p.message.starts_with("Cannot read") {
+        if is_input_failure(p) {
             missing += 1;
         }
     }
@@ -291,6 +270,45 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         0
     }
+}
+
+/// Whether a build problem means part of the build was not read: sources, argument files,
+/// logs, libraries or directories the build names and that are not there (what they hold was
+/// not checked), an option without its value, an argument file or log that includes itself, and
+/// argument files nested too deeply (the build was not read as written).
+pub fn is_input_failure(p: &dvi_project::BuildProblem) -> bool {
+    let m = &p.message;
+    let structural = m.contains(" needs ") || m.contains("includes itself") || m.contains("reads itself") || m.contains("nested too deeply");
+    structural || m.contains(" not found") || m.contains("matches nothing") || m.starts_with("No files match") || m.starts_with("Cannot read")
+}
+
+/// Reads the project in `dir` as `check` and `lint` do: the build file (`auto` to configure
+/// from the folder), else the folder's own. `Err` is the exit status when there is nothing
+/// to check (the message is printed).
+pub fn load_setup(cmd: &str, dir: &Path, build: Option<&Path>, env: FxHashMap<String, String>) -> Result<(ProjectSetup, u128), i32> {
+    let root = canonical(dir);
+    if !root.is_dir() {
+        eprintln!("{cmd}: {} is not a folder", dir.display());
+        return Err(2);
+    }
+    let t0 = std::time::Instant::now();
+    let cfg = match build {
+        Some(b) if b == Path::new("auto") => dvi_project::load_auto(&root, &env),
+        b => dvi_project::load(&root, b, &env),
+    };
+    let cfg_ms = t0.elapsed().as_millis();
+    if let Some(bf) = cfg.build_file.as_ref() {
+        let unread = cfg.problems.iter().find(|p| p.message.starts_with("Cannot read the build file"));
+        if !bf.is_file() || unread.is_some() {
+            eprintln!("{cmd}: {}", unread.map_or_else(|| format!("cannot read the build file {}", bf.display()), |p| p.message.clone()));
+            return Err(2);
+        }
+    }
+    Ok((ProjectSetup::new(&root, cfg, env), cfg_ms))
+}
+
+pub fn canonical_path(p: &Path) -> PathBuf {
+    canonical(p)
 }
 
 fn file_off(a: &Analysis, arg: &str) -> Option<(u32, u32)> {
