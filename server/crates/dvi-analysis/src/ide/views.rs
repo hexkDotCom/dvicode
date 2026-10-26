@@ -2864,7 +2864,8 @@ fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Opti
         None => String::new(),
     };
     let first = args.first().filter(|a| a.len() == 1);
-    let name = first.filter(|a| a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
+    // A literal, or `$sformatf` of literals (`$sformatf("agent%0d", 0)`): the name itself.
+    let name = first.filter(|a| a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string()).or_else(|| args.first().and_then(|a| sformatf_literal(a)));
     let name_arg = first.filter(|a| a[0].is_ident()).map(|a| a[0].text.to_string());
     // `$sformatf("agent%0d", i)`: the names it makes, for a log's paths.
     let name_format = args
@@ -2914,6 +2915,53 @@ fn method_calls(t: &[Token]) -> Vec<(usize, String, bool, Vec<(Option<String>, A
         out.push((i, t[i].text.to_string(), sup, args));
     }
     out
+}
+
+/// The text `$sformatf("fmt", ...)` makes when its arguments are literals: decimal numbers for
+/// `%d` (no width, or `%0d`) and strings for `%s`; `None` otherwise (not guessed).
+fn sformatf_literal(a: &[Token]) -> Option<String> {
+    if !(a.len() >= 4 && a[0].kind == TokKind::SysIdent && matches!(a[0].text.as_str(), "$sformatf" | "$psprintf") && a[1].is_punct("(") && a[2].kind == TokKind::String && a.last()?.is_punct(")")) {
+        return None;
+    }
+    let mut vals = Vec::new();
+    let rest = &a[3..a.len() - 1];
+    for part in rest.split(|t| t.is_punct(",")).skip(1) {
+        let [t] = part else { return None };
+        vals.push(t);
+    }
+    if rest.first().is_some_and(|t| !t.is_punct(",")) {
+        return None;
+    }
+    let fmt = a[2].text.trim_matches('"');
+    let mut out = String::new();
+    let mut it = fmt.chars().peekable();
+    let mut next = vals.into_iter();
+    while let Some(c) = it.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let mut width = String::new();
+        while let Some(d) = it.peek().copied().filter(char::is_ascii_digit) {
+            width.push(d);
+            it.next();
+        }
+        match it.next()? {
+            '%' => out.push('%'),
+            'd' | 'D' if width.is_empty() || width == "0" => {
+                let v = next.next()?;
+                (v.kind == TokKind::Number && v.text.bytes().all(|b| b.is_ascii_digit())).then_some(())?;
+                out.push_str(v.text.trim_start_matches('0').chars().next().map_or("0", |_| v.text.trim_start_matches('0')));
+            }
+            's' | 'S' if width.is_empty() => {
+                let v = next.next()?;
+                (v.kind == TokKind::String).then_some(())?;
+                out.push_str(v.text.trim_matches('"'));
+            }
+            _ => return None,
+        }
+    }
+    next.next().is_none().then_some(out)
 }
 
 /// Whether the tokens assign to the variable `name` (`name = ...`, not `name == ...`).
@@ -3085,4 +3133,23 @@ fn admit_links(w: &mut Walk, kids: Vec<VerifNode>, truncated: &mut bool) -> Vec<
         out.push(k);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sformatf_literal;
+
+    fn arg(text: &str) -> Option<String> {
+        sformatf_literal(&dvi_syntax::lexer::lex(text, 0))
+    }
+
+    #[test]
+    fn sformatf_of_literals_is_the_name_it_makes() {
+        assert_eq!(arg(r#"$sformatf("agent%0d", 0)"#).as_deref(), Some("agent0"));
+        assert_eq!(arg(r#"$sformatf("a%d_%s", 007, "rx")"#).as_deref(), Some("a7_rx"));
+        assert_eq!(arg(r#"$sformatf("100%%")"#).as_deref(), Some("100%"));
+        assert_eq!(arg(r#"$sformatf("agent%0d", i)"#), None, "not a literal");
+        assert_eq!(arg(r#"$sformatf("a%2d", 3)"#), None, "a width is not guessed");
+        assert_eq!(arg(r#"$sformatf("a%0d", 1, 2)"#), None, "an argument too many");
+    }
 }

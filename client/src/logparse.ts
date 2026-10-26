@@ -16,7 +16,7 @@ const SOURCE = /\.(?:sv|svh|svi|svp|sva|v|vh|vp|vg|vhd|vhdl|inc|pkg)$/i;
 // the report server shows it (`UVM_INFO(UVM_LOW) ...`); the file part is absent in reports
 // without one (`UVM_INFO @ 0: reporter [RNTST] ...`). The file may hold spaces: it ends at the
 // `(line) @` that follows it.
-const UVM = /\bUVM_(?:INFO|WARNING|ERROR|FATAL)(?:\([A-Z_]+\))?\s+(?:([^\s@][^@\n]*?)\((\d+)\)\s+)?@\s*[^:\n]*?:\s+(\S+)\s+\[/g;
+const UVM = /\bUVM_(?:INFO|WARNING|ERROR|FATAL)(?:\([A-Z_]+\))?\s+(?:(\S[^\n]*?)\((\d+)\)\s+)?@\s*[^:\n]*?:\s+(\S+)\s+\[/g;
 // `"x.sv", 12` (VCS syntax errors, `$error`, assertions): any extension inside quotes.
 const QUOTED = /"([^"\n]+\.[A-Za-z0-9]{1,6})",\s*(\d+)/g;
 // Anchors of the forms outside quotes, found first, the path then read back from them:
@@ -58,7 +58,7 @@ function componentOf(reporter: string): string | undefined {
 
 /** Whether `c` ends a path written outside quotes. */
 function delimits(c: string): boolean {
-  return /[\s"'(),:;|<>[\]{}=]/.test(c);
+  return /[\s"'(),:;|<>=]/.test(c);
 }
 
 /** The path written just before `end` in `line` (outside quotes): back to a delimiter, with a
@@ -184,19 +184,19 @@ export class LinkScanner {
       }
       const raw = text.slice(pos, Math.min(nl, pos + MAX_LINE * 4));
       const full = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
-      const plain = full.includes('\u001b') ? stripEscapes(full).text : full;
+      const stripped = stripEscapes(full);
+      const plain = stripped.text;
       // A line's links count as an error's when it is one, or a VCS error's location.
       const severe = SEVERE.test(plain) || (this.header && this.headerSevere);
       const found = MAYBE.test(plain) ? lineLinks(full) : [];
       if (this.header && !found.length) {
         const m = VCS_LOCATION.exec(plain);
-        // A path, not prose: a file name with an extension, and no white space unless it has
-        // folders (`C:\work dir\x.sv, 12`).
-        if (m && /\.[A-Za-z0-9]{1,6}$/.test(m[1]) && (!/\s/.test(m[1]) || /[\\/]/.test(m[1]))) {
-          const start = full.indexOf(m[1]);
-          if (start >= 0) {
-            found.push({ kind: 'file', start, end: full.trimEnd().length, path: m[1], line: Number(m[2]) });
-          }
+        // A path, not prose: it ends with a file extension that starts with a letter (not a
+        // number such as `2.0`); it may hold spaces (`C:\work dir\x.sv, 12`, `my file.sv, 3`).
+        // Found in the text without escapes, its offsets mapped back to the line as written.
+        if (m && /\.[A-Za-z][A-Za-z0-9]{0,5}$/.test(m[1])) {
+          const start = plain.indexOf(m[1]);
+          found.push({ kind: 'file', start: stripped.at(start), end: stripped.at(plain.trimEnd().length), path: m[1], line: Number(m[2]) });
         }
       }
       if (this.taskPath) {

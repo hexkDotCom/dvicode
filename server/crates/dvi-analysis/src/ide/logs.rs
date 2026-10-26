@@ -80,10 +80,11 @@ fn segment_is(seg: &str, child: &VerifNode) -> u8 {
         return 2;
     }
     let (Some((stem, idx)), Some((cstem, cidx))) = (seg.split_once('['), child.name.split_once('[')) else { return 0 };
-    let symbolic = |i: &str| !i.trim_end_matches(']').split("][").all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()));
-    // The same number of indices; a concrete child index is another element.
-    let dims = |i: &str| i.matches('[').count();
-    if stem == cstem && symbolic(cidx) && dims(idx) == dims(cidx) {
+    let (want, have): (Vec<&str>, Vec<&str>) = (idx.trim_end_matches(']').split("][").collect(), cidx.trim_end_matches(']').split("][").collect());
+    // The same number of indices; each a symbolic one of the child (`i`) or the same number.
+    let concrete = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    let fits = want.len() == have.len() && want.iter().zip(&have).all(|(w, h)| if concrete(h) { w == h } else { !h.is_empty() });
+    if stem == cstem && have.iter().any(|h| !concrete(h)) && fits {
         1
     } else {
         0
@@ -167,7 +168,14 @@ impl Analysis {
             let mut matched = 1;
             for seg in &segs[1..] {
                 // The best: the same name, then one the name's format makes, then an array.
-                let next = node.children.iter().map(|c| (segment_is(seg, c), c)).filter(|(k, _)| *k > 0).max_by_key(|(k, _)| *k).map(|(_, c)| c);
+                let mut next: Option<(u8, &VerifNode)> = None;
+                for c in &node.children {
+                    let k = segment_is(seg, c);
+                    if k > next.map_or(0, |n| n.0) {
+                        next = Some((k, c));
+                    }
+                }
+                let next = next.map(|(_, c)| c);
                 let Some(c) = next else { break };
                 names.push(keyed(&c.name, c.dup));
                 node = c;
@@ -184,7 +192,19 @@ impl Analysis {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_makes, written_parts};
+    use super::{format_makes, segment_is, written_parts};
+    use crate::ide::views::VerifNode;
+
+    #[test]
+    fn array_indices_are_compared_one_by_one() {
+        let node = |n: &str| VerifNode { name: n.to_string(), ..Default::default() };
+        assert_eq!(segment_is("banks[0][4]", &node("banks[0][i]")), 1);
+        assert_eq!(segment_is("banks[1][4]", &node("banks[0][i]")), 0, "a concrete index is that element");
+        assert_eq!(segment_is("agents[3]", &node("agents[i]")), 1);
+        assert_eq!(segment_is("agents[3]", &node("agents[0]")), 0);
+        assert_eq!(segment_is("agents[3][1]", &node("agents[i]")), 0, "another number of indices");
+        assert_eq!(segment_is("env", &node("env")), 3);
+    }
 
     #[test]
     fn formats_make_names() {

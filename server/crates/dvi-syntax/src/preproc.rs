@@ -1312,7 +1312,8 @@ fn substitute(
                             let a = actual(param_index(&b.text).unwrap());
                             // Macros in the actual are expanded here too, as they are in the body
                             // (`VIF(`BUS) with `"x``_vif`" is "bus_vif").
-                            match a.iter().any(|x| x.kind == TokKind::Directive && !COMPILER_DIRECTIVES.contains(&x.text.as_str())).then(|| expand(&a)).flatten() {
+                            let expands = |x: &Token| x.kind == TokKind::Directive && (!COMPILER_DIRECTIVES.contains(&x.text.as_str()) || matches!(x.text.as_str(), "__LINE__" | "__FILE__"));
+                            match a.iter().any(expands).then(|| expand(&a)).flatten() {
                                 Some(toks) => {
                                     for (k, e) in toks.iter().enumerate() {
                                         if k > 0 && e.ws_before() {

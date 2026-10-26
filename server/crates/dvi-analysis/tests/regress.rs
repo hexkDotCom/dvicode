@@ -4467,3 +4467,15 @@ fn includes_end_by_their_guards_at_any_depth_and_quotes_keep_comments_and_expand
     assert_eq!(exp("VIF"), "\"bus_vif\"");
     assert_eq!(exp("C"), "\"p /* kept */ y\"");
 }
+
+#[test]
+fn line_macro_in_a_stringified_actual_is_expanded() {
+    let src = "`define S(x) `\"x`\"\nmodule m;\n  string s = `S(`__LINE__);\nendmodule\n";
+    let (a, _) = project("pplineq", &[("t.sv", src)]);
+    let uid = a.units_for(a.project_files()[0])[0];
+    let idx = a.unit(uid).macro_uses.iter().position(|m| m.name == "S").unwrap();
+    // Expanded to a line number (the preview reads the call alone, so it counts from it), not
+    // the directive's text.
+    let e = a.expand_macro_use(uid, idx, usize::MAX).unwrap();
+    assert!(e.trim_matches('"').bytes().all(|b| b.is_ascii_digit()) && e.len() > 2, "{e}");
+}

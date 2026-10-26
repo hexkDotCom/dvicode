@@ -97,6 +97,19 @@ test.describe('review cases', () => {
   });
 });
 
+test.describe('review of the fixes', () => {
+  test.it('keeps brackets in folder names and @ in paths', () => {
+    assert.deepEqual(show('Error: /p/build[0]/x.sv:12 oops'), ['file /p/build[0]/x.sv:12 -> /p/build[0]/x.sv:12']);
+    assert.deepEqual(show('UVM_INFO /p/user@host/a.sv(12) @ 0: uvm_test_top.env [ID] hello').map((x) => x.split(' -> ')[1]), ['/p/user@host/a.sv:12', 'uvm_test_top.env']);
+  });
+  test.it('reads a coloured VCS location and a file name with spaces after a header', () => {
+    const text = 'Error-[SE] Syntax error\n/p/a\u001b[31m.sv\u001b[0m, 12\nError-[SE] Syntax error\nmy source.sv, 3\nWarning-[X] Title\nThe value is 2.0, 3\n';
+    const links = lp.textLinks(text, 10);
+    assert.deepEqual(links.map((l) => `${l.path}:${l.line}`), ['/p/a.sv:12', 'my source.sv:3']);
+    assert.equal(text.slice(links[0].start, links[0].end), '/p/a\u001b[31m.sv\u001b[0m, 12');
+  });
+});
+
 test.describe('LinkScanner', () => {
   test.it('reads a log a part at a time as it reads it at once, across the parts', () => {
     const text = 'Warning-[TMBIN] Too many bits\n/nfs/p/a.sv, 3\nUVM_ERROR b.sv(2) @ 0: uvm_test_top.env [B] m\n  location: file\n  /nfs/p/c.sv\n  line 9\n';
