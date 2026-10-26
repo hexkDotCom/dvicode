@@ -478,7 +478,7 @@ impl Analysis {
         let d = self.decl(r);
         let is_class = |c: &DeclRef| matches!(self.decl(*c).kind, DeclKind::Class | DeclKind::InterfaceClass);
         let class = d.parent.map(|p| DeclRef { unit: r.unit, decl: p }).filter(is_class);
-        let (Some(class), true) = (class, matches!(d.kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint) && d.name != "new") else { return vec![r] };
+        let (Some(class), true) = (class, matches!(d.kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint) && d.name != "new" && !d.has(dflags::LOCAL)) else { return vec![r] };
         let name = d.name.clone();
         let members = |c: DeclRef| -> Vec<DeclRef> {
             self.unit(c.unit)
@@ -486,7 +486,7 @@ impl Analysis {
                 .lookup_member(c.decl, &name)
                 .iter()
                 .map(|m| DeclRef { unit: c.unit, decl: *m })
-                .filter(|m| matches!(self.decl(*m).kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint))
+                .filter(|m| matches!(self.decl(*m).kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint) && !self.decl(*m).has(dflags::LOCAL))
                 .collect()
         };
         // Up: the bases (and interface classes) that declare it too.

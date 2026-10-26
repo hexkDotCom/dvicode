@@ -218,6 +218,7 @@ pub fn preprocess(
         line_index: Default::default(),
         work: Default::default(),
         adopted: Default::default(),
+        adopted_diags: Default::default(),
     };
     pp.enter_file(root, None);
     // The root file's tokens are most of the output: room for them at once.
@@ -262,6 +263,7 @@ pub fn expand_snippet(
         line_index: Default::default(),
         work: Default::default(),
         adopted: Default::default(),
+        adopted_diags: Default::default(),
     };
     pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, include: None, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
@@ -368,6 +370,8 @@ struct Pp<'a> {
     /// Macro uses written in an actual that was expanded before it was substituted (pasted or
     /// stringified): recorded with the call's, so rename and navigation see them.
     adopted: std::cell::RefCell<Vec<MacroUse>>,
+    /// Problems of such an expansion that failed inside a string (nothing reads it again).
+    adopted_diags: std::cell::RefCell<Vec<Diag>>,
 }
 
 impl<'a> Pp<'a> {
@@ -1084,9 +1088,11 @@ impl<'a> Pp<'a> {
         // Built only up to what the budget can still read: a body repeating a long argument
         // would otherwise be built whole first.
         let limit = MAX_WORK.saturating_sub(self.work.get()) as usize;
-        let toks = substitute(&def, &args, site, first_flags, limit, &|a| self.called_name(a, site, &def.name), &|a| self.expand_tokens(a, site, &def.name));
+        let toks = substitute(&def, &args, site, first_flags, limit, &|a| self.called_name(a, site, &def.name), &|a, report| self.expand_tokens(a, site, &def.name, report));
         let adopted = self.adopted.take();
         self.res.macro_uses.extend(adopted);
+        let failed = self.adopted_diags.take();
+        self.res.diags.extend(failed);
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
@@ -1105,7 +1111,7 @@ impl<'a> Pp<'a> {
         let name = |t: &Token| matches!(t.kind, TokKind::Ident | TokKind::Keyword).then(|| t.text.clone());
         match actual {
             [t] if t.kind != TokKind::Directive => name(t),
-            [t, ..] if t.kind == TokKind::Directive => match self.expand_tokens(actual, site, current)?.as_slice() {
+            [t, ..] if t.kind == TokKind::Directive => match self.expand_tokens(actual, site, current, false)?.as_slice() {
                 [t] => name(t),
                 _ => None,
             },
@@ -1116,11 +1122,21 @@ impl<'a> Pp<'a> {
     /// `actual`, starting with a macro call, expanded with the macros defined so far (within
     /// the depth limit); `None` when that fails (an undefined macro, a recursive use, too much
     /// work). `current`: the macro whose body `actual` is in.
-    fn expand_tokens(&self, actual: &[Token], site: Span, current: &SmolStr) -> Option<Vec<Token>> {
+    /// `report`: a failure's problems (an undefined macro) are kept for the call, where nothing
+    /// else would report them (inside a string).
+    fn expand_tokens(&self, actual: &[Token], site: Span, current: &SmolStr, report: bool) -> Option<Vec<Token>> {
         let mut pp = self.nested(Some(current))?;
         pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, include: None, repeat: false, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
         pp.run();
         if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
+            if report {
+                // Only a macro written in the actual (`S(`MISSING)`): one inside another macro's
+                // body (`DV_STRINGIFY(`DUT_HIER)`, defined on a simulator's command line) is the
+                // body's, as a string written in a body is.
+                let written: rustc_hash::FxHashSet<Span> = pp.res.macro_uses.iter().filter(|u| u.def.is_none()).map(|u| u.name_span).collect();
+                self.adopted_diags.borrow_mut().extend(pp.res.diags.into_iter().filter(|d| d.code == "UNDEFINED_MACRO" && written.contains(&d.span)));
+                self.adopted.borrow_mut().append(&mut pp.res.macro_uses);
+            }
             return None;
         }
         self.adopted.borrow_mut().append(&mut pp.res.macro_uses);
@@ -1160,6 +1176,7 @@ impl<'a> Pp<'a> {
             line_index: self.line_index.clone(),
             work: self.work.clone(),
             adopted: Default::default(),
+            adopted_diags: Default::default(),
         })
     }
 
@@ -1237,7 +1254,7 @@ const MAX_STRINGIFIED: usize = 1 << 20;
 
 /// An actual with `` `"...`" `` strings in it: each made into the string a body's would be
 /// (macros inside expanded); the other tokens as they are.
-fn quote_actual(a: Vec<Token>, site: Span, limit: usize, called: &dyn Fn(&[Token]) -> Option<SmolStr>, expand: &dyn Fn(&[Token]) -> Option<Vec<Token>>) -> Vec<Token> {
+fn quote_actual(a: Vec<Token>, site: Span, limit: usize, called: &dyn Fn(&[Token]) -> Option<SmolStr>, expand: &dyn Fn(&[Token], bool) -> Option<Vec<Token>>) -> Vec<Token> {
     let mut out = Vec::with_capacity(a.len());
     let mut k = 0;
     while k < a.len() {
@@ -1262,7 +1279,7 @@ fn substitute(
     first_flags: u8,
     limit: usize,
     called: &dyn Fn(&[Token]) -> Option<SmolStr>,
-    expand: &dyn Fn(&[Token]) -> Option<Vec<Token>>,
+    expand: &dyn Fn(&[Token], bool) -> Option<Vec<Token>>,
 ) -> Vec<Token> {
     let params = def.params.as_deref().unwrap_or(&[]);
     let param_index = |name: &str| params.iter().position(|p| p.name == name);
@@ -1325,7 +1342,7 @@ fn substitute(
                             // Macros in the actual are expanded here too, as they are in the body
                             // (`VIF(`BUS) with `"x``_vif`" is "bus_vif").
                             let expands = |x: &Token| x.kind == TokKind::Directive && (!COMPILER_DIRECTIVES.contains(&x.text.as_str()) || matches!(x.text.as_str(), "__LINE__" | "__FILE__"));
-                            match a.iter().any(expands).then(|| expand(&a)).flatten() {
+                            match a.iter().any(expands).then(|| expand(&a, true)).flatten() {
                                 Some(toks) => {
                                     for (k, e) in toks.iter().enumerate() {
                                         if s.len() > MAX_STRINGIFIED {
@@ -1342,7 +1359,7 @@ fn substitute(
                         }
                         // Macros inside `" are expanded (IEEE 1800 22.5.1): `"dir/`VENDOR/x`",
                         // with their arguments (`"dir/`ID(vcs)/x`"), formals replaced.
-                        TokKind::Directive => match (!COMPILER_DIRECTIVES.contains(&b.text.as_str())).then(|| {
+                        TokKind::Directive => match (!COMPILER_DIRECTIVES.contains(&b.text.as_str()) || matches!(b.text.as_str(), "__LINE__" | "__FILE__")).then(|| {
                             let mut call = vec![b.clone()];
                             // `"`M(x)`" with a formal M: the macro its actual names.
                             if let Some(n) = param_index(&b.text).and_then(|k| called(&actual(k))) {
@@ -1370,12 +1387,12 @@ fn substitute(
                                 if depth != 0 {
                                     call.truncate(1);
                                 } else {
-                                    let toks = expand(&call)?;
+                                    let toks = expand(&call, false)?;
                                     i = j;
                                     return Some(toks);
                                 }
                             }
-                            expand(&call)
+                            expand(&call, false)
                         }).flatten() {
                             Some(toks) => {
                                 for (k, e) in toks.iter().enumerate() {
@@ -1422,8 +1439,10 @@ fn substitute(
                 // Pasted to its neighbour: a macro in the actual is expanded first, as simulators
                 // do (`` `CFG(`TC) `` with the body `` tc``_cfg `` is `demo_cfg`, not `` `TC_cfg ``).
                 let pasted = def.body.get(i + 1).is_some_and(|x| x.kind == TokKind::MacroPaste) || i.checked_sub(1).is_some_and(|p| def.body[p].kind == TokKind::MacroPaste);
-                if pasted && a.iter().any(|x| x.kind == TokKind::Directive && !COMPILER_DIRECTIVES.contains(&x.text.as_str())) {
-                    if let Some(e) = expand(&a) {
+                if pasted && a.iter().any(|x| x.kind == TokKind::Directive && (!COMPILER_DIRECTIVES.contains(&x.text.as_str()) || matches!(x.text.as_str(), "__LINE__" | "__FILE__"))) {
+                    // A failure is not reported here: the actual is substituted as written, and
+                    // its macros are reported where they are read again.
+                    if let Some(e) = expand(&a, false) {
                         a = e
                             .into_iter()
                             .map(|mut x| {

@@ -66,8 +66,8 @@ export class LogLinks implements vscode.Disposable {
 
   constructor(
     private readonly conn: Conn,
-    /** Selects a component in the Verification Hierarchy; whether it was shown. */
-    private readonly reveal: (hit: ComponentHit) => Promise<boolean>,
+    /** Selects a component in the Verification Hierarchy (while `wanted`); whether it was shown. */
+    private readonly reveal: (hit: ComponentHit, wanted: () => boolean) => Promise<boolean>,
     /** The test the Verification Hierarchy shows (undefined: all tests, or none yet). */
     private readonly viewTest: () => string | undefined,
   ) {
@@ -237,7 +237,7 @@ export class LogLinks implements vscode.Disposable {
       void vscode.window.showInformationMessage(`DVICode: ${a.path} is not a component of the Verification Hierarchy.`);
       return;
     }
-    await this.reveal({ ...hit, revision: r.revision });
+    await this.reveal({ ...hit, revision: r.revision }, () => gen === this.componentGen);
     if (gen !== this.componentGen) {
       return;
     }

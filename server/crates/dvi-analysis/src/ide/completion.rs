@@ -494,20 +494,22 @@ impl Analysis {
     pub fn instance_snippet(&self, module: DeclRef) -> String {
         let u = self.unit(module.unit);
         let d = u.parsed.decl(module.decl);
-        let params: Vec<&Decl> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| matches!(c.kind, DeclKind::Parameter | DeclKind::TypeParam)).collect();
+        let params: Vec<&Decl> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| matches!(c.kind, DeclKind::Parameter | DeclKind::TypeParam) && !c.has(dflags::LOCAL_PARAM)).collect();
+        // A name as source text (escaped when it must be), then as snippet text.
+        let name = |n: &str| snippet_text(&crate::ide::instances::ident(n));
         let ports: Vec<&Decl> = d.children.iter().map(|c| u.parsed.decl(*c)).filter(|c| c.kind == DeclKind::Port).collect();
         // Names aligned up to 40 columns (one long generated name does not pad every line).
-        let w = ports.iter().map(|p| p.name.len()).max().unwrap_or(0).min(40);
-        let wp = params.iter().map(|p| p.name.len()).max().unwrap_or(0).min(40);
-        let mut s = d.name.to_string();
+        let w = ports.iter().map(|p| name(&p.name).len()).max().unwrap_or(0).min(40);
+        let wp = params.iter().map(|p| name(&p.name).len()).max().unwrap_or(0).min(40);
+        let mut s = name(&d.name);
         let mut n = 1;
         if !params.is_empty() {
             s.push_str(" #(\n");
             let v: Vec<String> = params
                 .iter()
                 .map(|p| {
-                    let def = if p.detail.is_empty() { p.name.to_string() } else { p.detail.replace('$', "\\$").replace('}', "\\}") };
-                    let line = format!("\t.{:<wp$} (${{{}:{}}})", p.name, n, def);
+                    let def = if p.detail.is_empty() { name(&p.name) } else { snippet_text(&p.detail) };
+                    let line = format!("\t.{:<wp$} (${{{}:{}}})", name(&p.name), n, def);
                     n += 1;
                     line
                 })
@@ -515,7 +517,7 @@ impl Analysis {
             s.push_str(&v.join(",\n"));
             s.push_str("\n)");
         }
-        s.push_str(&format!(" ${{{}:u_{}}}", n, d.name));
+        s.push_str(&format!(" ${{{}:u_{}}}", n, snippet_text(d.name.trim_start_matches('\\'))));
         n += 1;
         if ports.is_empty() {
             s.push_str(" ();");
@@ -524,7 +526,7 @@ impl Analysis {
             let v: Vec<String> = ports
                 .iter()
                 .map(|p| {
-                    let line = format!("\t.{:<w$} (${{{}:{}}})", p.name, n, p.name);
+                    let line = format!("\t.{:<w$} (${{{}:{}}})", name(&p.name), n, name(&p.name));
                     n += 1;
                     line
                 })
@@ -817,4 +819,9 @@ fn truncate(s: &str, n: usize) -> String {
         let cut = s.char_indices().nth(n).map(|c| c.0).unwrap_or(s.len());
         format!("{}...", &s[..cut])
     }
+}
+
+/// `text` in a snippet: `\\`, `$` and `}` escaped.
+fn snippet_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('$', "\\$").replace('}', "\\}")
 }

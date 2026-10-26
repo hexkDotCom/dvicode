@@ -91,6 +91,32 @@ fn segment_is(seg: &str, child: &VerifNode) -> u8 {
     }
 }
 
+/// The children of `node` along `segs` reaching deepest: each segment matched by the best kind
+/// of match first (same name, format, array), trying the next sibling when a branch ends early
+/// (two `agent%0d` siblings: `agent1.drv` may be under the second); the first deepest wins.
+fn deepest<'n>(node: &'n VerifNode, segs: &[&str], budget: &mut usize) -> (usize, Vec<&'n VerifNode>) {
+    let Some(seg) = segs.first() else { return (0, Vec::new()) };
+    let mut cands: Vec<(u8, &VerifNode)> = node.children.iter().map(|c| (segment_is(seg, c), c)).filter(|(k, _)| *k > 0).collect();
+    cands.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
+    let mut best: (usize, Vec<&VerifNode>) = (0, Vec::new());
+    for (_, c) in cands {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        let (n, rest) = deepest(c, &segs[1..], budget);
+        if n + 1 > best.0 {
+            let mut path = vec![c];
+            path.extend(rest);
+            best = (n + 1, path);
+            if best.0 == segs.len() {
+                break;
+            }
+        }
+    }
+    best
+}
+
 /// The components of a path as a log writes it (`/` or `\`), without `.`, `..` and a drive.
 fn written_parts(p: &str) -> Vec<&str> {
     p.split(['/', '\\']).filter(|c| !c.is_empty() && *c != "." && *c != ".." && !(c.len() == 2 && c.ends_with(':'))).collect()
@@ -163,24 +189,12 @@ impl Analysis {
             }
             let (h, _) = self.verification_tree(Some(&t), &TreeQuery::new(100_000));
             let Some(root) = h.roots.first() else { continue };
+            let mut budget = 100_000usize;
+            let (_, path) = deepest(root, &segs[1..], &mut budget);
             let mut names = vec![keyed(&root.class, root.dup)];
-            let mut node: &VerifNode = root;
-            let mut matched = 1;
-            for seg in &segs[1..] {
-                // The best: the same name, then one the name's format makes, then an array.
-                let mut next: Option<(u8, &VerifNode)> = None;
-                for c in &node.children {
-                    let k = segment_is(seg, c);
-                    if k > next.map_or(0, |n| n.0) {
-                        next = Some((k, c));
-                    }
-                }
-                let next = next.map(|(_, c)| c);
-                let Some(c) = next else { break };
-                names.push(keyed(&c.name, c.dup));
-                node = c;
-                matched += 1;
-            }
+            names.extend(path.iter().map(|c| keyed(&c.name, c.dup)));
+            let node: &VerifNode = path.last().copied().unwrap_or(root);
+            let matched = 1 + path.len();
             if best.as_ref().is_none_or(|b| matched > b.matched) {
                 let incomplete = matched < segs.len() && node.truncated;
                 best = Some(ComponentHit { test: t, names, matched, segments: segs.len(), class: node.class.clone(), uri: node.def_uri.clone(), line: node.def_line, unknown_test: unknown_test.clone(), incomplete });

@@ -1212,9 +1212,12 @@ export class Views implements vscode.Disposable {
   /** Selects a component a log names (`dvicode/component`), in the test it was found in: the
    * view switches to that test when it shows another one. Whether the node was selected (else
    * its nearest ancestor shown is). */
-  async revealComponent(hit: { test: string; names: string[]; revision?: number }): Promise<boolean> {
+  async revealComponent(hit: { test: string; names: string[]; revision?: number }, wanted: () => boolean = () => true): Promise<boolean> {
     const v = this.verification;
     await vscode.commands.executeCommand('dvicode.verificationHierarchy.focus');
+    if (!wanted()) {
+      return false;
+    }
     // The answer's test first (all tests shown, `*`, have it as a root too); then one fetch
     // when the tree is older than the answer (left out of date while large, not fetched yet,
     // or of another test): the node selected must be the one the answer describes.
@@ -1227,11 +1230,17 @@ export class Views implements vscode.Disposable {
     if (fetch) {
       await v.refresh(hit.names);
     }
+    if (!wanted()) {
+      return false;
+    }
     if (await v.selectExact(hit.names)) {
       return true;
     }
     // Beyond the node limit: fetched again with the component in it.
     await v.refresh(hit.names);
+    if (!wanted()) {
+      return false;
+    }
     if (await v.selectExact(hit.names)) {
       return true;
     }

@@ -220,7 +220,10 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("{}:{}: build config: {}", p.file.display(), p.line + 1, p.message);
         // Sources, argument files, logs, libraries or directories the build names and that are
         // not there: what they hold was not checked.
-        if p.message.contains(" not found") || p.message.contains("matches nothing") || p.message.starts_with("No files match") || p.message.starts_with("Cannot read") {
+        // Also an option without its value, an argument file or log that includes itself, and
+        // argument files nested too deeply: the build was not read as written.
+        let structural = p.message.contains(" needs ") || p.message.contains("includes itself") || p.message.contains("reads itself") || p.message.contains("nested too deeply");
+        if structural || p.message.contains(" not found") || p.message.contains("matches nothing") || p.message.starts_with("No files match") || p.message.starts_with("Cannot read") {
             missing += 1;
         }
     }

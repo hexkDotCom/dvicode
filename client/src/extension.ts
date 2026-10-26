@@ -597,7 +597,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   drivers = new DriversView(conn);
   const logs = new LogLinks(
     conn,
-    (hit) => views.revealComponent(hit),
+    (hit, wanted) => views.revealComponent(hit, wanted),
     () => views.verification.last?.test ?? undefined,
   );
   contexts = new CompileContextReports(conn);

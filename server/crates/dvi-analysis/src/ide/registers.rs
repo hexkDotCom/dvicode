@@ -1070,6 +1070,37 @@ impl<'a> Interp<'a> {
             }
             return;
         }
+        // `off += 4`, `off++`: a local's new value (unknown when it is not a single operand).
+        if s[0].is_ident() && env.locals.contains_key(s[0].text.as_str()) {
+            let op = s.get(1).map(|x| x.text.as_str()).unwrap_or("");
+            let compound = matches!(op, "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=");
+            let step = s.len() == 2 && matches!(op, "++" | "--");
+            if compound || step {
+                let v = if step || s.len() == 3 {
+                    let mut o = s[1].clone();
+                    // `+=` is `+`, `<<=` is `<<`; `++` is `+` (with a 1).
+                    let binary = if step { &op[..1] } else { op.trim_end_matches('=') };
+                    o.text = smol_str::SmolStr::new(binary);
+                    o.kind = TokKind::Punct;
+                    let rhs = if step {
+                        let mut one = s[0].clone();
+                        one.kind = TokKind::Number;
+                        one.text = smol_str::SmolStr::new_inline("1");
+                        one
+                    } else {
+                        s[2].clone()
+                    };
+                    match (self.eval(&[s[0].clone(), o, rhs], m, env, this), env.widths.get(s[0].text.as_str())) {
+                        (Val::Num(n), Some(w)) => Val::Num(mask(n, Some(*w))),
+                        (v, _) => v,
+                    }
+                } else {
+                    Val::Unknown(s[0].text.to_string())
+                };
+                self.set_local(env, s[0].text.as_str(), v, conditional);
+                return;
+            }
+        }
         // A declaration with a value: `int base = 'h100;`, `uvm_reg_map m = create_map(...)`.
         if let Some(eq) = top_level(s, "=") {
             let lhs = &s[..eq];
@@ -1372,8 +1403,19 @@ impl<'a> Interp<'a> {
                 (Val::Num(n), Some(w)) => Val::Num(mask(n, Some(*w))),
                 (v, _) => v,
             };
-            env.locals.insert(target.key.clone(), Handle::Val(v));
+            self.set_local(env, &target.key, v, conditional);
         }
+    }
+
+    /// Sets a local's value; under a condition, the value is known only when it is the one it
+    /// had (both ways give it), else unknown.
+    fn set_local(&self, env: &mut Env, key: &str, v: Val, conditional: bool) {
+        let v = match env.locals.get(key) {
+            Some(Handle::Val(old)) if conditional && old.num().is_some() && old.num() == v.num() => v,
+            _ if conditional => Val::Unknown(key.to_string()),
+            _ => v,
+        };
+        env.locals.insert(key.to_string(), Handle::Val(v));
     }
 
     /// `rhs` makes an object: its class (when known) and the index of its argument list's `(`.
@@ -1586,14 +1628,18 @@ impl<'a> Interp<'a> {
                 // (`add_regs(.map(m), .offset(o))` adding them to a map).
                 let class = self.regfiles[f].2.or_else(|| self.declared_class(recv, m, this));
                 if let Some(bm) = class.and_then(|c| self.find_method(c, method)) {
+                    self.under += usize::from(conditional);
                     self.exec_method(bm, args, handles, This::RegFile(f), depth + 1);
+                    self.under -= usize::from(conditional);
                 }
             }
             (Obj::Block(b), _) if !matches!(method, "configure" | "lock_model" | "set_hdl_path_root" | "add_hdl_path" | "clear_hdl_path") => {
                 // One of a sub-block's own methods.
                 let class = self.m.blocks[b].class;
                 if let Some(f) = self.find_method(class, method) {
+                    self.under += usize::from(conditional);
                     self.exec_method(f, args, handles, This::Block(b), depth + 1);
+                    self.under -= usize::from(conditional);
                 }
             }
             (Obj::Field(fi), "configure") => {

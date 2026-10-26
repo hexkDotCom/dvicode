@@ -4499,3 +4499,31 @@ fn a_macro_passed_as_a_pasted_argument_is_still_a_use() {
     let longest = a.unit(a.units_for(a.project_files()[0])[0]).parsed.decls.iter().map(|d| d.name.len()).max().unwrap_or(0);
     assert!(longest <= 4096, "{longest}");
 }
+
+#[test]
+fn general_round_five_cases() {
+    // A `__LINE__ inside `"...`" in a body expands; a missing macro inside a string is reported.
+    let src = "`define LOC `\"line `__LINE__`\"\n`define S(x) `\"x`\"\nmodule m;\n  string a = `LOC;\n  string b = `S(`MISSING);\nendmodule\n";
+    let (a, _) = project("g5pp", &[("t.sv", src)]);
+    let uid = a.units_for(a.project_files()[0])[0];
+    let idx = a.unit(uid).macro_uses.iter().position(|m| m.name == "LOC").unwrap();
+    let e = a.expand_macro_use(uid, idx, usize::MAX).unwrap();
+    assert!(!e.contains('`'), "{e}");
+    assert!(codes(&a, "t.sv").contains(&"UNDEFINED_MACRO"), "{:?}", codes(&a, "t.sv"));
+    // Register offsets: `+=` and a value set under a condition.
+    let src = "virtual class uvm_reg_block; endclass\nvirtual class uvm_reg; endclass\nclass uvm_reg_map; endclass\nclass r_t extends uvm_reg;\n  function new(string name = \"r_t\"); super.new(name, 32, 0); endfunction\nendclass\nclass top_block extends uvm_reg_block;\n  rand r_t a, b, c;\n  bit en;\n  function new(string name = \"top_block\"); super.new(name); endfunction\n  virtual function void build();\n    int unsigned off = 0;\n    default_map = create_map(\"map\", 0, 4, UVM_LITTLE_ENDIAN);\n    a = r_t::type_id::create(\"a\"); a.configure(this, null, \"\");\n    default_map.add_reg(a, off, \"RW\");\n    off += 4;\n    b = r_t::type_id::create(\"b\"); b.configure(this, null, \"\");\n    default_map.add_reg(b, off, \"RW\");\n    if (en) off = 'h40;\n    c = r_t::type_id::create(\"c\"); c.configure(this, null, \"\");\n    default_map.add_reg(c, off, \"RW\");\n  endfunction\nendclass\n";
+    let (a, _) = project("g5ral", &[("ral.sv", src)]);
+    let (blocks, _) = a.register_blocks();
+    let model = a.register_model(blocks[0]);
+    let hits = |x: u128| a.registers_at(&model, x).into_iter().map(|h| h.path.join(".")).collect::<Vec<_>>();
+    assert_eq!(hits(0), ["top_block.map.a"]);
+    assert_eq!(hits(4), ["top_block.map.b"], "`off += 4`");
+    assert!(hits(0x40).is_empty(), "set under a condition: not a known address");
+    // A `local` method is not the family of a subclass's method of that name.
+    let src = "class B;\n  local function void f(); endfunction\n  function void g(); f(); endfunction\nendclass\nclass D extends B;\n  function void f(); endfunction\nendclass\n";
+    let (a, root) = project("g5local", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let edit = a.rename(f, src.rfind("f()").unwrap() as u32, "h").unwrap();
+    let Some(lsp_types::DocumentChanges::Edits(docs)) = edit.document_changes else { panic!() };
+    assert_eq!(docs[0].edits.len(), 1, "only D::f");
+}
