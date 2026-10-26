@@ -324,9 +324,14 @@ fn log_links_find_files_and_components() {
     assert_eq!(a.find_files(&f[0].to_string_lossy(), None), f, "an existing path is itself");
     assert_eq!(a.find_files("tb/demo_env_pkg.sv", None).len(), 1, "relative to the project");
     assert!(a.find_files("/nfs/elsewhere/nothing_like_it.sv", None).is_empty());
-    // A component: arrays made in a loop match any index; the configured test by default.
-    let h = a.component_at(None, "uvm_test_top.env.agents[1].drv").unwrap();
+    // A component: the names UVM gives (`$sformatf("agent%0d", i)` makes `agent1`) and an
+    // index into an array made in a loop; the configured test by default.
+    let h = a.component_at(None, "uvm_test_top.env.agent1.drv").unwrap();
     assert_eq!((h.test.as_str(), h.names.join("."), h.matched, h.segments, h.class.as_str()), ("demo_full_test", "demo_full_test.env.agents[i].drv".to_string(), 4, 4, "demo_driver"));
+    assert_eq!(a.component_at(None, "uvm_test_top.env.agents[1].drv").unwrap().matched, 4);
+    assert_eq!(a.component_at(None, "uvm_test_top.env.agentx.drv").unwrap().matched, 2, "not a name the format makes");
+    let h = a.component_at(Some("no_such_test"), "uvm_test_top.env").unwrap();
+    assert_eq!((h.unknown_test.as_deref(), h.test.as_str()), (Some("no_such_test"), "demo_full_test"), "an unknown test is said");
     assert!(h.uri.as_deref().is_some_and(|u| u.ends_with(".sv")));
     let h = a.component_at(Some("demo_smoke_test"), "uvm_test_top.env.nothing.x").unwrap();
     assert_eq!((h.test.as_str(), h.matched, h.segments), ("demo_smoke_test", 2, 4), "the deepest part that exists");

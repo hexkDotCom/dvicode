@@ -25,6 +25,10 @@ export interface ComponentHit {
   class: string;
   uri: string | null;
   line: number;
+  /** The test the log names, when the build has none of that name (another one was searched). */
+  unknown_test: string | null;
+  /** The tree was cut by its size before the rest of the path. */
+  incomplete: boolean;
 }
 
 interface OpenArgs {
@@ -50,6 +54,8 @@ export class LogLinks implements vscode.Disposable {
     private readonly conn: Conn,
     /** Selects a component in the Verification Hierarchy; whether it was shown. */
     private readonly reveal: (hit: ComponentHit) => Promise<boolean>,
+    /** The test the Verification Hierarchy shows (undefined: all tests, or none yet). */
+    private readonly viewTest: () => string | undefined,
   ) {
     this.subs.push(
       vscode.languages.registerDocumentLinkProvider(SELECTOR, { provideDocumentLinks: (d, t) => this.documentLinks(d, t) }),
@@ -138,25 +144,37 @@ export class LogLinks implements vscode.Disposable {
     await vscode.window.showTextDocument(target, { selection: new vscode.Range(pos, pos) });
   }
 
-  /** The files a log's path may name: by the engine, or without one, the path itself or
-   * relative to the log's folder. */
+  /** The files a log's path may name: the path as written when it exists here (an absolute
+   * one on the log's own file system too: a remote or WSL folder), relative to the log's folder
+   * and to each workspace folder; else what the engine finds, on its machine and by the end of
+   * the path among the project's files. */
   private async candidates(a: OpenArgs): Promise<vscode.Uri[]> {
-    const c = this.conn.client();
-    const m = this.conn.mapper();
-    const folder = a.log ? vscode.Uri.joinPath(vscode.Uri.parse(a.log), '..') : undefined;
-    if (c?.isRunning() && m) {
-      const base = folder ? m.toServer(folder) : null;
-      const r = await c.sendRequest<{ files: string[] }>('dvicode/findFile', { path: a.path, base }).catch(() => undefined);
-      if (r) {
-        return r.files.map((f) => m.toClient(f));
+    const logUri = a.log ? vscode.Uri.parse(a.log) : undefined;
+    const folder = logUri ? vscode.Uri.joinPath(logUri, '..') : undefined;
+    const drive = /^[A-Za-z]:[\\/]/.test(a.path);
+    const tries: vscode.Uri[] = [];
+    if (drive || /^[\\/]/.test(a.path)) {
+      if (logUri && !drive && logUri.scheme !== 'file') {
+        tries.push(logUri.with({ path: a.path.replace(/\\/g, '/'), query: '', fragment: '' }));
+      }
+      tries.push(vscode.Uri.file(a.path));
+    } else {
+      for (const base of [...(folder ? [folder] : []), ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri)]) {
+        tries.push(vscode.Uri.joinPath(base, a.path.replace(/\\/g, '/')));
       }
     }
-    const tries = [vscode.Uri.file(a.path), ...(folder ? [vscode.Uri.joinPath(folder, a.path)] : [])];
     for (const u of tries) {
       const s = await Promise.resolve(vscode.workspace.fs.stat(u)).catch(() => undefined);
       if (s && s.type & vscode.FileType.File) {
         return [u];
       }
+    }
+    const c = this.conn.client();
+    const m = this.conn.mapper();
+    if (c?.isRunning() && m) {
+      const base = folder ? m.toServer(folder) : null;
+      const r = await c.sendRequest<{ files: string[] }>('dvicode/findFile', { path: a.path, base }).catch(() => undefined);
+      return r ? r.files.map((f) => m.toClient(f)) : [];
     }
     return [];
   }
@@ -169,7 +187,8 @@ export class LogLinks implements vscode.Disposable {
       return;
     }
     const doc = a.log ? vscode.workspace.textDocuments.find((d) => d.uri.toString() === a.log) : undefined;
-    const test = doc ? logTest(doc.getText()) : undefined;
+    // The test the log ran; in a terminal (or a log that does not say), the view's.
+    const test = (doc ? logTest(doc.getText()) : undefined) ?? this.viewTest();
     const r = await c.sendRequest<{ hit: ComponentHit | null }>('dvicode/component', { path: a.path, test: test ?? null }).catch(() => undefined);
     const hit = r?.hit;
     if (!hit) {
@@ -182,11 +201,18 @@ export class LogLinks implements vscode.Disposable {
       const pos = new vscode.Position(hit.line, 0);
       await vscode.window.showTextDocument(m.toClient(hit.uri), { selection: new vscode.Range(pos, pos), preserveFocus: false });
     }
+    const parts = a.path.split('.');
+    const reached = parts.slice(0, hit.matched).join('.');
+    const rest = parts.slice(hit.matched).join('.');
+    const notes: string[] = [];
+    if (hit.unknown_test) {
+      notes.push(`the log ran ${hit.unknown_test}, which is not a test of this build: ${hit.test}'s hierarchy is shown`);
+    }
     if (hit.matched < hit.segments) {
-      const parts = a.path.split('.');
-      void vscode.window.showInformationMessage(
-        `DVICode: ${hit.test}'s Verification Hierarchy has ${parts.slice(0, hit.matched).join('.')} but not ${parts.slice(hit.matched).join('.')}.`,
-      );
+      notes.push(hit.incomplete ? `the hierarchy is too large to look past ${reached} for ${rest}` : `${hit.test}'s hierarchy has ${reached} but not ${rest}`);
+    }
+    if (notes.length) {
+      void vscode.window.showInformationMessage(`DVICode: ${notes.join('; ')}.`);
     }
   }
 }

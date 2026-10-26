@@ -595,7 +595,11 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   structure = new Structure(ctx, conn);
   checks = new ChecksView(ctx, conn);
   drivers = new DriversView(conn);
-  const logs = new LogLinks(conn, (hit) => views.revealComponent(hit));
+  const logs = new LogLinks(
+    conn,
+    (hit) => views.revealComponent(hit),
+    () => views.verification.last?.test ?? undefined,
+  );
   contexts = new CompileContextReports(conn);
   chooser = new ContextChooser(ctx.workspaceState, conn);
   ctx.subscriptions.push(

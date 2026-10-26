@@ -23,6 +23,71 @@ pub struct ComponentHit {
     pub class: String,
     pub uri: Option<String>,
     pub line: u32,
+    /// The test the log names, when the build has no such test (another one was searched).
+    pub unknown_test: Option<String>,
+    /// The tree was cut by its size before the rest of the path: not known to be missing.
+    pub incomplete: bool,
+}
+
+/// Whether `name` is one a `$sformatf` with `format` can make: `%d` (with a width or `0`)
+/// any digits, `%s` any text, `%h`/`%x` hex digits, `%o` and `%b` theirs, `%%` a `%`.
+fn format_makes(format: &str, name: &str) -> bool {
+    fn go(f: &[u8], n: &[u8], budget: &mut u32) -> bool {
+        *budget = budget.saturating_sub(1);
+        if *budget == 0 {
+            return false;
+        }
+        let Some((&c, rest)) = f.split_first() else { return n.is_empty() };
+        if c != b'%' {
+            return n.first() == Some(&c) && go(rest, &n[1..], budget);
+        }
+        let mut k = 0;
+        while k < rest.len() && rest[k].is_ascii_digit() {
+            k += 1;
+        }
+        let Some(&spec) = rest.get(k) else { return false };
+        let after = &rest[k + 1..];
+        let class: fn(u8) -> bool = match spec.to_ascii_lowercase() {
+            b'%' => return n.first() == Some(&b'%') && go(after, &n[1..], budget),
+            b'd' => |b| b.is_ascii_digit(),
+            b'h' | b'x' => |b| b.is_ascii_hexdigit(),
+            b'o' => |b| (b'0'..=b'7').contains(&b),
+            b'b' => |b| b == b'0' || b == b'1',
+            b's' | b'p' => |_| true,
+            _ => return false,
+        };
+        // One character at least, as many as the rest allows.
+        let mut j = 0;
+        while j < n.len() && class(n[j]) {
+            j += 1;
+            if go(after, &n[j..], budget) {
+                return true;
+            }
+        }
+        false
+    }
+    go(format.as_bytes(), name.as_bytes(), &mut 10_000)
+}
+
+/// Whether a child named `child` (made with `format`, when computed) is the one a log's path
+/// segment `seg` names: the same name; a name the format makes; or, for a child that stands for
+/// an array made in a loop (`agents[i]`, a symbolic index), `seg` with any index there.
+fn segment_is(seg: &str, child: &VerifNode) -> u8 {
+    if child.name == seg {
+        return 3;
+    }
+    if child.name_format.as_deref().is_some_and(|f| format_makes(f, seg)) {
+        return 2;
+    }
+    let (Some((stem, idx)), Some((cstem, cidx))) = (seg.split_once('['), child.name.split_once('[')) else { return 0 };
+    let symbolic = |i: &str| !i.trim_end_matches(']').split("][").all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()));
+    // The same number of indices; a concrete child index is another element.
+    let dims = |i: &str| i.matches('[').count();
+    if stem == cstem && symbolic(cidx) && dims(idx) == dims(cidx) {
+        1
+    } else {
+        0
+    }
 }
 
 /// The components of a path as a log writes it (`/` or `\`), without `.`, `..` and a drive.
@@ -83,6 +148,8 @@ impl Analysis {
         }
         let tests: Vec<String> = self.uvm_tests().iter().map(|t| self.decl(*t).name.to_string()).collect();
         let configured = self.setup.config.uvm_testname();
+        // A test the build does not have: said, and another one searched.
+        let unknown_test = test.filter(|t| !tests.iter().any(|x| x == t)).map(str::to_string);
         let wanted: Vec<String> = match (test.filter(|t| tests.iter().any(|x| x == t)), configured.filter(|c| tests.contains(c))) {
             (Some(t), _) => vec![t.to_string()],
             (None, Some(c)) => vec![c],
@@ -99,15 +166,16 @@ impl Analysis {
             let mut node: &VerifNode = root;
             let mut matched = 1;
             for seg in &segs[1..] {
-                let stem = seg.split_once('[').map(|(s, _)| s);
-                let next = node.children.iter().find(|c| c.name == *seg).or_else(|| stem.and_then(|s| node.children.iter().find(|c| c.name.strip_prefix(s).is_some_and(|r| r.starts_with('[')))));
+                // The best: the same name, then one the name's format makes, then an array.
+                let next = node.children.iter().map(|c| (segment_is(seg, c), c)).filter(|(k, _)| *k > 0).max_by_key(|(k, _)| *k).map(|(_, c)| c);
                 let Some(c) = next else { break };
                 names.push(keyed(&c.name, c.dup));
                 node = c;
                 matched += 1;
             }
             if best.as_ref().is_none_or(|b| matched > b.matched) {
-                best = Some(ComponentHit { test: t, names, matched, segments: segs.len(), class: node.class.clone(), uri: node.def_uri.clone(), line: node.def_line });
+                let incomplete = matched < segs.len() && node.truncated;
+                best = Some(ComponentHit { test: t, names, matched, segments: segs.len(), class: node.class.clone(), uri: node.def_uri.clone(), line: node.def_line, unknown_test: unknown_test.clone(), incomplete });
             }
         }
         best
@@ -116,7 +184,19 @@ impl Analysis {
 
 #[cfg(test)]
 mod tests {
-    use super::written_parts;
+    use super::{format_makes, written_parts};
+
+    #[test]
+    fn formats_make_names() {
+        assert!(format_makes("agent%0d", "agent12"));
+        assert!(format_makes("agent_%d_%s", "agent_3_rx"));
+        assert!(format_makes("r[%0d]", "r[7]"));
+        assert!(format_makes("m%h", "mff"));
+        assert!(!format_makes("agent%0d", "agent"));
+        assert!(!format_makes("agent%0d", "agentx"));
+        assert!(!format_makes("a%d", "b1"));
+        assert!(format_makes("100%%", "100%"));
+    }
 
     #[test]
     fn written_parts_drop_dots_and_drives() {

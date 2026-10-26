@@ -592,7 +592,7 @@ async function run() {
     const log = vscode.Uri.joinPath(dir, 'sim.log');
     const text = [
       'UVM_INFO @ 0: reporter [RNTST] Running test demo_full_test...',
-      'UVM_ERROR /nfs/farm/demo/tb/demo_env_pkg.sv(15) @ 100: uvm_test_top.env.agents[0].drv [DRV] boom',
+      'UVM_ERROR /nfs/farm/demo/tb/demo_env_pkg.sv(15) @ 100: uvm_test_top.env.agent0.drv [DRV] boom',
       'Warning-[TMBIN] Too many bits in Based Number',
       '/nfs/farm/demo/tb/tb_pkg.sv, 3',
       '',

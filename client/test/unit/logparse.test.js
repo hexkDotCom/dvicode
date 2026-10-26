@@ -64,6 +64,39 @@ test.describe('textLinks', () => {
   });
 });
 
+test.describe('review cases', () => {
+  test.it('reads a very long line quickly (the patterns do not scan back and forth)', () => {
+    const t0 = Date.now();
+    assert.deepEqual(show('a'.repeat(60000) + ':1'), []);
+    assert.deepEqual(lp.textLinks('x'.repeat(200000) + '.sv(3)\n', 10).length, 0, 'past the part of a line read');
+    assert.ok(Date.now() - t0 < 200, `${Date.now() - t0} ms`);
+  });
+  test.it('links a UVM report without a file in a log', () => {
+    const text = 'UVM_INFO @ 0: uvm_test_top.env [ID] hello\n';
+    assert.deepEqual(lp.textLinks(text, 10).map((l) => text.slice(l.start, l.end)), ['uvm_test_top.env']);
+  });
+  test.it('reads coloured lines, with offsets in the line as written', () => {
+    const line = 'UVM_ERROR \u001b[31m/nfs/p/a.sv\u001b[0m(12) @ 0: uvm_test_top.sb [SB] m';
+    assert.deepEqual(lp.lineLinks(line).map((l) => [l.kind, l.path]), [['file', '/nfs/p/a.sv'], ['component', 'uvm_test_top.sb']]);
+    const text = '\u001b[1mWarning-[TMBIN]\u001b[0m Too many bits\n/nfs/p/b.sv, 4\n';
+    assert.deepEqual(lp.textLinks(text, 10).map((l) => `${l.path}:${l.line}`), ['/nfs/p/b.sv:4']);
+  });
+  test.it('reads paths with spaces where the format ends them', () => {
+    assert.deepEqual(show('UVM_INFO C:\\work dir\\x.sv(12) @ 0: uvm_test_top.env [ID] hello').map((s) => s.split(' -> ')[1]), ['C:\\work dir\\x.sv:12', 'uvm_test_top.env']);
+    const text = 'Error-[SE] Syntax error\nC:\\work dir\\x.sv, 12\n';
+    assert.deepEqual(lp.textLinks(text, 10).map((l) => `${l.path}:${l.line}`), ['C:\\work dir\\x.sv:12']);
+  });
+  test.it('reads a report with its verbosity', () => {
+    assert.deepEqual(show('UVM_INFO(UVM_LOW) a.sv(1) @ 0: uvm_test_top.env [ID] hello'), ['file a.sv(1) -> a.sv:1', 'component uvm_test_top.env -> uvm_test_top.env']);
+  });
+  test.it('keeps a budget for errors and warnings when ordinary reports use theirs', () => {
+    const info = 'UVM_INFO a.sv(1) @ 0: uvm_test_top.env [I] m\n'.repeat(50);
+    const text = info + 'UVM_ERROR b.sv(2) @ 9: uvm_test_top.sb [E] bad\n';
+    const paths = lp.textLinks(text, 10).map((l) => l.path);
+    assert.ok(paths.includes('b.sv'), paths.join(' '));
+  });
+});
+
 test.describe('LinkScanner', () => {
   test.it('reads a log a part at a time as it reads it at once, across the parts', () => {
     const text = 'Warning-[TMBIN] Too many bits\n/nfs/p/a.sv, 3\nUVM_ERROR b.sv(2) @ 0: uvm_test_top.env [B] m\n  location: file\n  /nfs/p/c.sv\n  line 9\n';

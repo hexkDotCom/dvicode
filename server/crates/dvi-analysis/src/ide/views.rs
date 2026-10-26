@@ -72,6 +72,9 @@ pub struct VerifNode {
     /// Its class.
     #[serde(skip)]
     pub class_decl: Option<DeclRef>,
+    /// Its name is made by `$sformatf` with this format (`agent%0d`): the names UVM gives it.
+    #[serde(skip)]
+    pub name_format: Option<String>,
     /// The class its creation asked for (before factory overrides).
     #[serde(skip)]
     pub requested_decl: Option<DeclRef>,
@@ -382,6 +385,8 @@ struct Creation {
     name: Option<String>,
     /// The instance name when it is a variable (an argument of a factory method).
     name_arg: Option<String>,
+    /// The format of an instance name made with `$sformatf("agent%0d", i)`: `agent%0d`.
+    name_format: Option<String>,
     /// The parent: `this`, or a variable.
     parent: String,
     /// The created class, when known already (a factory method's creation).
@@ -1989,6 +1994,7 @@ impl Analysis {
             let mut node = VerifNode {
                 path_known: child.path_known,
                 class_decl: child.class,
+                name_format: m.cr.name_format.clone().filter(|_| m.cr.name.is_none()),
                 requested_decl: child.requested,
                 made_by_factory: Some(m.cr.factory),
                 lookup: child.lookup.clone(),
@@ -2648,7 +2654,7 @@ impl Analysis {
             });
             out.push((
                 lhs_start,
-                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, parent: "this".into(), class, factory: cr.factory, contxt: None, contxt_unknown: false, params: cr.params },
+                Creation { lhs: tokens_text(&t[lhs_start..i]), lhs_head: t[head].span, ty: None, ty_text: cr.ty_text.clone(), name, name_arg: None, name_format: cr.name_format.clone(), parent: "this".into(), class, factory: cr.factory, contxt: None, contxt_unknown: false, params: cr.params },
             ));
         }
         out
@@ -2860,6 +2866,11 @@ fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Opti
     let first = args.first().filter(|a| a.len() == 1);
     let name = first.filter(|a| a[0].kind == TokKind::String).map(|a| a[0].text.trim_matches('"').to_string());
     let name_arg = first.filter(|a| a[0].is_ident()).map(|a| a[0].text.to_string());
+    // `$sformatf("agent%0d", i)`: the names it makes, for a log's paths.
+    let name_format = args
+        .first()
+        .filter(|a| a.len() >= 3 && a[0].kind == TokKind::SysIdent && matches!(a[0].text.as_str(), "$sformatf" | "$psprintf") && a[1].is_punct("(") && a[2].kind == TokKind::String)
+        .map(|a| a[2].text.trim_matches('"').to_string());
     let (contxt, contxt_unknown) = match args.get(2) {
         None => (None, false),
         Some([s]) if s.kind == TokKind::String => {
@@ -2868,7 +2879,7 @@ fn creation_call(t: &[Token], mut k: usize, lhs: String, lhs_head: Span) -> Opti
         }
         Some(_) => (None, true),
     };
-    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, parent, class: None, factory, contxt, contxt_unknown, params })
+    Some(Creation { lhs, lhs_head, ty, ty_text, name, name_arg, name_format, parent, class: None, factory, contxt, contxt_unknown, params })
 }
 
 /// Calls of the object's own methods in a method body (`f(...)`, `this.f(...)`) and of its base
