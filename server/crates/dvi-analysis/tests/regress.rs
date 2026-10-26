@@ -4387,3 +4387,17 @@ fn review_round_three_registers_and_drivers() {
     let (reads, _, _) = access_lines(&a, f, word_at(src, "C c", "c"), false);
     assert!(reads.iter().any(|l| l.contains("argument")), "the handle is read: {reads:?}");
 }
+
+#[test]
+fn macro_actuals_are_expanded_before_pasting_and_quoted_when_they_hold_backtick_quotes() {
+    // GitHub issue 13: both compile with VCS.
+    let src = "`define TC        demo\n`define CFG(tc)   tc``_cfg\n`define LOG(MSG)  $display(\"%s\", MSG)\n\nclass `TC; endclass\nclass `CFG(direct); endclass\nclass `CFG(`TC); endclass\n\nmodule m;\n  class demo2; function void run(); endfunction endclass\n  initial begin\n    `LOG(\"`TC run(): Finished!\");\n    `LOG(`\"`TC run(): Finished!`\");\n  end\nendmodule\n";
+    let (a, _) = project("issue13", &[("t.sv", src)]);
+    assert!(codes(&a, "t.sv").is_empty(), "{:?}", codes(&a, "t.sv"));
+    let u = a.unit(a.units_for(a.project_files()[0])[0]);
+    assert!(u.parsed.decls.iter().any(|d| d.name == "demo_cfg"), "`CFG(`TC) declares demo_cfg");
+    let uid = u.id;
+    let idx = u.macro_uses.iter().rposition(|m| m.name == "LOG").unwrap();
+    let e = a.expand_macro_use(uid, idx, usize::MAX).unwrap();
+    assert!(e.contains("\"demo run(): Finished!\""), "{e}");
+}

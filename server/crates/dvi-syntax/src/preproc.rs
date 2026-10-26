@@ -1198,6 +1198,26 @@ const COMPILER_DIRECTIVES: &[&str] = &[
 /// Bytes of a `` `"...`" `` string built at most.
 const MAX_STRINGIFIED: usize = 1 << 20;
 
+/// An actual with `` `"...`" `` strings in it: each made into the string a body's would be
+/// (macros inside expanded); the other tokens as they are.
+fn quote_actual(a: Vec<Token>, site: Span, limit: usize, called: &dyn Fn(&[Token]) -> Option<SmolStr>, expand: &dyn Fn(&[Token]) -> Option<Vec<Token>>) -> Vec<Token> {
+    let mut out = Vec::with_capacity(a.len());
+    let mut k = 0;
+    while k < a.len() {
+        if a[k].kind == TokKind::MacroQuote {
+            if let Some(end) = (k + 1..a.len()).find(|&j| a[j].kind == TokKind::MacroQuote) {
+                let quoted = MacroDef { name: SmolStr::default(), params: None, body: a[k..=end].to_vec(), name_span: site, body_text: String::new() };
+                out.extend(substitute(&quoted, &[], site, a[k].flags & flags::WS_BEFORE, limit, called, expand));
+                k = end + 1;
+                continue;
+            }
+        }
+        out.push(a[k].clone());
+        k += 1;
+    }
+    out
+}
+
 fn substitute(
     def: &MacroDef,
     args: &[Vec<Token>],
@@ -1321,6 +1341,26 @@ fn substitute(
             }
             TokKind::Ident | TokKind::Keyword if param_index(&t.text).is_some() => {
                 let mut a = actual(param_index(&t.text).unwrap());
+                // `` `"...`" `` written in the actual, not the body: a string once substituted, as
+                // simulators make it (`` `LOG(`"`TC run`") ``).
+                if a.iter().any(|x| x.kind == TokKind::MacroQuote) {
+                    a = quote_actual(a, site, limit, called, expand);
+                }
+                // Pasted to its neighbour: a macro in the actual is expanded first, as simulators
+                // do (`` `CFG(`TC) `` with the body `` tc``_cfg `` is `demo_cfg`, not `` `TC_cfg ``).
+                let pasted = def.body.get(i + 1).is_some_and(|x| x.kind == TokKind::MacroPaste) || i.checked_sub(1).is_some_and(|p| def.body[p].kind == TokKind::MacroPaste);
+                if pasted && a.iter().any(|x| x.kind == TokKind::Directive && !COMPILER_DIRECTIVES.contains(&x.text.as_str())) {
+                    if let Some(e) = expand(&a) {
+                        a = e
+                            .into_iter()
+                            .map(|mut x| {
+                                x.flags |= flags::FROM_MACRO;
+                                x.flags &= !(flags::NL_BEFORE | flags::CONT_BEFORE);
+                                x
+                            })
+                            .collect();
+                    }
+                }
                 if let Some(f) = a.first_mut() {
                     let keep = flags::WS_BEFORE | flags::CONT_BEFORE;
                     f.flags = (f.flags & !keep) | (t.flags & keep);
