@@ -337,7 +337,7 @@ test.describe('design hierarchy parameters', () => {
 });
 
 test.describe('choosing the compile context', () => {
-  const item = (n, root, chosen = false, invocation = 0) => ({ root: `file:///p/${root}`, invocation_key: 'v1-k', nth: 0, index: null, ordinal: n, invocation, mode: 'default', root_role: 'top', includer: { uri: `file:///p/${root}`, line: 1 }, chosen });
+  const item = (n, root, chosen = false, invocation = 0) => ({ root: `file:///p/${root}`, invocation_key: 'v1-k', nth: 0, before: null, ordinal: n, invocation, mode: 'default', root_role: 'top', includer: { uri: `file:///p/${root}`, line: 1 }, chosen });
   const name = (u) => u.replace('file:///p/', '');
   const list = { total: 450, matched: 450, offset: 0, state: 'chosen', chosen: item(300, 'r300.sv', true), default: item(1, 'r1.sv'), unavailable: null, items: [item(1, 'r1.sv'), item(2, 'r2.sv', false, 4)] };
   test.it('shows the context in use in the status bar, nothing for one', () => {
@@ -354,7 +354,7 @@ test.describe('choosing the compile context', () => {
       ['Default (first in build order)', '$(check) 300. r300.sv', '1. r1.sv', '2. r2.sv', '$(ellipsis) 448 more: show the next 2'],
     );
     assert.equal(rows[0].choice, null);
-    assert.deepEqual(rows[1].choice, { root: 'file:///p/r300.sv', invocation_key: 'v1-k', nth: 0, index: null });
+    assert.deepEqual(rows[1].choice, { root: 'file:///p/r300.sv', invocation_key: 'v1-k', nth: 0, before: null });
     assert.equal(rows[3].description, 'invocation 5 · top file');
     assert.equal(rows[2].detail, 'r1.sv — included at r1.sv:2');
     assert.equal(rows[4].more, 2);
@@ -371,9 +371,11 @@ test.describe('choosing the compile context', () => {
       ],
     };
     const md = vm.compileContextMarkdown(c, (u) => `<${u}>`, name);
-    assert.match(md, /use the context chosen with \*\*Compile This File As\.\.\.\*\*/);
+    assert.match(md, /use the context chosen with the command \*DVICode: Compile This File As\.\.\.\*/);
     assert.match(md, /2\. From \[b\.sv\]\(<file:\/\/\/p\/b\.sv>\) .* — \*\*chosen\*\*/);
     const gone = vm.compileContextMarkdown({ ...c, choice: 'unavailable', unavailable: ['file:///p/b.sv', 'v1-x', 0] }, (u) => `<${u}>`, name);
     assert.match(gone, /The context chosen for this file \(from \[b\.sv\]\(<file:\/\/\/p\/b\.sv>\)\) is not compiled in this build/);
+    const none = vm.compileContextMarkdown({ ...c, contexts: [], contexts_total: 0, choice: 'unavailable', unavailable: ['file:///p/b.sv', 'v1-x', 0] }, (u) => `<${u}>`, name);
+    assert.match(none, /A compile context was chosen for this file \(from \[b\.sv\].*it is kept[\s\S]*\*\*Not compiled\.\*\*/);
   });
 });

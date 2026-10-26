@@ -21,7 +21,7 @@ interface Kept {
   root: string;
   invocation_key: string;
   nth: number;
-  index?: number | null;
+  before?: string | null;
   at: number;
 }
 
@@ -34,6 +34,8 @@ export class ContextChooser implements vscode.Disposable {
   private statusSeq = 0;
   /** The open picker asks again for what it shows (the analysis changed). */
   private reloadPicker: (() => void) | undefined;
+  /** Closes the open picker (its engine stopped). */
+  private closePicker: (() => void) | undefined;
 
   constructor(
     private readonly state: vscode.Memento,
@@ -83,6 +85,7 @@ export class ContextChooser implements vscode.Disposable {
     this.engine = undefined;
     this.statusSeq++;
     this.item.hide();
+    this.closePicker?.();
   }
 
   /** The analysis changed, or the active editor: the status item and an open picker ask again. */
@@ -137,17 +140,20 @@ export class ContextChooser implements vscode.Disposable {
   private entries(kept: Kept[], m: Mapper): { uri: string; context: ContextRef }[] {
     return kept.map((k) => ({
       uri: m.toServer(vscode.Uri.parse(k.file)),
-      context: { root: m.toServer(vscode.Uri.parse(k.root)), invocation_key: k.invocation_key, nth: k.nth, index: k.index ?? null },
+      context: { root: m.toServer(vscode.Uri.parse(k.root)), invocation_key: k.invocation_key, nth: k.nth, before: k.before ?? null },
     }));
   }
 
-  /** Keeps the choice of `file`; the oldest go past the limit, from the engine too. */
-  private async keep(c: LanguageClient, file: vscode.Uri, choice: ContextRef | null, m: Mapper): Promise<void> {
+  /**
+   * Keeps the choice of `file` in place of those of `aliases` (other spellings of it, as the
+   * engine names them); the oldest go past the limit, from the engine too.
+   */
+  private async keep(c: LanguageClient, file: vscode.Uri, choice: ContextRef | null, aliases: string[], m: Mapper): Promise<void> {
     const key = file.toString();
-    let v = this.kept().filter((k) => k.file !== key);
+    let v = this.kept().filter((k) => k.file !== key && !aliases.includes(m.toServer(vscode.Uri.parse(k.file))));
     let evicted = false;
     if (choice) {
-      v.push({ file: key, root: m.toClient(choice.root).toString(), invocation_key: choice.invocation_key, nth: choice.nth, index: choice.index ?? null, at: Date.now() });
+      v.push({ file: key, root: m.toClient(choice.root).toString(), invocation_key: choice.invocation_key, nth: choice.nth, before: choice.before ?? null, at: Date.now() });
       v.sort((a, b) => a.at - b.at);
       evicted = v.length > MAX_KEPT;
       v = v.slice(Math.max(0, v.length - MAX_KEPT));
@@ -194,13 +200,18 @@ export class ContextChooser implements vscode.Disposable {
       }
       choice = picked;
     }
+    if (this.client() !== c) {
+      return false;
+    }
+    let aliases: string[] = [];
     try {
-      await c.sendRequest('dvicode/setCompileContext', { textDocument: { uri: m.toServer(source) }, context: choice });
+      const r = await c.sendRequest<{ aliases?: string[] }>('dvicode/setCompileContext', { textDocument: { uri: m.toServer(source) }, context: choice });
+      aliases = r?.aliases ?? [];
     } catch (e) {
       void vscode.window.showWarningMessage(`DVICode: ${e instanceof Error ? e.message : String(e)}. Choose again.`);
       return false;
     }
-    await this.keep(c, source, choice, m);
+    await this.keep(c, source, choice, aliases, m);
     // The views, the report and the status item ask again on the revision it makes.
     return true;
   }
@@ -266,6 +277,7 @@ export class ContextChooser implements vscode.Disposable {
         }
       };
       this.reloadPicker = () => void load(qp.value.trim(), 0);
+      this.closePicker = () => qp.hide();
       qp.onDidChangeValue((v) => {
         if (timer) {
           clearTimeout(timer);
@@ -286,6 +298,7 @@ export class ContextChooser implements vscode.Disposable {
         }
         seq++;
         this.reloadPicker = undefined;
+        this.closePicker = undefined;
         qp.dispose();
         finish(undefined);
       });

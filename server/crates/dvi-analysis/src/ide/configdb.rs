@@ -290,15 +290,17 @@ impl Analysis {
         let mut idx = ConfigIndex::default();
         let mut files: FxHashSet<FileId> = FxHashSet::default();
         for u in self.units.iter().flatten() {
-            if u.kind == UnitKind::Builtin || u.library {
+            if u.kind == UnitKind::Builtin {
                 continue;
             }
             if self.cancelled() {
                 break;
             }
             for &f in &u.files {
-                // Each file once, in the unit it is read in (the chosen one, if any).
-                if self.chosen_unit(f).is_some_and(|c| c != u.id) || !files.insert(f) {
+                // Each file once, in the unit it is read in: the chosen one, if any (a library
+                // unit only then), else the first that is not a library unit.
+                let chosen = self.chosen_unit(f);
+                if chosen.is_some_and(|c| c != u.id) || u.library && chosen.is_none() || !files.insert(f) {
                     continue;
                 }
                 if !self.file_text(f).is_some_and(|t| t.contains("uvm_config_db")) {

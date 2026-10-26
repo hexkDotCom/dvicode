@@ -2087,11 +2087,22 @@ fn choosing_a_compile_context_republishes_the_header_and_refreshes_tokens() {
     assert_ne!(before["data"], after["data"], "the inactive branch moved");
     let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h }, "limit": 0 }));
     assert_eq!((list["state"].as_str(), list["chosen"]["ordinal"].as_u64()), (Some("chosen"), Some(2)), "{list}");
-    // A context that does not compile the file is refused; the default comes back with none.
+    // A context that does not compile the file is refused, and the choice made stays (also
+    // when asked through another spelling of the file, where case does not matter).
     let mut bad = context_ref(b);
     bad["nth"] = json!(7);
-    let e = c.request("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": bad }));
+    let other = if cfg!(windows) { uri(&root, "H.SVH") } else { h.clone() };
+    let e = c.request("dvicode/setCompileContext", json!({ "textDocument": { "uri": other }, "context": bad }));
     assert!(e.error.is_some(), "{e:?}");
+    c.request_ok("dvicode/rebuild", Value::Null);
+    c.wait_note("dvicode/status", |_| true);
+    let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h }, "limit": 0 }));
+    assert_eq!(list["state"], "chosen", "{list}");
+    if cfg!(windows) {
+        // Chosen through the other spelling: it replaces the first, and says so.
+        let r = c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": other }, "context": context_ref(b) }));
+        assert_eq!(r["aliases"], json!([h.to_string()]), "{r}");
+    }
     c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": null }));
     c.wait_problems(&h, |p| !has_undeclared(p));
     // Chosen again, then a build in which b.sv's invocation has another define: the choice no
@@ -2130,7 +2141,9 @@ endmodule
     gate.wait_entered(1);
     c.wait_note("dvicode/revision", |_| true);
     let list = c.request_ok("dvicode/compileContexts", json!({ "textDocument": { "uri": h } }));
-    // An edit's update held while the context is chosen twice.
+    // Chosen once before the edit: the update starts from that copy.
+    c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(&list["items"][0]) }));
+    // An edit's update held while the context is chosen twice more.
     gate.close();
     c.change(&a, 2, &a_text.replace("module ma;", "module ma;
   int extra;"));
@@ -2153,22 +2166,26 @@ fn a_token_request_from_before_a_choice_does_not_answer_after_it() {
     let root = two_contexts("ctxtokens");
     let gate = Arc::new(Gate::default());
     let _opener = Opener(gate.clone());
-    let (mut c, _) = Client::start_with(&root, Value::Null, gate.request_hooks("textDocument/semanticTokens/full"));
+    // Delta requests are held; full ones are not.
+    let (mut c, _) = Client::start_with(&root, Value::Null, gate.request_hooks("textDocument/semanticTokens/full/delta"));
     let h = uri(&root, "h.svh");
     c.open(&h, 1, CTX_HEADER);
     let doc = json!({ "textDocument": { "uri": h } });
-    let default_tokens = c.request_ok("textDocument/semanticTokens/full", doc.clone());
-    // Held with the snapshot of the default context while the choice is made.
+    c.wait_note("dvicode/revision", |_| true);
+    // Held with the snapshot of the default context, nothing cached yet, while the context is
+    // chosen and the new snapshot's tokens are cached.
     gate.close();
-    let old = c.send_request("textDocument/semanticTokens/full", doc.clone());
-    gate.wait_entered(2);
+    let old = c.send_request("textDocument/semanticTokens/full/delta", json!({ "textDocument": { "uri": h }, "previousResultId": "none" }));
+    gate.wait_entered(1);
     let list = c.request_ok("dvicode/compileContexts", doc.clone());
     c.request_ok("dvicode/setCompileContext", json!({ "textDocument": { "uri": h }, "context": context_ref(&list["items"][1]) }));
+    let chosen = c.request_ok("textDocument/semanticTokens/full", doc.clone());
     gate.open();
     let old = c.reply(&old, WAIT).unwrap().result.unwrap();
-    assert_eq!(old["data"], default_tokens["data"], "answered from its own snapshot");
-    let now = c.request_ok("textDocument/semanticTokens/full", doc.clone());
-    assert_ne!(now["data"], default_tokens["data"], "not the older answer kept for the new snapshot");
+    assert_ne!(old["data"], chosen["data"], "answered from its own snapshot");
+    // The older answer, finished last, did not replace the newer one in the cache.
+    let again = c.request_ok("textDocument/semanticTokens/full", doc.clone());
+    assert_eq!((&again["resultId"], &again["data"]), (&chosen["resultId"], &chosen["data"]));
     c.shutdown();
 }
 

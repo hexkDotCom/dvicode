@@ -205,11 +205,12 @@ impl Analysis {
                 out.skip_matches.push((i, p.clone()));
             }
         }
-        let Some(file) = file else { return out };
-        let units = self.units_for(file);
-        out.contexts_total = units.len();
-        let chosen = self.chosen_unit(file);
-        out.choice = match (chosen, self.selection.unavailable.get(&file)) {
+        let chosen = file.and_then(|f| self.chosen_unit(f));
+        let lost = match file {
+            Some(f) => self.selection.unavailable.get(&f),
+            None => self.selection.unknown.get(path),
+        };
+        out.choice = match (chosen, lost) {
             (Some(_), _) => "chosen",
             (None, Some(k)) => {
                 out.unavailable = Some((url_of(&k.root).to_string(), k.invocation.clone(), k.nth));
@@ -217,6 +218,9 @@ impl Analysis {
             }
             (None, None) => "default",
         };
+        let Some(file) = file else { return out };
+        let units = self.units_for(file);
+        out.contexts_total = units.len();
         for (i, &uid) in units.iter().enumerate() {
             if i < MAX_CONTEXTS {
                 out.contexts.push(self.context_of(uid, file, i + 1, chosen));

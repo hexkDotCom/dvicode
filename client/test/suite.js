@@ -530,24 +530,36 @@ async function run() {
       const h = await open('ctx_e2e/h.svh');
       await vscode.window.showTextDocument(h);
       const undeclared = () => vscode.languages.getDiagnostics(h.uri).some((d) => d.message.includes('missing_nox'));
-      const list = await waitFor('two contexts', async () => {
-        const l = await client.sendRequest('dvicode/compileContexts', { textDocument: { uri: api.toServer(h.uri) } });
-        return l.total === 2 ? l : undefined;
-      }, 30000);
-      // By default the first by path, x.sv: X is not defined there.
-      await waitFor('the problem of x.sv\'s context', async () => undeclared(), 30000);
+      // The open header's own unit (the default), then x.sv's and y.sv's by path.
+      let last;
+      const list = await waitFor('three contexts', async () => {
+        last = await client.sendRequest('dvicode/compileContexts', { textDocument: { uri: api.toServer(h.uri) } });
+        return last.total === 3 ? last : undefined;
+      }, 30000).catch((e) => {
+        throw new Error(`${e.message}: ${JSON.stringify(last)}`);
+      });
+      // X is not defined in the default context.
+      await waitFor('the problem of the default context', async () => undeclared(), 30000);
       const y = list.items.find((i) => i.root.endsWith('/y.sv'));
       if (!y) throw new Error(JSON.stringify(list));
-      const choice = { root: y.root, invocation_key: y.invocation_key, nth: y.nth, index: y.index };
+      const choice = { root: y.root, invocation_key: y.invocation_key, nth: y.nth, before: y.before };
       if (!(await vscode.commands.executeCommand('dvicode.selectCompileContext', h.uri, choice))) throw new Error('not chosen');
       await waitFor('no problem in y.sv\'s context', async () => !undeclared(), 30000);
       const report = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'dvicode-context', path: '/h.svh (compile context).md', query: h.uri.toString() }));
       const md = report.getText();
       if (!/use the context chosen/.test(md) || !/y\.sv.*\*\*chosen\*\*/.test(md)) throw new Error(`report: ${md.slice(0, 800)}`);
+      // A new engine gets the choice from the extension.
+      await vscode.commands.executeCommand('dvicode.restartServer');
+      const again = await api.ready();
+      await waitFor('the choice in the new engine', async () => {
+        const l = await again.sendRequest('dvicode/compileContexts', { textDocument: { uri: api.toServer(h.uri) }, limit: 0 });
+        return l.state === 'chosen' && l.chosen && l.chosen.root.endsWith('/y.sv');
+      }, 60000);
+      await waitFor('no problem in y.sv\'s context after the restart', async () => !undeclared(), 30000);
       // Back to the default.
       await vscode.commands.executeCommand('dvicode.selectCompileContext', h.uri, null);
       await waitFor('the problem again', async () => undeclared(), 30000);
-      return `${list.total} contexts; chosen ${y.root.split('/').pop()}, then the default`;
+      return `${list.total} contexts; chosen ${y.root.split('/').pop()} (${y.ordinal} of ${list.total}), then the default`;
     } finally {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await vscode.workspace.fs.delete(dir, { recursive: true, useTrash: false });

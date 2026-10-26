@@ -117,6 +117,10 @@ impl Analysis {
         let t = toks.get(k).filter(|t| t.span.start <= off && t.kind == TokKind::Ident && t.text.starts_with("set_") && t.text.contains("_override"))?;
         let at = t.span;
         let uid = self.context_unit(file)?;
+        // Code the chosen context removes is not read (with no choice, as before).
+        if self.chosen_unit(file).is_some() && self.unit(uid).inactive.iter().any(|s| s.file == file && s.start <= off && off < s.end) {
+            return None;
+        }
         // The method around it.
         let mut d = Some(self.scope_at(uid, file, off));
         let u = self.unit(uid);

@@ -876,6 +876,9 @@ export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string
   if (c.skip_matches.length) {
     out.push('');
   }
+  if (c.choice === 'unavailable' && c.unavailable && !c.contexts.length) {
+    out.push(`A compile context was chosen for this file (from ${file(c.unavailable[0])}); it is kept, and applies again when the build compiles the file that way.`, '');
+  }
   if (!c.known || !c.contexts.length) {
     out.push(
       c.known
@@ -888,11 +891,11 @@ export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string
   out.push(`## Compiled in ${c.contexts_total} context${c.contexts_total === 1 ? '' : 's'}`, '');
   const chosen = c.choice === 'chosen';
   if (chosen) {
-    out.push('The editor features (problems, hover, highlighting) use the context chosen with **Compile This File As...** (marked).', '');
+    out.push('The editor features (problems, hover, highlighting) use the context chosen with the command *DVICode: Compile This File As...* (marked).', '');
   } else if (c.choice === 'unavailable' && c.unavailable) {
-    out.push(`The context chosen for this file (from ${file(c.unavailable[0])}) is not compiled in this build: the editor features use the first one. **Compile This File As...** chooses again.`, '');
+    out.push(`The context chosen for this file (from ${file(c.unavailable[0])}) is not compiled in this build: the editor features use the first one. The command *DVICode: Compile This File As...* chooses again.`, '');
   } else if (c.contexts_total > 1) {
-    out.push('The editor features (problems, hover, highlighting) use the first one; **Compile This File As...** chooses another.', '');
+    out.push('The editor features (problems, hover, highlighting) use the first one; the command *DVICode: Compile This File As...* (in the editor context menu) chooses another.', '');
   }
   const entry = (x: CompileContextInfo['contexts'][number], n: number): string => {
     const order = x.order ? `, ${x.order[0]} of ${x.order[1]} top files` : '';
@@ -1007,7 +1010,7 @@ export interface ContextItemInfo {
   root: string;
   invocation_key: string;
   nth: number;
-  index?: number | null;
+  before?: string | null;
   ordinal: number;
   invocation: number;
   mode: string;
@@ -1034,11 +1037,11 @@ export interface ContextRef {
   root: string;
   invocation_key: string;
   nth: number;
-  index?: number | null;
+  before?: string | null;
 }
 
 export function contextRef(i: ContextItemInfo): ContextRef {
-  return { root: i.root, invocation_key: i.invocation_key, nth: i.nth, index: i.index ?? null };
+  return { root: i.root, invocation_key: i.invocation_key, nth: i.nth, before: i.before ?? null };
 }
 
 /** The status bar text and tooltip of the active file's contexts; none for one or none. */

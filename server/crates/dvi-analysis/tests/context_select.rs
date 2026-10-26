@@ -275,27 +275,47 @@ fn the_fingerprint_is_stable() {
 const GOLDEN: &str = "v1-434fccc030a8a427";
 
 #[test]
-fn alike_sections_are_named_by_their_place_too() {
-    let root = write_project("alike", "a.sv\n", &[("h.svh", HEADER), ("a.sv", "module ma;\n`include \"h.svh\"\nendmodule\n"), ("z.sv", "module z; endmodule\n")]);
+fn alike_sections_are_named_by_what_is_compiled_before() {
+    let root = write_project("alike", "a.sv
+", &[("h.svh", HEADER), ("a.sv", "module ma;
+`include \"h.svh\"
+endmodule
+"), ("z.sv", "module z; endmodule
+")]);
     let a = build(&root);
     let h = file(&a, &root, "h.svh");
     let single = a.context_key(a.units_for(h)[0]);
-    assert_eq!((single.nth, single.index), (0, None));
+    assert_eq!((single.nth, single.before.is_none()), (0, true));
     // Two sections that preprocess alike compile a.sv: the old key, made when there was one,
     // could mean either.
-    let a2 = rebuild(&root, "a.sv\n+dvicode_init+default\na.sv\n");
+    let a2 = rebuild(&root, "a.sv
++dvicode_init+default
+a.sv
+");
     let h2 = file(&a2, &root, "h.svh");
     assert!(a2.resolve_context(h2, &single).is_none());
     let second = a2.context_key(a2.units_for(h2)[1]);
-    assert_eq!((second.nth, second.index), (1, Some(1)));
-    // A section put before them (the second is now invocation 2): not the other one by mistake.
-    let a3 = rebuild(&root, "+dvicode_init+zero\nz.sv\n+dvicode_init+default\na.sv\n+dvicode_init+default\na.sv\n");
+    assert_eq!((second.nth, second.before.is_some()), (1, true), "nothing before either: told apart by order only");
+    // A section put before them: the second of the two still.
+    let a3 = rebuild(&root, "+dvicode_init+zero
+z.sv
++dvicode_init+default
+a.sv
++dvicode_init+default
+a.sv
+");
     let h3 = file(&a3, &root, "h.svh");
-    assert!(a3.resolve_context(h3, &second).is_none());
-    // The same build: found.
-    let a4 = rebuild(&root, "a.sv\n+dvicode_init+default\na.sv\n");
+    assert_eq!(a3.resolve_context(h3, &second).map(|u| a3.unit(u).invocation), Some(2));
+    // A file before a.sv in the first: each has its own `before`, the second keeps nth 0.
+    let a4 = rebuild(&root, "z.sv
+a.sv
++dvicode_init+default
+a.sv
+");
     let h4 = file(&a4, &root, "h.svh");
-    assert_eq!(a4.resolve_context(h4, &second), Some(a4.units_for(h4)[1]));
+    let k = a4.context_key(a4.units_for(h4)[1]);
+    assert_eq!(k.nth, 0);
+    assert_ne!(k.before, a4.context_key(a4.units_for(h4)[0]).before);
 }
 
 #[test]
@@ -337,4 +357,99 @@ fn a_chosen_unit_that_is_gone_is_never_used() {
     assert_eq!(b.editor_units(h).len(), 1);
     assert!(b.hover(h, off(HEADER, "only_nox;") + 2).is_some());
     let _ = b.file_diagnostics(h);
+}
+
+#[test]
+fn alike_sections_swapped_keep_their_compilation() {
+    // root.sv after pre_x.sv (which defines X) in one section, after pre_y.sv in another: the
+    // sections preprocess alike, the compilations of h.svh differ.
+    let root = write_project(
+        "swap",
+        "pre_x.sv\nroot.sv\n+dvicode_init+default\npre_y.sv\nroot.sv\n",
+        &[("h.svh", HEADER), ("pre_x.sv", "`define X\n"), ("pre_y.sv", "module y; endmodule\n"), ("root.sv", "module mr;\n`include \"h.svh\"\nendmodule\n")],
+    );
+    let a = build(&root);
+    let h = file(&a, &root, "h.svh");
+    let after_y = a.units_for(h)[1];
+    assert_eq!(a.unit(after_y).invocation, 1);
+    let key = a.context_key(after_y);
+    assert!(key.before.is_some());
+    let a2 = rebuild(&root, "pre_y.sv\nroot.sv\n+dvicode_init+default\npre_x.sv\nroot.sv\n");
+    let h2 = file(&a2, &root, "h.svh");
+    let u = a2.resolve_context(h2, &key).expect("found where it went");
+    assert_eq!(a2.unit(u).invocation, 0, "the section after pre_y.sv, now first");
+    let mut c = ContextChoices::default();
+    c.0.insert(root.join("h.svh"), key);
+    let mut a2 = a2;
+    a2.select_contexts(&c, 1);
+    assert!(undeclared(&a2, h2).iter().any(|m| m.contains("missing_nox")), "X is not defined there");
+}
+
+#[test]
+fn symbols_and_folding_follow_the_chosen_context() {
+    let (mut a, root) = two_roots("symbols");
+    let h = file(&a, &root, "h.svh");
+    let names = |a: &Analysis| -> Vec<String> {
+        fn walk(s: &[lsp_types::DocumentSymbol], out: &mut Vec<String>) {
+            for x in s {
+                out.push(x.name.clone());
+                walk(x.children.as_deref().unwrap_or(&[]), out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&a.document_symbols(h), &mut out);
+        out
+    };
+    let folds = |a: &Analysis| a.folding_ranges(h).iter().map(|r| (r.start_line, r.end_line)).collect::<Vec<_>>();
+    let (n0, f0) = (names(&a), folds(&a));
+    choose(&mut a, &root, "h.svh", "b.sv");
+    let (n1, f1) = (names(&a), folds(&a));
+    assert!(n0.iter().any(|n| n == "only_x") && !n0.iter().any(|n| n == "only_nox"), "{n0:?}");
+    assert!(n1.iter().any(|n| n == "only_nox") && !n1.iter().any(|n| n == "only_x"), "{n1:?}");
+    assert_ne!(f0, f1, "the removed region folds");
+}
+
+#[test]
+fn a_library_context_can_be_chosen_for_config_db_calls() {
+    let hdr = "`ifdef X\n  initial uvm_config_db#(int)::set(null, \"*\", \"fa\", 1);\n`else\n  initial uvm_config_db#(int)::set(null, \"*\", \"fb\", 1);\n`endif\n";
+    let root = write_project(
+        "libctx",
+        "top.sv\n-v lib.sv\n",
+        &[("h.svh", hdr), ("top.sv", "module top;\n`include \"h.svh\"\n  libmod u();\nendmodule\n"), ("lib.sv", "`define X\nmodule libmod;\n`include \"h.svh\"\nendmodule\n")],
+    );
+    let mut a = build(&root);
+    let h = file(&a, &root, "h.svh");
+    assert_eq!(a.context_list(h, None, 0, 10).items.iter().map(|i| i.root_role).collect::<Vec<_>>(), ["top", "library"]);
+    let fields = |a: &Analysis| -> Vec<String> { a.config_index().calls.iter().filter(|c| c.method.file == h).filter_map(|c| c.field.clone()).collect() };
+    assert_eq!(fields(&a), ["fb"]);
+    choose(&mut a, &root, "h.svh", "lib.sv");
+    assert_eq!(fields(&a), ["fa"]);
+}
+
+#[test]
+fn skipped_code_notices_are_those_of_the_chosen_context() {
+    // No build file: pa.sv defines X before the header's class, pb.sv does not; user.sv uses a
+    // member that pa's copy declares only without X.
+    let hdr = "class hc;\n`ifdef X\n  int only_x;\n`else\n  int only_nox;\n`endif\nendclass\n";
+    let root = write_project(
+        "skipped",
+        "",
+        &[
+            ("h.svh", hdr),
+            // Macros flow from file to file here: X is not left for pb.sv.
+            ("pa.sv", "`define X\npackage pa;\n`include \"h.svh\"\nendpackage\n`undef X\n"),
+            ("pb.sv", "package pb;\n`include \"h.svh\"\nendpackage\n"),
+            ("user.sv", "module u;\n  pa::hc o;\n  initial o.only_nox = 1;\nendmodule\n"),
+        ],
+    );
+    let _ = std::fs::remove_file(root.join(".dvicode/default.build"));
+    let cfg = dvi_project::load_auto(&root, &FxHashMap::default());
+    let mut a = Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default())));
+    let h = file(&a, &root, "h.svh");
+    let notices = |a: &Analysis| a.file_diagnostics(h).into_iter().filter(|d| d.code == "SKIPPED_CODE").count();
+    assert_eq!(a.unit(a.context_unit(h).unwrap()).root, file(&a, &root, "pa.sv"));
+    assert_eq!(notices(&a), 1, "{:?}", a.file_diagnostics(h));
+    // In pb.sv's context that code is compiled: no notice on it.
+    choose(&mut a, &root, "h.svh", "pb.sv");
+    assert_eq!(notices(&a), 0, "{:?}", a.file_diagnostics(h));
 }

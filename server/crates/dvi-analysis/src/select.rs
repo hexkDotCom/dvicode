@@ -21,17 +21,19 @@ use std::sync::Arc;
 /// (a fingerprint of mode, defines, undefines and include directories, not its position), and
 /// which of the units with both it is (in invocation order; 0 but for identical sections).
 ///
-/// Sections that preprocess alike can still differ by the files before the root (the macros
-/// they leave): when several compile the root, `nth` alone could name another one after they
-/// are reordered, so the key then also holds the invocation index, and a choice made while
-/// the root had one such unit does not apply while it has several.
+/// Sections that preprocess alike can still differ by the files compiled before the root (the
+/// macros they leave): when several compile the root, the key also holds a fingerprint of
+/// those files (`before`), and `nth` counts among the units with the same one, so reordering
+/// or inserting sections never makes it name another compilation. A choice made while the
+/// root had one such unit does not apply while it has several.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ContextKey {
     pub root: PathBuf,
     pub invocation: String,
     pub nth: u32,
-    /// The invocation index, when other units of the root preprocess alike.
-    pub index: Option<u32>,
+    /// The fingerprint of the files compiled before the root, when other units of the root
+    /// preprocess alike.
+    pub before: Option<String>,
 }
 
 /// The contexts chosen, by file path (a file the engine has not read yet keeps its choice).
@@ -57,31 +59,41 @@ pub struct Selection {
 /// value); the number of undefines and their names; the number of include directories and
 /// their paths as the build gives them (UTF-8).
 pub fn invocation_key(inv: &dvi_project::Invocation) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut put = |b: &[u8]| {
-        for x in (b.len() as u64).to_le_bytes().iter().chain(b) {
-            h ^= *x as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    put(inv.mode.as_bytes());
-    put(&(inv.defines.len() as u64).to_le_bytes());
+    let mut h = Fnv::new();
+    h.put(inv.mode.as_bytes());
+    h.put(&(inv.defines.len() as u64).to_le_bytes());
     for (n, v) in &inv.defines {
-        put(n.as_bytes());
+        h.put(n.as_bytes());
         match v {
-            Some(v) => put(format!("={v}").as_bytes()),
-            None => put(b""),
+            Some(v) => h.put(format!("={v}").as_bytes()),
+            None => h.put(b""),
         }
     }
-    put(&(inv.undefines.len() as u64).to_le_bytes());
+    h.put(&(inv.undefines.len() as u64).to_le_bytes());
     for n in &inv.undefines {
-        put(n.as_bytes());
+        h.put(n.as_bytes());
     }
-    put(&(inv.incdirs.len() as u64).to_le_bytes());
+    h.put(&(inv.incdirs.len() as u64).to_le_bytes());
     for d in &inv.incdirs {
-        put(d.to_string_lossy().as_bytes());
+        h.put(d.to_string_lossy().as_bytes());
     }
-    format!("v1-{h:016x}")
+    format!("v1-{:016x}", h.0)
+}
+
+/// FNV-1a over items written as their length (64-bit little-endian) and their bytes.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Fnv {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn put(&mut self, b: &[u8]) {
+        for x in (b.len() as u64).to_le_bytes().iter().chain(b) {
+            self.0 ^= *x as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
 }
 
 impl ProjectSetup {
@@ -98,7 +110,7 @@ pub struct ContextItem {
     pub root: String,
     pub invocation_key: String,
     pub nth: u32,
-    pub index: Option<u32>,
+    pub before: Option<String>,
     /// Its 1-based position in the default order (the first is the default).
     pub ordinal: usize,
     /// Zero-based invocation index, for display (it changes when sections are added).
@@ -172,23 +184,50 @@ impl Analysis {
         same
     }
 
+    /// The fingerprint of what a unit is compiled after: the invocation's top files before its
+    /// root, or the library units before it in that invocation.
+    fn before_key(&self, u: &Unit) -> String {
+        let mut h = Fnv::new();
+        let inv = self.setup.config.invocations.get(u.invocation);
+        if u.library {
+            h.put(b"library");
+            for id in self.library_order.iter().take_while(|id| **id != u.id) {
+                if let Some(o) = self.try_unit(*id).filter(|o| o.invocation == u.invocation) {
+                    h.put(self.path(o.root).to_string_lossy().as_bytes());
+                }
+            }
+        } else if let (UnitKind::Project, Some(inv)) = (u.kind, inv) {
+            h.put(b"top");
+            let root = self.path(u.root);
+            for f in inv.files.iter().take_while(|f| **f != root) {
+                h.put(f.to_string_lossy().as_bytes());
+            }
+        } else {
+            h.put(b"adhoc");
+        }
+        format!("{:016x}", h.0)
+    }
+
     /// The durable key of a unit's context.
     pub fn context_key(&self, uid: UnitId) -> ContextKey {
         let u = self.unit(uid);
         let key = self.setup.invocation_key(u.invocation);
         let same = self.alike(u.root, key);
-        let nth = same.iter().position(|o| o.id == uid).unwrap_or(0) as u32;
-        let index = (same.len() > 1).then_some(u.invocation as u32);
-        ContextKey { root: self.path(u.root), invocation: key.to_string(), nth, index }
+        if same.len() <= 1 {
+            return ContextKey { root: self.path(u.root), invocation: key.to_string(), nth: 0, before: None };
+        }
+        let before = self.before_key(u);
+        let nth = same.iter().filter(|o| self.before_key(o) == before).position(|o| o.id == uid).unwrap_or(0) as u32;
+        ContextKey { root: self.path(u.root), invocation: key.to_string(), nth, before: Some(before) }
     }
 
     /// The unit of this snapshot that `key` names, when it compiles `file`.
     pub fn resolve_context(&self, file: FileId, key: &ContextKey) -> Option<UnitId> {
         let root = self.vfs.lookup(&key.root)?;
         let same = self.alike(root, &key.invocation);
-        // Several alike: only the one at the same place, if it still is; none named before.
-        let u = match key.index {
-            Some(i) => same.get(key.nth as usize).filter(|u| u.invocation as u32 == i)?,
+        // Several alike: the one after the same files; none named while there was one.
+        let u = match &key.before {
+            Some(b) => *same.iter().filter(|o| self.before_key(o) == *b).nth(key.nth as usize)?,
             None if same.len() == 1 && key.nth == 0 => same[0],
             None => return None,
         };
@@ -249,7 +288,7 @@ impl Analysis {
             root: url_of(&key.root).to_string(),
             invocation_key: key.invocation,
             nth: key.nth,
-            index: key.index,
+            before: key.before,
             ordinal,
             invocation: u.invocation,
             mode: self.setup.config.invocations.get(u.invocation).map(|i| i.mode.clone()).unwrap_or_default(),

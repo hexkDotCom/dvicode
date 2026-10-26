@@ -303,9 +303,9 @@ struct Server {
     /// the number of their changes: each snapshot installed resolves them (`Server::install`).
     contexts: ContextChoices,
     context_generation: u64,
-    /// The snapshot the one in use was copied from with other choices only (same units): an
-    /// update started from it is still good.
-    reselected_from: Option<Arc<Analysis>>,
+    /// The snapshots the one in use was copied from with other choices only (the same units),
+    /// since the last one with other units: an update started from any of them is still good.
+    reselected_from: Vec<Arc<Analysis>>,
     hints_refreshed: Option<Instant>,
     open: FxHashMap<FileId, Url>,
     pending: FxHashSet<FileId>,
@@ -474,7 +474,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         token_refresh,
         contexts: ContextChoices::default(),
         context_generation: 0,
-        reselected_from: None,
+        reselected_from: Vec::new(),
         hints_refreshed: None,
         open: FxHashMap::default(),
         pending: FxHashSet::default(),
@@ -1056,7 +1056,7 @@ impl Server {
         let mut recompiled = Vec::new();
         let base = self.built.as_ref().unwrap_or(&self.analysis);
         // A copy of its base with other compile contexts chosen has the same units.
-        let same_base = Arc::ptr_eq(&job.base, base) || self.built.is_none() && self.reselected_from.as_ref().is_some_and(|r| Arc::ptr_eq(&job.base, r));
+        let same_base = Arc::ptr_eq(&job.base, base) || self.built.is_none() && self.reselected_from.iter().any(|r| Arc::ptr_eq(&job.base, r));
         let mut reselected = Vec::new();
         match done {
             Some(_) if !same_base => {
@@ -1523,7 +1523,7 @@ impl Server {
         self.revision += 1;
         a.revision = self.revision;
         self.analysis = Arc::new(a);
-        self.reselected_from = None;
+        self.reselected_from.clear();
         self.watch_build_inputs();
         // An edit elsewhere (a function's arguments renamed) changes other files' hints.
         self.refresh_hints(false);
@@ -1535,9 +1535,10 @@ impl Server {
     /// they change asked for again.
     fn reselect(&mut self) {
         self.context_generation += 1;
-        let from = self.reselected_from.clone().unwrap_or_else(|| self.analysis.clone());
+        let mut from = std::mem::take(&mut self.reselected_from);
+        from.push(self.analysis.clone());
         let mut files = self.install((*self.analysis).clone());
-        self.reselected_from = Some(from);
+        self.reselected_from = from;
         self.notify("dvicode/revision", &json!({ "revision": self.revision }));
         if files.is_empty() {
             return;
@@ -1551,29 +1552,32 @@ impl Server {
     }
 
     /// `dvicode/setCompileContext`: chooses (or with no context, forgets) the compile context
-    /// of a file. The context must be one of the file's in the snapshot in use.
+    /// of a file. The context must be one of the file's in the snapshot in use. The answer
+    /// names the other spellings of the file (case, links) whose choices it replaced.
     fn set_context(&mut self, p: SetContextParams) -> Result<Value, String> {
         let path = path_of(&p.text_document.uri).ok_or("not a file")?;
-        // Another spelling of the same file (case, links) loses its choice to this one.
-        if let Some(f) = self.analysis.file_of_url(&p.text_document.uri) {
-            let vfs = &self.analysis.vfs;
-            self.contexts.0.retain(|q, _| *q == path || vfs.lookup(q) != Some(f));
-        }
-        match p.context {
-            None => {
-                self.contexts.0.remove(&path);
-            }
+        let file = self.analysis.file_of_url(&p.text_document.uri);
+        let key = match &p.context {
+            None => None,
             Some(c) => {
                 let key = c.key().ok_or("the root is not a file")?;
-                let file = self.analysis.file_of_url(&p.text_document.uri);
                 if file.and_then(|f| self.analysis.resolve_context(f, &key)).is_none() {
                     return Err("that context does not compile this file in the current build".into());
                 }
-                self.contexts.0.insert(path, key);
+                Some(key)
             }
+        };
+        let vfs = &self.analysis.vfs;
+        let aliases: Vec<PathBuf> = self.contexts.0.keys().filter(|q| **q != path && file.is_some() && vfs.lookup(q) == file).cloned().collect();
+        for q in &aliases {
+            self.contexts.0.remove(q);
         }
+        match key {
+            None => self.contexts.0.remove(&path),
+            Some(key) => self.contexts.0.insert(path, key),
+        };
         self.reselect();
-        Ok(json!({ "revision": self.revision }))
+        Ok(json!({ "revision": self.revision, "aliases": aliases.iter().map(|q| url_of(q).to_string()).collect::<Vec<_>>() }))
     }
 
     /// Asks the client to request inlay hints again (at most once a second unless `now`).
@@ -2305,12 +2309,12 @@ struct ContextRef {
     invocation_key: String,
     nth: u32,
     #[serde(default)]
-    index: Option<u32>,
+    before: Option<String>,
 }
 
 impl ContextRef {
     fn key(&self) -> Option<ContextKey> {
-        Some(ContextKey { root: path_of(&self.root)?, invocation: self.invocation_key.clone(), nth: self.nth, index: self.index })
+        Some(ContextKey { root: path_of(&self.root)?, invocation: self.invocation_key.clone(), nth: self.nth, before: self.before.clone() })
     }
 }
 
