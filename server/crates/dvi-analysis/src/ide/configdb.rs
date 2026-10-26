@@ -529,7 +529,10 @@ impl Analysis {
         let mut placed = false;
         let (mut g_any, mut s_any) = (false, false);
         let mut precedence = None;
-        for (test, map) in &places.tests {
+        'tests: for (test, map) in &places.tests {
+            if scope == Status::Match {
+                break;
+            }
             let names = |c: &ConfigCall| -> Option<Vec<(String, bool)>> {
                 match c.ctx {
                     Ctx::Root => Some(vec![(String::new(), true)]),
@@ -568,7 +571,8 @@ impl Analysis {
                         }
                         continue;
                     }
-                    if glob_match(&pattern, &lookup) {
+                    let literal = !pattern.contains(['*', '?', '+', '[']);
+                    if if literal { pattern == lookup } else { glob_match(&pattern, &lookup) } {
                         if scope != Status::Match {
                             scope = Status::Match;
                             scope_text = format!("{lookup} matches {pattern}{}", if places.tests.len() > 1 { format!(" (test {test})") } else { String::new() });
@@ -576,6 +580,8 @@ impl Analysis {
                                 precedence = Some(1000u32.saturating_sub(if sp.is_empty() { 0 } else { sp.split('.').count() as u32 }));
                             }
                         }
+                        // The first match decides the text and the precedence.
+                        break 'tests;
                     } else if scope == Status::Mismatch && scope_text.is_empty() {
                         scope_text = format!("{lookup} does not match {pattern}");
                     }

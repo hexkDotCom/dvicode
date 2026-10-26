@@ -168,8 +168,9 @@ impl Analysis {
 
     /// The chosen unit of `file`, when it still compiles it in this snapshot.
     pub fn chosen_unit(&self, file: FileId) -> Option<UnitId> {
+        // Resolved for this snapshot when it was installed (`select_contexts`).
         let &u = self.selection.chosen.get(&file)?;
-        (self.try_unit(u).is_some() && self.units_of_file(file).contains(&u)).then_some(u)
+        self.try_unit(u).is_some().then_some(u)
     }
 
     /// The units with root `root` whose invocation has fingerprint `key`, in invocation order.

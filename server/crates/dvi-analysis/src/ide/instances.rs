@@ -615,7 +615,9 @@ impl Analysis {
             })
             .collect();
         let toks = self.file_tokens(file)?;
-        let file_before: Vec<&Token> = toks.iter().take_while(|t| t.span.end <= line_start).collect();
+        // The search goes back 20,000 tokens at most: a window of the file before the line.
+        let k = toks.partition_point(|t| t.span.end <= line_start);
+        let file_before: Vec<&Token> = toks[k.saturating_sub(40_000)..k].iter().collect();
         let all: Vec<&Token> = file_before.iter().copied().chain(line_toks.iter()).collect();
         let mut depth = 0i32;
         let mut open = None;

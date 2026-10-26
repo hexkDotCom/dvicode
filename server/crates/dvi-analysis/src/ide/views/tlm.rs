@@ -159,7 +159,7 @@ pub(super) fn connect_calls(t: &[Token]) -> Vec<(usize, ConnectCall)> {
             }
             s
         };
-        let src = t[from..i - 1].to_vec();
+        let src = t[from.max((i - 1).saturating_sub(32))..i - 1].to_vec();
         // The argument: up to the matching `)`.
         let open = i + 1;
         let close = skip_group(t, open).saturating_sub(1);

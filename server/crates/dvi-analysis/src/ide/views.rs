@@ -917,11 +917,11 @@ impl Analysis {
             }
             // Children per including file.
             let mut by_parent: FxHashMap<FileId, Vec<FileId>> = FxHashMap::default();
+            let mut seen_children: FxHashSet<(FileId, FileId)> = FxHashSet::default();
             for inc in &u.includes {
                 if let Some(r) = inc.resolved {
-                    let v = by_parent.entry(inc.span.file).or_default();
-                    if !v.contains(&r) {
-                        v.push(r);
+                    if seen_children.insert((inc.span.file, r)) {
+                        by_parent.entry(inc.span.file).or_default().push(r);
                     }
                 }
             }

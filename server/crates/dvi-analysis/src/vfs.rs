@@ -346,6 +346,11 @@ impl Vfs {
     /// Forgets the text, tokens and line index kept of each file that is not open and that
     /// `keep` does not want (no longer compiled): read again if they are asked for. The file
     /// keeps its id.
+    /// Forgets the text, tokens and line index kept of one file (not open): read again if asked.
+    pub fn forget_text(&self, id: FileId) {
+        self.forget_texts_except(|f| f != id);
+    }
+
     pub fn forget_texts_except(&self, keep: impl Fn(FileId) -> bool) {
         let mut g = self.inner.write().unwrap();
         for (i, e) in g.entries.iter_mut().enumerate() {

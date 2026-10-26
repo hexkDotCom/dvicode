@@ -313,7 +313,7 @@ impl Analysis {
             tested: bool,
             undefined: bool,
             /// Each distinct state (definition place and text, or none) and its index in `seen`.
-            keys: FxHashMap<Option<(FileId, u32, String)>, usize>,
+            keys: FxHashMap<Option<(FileId, u32, usize)>, usize>,
             seen: Vec<(Option<Arc<MacroDef>>, usize)>,
             cut: usize,
         }
@@ -321,7 +321,13 @@ impl Analysis {
         let mut states: FxHashMap<String, Acc> = FxHashMap::default();
         let uses = u.macro_uses.iter().filter(|m| m.name_span.file == file).map(|m| (&m.name, &m.def, 0u8, m.name_span.start));
         let names = u.macro_names.iter().filter(|m| m.span.file == file).map(|m| (&m.name, &m.def, 1u8, m.span.start));
+        let mut counted: FxHashSet<&str> = FxHashSet::default();
         for (name, def, what, at) in uses.chain(names) {
+            // Past the names listed, only counted.
+            if order.len() >= MAX_MACROS && !states.contains_key(name.as_str()) {
+                counted.insert(name.as_str());
+                continue;
+            }
             let e = states.entry(name.to_string()).or_insert_with(|| {
                 order.push(name.to_string());
                 Acc::default()
@@ -331,7 +337,8 @@ impl Analysis {
                 _ if undefs.contains(&at) => e.undefined = true,
                 _ => e.tested = true,
             }
-            let key = def.as_ref().map(|d| (d.name_span.file, d.name_span.start, d.body_text.clone()));
+            // One definition (a shared table entry) is one state; not its text copied.
+            let key = def.as_ref().map(|d| (d.name_span.file, d.name_span.start, Arc::as_ptr(d) as usize));
             let next = e.keys.len();
             let k = *e.keys.entry(key).or_insert(next);
             if k < e.seen.len() {
@@ -342,7 +349,7 @@ impl Analysis {
                 e.cut += 1;
             }
         }
-        d.macros_total = order.len();
+        d.macros_total = order.len() + counted.len();
         for name in order.into_iter().take(MAX_MACROS) {
             let a = states.remove(&name).unwrap_or_default();
             let seen = a.seen.into_iter().map(|(def, count)| self.seen_def(def.as_deref(), count)).collect();
@@ -559,7 +566,7 @@ impl Analysis {
         let li = self.file_lines(file)?;
         let (line, _) = li.position(&text, off);
         let (a, b) = (li.offset(&text, line, 0) as usize, li.offset(&text, line + 1, 0) as usize);
-        if !text.get(a..b.max(a)).is_some_and(|l| l.contains('`')) {
+        if !text.get(a..b.max(a)).is_some_and(|l| l.contains("include")) {
             return None;
         }
         for uid in self.editor_units(file) {

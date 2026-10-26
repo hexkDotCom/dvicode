@@ -2062,12 +2062,26 @@ impl<'t> Parser<'t> {
                 }
             }
         }
-        if selects.is_empty() {
+        // The selects without a `with`, merged: inside any of them, a name is a use.
+        let mut spans: Vec<(u32, u32)> = selects.iter().filter(|x| !x.2).map(|x| (x.0, x.1)).collect();
+        if spans.is_empty() {
             return;
+        }
+        spans.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(spans.len());
+        for (s, e) in spans {
+            match merged.last_mut() {
+                Some(last) if s < last.1 => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
         }
         for r in &mut self.u.refs[first_ref..] {
             let (at, macro_made) = (r.segs[0].span.start, r.segs[0].from_macro);
-            if r.segs.len() == 1 && !macro_made && r.kind == RefKind::Loose && selects.iter().any(|(s, e, with)| *s < at && at < *e && !*with) {
+            if r.segs.len() != 1 || macro_made || r.kind != RefKind::Loose {
+                continue;
+            }
+            let k = merged.partition_point(|x| x.0 < at);
+            if k > 0 && at < merged[k - 1].1 {
                 r.kind = RefKind::Expr;
             }
         }

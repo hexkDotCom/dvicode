@@ -1099,11 +1099,16 @@ export class Views implements vscode.Disposable {
     }
   }
 
-  /** After a full build: every view again. */
+  /** After a full build: every visible view again; a hidden one when it is shown. */
   refreshAll(): void {
     this.located = undefined;
     for (const v of this.all) {
       v.forget();
+      if (!v.view?.visible) {
+        v.stale = true;
+        v.present();
+        continue;
+      }
       void v.refresh().then(() => {
         if (v.sync) {
           this.schedule(0);

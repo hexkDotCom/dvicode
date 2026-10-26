@@ -1412,6 +1412,10 @@ impl Server {
                     tr.by_file.remove(&id);
                     tr.open.remove(&id);
                     drop(tr);
+                    // Not compiled by the build: its text is not kept once it is closed.
+                    if !self.analysis.units_of_file(id).iter().any(|u| self.analysis.try_unit(*u).is_some_and(|u| u.kind == dvi_analysis::UnitKind::Project)) {
+                        self.vfs.forget_text(id);
+                    }
                     // Back to the disk contents, also in the units of other open files that
                     // include it.
                     self.note_change(id);
@@ -1508,6 +1512,8 @@ impl Server {
     /// Makes `a` the analysis requests use, with the next revision and the compile contexts
     /// chosen resolved in it. The files whose chosen unit is not the one `a` had.
     fn install(&mut self, mut a: Analysis) -> Vec<FileId> {
+        // A register model of another revision is never used again.
+        *self.register_models.lock().unwrap() = None;
         let mut changed = a.select_contexts(&self.contexts, self.context_generation);
         // Against the snapshot in use too (a full build starts with no choice of its own).
         let (old, new) = (&self.analysis.selection.chosen, &a.selection.chosen);
@@ -2397,7 +2403,10 @@ struct AccessesParams {
 /// it was built for this revision.
 fn register_model(a: &Analysis, top: Option<&str>, models: &RegisterModels) -> Option<(String, Arc<dvi_analysis::ide::registers::Model>)> {
     let (chosen, ..) = a.register_top(top.filter(|t| !t.is_empty()));
-    let chosen = chosen?;
+    let Some(chosen) = chosen else {
+        *models.lock().unwrap() = None;
+        return None;
+    };
     let name = a.decl(chosen).name.to_string();
     if let Some((rev, n, m)) = models.lock().unwrap().as_ref() {
         if *rev == a.revision && *n == name {
@@ -2405,7 +2414,11 @@ fn register_model(a: &Analysis, top: Option<&str>, models: &RegisterModels) -> O
         }
     }
     let m = Arc::new(a.register_model(chosen));
-    *models.lock().unwrap() = Some((a.revision, name.clone(), m.clone()));
+    // Not over a newer revision's model (an older request finishing late).
+    let mut kept = models.lock().unwrap();
+    if kept.as_ref().is_none_or(|(rev, _, _)| *rev <= a.revision) {
+        *kept = Some((a.revision, name.clone(), m.clone()));
+    }
     Some((name, m))
 }
 

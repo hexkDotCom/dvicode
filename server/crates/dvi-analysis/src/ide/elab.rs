@@ -726,6 +726,13 @@ impl<'a> Eval<'a> {
                     let first = defs.first();
                     let same = first.is_some_and(|f| f.params.is_none() && defs.iter().all(|d| d.params.is_none() && d.body.len() == f.body.len() && d.body.iter().zip(&f.body).all(|(p, q)| p.text == q.text && p.kind == q.kind)));
                     if let (true, Some(f)) = (same, first) {
+                        // Too long to be an expression evaluated here: the parse refuses it.
+                        if out.len() + todo.len() + f.body.len() > MAX_EXPR_TOKENS {
+                            out.push(x);
+                            out.extend(todo.drain(..).rev().take(MAX_EXPR_TOKENS));
+                            out.truncate(MAX_EXPR_TOKENS + 1);
+                            return out;
+                        }
                         n += 1;
                         // A simple name of the body is the invocation's: it takes the invocation's
                         // place, where it is looked up (a name in a chain keeps the definition's).
@@ -3096,10 +3103,10 @@ impl Analysis {
         if !param && !signal {
             return None;
         }
-        let mut el = Elab::new(self);
+        let mut ev = Eval::new(self);
         if signal {
             // Only when the width depends on something: a name in its type's range.
-            let t = el.ev.type_tokens(r)?;
+            let t = ev.type_tokens(r)?;
             let named = t.iter().skip_while(|t| !t.is_punct("[")).any(|t| t.kind == TokKind::Ident || t.kind == TokKind::Directive);
             if !named {
                 return None;
@@ -3123,7 +3130,7 @@ impl Analysis {
                     None => "unresolved".to_string(),
                 }
             } else {
-                match el.ev.signal_width(r, &i.frame) {
+                match ev.signal_width(r, &i.frame) {
                     Ok(w) => format!("{w} bits"),
                     Err(e) => format!("{} ({})", state_name(e.state), e.why),
                 }

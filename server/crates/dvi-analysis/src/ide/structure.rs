@@ -73,6 +73,15 @@ struct Build<'a> {
     incomplete: bool,
     /// Tokens of the files read, once.
     toks: FxHashMap<FileId, Option<Arc<Vec<Token>>>>,
+    /// Each unit's macro calls by place, made when first asked.
+    calls: std::cell::RefCell<FxHashMap<UnitId, Arc<CallIndex>>>,
+}
+
+/// A unit's macro calls sorted by (file, start): (file, start, end, index in `macro_uses`),
+/// and the length of the longest (no call before `start - longest` can contain `start`).
+struct CallIndex {
+    spans: Vec<(FileId, u32, u32, usize)>,
+    longest: u32,
 }
 
 impl Analysis {
@@ -82,7 +91,7 @@ impl Analysis {
         let units = self.units_of_file(file);
         let Some(unit) = self.context_unit(file) else { return StructTree { status: "none", ..Default::default() } };
         let u = self.unit(unit);
-                let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false, toks: FxHashMap::default() };
+                let mut b = Build { a: self, unit, file, left: max_nodes, incomplete: false, toks: FxHashMap::default(), calls: Default::default() };
         let mut nodes = Vec::new();
         // Includes, defines and top-level declarations, in source order.
         let mut items: Vec<(u32, StructNode)> = Vec::new();
@@ -578,9 +587,34 @@ impl Build<'_> {
     }
 
     /// The macro whose call made a declaration at `at` (in `unit`).
+    /// The innermost macro call around `at` (by the unit's call index, not a scan of them all).
     fn macro_at(&self, unit: UnitId, at: Span) -> Option<String> {
         let u = self.a.unit(unit);
-        u.macro_uses.iter().filter(|m| m.call_span.file == at.file && m.call_span.start <= at.start && at.start <= m.call_span.end).min_by_key(|m| m.call_span.end - m.call_span.start).map(|m| m.name.to_string())
+        let idx = self
+            .calls
+            .borrow_mut()
+            .entry(unit)
+            .or_insert_with(|| {
+                let mut spans: Vec<(FileId, u32, u32, usize)> = u.macro_uses.iter().enumerate().map(|(i, m)| (m.call_span.file, m.call_span.start, m.call_span.end, i)).collect();
+                spans.sort_unstable();
+                let longest = spans.iter().map(|x| x.2.saturating_sub(x.1)).max().unwrap_or(0);
+                Arc::new(CallIndex { spans, longest })
+            })
+            .clone();
+        let k = idx.spans.partition_point(|x| (x.0, x.1) <= (at.file, at.start));
+        let mut best: Option<(u32, usize)> = None;
+        for x in idx.spans[..k].iter().rev() {
+            if x.0 != at.file || x.1.saturating_add(idx.longest) < at.start {
+                break;
+            }
+            if at.start <= x.2 {
+                let len = x.2 - x.1;
+                if best.is_none_or(|b| len <= b.0) {
+                    best = Some((len, x.3));
+                }
+            }
+        }
+        best.map(|(_, i)| u.macro_uses[i].name.to_string())
     }
 }
 
