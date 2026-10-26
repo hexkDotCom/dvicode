@@ -5,10 +5,12 @@
 
 import * as vscode from 'vscode';
 import { Conn } from './views';
-import { LogLink, lineLinks, logTest, textLinks } from './logparse';
+import { LinkScanner, LogLink, lineLinks, logTest } from './logparse';
 
 /** Links listed per document at most. */
 const MAX_LINKS = 20_000;
+/** Lines read between two yields of the extension host's thread. */
+const LINES_PER_STEP = 20_000;
 /** Log files: the editor's Log language, `*.log`, and Questa's `transcript`. */
 const SELECTOR: vscode.DocumentSelector = [{ language: 'log' }, { pattern: '**/*.log' }, { pattern: '**/transcript' }];
 /** Languages that have links of their own. */
@@ -50,7 +52,7 @@ export class LogLinks implements vscode.Disposable {
     private readonly reveal: (hit: ComponentHit) => Promise<boolean>,
   ) {
     this.subs.push(
-      vscode.languages.registerDocumentLinkProvider(SELECTOR, { provideDocumentLinks: (d) => this.documentLinks(d) }),
+      vscode.languages.registerDocumentLinkProvider(SELECTOR, { provideDocumentLinks: (d, t) => this.documentLinks(d, t) }),
       vscode.window.registerTerminalLinkProvider({
         provideTerminalLinks: (c) => this.terminalLinks(c.line),
         handleTerminalLink: (l: LogTerminalLink) => this.follow(l.link, undefined),
@@ -70,12 +72,26 @@ export class LogLinks implements vscode.Disposable {
     return vscode.workspace.getConfiguration('dvicode').get<boolean>('logs.links', true);
   }
 
-  private documentLinks(doc: vscode.TextDocument): vscode.DocumentLink[] {
+  /** A log's links, read a part at a time (the editor asks again each time the log grows, and
+   * cancels the reading under way); none for a log above `dvicode.logs.maxFileSizeMB`. */
+  private async documentLinks(doc: vscode.TextDocument, token: vscode.CancellationToken): Promise<vscode.DocumentLink[]> {
     if (!this.enabled() || NOT_LOGS.has(doc.languageId)) {
       return [];
     }
+    const maxMB = vscode.workspace.getConfiguration('dvicode').get<number>('logs.maxFileSizeMB', 50);
+    const text = doc.getText();
+    if (text.length > maxMB * 1_000_000) {
+      return [];
+    }
+    const scan = new LinkScanner(text, MAX_LINKS);
+    while (!scan.step(LINES_PER_STEP)) {
+      await new Promise((r) => setImmediate(r));
+      if (token.isCancellationRequested) {
+        return [];
+      }
+    }
     const log = doc.uri.toString();
-    return textLinks(doc.getText(), MAX_LINKS).map((l) => {
+    return scan.links.map((l) => {
       const range = new vscode.Range(doc.positionAt(l.start), doc.positionAt(l.end));
       const [command, args, tooltip] = l.kind === 'file' ? ['dvicode.logs.open', { path: l.path, line: l.line, log }, `Open ${l.path}:${l.line}`] : ['dvicode.logs.component', { path: l.path, log }, `Show ${l.path} in the Verification Hierarchy`];
       const link = new vscode.DocumentLink(range, vscode.Uri.parse(`command:${command}?${encodeURIComponent(JSON.stringify([args]))}`));

@@ -77,7 +77,8 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
   `file(line)` and `file:line` forms), even when the log was written on another machine: the
   project file whose path ends the same way is opened. A UVM component path
   (`uvm_test_top.env.sb`) selects the component in the Verification Hierarchy, in the test the
-  log ran, and opens its class. Setting `dvicode.logs.links`.
+  log ran, and opens its class. On by default; `dvicode.logs.links` turns it off and
+  `dvicode.logs.maxFileSizeMB` (50) skips larger logs.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".
 - **Uses your existing file lists** (`-f` files), or configures the project by itself.

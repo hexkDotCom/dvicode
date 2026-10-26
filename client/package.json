@@ -388,6 +388,12 @@
           "default": true,
           "markdownDescription": "Make source locations and UVM component paths in simulator logs (`*.log`, `transcript`) and terminals clickable. A path from another machine opens the project file whose path ends the same way; a component path (`uvm_test_top.env.sb`) is selected in the Verification Hierarchy."
         },
+        "dvicode.logs.maxFileSizeMB": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "markdownDescription": "Log files larger than this (in megabytes) get no links (0: none get links). A log is read a part at a time without holding up the editor (a 50 MB log takes about 50 ms), but each change of a log being written reads it again. Terminal output is not limited."
+        },
         "dvicode.inlayHints.ports": {
           "type": "boolean",
           "default": true,

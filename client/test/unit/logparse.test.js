@@ -64,6 +64,17 @@ test.describe('textLinks', () => {
   });
 });
 
+test.describe('LinkScanner', () => {
+  test.it('reads a log a part at a time as it reads it at once, across the parts', () => {
+    const text = 'Warning-[TMBIN] Too many bits\n/nfs/p/a.sv, 3\nUVM_ERROR b.sv(2) @ 0: uvm_test_top.env [B] m\n  location: file\n  /nfs/p/c.sv\n  line 9\n';
+    const s = new lp.LinkScanner(text, 100);
+    let steps = 0;
+    while (!s.step(1)) steps++;
+    assert.deepEqual(s.links.map((l) => `${l.path}:${l.line ?? ''}`), lp.textLinks(text, 100).map((l) => `${l.path}:${l.line ?? ''}`));
+    assert.ok(steps >= 6, `${steps} steps`);
+  });
+});
+
 test.describe('logTest', () => {
   test.it('reads the test UVM ran', () => {
     assert.equal(lp.logTest('UVM_INFO @ 0: reporter [RNTST] Running test demo_full_test...\n'), 'demo_full_test');

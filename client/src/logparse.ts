@@ -81,54 +81,81 @@ export function lineLinks(line: string): LogLink[] {
   return out.sort((a, b) => a.start - b.start);
 }
 
-/** The links of a whole log (offsets in `text`), with the forms that span lines (a VCS
- * message's location on the line after its header; an elaboration task's file and line on
- * their own lines); at most `max`. */
-export function textLinks(text: string, max: number): LogLink[] {
-  const out: LogLink[] = [];
-  let pos = 0;
+/** A line that may hold a link: every form has a line number after `(`, `:`, `,` or `"`, or is
+ * an elaboration task's `location:`. Most lines of a long log have none and skip the rest. */
+const MAYBE = /[(:,"|]\s*\d|location:/;
+
+/** Reads the links of a whole log (offsets in `text`) a part at a time, so that a long log is
+ * read without holding the thread: with the forms that span lines (a VCS message's location on
+ * the line after its header; an elaboration task's file and line on their own lines); at most
+ * `max`. */
+export class LinkScanner {
+  readonly links: LogLink[] = [];
+  private pos = 0;
   // The line before was a VCS message header / `location: file` (and the path after it).
-  let header = false;
-  let taskFile = false;
-  let taskPath: { start: number; end: number; path: string } | undefined;
-  while (pos <= text.length && out.length < max) {
-    let nl = text.indexOf('\n', pos);
-    if (nl < 0) {
-      nl = text.length;
-    }
-    const raw = text.slice(pos, nl);
-    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
-    const found = lineLinks(line);
-    if (header && !found.length) {
-      const m = VCS_LOCATION.exec(line);
-      // A path: no white space in it, and a file name with an extension (not prose).
-      if (m && !/\s/.test(m[1]) && /\.[A-Za-z0-9]{1,6}$/.test(m[1])) {
-        const start = line.indexOf(m[1]);
-        found.push({ kind: 'file', start, end: line.trimEnd().length, path: m[1], line: Number(m[2]) });
-      }
-    }
-    if (taskPath) {
-      const m = TASK_LINE.exec(line);
-      if (m) {
-        out.push({ kind: 'file', start: taskPath.start, end: taskPath.end, path: taskPath.path, line: Number(m[1]) });
-      }
-      taskPath = undefined;
-    } else if (taskFile && line.trim()) {
-      const start = pos + line.length - line.trimStart().length;
-      taskPath = { start, end: pos + line.trimEnd().length, path: line.trim() };
-    }
-    taskFile = TASK_FILE.test(line);
-    for (const l of found) {
-      if (out.length >= max) {
-        break;
-      }
-      out.push({ ...l, start: l.start + pos, end: l.end + pos });
-    }
-    // A header's location may follow a blank line; anything else ends the wait.
-    header = VCS_HEADER.test(line) || (header && !line.trim());
-    pos = nl + 1;
+  private header = false;
+  private taskFile = false;
+  private taskPath: { start: number; end: number; path: string } | undefined;
+
+  constructor(
+    private readonly text: string,
+    private readonly max: number,
+  ) {}
+
+  get done(): boolean {
+    return this.pos > this.text.length || this.links.length >= this.max;
   }
-  return out.sort((a, b) => a.start - b.start);
+
+  /** Reads up to `lines` more lines; whether the log is read through. */
+  step(lines: number): boolean {
+    const { text, links: out, max } = this;
+    for (let k = 0; k < lines && !this.done; k++) {
+      const pos = this.pos;
+      let nl = text.indexOf('\n', pos);
+      if (nl < 0) {
+        nl = text.length;
+      }
+      const raw = text.slice(pos, nl);
+      const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+      const found = MAYBE.test(line) ? lineLinks(line) : [];
+      if (this.header && !found.length) {
+        const m = VCS_LOCATION.exec(line);
+        // A path: no white space in it, and a file name with an extension (not prose).
+        if (m && !/\s/.test(m[1]) && /\.[A-Za-z0-9]{1,6}$/.test(m[1])) {
+          const start = line.indexOf(m[1]);
+          found.push({ kind: 'file', start, end: line.trimEnd().length, path: m[1], line: Number(m[2]) });
+        }
+      }
+      if (this.taskPath) {
+        const m = TASK_LINE.exec(line);
+        if (m) {
+          out.push({ kind: 'file', start: this.taskPath.start, end: this.taskPath.end, path: this.taskPath.path, line: Number(m[1]) });
+        }
+        this.taskPath = undefined;
+      } else if (this.taskFile && line.trim()) {
+        const start = pos + line.length - line.trimStart().length;
+        this.taskPath = { start, end: pos + line.trimEnd().length, path: line.trim() };
+      }
+      this.taskFile = TASK_FILE.test(line);
+      for (const l of found) {
+        if (out.length >= max) {
+          break;
+        }
+        out.push({ ...l, start: l.start + pos, end: l.end + pos });
+      }
+      // A header's location may follow a blank line; anything else ends the wait.
+      this.header = VCS_HEADER.test(line) || (this.header && !line.trim());
+      this.pos = nl + 1;
+    }
+    return this.done;
+  }
+}
+
+/** The links of a whole log at once (see [`LinkScanner`]), in order. */
+export function textLinks(text: string, max: number): LogLink[] {
+  const s = new LinkScanner(text, max);
+  s.step(Infinity);
+  return s.links.sort((a, b) => a.start - b.start);
 }
 
 /** The test a log ran: UVM's `[RNTST] Running test NAME...`. */
