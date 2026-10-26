@@ -184,12 +184,23 @@ pub fn is_dir(p: impl AsRef<Path>) -> bool {
 /// The bytes of a regular file (reading a FIFO named as a source would block); an error of kind
 /// `InvalidInput` for anything else.
 pub fn read_regular(p: impl AsRef<Path>) -> Result<Vec<u8>> {
+    use std::io::Read;
     let p = p.as_ref();
-    if !metadata(p)?.is_file() {
+    let m = metadata(p)?;
+    if !m.is_file() {
         return Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a regular file", p.display())));
     }
-    std::fs::read(p)
+    // Larger than any source a project compiles: refused, not read into memory.
+    if m.len() > MAX_REGULAR {
+        return Err(Error::new(ErrorKind::InvalidInput, format!("{} is larger than {} MB", p.display(), MAX_REGULAR >> 20)));
+    }
+    let mut b = Vec::with_capacity(m.len() as usize);
+    std::fs::File::open(p)?.take(MAX_REGULAR).read_to_end(&mut b)?;
+    Ok(b)
 }
+
+/// The largest file [`read_regular`] reads.
+pub const MAX_REGULAR: u64 = 1 << 30;
 
 pub fn read(p: impl AsRef<Path>) -> Result<Vec<u8>> {
     let p = p.as_ref();

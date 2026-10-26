@@ -220,7 +220,7 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("{}:{}: build config: {}", p.file.display(), p.line + 1, p.message);
         // Sources, argument files, logs, libraries or directories the build names and that are
         // not there: what they hold was not checked.
-        if p.message.contains(" not found") || p.message.contains("matches nothing") || p.message.starts_with("Cannot read") {
+        if p.message.contains(" not found") || p.message.contains("matches nothing") || p.message.starts_with("No files match") || p.message.starts_with("Cannot read") {
             missing += 1;
         }
     }

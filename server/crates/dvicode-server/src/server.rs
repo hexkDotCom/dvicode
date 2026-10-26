@@ -357,6 +357,9 @@ struct Server {
     progress_request: Option<RequestId>,
     /// The client accepted the build's progress token: progress may be reported on it.
     progress_live: bool,
+    /// The build progress token of the current build, and how many builds asked for one.
+    progress_token: String,
+    progress_builds: u64,
     /// Numbers the checks of build documents (`BuildDoc::seq`).
     inspect_seq: u64,
     /// The update thread's jobs, the one running (or queued), and the last job number.
@@ -507,6 +510,8 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         hints_due: None,
         progress_request: None,
         progress_live: false,
+        progress_token: "dvicode-build".into(),
+        progress_builds: 0,
         document_changes,
         inspect_seq: 0,
         update_tx,
@@ -583,7 +588,7 @@ impl Server {
                                     self.notify(
                                         "$/progress",
                                         ProgressParams {
-                                            token: NumberOrString::String("dvicode-build".into()),
+                                            token: NumberOrString::String(self.progress_token.clone()),
                                             value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
                                                 title: "DVICode: building project".into(),
                                                 cancellable: Some(false),
@@ -723,7 +728,7 @@ impl Server {
             self.notify(
                 "$/progress",
                 ProgressParams {
-                    token: NumberOrString::String("dvicode-build".into()),
+                    token: NumberOrString::String(self.progress_token.clone()),
                     value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(WorkDoneProgressReport {
                         cancellable: Some(false),
                         message: Some(message.clone()),
@@ -782,9 +787,12 @@ impl Server {
         self.logged_at = Instant::now();
         self.reported = (String::new(), 0);
         if self.progress {
-            // The progress begins once the client has accepted the token.
+            // The progress begins once the client has accepted the token; one per build, so an
+            // answer for an earlier build's token never begins this one.
             self.progress_live = false;
-            let id = self.request_client("window/workDoneProgress/create", WorkDoneProgressCreateParams { token: NumberOrString::String("dvicode-build".into()) });
+            self.progress_builds += 1;
+            self.progress_token = format!("dvicode-build-{}", self.progress_builds);
+            let id = self.request_client("window/workDoneProgress/create", WorkDoneProgressCreateParams { token: NumberOrString::String(self.progress_token.clone()) });
             self.progress_request = Some(id);
         }
         let (root, settings) = (self.root.clone(), self.settings.clone());
@@ -944,7 +952,7 @@ impl Server {
             self.notify(
                 "$/progress",
                 ProgressParams {
-                    token: NumberOrString::String("dvicode-build".into()),
+                    token: NumberOrString::String(self.progress_token.clone()),
                     value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd { message: None })),
                 },
             );
@@ -1705,9 +1713,10 @@ impl Server {
         let rid = id.clone();
         let edits = matches!(method.as_str(), "textDocument/rename" | "textDocument/codeAction");
         let plain = !self.document_changes && edits;
+        // The inputs when it was asked: an edit made while it waits or runs may add a use its
+        // edits leave behind.
+        let inputs = self.vfs.changes();
         let run = move |a: Arc<Analysis>| {
-            // The inputs the snapshot (up to date when a request runs) was made from.
-            let inputs = a.vfs.changes();
             rayon::spawn(move || {
                 let t0 = Instant::now();
                 // Not started when it was cancelled while it waited for a thread; its result is
@@ -2043,8 +2052,11 @@ impl Server {
                 let Some((f, start)) = pos(a, &p.text_document.uri, p.range.start) else { return Ok(None) };
                 let end = a.offset_at(f, p.range.end).unwrap_or(start);
                 let fixes = if wants("quickfix") { a.quick_fixes(f, start, end) } else { Vec::new() };
+                // Another file than this one only when it is the project's (not a library header).
+                let editable = |edits: &[(dvi_syntax::Span, String)]| edits.iter().all(|(s, _)| s.file == f || a.is_editable(s.file));
                 let mut actions: Vec<CodeActionOrCommand> = fixes
                     .into_iter()
+                    .filter(|q| editable(&q.edits))
                     .filter_map(|q| {
                         let edit = a.versioned_edit(q.edits.clone())?;
                         Some(CodeActionOrCommand::CodeAction(CodeAction {
@@ -2059,7 +2071,7 @@ impl Server {
                     .collect();
                 if wants("refactor.rewrite") {
                     let refactors = a.implement_pure_methods(f, start).into_iter().chain(a.instance_actions(f, start));
-                    for r in refactors {
+                    for r in refactors.filter(|r| editable(&r.edits)) {
                         if let Some(edit) = a.versioned_edit(r.edits) {
                             actions.push(CodeActionOrCommand::CodeAction(CodeAction { title: r.title, kind: Some(CodeActionKind::REFACTOR_REWRITE), edit: Some(edit), ..Default::default() }));
                         }

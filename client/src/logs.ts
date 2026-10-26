@@ -5,7 +5,7 @@
 
 import * as vscode from 'vscode';
 import { Conn } from './views';
-import { LinkScanner, LogLink, lineLinks, logTest } from './logparse';
+import { LinkScanner, LogLink, lineLinks, locationLine, logTest } from './logparse';
 
 /** Links listed per document at most. */
 const MAX_LINKS = 20_000;
@@ -29,6 +29,8 @@ export interface ComponentHit {
   unknown_test: string | null;
   /** The tree was cut by its size before the rest of the path. */
   incomplete: boolean;
+  /** The analysis revision of the answer (set by the client). */
+  revision?: number;
 }
 
 interface OpenArgs {
@@ -36,15 +38,26 @@ interface OpenArgs {
   line: number;
   /** The log the link is in (its folder is where relative paths start). */
   log?: string;
+  /** A terminal's working folder (where relative paths start). */
+  cwd?: string;
 }
 
 interface ComponentArgs {
   path: string;
   log?: string;
+  /** Where the link is in the log (the test is the last one announced before it). */
+  at?: number;
 }
 
 interface LogTerminalLink extends vscode.TerminalLink {
   link: LogLink;
+  cwd?: string;
+}
+
+/** A terminal's working folder, when its shell reports it. */
+function terminalCwd(t: vscode.Terminal): string | undefined {
+  const cwd = (t as { shellIntegration?: { cwd?: vscode.Uri } }).shellIntegration?.cwd;
+  return cwd?.toString();
 }
 
 export class LogLinks implements vscode.Disposable {
@@ -57,18 +70,35 @@ export class LogLinks implements vscode.Disposable {
     /** The test the Verification Hierarchy shows (undefined: all tests, or none yet). */
     private readonly viewTest: () => string | undefined,
   ) {
+    this.provider = this.registerProvider();
     this.subs.push(
-      vscode.languages.registerDocumentLinkProvider(SELECTOR, { provideDocumentLinks: (d, t) => this.documentLinks(d, t) }),
       vscode.window.registerTerminalLinkProvider({
-        provideTerminalLinks: (c) => this.terminalLinks(c.line),
-        handleTerminalLink: (l: LogTerminalLink) => this.follow(l.link, undefined),
+        provideTerminalLinks: (c) => this.terminalLinks(c.line, terminalCwd(c.terminal)),
+        handleTerminalLink: (l: LogTerminalLink) => (l.link.kind === 'file' ? this.open({ path: l.link.path, line: l.link.line, cwd: l.cwd }) : this.component({ path: l.link.path })),
       }),
       vscode.commands.registerCommand('dvicode.logs.open', (a: OpenArgs) => this.open(a)),
       vscode.commands.registerCommand('dvicode.logs.component', (a: ComponentArgs) => this.component(a)),
+      // A changed setting: the links shown are made again (none when turned off).
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('dvicode.logs')) {
+          this.provider.dispose();
+          this.provider = this.registerProvider();
+        }
+      }),
     );
   }
 
+  /** The document link provider (registered again to drop the links shown). */
+  private provider: vscode.Disposable;
+  /** Changes with each component link followed: an older search's answer is dropped. */
+  private componentGen = 0;
+
+  private registerProvider(): vscode.Disposable {
+    return vscode.languages.registerDocumentLinkProvider(SELECTOR, { provideDocumentLinks: (d, t) => this.documentLinks(d, t) });
+  }
+
   dispose(): void {
+    this.provider.dispose();
     for (const s of this.subs) {
       s.dispose();
     }
@@ -99,27 +129,28 @@ export class LogLinks implements vscode.Disposable {
     const log = doc.uri.toString();
     return scan.links.map((l) => {
       const range = new vscode.Range(doc.positionAt(l.start), doc.positionAt(l.end));
-      const [command, args, tooltip] = l.kind === 'file' ? ['dvicode.logs.open', { path: l.path, line: l.line, log }, `Open ${l.path}:${l.line}`] : ['dvicode.logs.component', { path: l.path, log }, `Show ${l.path} in the Verification Hierarchy`];
+      const [command, args, tooltip] = l.kind === 'file' ? ['dvicode.logs.open', { path: l.path, line: l.line, log }, `Open ${l.path}:${l.line}`] : ['dvicode.logs.component', { path: l.path, log, at: l.start }, `Show ${l.path} in the Verification Hierarchy`];
       const link = new vscode.DocumentLink(range, vscode.Uri.parse(`command:${command}?${encodeURIComponent(JSON.stringify([args]))}`));
       link.tooltip = `${tooltip} (DVICode)`;
       return link;
     });
   }
 
-  private terminalLinks(line: string): LogTerminalLink[] {
+  /** A terminal line's links; a VCS location alone on its line too (its header is the line
+   * before, which a terminal does not give). */
+  private terminalLinks(line: string, cwd: string | undefined): LogTerminalLink[] {
     if (!this.enabled()) {
       return [];
     }
-    return lineLinks(line).map((l) => ({
+    const found = lineLinks(line);
+    const alone = found.length ? undefined : locationLine(line);
+    return (alone ? [alone] : found).map((l) => ({
       startIndex: l.start,
       length: l.end - l.start,
       tooltip: l.kind === 'file' ? `Open ${l.path}:${l.line} (DVICode)` : `Show ${l.path} in the Verification Hierarchy (DVICode)`,
       link: l,
+      cwd,
     }));
-  }
-
-  private follow(l: LogLink, log: string | undefined): Promise<void> {
-    return l.kind === 'file' ? this.open({ path: l.path, line: l.line, log }) : this.component({ path: l.path, log });
   }
 
   /** Opens the source a log names, at its line. */
@@ -159,7 +190,8 @@ export class LogLinks implements vscode.Disposable {
       }
       tries.push(vscode.Uri.file(a.path));
     } else {
-      for (const base of [...(folder ? [folder] : []), ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri)]) {
+      const cwd = a.cwd ? [vscode.Uri.parse(a.cwd)] : [];
+      for (const base of [...cwd, ...(folder ? [folder] : []), ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri)]) {
         tries.push(vscode.Uri.joinPath(base, a.path.replace(/\\/g, '/')));
       }
     }
@@ -182,22 +214,31 @@ export class LogLinks implements vscode.Disposable {
   /** Selects a component a log names in the Verification Hierarchy, and opens its class. */
   async component(a: ComponentArgs): Promise<void> {
     const c = this.conn.client();
-    if (!c?.isRunning()) {
+    const m = this.conn.mapper();
+    if (!c?.isRunning() || !m) {
       void vscode.window.showInformationMessage('DVICode: the engine is not running.');
       return;
     }
+    // A later click wins: an earlier search that answers after it is dropped.
+    const gen = ++this.componentGen;
     const doc = a.log ? vscode.workspace.textDocuments.find((d) => d.uri.toString() === a.log) : undefined;
-    // The test the log ran; in a terminal (or a log that does not say), the view's.
-    const test = (doc ? logTest(doc.getText()) : undefined) ?? this.viewTest();
-    const r = await c.sendRequest<{ hit: ComponentHit | null }>('dvicode/component', { path: a.path, test: test ?? null }).catch(() => undefined);
+    // The test the log ran (the last announced before the link); in a terminal (or a log that
+    // does not say), the view's.
+    const test = (doc ? logTest(doc.getText(), a.at ?? Infinity) : undefined) ?? this.viewTest();
+    const r = await c.sendRequest<{ revision: number; hit: ComponentHit | null }>('dvicode/component', { path: a.path, test: test ?? null }).catch(() => undefined);
+    if (gen !== this.componentGen || this.conn.client() !== c) {
+      return;
+    }
     const hit = r?.hit;
     if (!hit) {
       void vscode.window.showInformationMessage(`DVICode: ${a.path} is not a component of the Verification Hierarchy.`);
       return;
     }
-    await this.reveal(hit);
-    const m = this.conn.mapper();
-    if (hit.uri && m) {
+    await this.reveal({ ...hit, revision: r.revision });
+    if (gen !== this.componentGen) {
+      return;
+    }
+    if (hit.uri) {
       const pos = new vscode.Position(hit.line, 0);
       await vscode.window.showTextDocument(m.toClient(hit.uri), { selection: new vscode.Range(pos, pos), preserveFocus: false });
     }

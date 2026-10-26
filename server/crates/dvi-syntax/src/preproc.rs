@@ -217,6 +217,7 @@ pub fn preprocess(
         nested_runs: Default::default(),
         line_index: Default::default(),
         work: Default::default(),
+        adopted: Default::default(),
     };
     pp.enter_file(root, None);
     // The root file's tokens are most of the output: room for them at once.
@@ -260,6 +261,7 @@ pub fn expand_snippet(
         nested_runs: Default::default(),
         line_index: Default::default(),
         work: Default::default(),
+        adopted: Default::default(),
     };
     pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, include: None, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
@@ -362,6 +364,9 @@ struct Pp<'a> {
     /// that include the previous one twice, double the work at every level within the depth
     /// limits.
     work: std::rc::Rc<std::cell::Cell<u64>>,
+    /// Macro uses written in an actual that was expanded before it was substituted (pasted or
+    /// stringified): recorded with the call's, so rename and navigation see them.
+    adopted: std::cell::RefCell<Vec<MacroUse>>,
 }
 
 impl<'a> Pp<'a> {
@@ -1079,6 +1084,8 @@ impl<'a> Pp<'a> {
         // would otherwise be built whole first.
         let limit = MAX_WORK.saturating_sub(self.work.get()) as usize;
         let toks = substitute(&def, &args, site, first_flags, limit, &|a| self.called_name(a, site, &def.name), &|a| self.expand_tokens(a, site, &def.name));
+        let adopted = self.adopted.take();
+        self.res.macro_uses.extend(adopted);
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
@@ -1115,6 +1122,7 @@ impl<'a> Pp<'a> {
         if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
             return None;
         }
+        self.adopted.borrow_mut().append(&mut pp.res.macro_uses);
         Some(std::mem::take(&mut pp.res.tokens))
     }
 
@@ -1150,6 +1158,7 @@ impl<'a> Pp<'a> {
             nested_runs: self.nested_runs.clone(),
             line_index: Default::default(),
             work: self.work.clone(),
+            adopted: Default::default(),
         })
     }
 
@@ -1220,6 +1229,8 @@ const COMPILER_DIRECTIVES: &[&str] = &[
 ];
 
 /// `called` gives the macro an actual names after a backtick (see [`Pp::called_name`]).
+/// Bytes of a name built by token pasting at most: past it, the parts stay apart.
+const MAX_PASTED: usize = 4096;
 /// Bytes of a `` `"...`" `` string built at most.
 const MAX_STRINGIFIED: usize = 1 << 20;
 
@@ -1467,7 +1478,7 @@ fn substitute(
                 let word = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$');
                 match (merged.last_mut(), next) {
                     // `name``()`: only words join; anything else just follows without a space.
-                    (Some(prev), Some(mut n)) if !(word(&prev.text) && word(&n.text)) => {
+                    (Some(prev), Some(mut n)) if !(word(&prev.text) && word(&n.text)) || prev.text.len() + n.text.len() > MAX_PASTED => {
                         n.flags &= !(flags::WS_BEFORE | flags::NL_BEFORE);
                         merged.push(n);
                     }

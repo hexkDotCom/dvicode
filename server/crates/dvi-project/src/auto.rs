@@ -198,7 +198,8 @@ pub(crate) fn include_bases(sources: &[PathBuf], included: &[PathBuf]) -> Vec<Pa
     let operands: FxHashSet<String> = sources
         .par_iter()
         .flat_map_iter(|p| {
-            let text = fsx::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            // A path from a log may name a device or a FIFO: a bounded regular file only.
+            let text = crate::read_input(p, crate::MAX_SOURCE).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             scan(&text).include_paths
         })
         .collect();

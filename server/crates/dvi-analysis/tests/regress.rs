@@ -4479,3 +4479,23 @@ fn line_macro_in_a_stringified_actual_is_expanded() {
     let e = a.expand_macro_use(uid, idx, usize::MAX).unwrap();
     assert!(e.trim_matches('"').bytes().all(|b| b.is_ascii_digit()) && e.len() > 2, "{e}");
 }
+
+#[test]
+fn a_macro_passed_as_a_pasted_argument_is_still_a_use() {
+    // Renaming `TC` changes the `TC written in `CFG(`TC) (expanded before it is pasted).
+    let src = "`define TC demo\n`define CFG(tc) tc``_cfg\nclass `CFG(`TC); endclass\n";
+    let (a, root) = project("pparguse", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let edit = a.rename(f, src.find("TC demo").unwrap() as u32, "TC2").unwrap();
+    let Some(lsp_types::DocumentChanges::Edits(docs)) = edit.document_changes else { panic!() };
+    assert_eq!(docs[0].edits.len(), 2, "the definition and the use in the argument");
+    // A pasted name stays a few kilobytes however the pastes double it.
+    let mut src = String::from("`define M12(x) x``x\n");
+    for k in (0..12).rev() {
+        src.push_str(&format!("`define M{k}(x) `M{}(x``x)\n", k + 1));
+    }
+    src.push_str("module m; int `M0(a); endmodule\n");
+    let (a, _) = project("pppastecap", &[("t.sv", &src)]);
+    let longest = a.unit(a.units_for(a.project_files()[0])[0]).parsed.decls.iter().map(|d| d.name.len()).max().unwrap_or(0);
+    assert!(longest <= 4096, "{longest}");
+}

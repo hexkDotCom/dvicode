@@ -236,7 +236,27 @@ export function textLinks(text: string, max: number): LogLink[] {
   return s.links.sort((a, b) => a.start - b.start);
 }
 
-/** The test a log ran: UVM's `[RNTST] Running test NAME...`. */
-export function logTest(text: string): string | undefined {
-  return /\[RNTST\]\s+Running test\s+([A-Za-z_][\w$]*)/.exec(text)?.[1];
+/** The test a log ran: UVM's `[RNTST] Running test NAME...`; with `before`, the last one
+ * before that offset (a log of several runs one after the other). */
+export function logTest(text: string, before = Infinity): string | undefined {
+  let test: string | undefined;
+  for (const m of text.matchAll(/\[RNTST\]\s+Running test\s+([A-Za-z_][\w$]*)/g)) {
+    if ((m.index ?? 0) > before) {
+      break;
+    }
+    test = m[1];
+  }
+  return test;
+}
+
+/** A VCS message's location on a line of its own (`rtl/top.sv, 42`), read without the header
+ * line before it (a terminal gives one line at a time): only a source file's path. */
+export function locationLine(line: string): LogLink | undefined {
+  const { text, at } = stripEscapes(line);
+  const m = VCS_LOCATION.exec(text);
+  if (!m || !SOURCE.test(m[1])) {
+    return undefined;
+  }
+  const start = text.indexOf(m[1]);
+  return { kind: 'file', start: at(start), end: at(text.trimEnd().length), path: m[1], line: Number(m[2]) };
 }

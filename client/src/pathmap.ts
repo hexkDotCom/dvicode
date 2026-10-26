@@ -99,10 +99,17 @@ export function identityMapper(): Mapper {
   };
 }
 
+/** A server path of a mapping: a Windows engine's (`C:\\srv\\proj`) with `/`, whatever this
+ * client's platform. */
+function normRemote(p: string): string {
+  const s = /^[A-Za-z]:[\\/]/.test(p) ? p.replace(/\\/g, '/') : p;
+  return s.length > 1 && s.endsWith('/') ? s.slice(0, -1) : s;
+}
+
 export function makeMapper(opts: MapperOptions): Mapper {
   const mappings = opts.mappings
     .filter((m) => m.local && m.remote)
-    .map((m) => ({ local: norm(m.local), remote: norm(m.remote) }))
+    .map((m) => ({ local: norm(m.local), remote: normRemote(m.remote) }))
     // Longest prefixes first.
     .sort((a, b) => b.local.length - a.local.length);
   // The other direction picks the longest server prefix.
@@ -158,9 +165,12 @@ export function makeMapper(opts: MapperOptions): Mapper {
       if (opts.remoteAuthority) {
         return vscode.Uri.from({ scheme: 'dvicode', authority: opts.remoteAuthority, path: p });
       }
+      // A Windows engine's file URI has its drive after a `/` (`/C:/srv/a.sv`); its paths
+      // ignore case.
+      const q = /^\/[A-Za-z]:\//.test(p) ? p.slice(1) : p;
       for (const m of reverse) {
-        if (startsWithPath(p, m.remote, false)) {
-          return vscode.Uri.file(joinPath(m.local, p.slice(m.remote.length)));
+        if (startsWithPath(q, m.remote, /^[A-Za-z]:/.test(m.remote))) {
+          return vscode.Uri.file(joinPath(m.local, q.slice(m.remote.length)));
         }
       }
       if (opts.wslDistro !== undefined) {

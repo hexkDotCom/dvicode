@@ -143,6 +143,13 @@ test.describe('pathMappings', () => {
     assert.equal(m.toClient('file:///srv/library/x.sv').toString(), 'file:///srv/library/x.sv');
   });
   test.it('ignores the case of local paths on Windows only', () => {
+    // A Windows engine: its file URIs have the drive after a `/`, on any client.
+    for (const { vscode, pathmap } of [win, nix]) {
+      const m = pathmap.makeMapper({ mappings: [{ local: vscode === win.vscode ? 'Z:\\proj' : '/z/proj', remote: 'C:\\srv\\proj' }] });
+      const back = m.toClient('file:///c%3A/srv/Proj/a.sv');
+      assert.equal(back.fsPath.replace(/\\/g, '/').toLowerCase(), (vscode === win.vscode ? 'z:/proj/a.sv' : '/z/proj/a.sv'), back.toString());
+      assert.equal(m.toServer(back).toLowerCase(), 'file:///c%3a/srv/proj/a.sv');
+    }
     const w = win.pathmap.makeMapper({ mappings: [{ local: 'Z:\\Proj', remote: '/home/me/proj' }] });
     assert.equal(w.toServer(win.vscode.Uri.file('z:\\PROJ\\Rtl\\a.sv')), 'file:///home/me/proj/Rtl/a.sv');
     // Server paths are case-sensitive everywhere.

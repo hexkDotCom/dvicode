@@ -47,7 +47,9 @@ pub fn apply_changes(text: &str, changes: Vec<TextDocumentContentChangeEvent>) -
                 let e = li.offset(&text, r.end.line, r.end.character) as usize;
                 let (s, e) = (s.min(text.len()), e.min(text.len()).max(s.min(text.len())));
                 text.replace_range(s..e, &c.text);
-                *upto = (r.start.line, r.start.character);
+                // Lines before the edited one keep their starts; the edited line does not keep its
+                // end (a later change on it converts columns against the new text).
+                *upto = (r.start.line, 0);
             }
         }
     }
@@ -79,6 +81,7 @@ mod tests {
         // First first: each later range is in the text the earlier changes made.
         assert_eq!(apply_changes(t, vec![ch(0, 4, 5, "10\n"), ch(2, 0, 2, "bb"), ch(3, 0, 1, "cc")]), "a = 10\n;\nbb= 2;\ncc = 3;\n");
         // Two on one line, the right one first.
-        assert_eq!(apply_changes(t, vec![ch(1, 4, 5, "20"), ch(1, 0, 1, "B")]), "a = 1;\nB = 20;\nc = 3;\n");
+        assert_eq!(apply_changes(t, vec![ch(1, 4, 5, "20"), ch(1, 0, 1, "B")]), "a = 1;\nB = 20;\nc = 3;\n");        // Two on one line with a character beyond ASCII before them (columns in UTF-16).
+        assert_eq!(apply_changes("// \u{e9}abc\n", vec![ch(0, 4, 7, ""), ch(0, 3, 4, "e")]), "// e\n");
     }
 }

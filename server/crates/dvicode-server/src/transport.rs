@@ -100,7 +100,8 @@ fn read_token_line(mut stream: &TcpStream) -> Option<Vec<u8>> {
 
 pub enum IoThreads {
     Stdio(lsp_server::IoThreads),
-    Tcp(Vec<thread::JoinHandle<()>>),
+    /// Reader, writer, and the socket (shut down between them).
+    Tcp(thread::JoinHandle<()>, thread::JoinHandle<()>, std::net::TcpStream),
 }
 
 impl IoThreads {
@@ -109,10 +110,12 @@ impl IoThreads {
             IoThreads::Stdio(t) => {
                 let _ = t.join();
             }
-            IoThreads::Tcp(v) => {
-                for h in v {
-                    let _ = h.join();
-                }
+            IoThreads::Tcp(r, w, s) => {
+                // The writer ends with the server's last message; the reader may wait for a
+                // client that never sends `exit`.
+                let _ = w.join();
+                let _ = s.shutdown(std::net::Shutdown::Both);
+                let _ = r.join();
             }
         }
     }
@@ -145,6 +148,7 @@ pub fn listen(addr: &str, token: Option<&str>) -> Result<(Connection, IoThreads)
         Some(t) => accept_with_token(&listener, t)?,
     };
     let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    let shut = stream.try_clone().map_err(|e| e.to_string())?;
     log::info!("client connected from {peer}");
     let (reader_tx, reader_rx): (Sender<Message>, Receiver<Message>) = bounded(0);
     let r = thread::spawn(move || {
@@ -166,7 +170,7 @@ pub fn listen(addr: &str, token: Option<&str>) -> Result<(Connection, IoThreads)
             let _ = out.flush();
         }
     });
-    Ok((Connection { sender: writer_tx, receiver: reader_rx }, IoThreads::Tcp(vec![r, w])))
+    Ok((Connection { sender: writer_tx, receiver: reader_rx }, IoThreads::Tcp(r, w, shut)))
 }
 
 #[cfg(test)]

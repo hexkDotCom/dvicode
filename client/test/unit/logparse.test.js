@@ -121,6 +121,21 @@ test.describe('LinkScanner', () => {
   });
 });
 
+test.describe('round 4 review', () => {
+  test.it('takes the test announced last before a link (runs one after the other)', () => {
+    const text = 'UVM_INFO @ 0: reporter [RNTST] Running test t_a...\nx\nUVM_INFO @ 0: reporter [RNTST] Running test t_b...\ny\n';
+    assert.equal(lp.logTest(text, text.indexOf('x')), 't_a');
+    assert.equal(lp.logTest(text, text.indexOf('y')), 't_b');
+    assert.equal(lp.logTest(text), 't_b');
+  });
+  test.it('reads a VCS location alone on its line (a terminal)', () => {
+    const l = lp.locationLine('  rtl/top.sv, 42');
+    assert.deepEqual([l.path, l.line, l.start, l.end], ['rtl/top.sv', 42, 2, 16]);
+    assert.equal(lp.locationLine('The value is 2, 3'), undefined);
+    assert.equal(lp.locationLine('notes.txt, 3'), undefined, 'a source file only');
+  });
+});
+
 test.describe('logTest', () => {
   test.it('reads the test UVM ran', () => {
     assert.equal(lp.logTest('UVM_INFO @ 0: reporter [RNTST] Running test demo_full_test...\n'), 'demo_full_test');
