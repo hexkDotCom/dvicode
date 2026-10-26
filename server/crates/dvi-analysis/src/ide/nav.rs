@@ -361,7 +361,13 @@ impl Analysis {
             let sub = self.decl(canon).parent.map(|p| DeclRef { unit: canon.unit, decl: p });
             if let Some(sub) = sub.filter(|s| matches!(self.decl(*s).kind, DeclKind::Function | DeclKind::Task)) {
                 let mut tokens: FxHashMap<FileId, Option<Arc<Vec<Token>>>> = FxHashMap::default();
-                for call in self.decl_references(sub, false) {
+                // A call in a shared file that calls another subroutine elsewhere names an
+                // argument that one may not have.
+                let (calls, call_conflict) = self.decl_references_checked(sub, false, check);
+                if let Some(c) = call_conflict {
+                    return (out, Some(c));
+                }
+                for call in calls {
                     let Some(toks) = tokens.entry(call.file).or_insert_with(|| self.file_tokens(call.file)).clone() else { continue };
                     for s in named_arguments(&toks, call, &name) {
                         if seen.insert(s) {
@@ -449,6 +455,83 @@ impl Analysis {
         self.with_lookup_memo(|| self.rename_inner(file, off, new_name))
     }
 
+    /// What a rename at `off` changes: the references, of a class method's overrides too.
+    pub fn rename_spans(&self, file: FileId, off: u32) -> Vec<Span> {
+        match self.target_at(file, off) {
+            Some(Target::Decl(r)) => {
+                let mut out: Vec<Span> = self.method_family(r).into_iter().flat_map(|x| self.decl_references(x, true)).collect();
+                out.sort_by_key(|s| (s.file, s.start, s.end));
+                out.dedup();
+                out
+            }
+            _ => self.reference_spans(file, off, true),
+        }
+    }
+
+    /// A class method and the methods of the same name above and below it in the class tree
+    /// (overrides, and what they override): one name, renamed together. Others: `r` alone.
+    fn method_family(&self, r: DeclRef) -> Vec<DeclRef> {
+        let r = self.canonical(r);
+        let d = self.decl(r);
+        let is_class = |c: &DeclRef| matches!(self.decl(*c).kind, DeclKind::Class | DeclKind::InterfaceClass);
+        let class = d.parent.map(|p| DeclRef { unit: r.unit, decl: p }).filter(is_class);
+        let (Some(class), true) = (class, matches!(d.kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint) && d.name != "new") else { return vec![r] };
+        let name = d.name.clone();
+        let members = |c: DeclRef| -> Vec<DeclRef> {
+            self.unit(c.unit)
+                .parsed
+                .lookup_member(c.decl, &name)
+                .iter()
+                .map(|m| DeclRef { unit: c.unit, decl: *m })
+                .filter(|m| matches!(self.decl(*m).kind, DeclKind::Function | DeclKind::Task | DeclKind::Constraint))
+                .collect()
+        };
+        // Up: the bases (and interface classes) that declare it too.
+        let mut tops = vec![class];
+        let mut stack = vec![class];
+        let mut up: FxHashSet<(u32, u32)> = FxHashSet::from_iter([self.decl_key(class)]);
+        while let Some(c) = stack.pop() {
+            for b in self.class_base(c).into_iter().chain(self.class_interfaces(c)) {
+                if up.len() < 256 && up.insert(self.decl_key(b)) {
+                    stack.push(b);
+                    if !members(b).is_empty() {
+                        tops.push(b);
+                    }
+                }
+            }
+        }
+        // Down from each: every subclass that declares it.
+        let mut out = vec![r];
+        let mut keys: FxHashSet<(u32, u32)> = FxHashSet::from_iter([self.decl_key(r)]);
+        for top in tops {
+            for c in std::iter::once(top).chain(self.all_subclasses(top)) {
+                for m in members(c) {
+                    let m = self.canonical(m);
+                    if keys.insert(self.decl_key(m)) {
+                        out.push(m);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A use of macro `m` at a place where, in another unit or inclusion, the same use means
+    /// another definition of that name: renaming would change both.
+    fn macro_use_conflict(&self, m: &dvi_syntax::preproc::MacroDef) -> Option<Span> {
+        let (mut ours, mut other) = (FxHashSet::default(), FxHashSet::default());
+        for u in self.units.iter().flatten() {
+            for mu in u.macro_uses.iter().filter(|x| x.name == m.name) {
+                match &mu.def {
+                    Some(d) if d.name_span == m.name_span => ours.insert(mu.name_span),
+                    Some(_) => other.insert(mu.name_span),
+                    None => false,
+                };
+            }
+        }
+        ours.intersection(&other).min_by_key(|s| (s.file, s.start)).copied()
+    }
+
     fn rename_inner(&self, file: FileId, off: u32, new_name: &str) -> Result<WorkspaceEdit, String> {
         if !is_identifier(new_name) {
             return Err(format!("'{new_name}' is not a valid SystemVerilog identifier"));
@@ -461,7 +544,7 @@ impl Analysis {
         let target = match self.target_at(file, off) {
             Some(Target::Decl(r)) => {
                 decl = Some(r);
-                if let Some((m, at)) = self.use_in_macro_body(r) {
+                if let Some((m, at)) = self.method_family(r).into_iter().find_map(|x| self.use_in_macro_body(x)) {
                     return Err(format!("'{}' is also used inside the macro `{m} (expanded at {}), which rename cannot change", self.decl(r).name, line(at)));
                 }
                 if let Some(at) = self.dot_star_connection(r) {
@@ -478,13 +561,24 @@ impl Analysis {
                 if let (Some(o), false) = (other, self.macro_uses_in_bodies(&m.name).is_empty()) {
                     return Err(format!("`{} is defined in more than one place ({} and {}) and used inside other macros, which could mean either", m.name, line(m.name_span), line(o.name_span)));
                 }
+                if let Some(at) = self.macro_use_conflict(&m) {
+                    return Err(format!("`{} at {} means another definition of it where that file is included again or compiled in another context, which rename would change too", m.name, line(at)));
+                }
                 None
             }
             _ => None,
         };
         let spans = match decl {
             Some(r) => {
-                let (spans, conflict) = self.decl_references_checked(r, true, true);
+                // A method: with its overrides and what it overrides (a call through a base
+                // handle reaches them all).
+                let mut spans = Vec::new();
+                let mut conflict = None;
+                for x in self.method_family(r) {
+                    let (s, c) = self.decl_references_checked(x, true, true);
+                    spans.extend(s);
+                    conflict = conflict.or(c);
+                }
                 if let Some(at) = conflict {
                     return Err(format!(
                         "'{}' at {} also means another declaration where that file is included again or compiled in another context, which rename would change too",

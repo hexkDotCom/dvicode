@@ -232,6 +232,11 @@ impl Analysis {
         // source had space or a comment between two tokens.
         let mut out = String::new();
         let mut prev_end: Option<u32> = None;
+        // A formal named as a class parameter is that formal, not the parameter.
+        let formals: FxHashSet<SmolStr> = {
+            let p = &self.unit(m.unit).parsed;
+            p.decl(m.decl).children.iter().map(|c| p.decl(*c)).filter(|c| c.kind == DeclKind::Argument).map(|c| c.name.clone()).collect()
+        };
         for t in toks {
             if t.kind == TokKind::Keyword && matches!(t.text.as_str(), "extern" | "pure") {
                 continue;
@@ -242,7 +247,7 @@ impl Analysis {
                     out.push(' ');
                 }
             }
-            match subst.get(t.text.as_str()).filter(|_| t.kind == TokKind::Ident) {
+            match subst.get(t.text.as_str()).filter(|_| t.kind == TokKind::Ident && !formals.contains(t.text.as_str())) {
                 Some(v) => out.push_str(v),
                 None => {
                     // A package's name the class it goes in does not see: qualified.
@@ -397,8 +402,21 @@ fn specialization_args(written: &str) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut item = String::new();
+    let (mut in_str, mut esc) = (false, false);
     for ch in body.chars() {
+        if in_str {
+            item.push(ch);
+            if esc {
+                esc = false;
+            } else if ch == '\\' {
+                esc = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
         match ch {
+            '"' => in_str = true,
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' if depth > 0 => depth -= 1,
             ')' => break,

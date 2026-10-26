@@ -4264,3 +4264,66 @@ fn rename_refuses_a_shared_header_use_that_means_another_declaration_elsewhere()
     let f = a.vfs.lookup(&root.join("p.sv")).unwrap();
     assert!(a.rename(f, solo.find("value").unwrap() as u32, "v2").is_ok());
 }
+
+#[test]
+fn rename_of_a_virtual_method_renames_its_overrides() {
+    let src = "class B;\n  virtual function int f(); return 1; endfunction\nendclass\nclass D extends B;\n  virtual function int f(); return 2; endfunction\nendclass\nmodule top;\n  initial begin\n    B b;\n    D d;\n    d = new;\n    b = d;\n    $display(b.f(), d.f());\n  end\nendmodule\n";
+    let (a, root) = project("review3virt", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let edit = a.rename(f, src.find("f()").unwrap() as u32, "g").unwrap();
+    let Some(lsp_types::DocumentChanges::Edits(docs)) = edit.document_changes else { panic!() };
+    assert_eq!(docs[0].edits.len(), 4, "B::f, D::f and both calls");
+}
+
+#[test]
+fn rename_refuses_macro_and_named_argument_uses_that_mean_something_else_elsewhere() {
+    let hdr = "localparam X = `M;\n";
+    let ma = "`define M 1\nmodule a;\n  `include \"h.svh\"\nendmodule\n";
+    let mb = "`undef M\n`define M 2\nmodule b;\n  `include \"h.svh\"\nendmodule\n";
+    let (a, root) = project("review3macro", &[("h.svh", hdr), ("a.sv", ma), ("b.sv", mb)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let e = a.rename(f, ma.find("M 1").unwrap() as u32, "N").unwrap_err();
+    assert!(e.contains("another definition"), "{e}");
+    let hdr = "initial f(.value(1));\n";
+    let ma = "module a;\n  function void f(int value); endfunction\n  `include \"h.svh\"\nendmodule\n";
+    let mb = "module b;\n  function void f(int value); endfunction\n  `include \"h.svh\"\nendmodule\n";
+    let (a, root) = project("review3named", &[("h.svh", hdr), ("a.sv", ma), ("b.sv", mb)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let e = a.rename(f, ma.find("value").unwrap() as u32, "v2").unwrap_err();
+    assert!(e.contains("another declaration"), "{e}");
+}
+
+#[test]
+fn override_text_keeps_formals_and_string_arguments() {
+    let src = "virtual class base #(string S = \"\", int N = 1);\n  pure virtual function void f(int N, bit [N-1:0] x);\n  pure virtual function void g(bit [N-1:0] y);\nendclass\nclass child extends base #(\"a,b\", 8);\nendclass\n";
+    let (a, _) = project("review3ovr2", &[("t.sv", src)]);
+    let class = {
+        let u = a.unit(a.units_for(a.project_files()[0])[0]);
+        let d = u.parsed.decls.iter().position(|d| d.name == "child").unwrap();
+        dvi_analysis::DeclRef { unit: u.id, decl: d as u32 }
+    };
+    let os = a.overridable_methods(class);
+    let text = |n: &str| os.iter().find(|o| o.name == n).and_then(|o| a.override_text(o, class, "  ", "\n", false));
+    assert_eq!(text("f").as_deref(), Some("virtual function void f(int N, bit [N-1:0] x);\nendfunction"), "a formal named as the parameter");
+    assert_eq!(text("g").as_deref(), Some("virtual function void g(bit [8-1:0] y);\nendfunction"), "the string's comma does not split it");
+}
+
+#[test]
+fn register_helpers_under_a_condition_and_else_branches_in_loops() {
+    let src = "virtual class uvm_reg_block; endclass\nvirtual class uvm_reg; endclass\nclass uvm_reg_map; endclass\nclass r_t extends uvm_reg;\n  function new(string name = \"r_t\"); super.new(name, 32, 0); endfunction\nendclass\nclass top_block extends uvm_reg_block;\n  rand r_t r[2];\n  rand r_t z;\n  bit pre;\n  function new(string name = \"top_block\"); super.new(name); endfunction\n  function void freeze(); lock_model(); endfunction\n  virtual function void build();\n    default_map = create_map(\"map\", 0, 4, UVM_LITTLE_ENDIAN);\n    if (pre) freeze();\n    for (int i = 0; i < 2; i++)\n      if (i == 0) r[i] = r_t::type_id::create(\"ra\");\n      else r[i] = r_t::type_id::create(\"rb\");\n    z = r_t::type_id::create(\"z\");\n    z.configure(this, null, \"\");\n    default_map.add_reg(z, 'h8, \"RW\");\n  endfunction\nendclass\n";
+    let (a, _) = project("review3helper", &[("ral.sv", src)]);
+    let (blocks, _) = a.register_blocks();
+    let model = a.register_model(blocks[0]);
+    let names: Vec<&str> = model.regs.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"z"), "a lock in a helper called under a condition does not stop the model: {names:?}");
+    assert!(!names.iter().any(|n| n.contains('*')), "the else branch is in the loop: {names:?}");
+}
+
+#[test]
+fn a_macro_preview_uses_the_definition_of_the_call() {
+    let src = "`define V 1\nmodule m;\n  localparam A = `V;\nendmodule\n`undef V\n`define V 2\n";
+    let (a, _) = project("review3pp", &[("t.sv", src)]);
+    let uid = a.units_for(a.project_files()[0])[0];
+    let idx = a.unit(uid).macro_uses.iter().position(|m| m.name == "V").unwrap();
+    assert_eq!(a.expand_macro_use(uid, idx, 1).as_deref(), Some("1"));
+}

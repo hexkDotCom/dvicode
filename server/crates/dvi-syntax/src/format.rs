@@ -511,7 +511,8 @@ pub fn candidate(t: &str, o: &Options) -> Formatted {
         }
         blank_run = 0;
         let lead_old = l.lead - l.start;
-        let new_lead = levels[i].as_ref().map(|lv| lv.text(o));
+        // Nested deeper than any real code: its indentation is left as it is (not megabytes of it).
+        let new_lead = levels[i].as_ref().filter(|lv| lv.width(o) <= MAX_INDENT_WIDTH).map(|lv| lv.text(o));
         let indent = new_lead.filter(|n| *n != t[l.start..l.lead]);
         let trim = (o.trim_trailing && !l.keep_trail && l.trail < l.end).then_some(l.trail - l.start);
         match (indent, trim) {
@@ -532,9 +533,16 @@ struct Indent {
     column: Option<usize>,
 }
 
+/// Columns of indentation given at most.
+const MAX_INDENT_WIDTH: usize = 512;
+
 impl Indent {
+    fn width(&self, o: &Options) -> usize {
+        self.column.unwrap_or(self.levels.saturating_mul(o.indent_size))
+    }
+
     fn text(&self, o: &Options) -> String {
-        let width = self.column.unwrap_or(self.levels * o.indent_size);
+        let width = self.width(o);
         if o.use_tabs {
             let tabs = if self.column.is_some() { width / o.indent_size.max(1) } else { self.levels };
             let spaces = width - tabs * o.indent_size;

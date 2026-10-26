@@ -318,6 +318,13 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
     return this.revision;
   }
 
+  /** Out of date while hidden: an answer under way is dropped; shown, it fetches again. */
+  markStale(): void {
+    this.gen++;
+    this.stale = true;
+    this.present();
+  }
+
   /** Forgets the occurrences found (a restarted server, a refresh): they are searched again. */
   forget(): void {
     this.found = undefined;
@@ -1105,8 +1112,7 @@ export class Views implements vscode.Disposable {
     for (const v of this.all) {
       v.forget();
       if (!v.view?.visible) {
-        v.stale = true;
-        v.present();
+        v.markStale();
         continue;
       }
       void v.refresh().then(() => {

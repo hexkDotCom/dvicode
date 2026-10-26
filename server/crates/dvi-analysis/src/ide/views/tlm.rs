@@ -549,7 +549,7 @@ fn reach(at: &str, next: &FxHashMap<&str, Vec<(&str, bool)>>, open: &FxHashSet<&
         let terminal = kinds.get(to).is_some_and(|k| k.role == Role::Imp || (k.library && !next.contains_key(to)));
         let sub = if terminal { Reach { ends: vec![to.to_string()], ..Default::default() } } else { reach(to, next, open, kinds, memo, on_path, depth + 1, visits) };
         r.incomplete |= sub.incomplete;
-        r.more += sub.more;
+        r.more = r.more.saturating_add(sub.more);
         r.more_at_most |= sub.more_at_most;
         ways += usize::from(!sub.ends.is_empty());
         if !sub.ends.is_empty() {
@@ -563,12 +563,17 @@ fn reach(at: &str, next: &FxHashMap<&str, Vec<(&str, bool)>>, open: &FxHashSet<&
             if r.ends.len() < MAX_REACHED {
                 r.ends.push(e);
             } else {
-                r.more += 1;
+                r.more = r.more.saturating_add(1);
             }
         }
     }
     r.possible = any && all_possible;
     r.more_at_most |= r.more > 0 && ways > 1;
+    // Never more than the endpoints there are.
+    if r.more > kinds.len() {
+        r.more = kinds.len();
+        r.more_at_most = true;
+    }
     on_path.remove(at);
     if !r.incomplete || depth == 0 {
         memo.insert(at.to_string(), r.clone());

@@ -228,7 +228,7 @@ impl Session<'_> {
         if self.verbose {
             (self.log)(&format!("write check: {what}"));
         }
-        let refs: BTreeSet<(PathBuf, u32)> = a0.reference_spans(f, off, true).iter().map(|s| (a0.vfs.path(s.file), s.start)).collect();
+        let refs: BTreeSet<(PathBuf, u32)> = a0.rename_spans(f, off).iter().map(|s| (a0.vfs.path(s.file), s.start)).collect();
         let edit = match a0.rename(f, off, &new) {
             Ok(e) => e,
             Err(e) if e.contains("outside the workspace") => {
@@ -334,7 +334,7 @@ impl Session<'_> {
         let path = a0.vfs.path(f);
         if let Some(f1) = a1.vfs.lookup(&path) {
             let off1 = new_at(&path, span.start as usize) as u32;
-            let got: BTreeSet<(PathBuf, u32)> = a1.reference_spans(f1, off1, true).iter().map(|s| (a1.vfs.path(s.file), s.start)).collect();
+            let got: BTreeSet<(PathBuf, u32)> = a1.rename_spans(f1, off1).iter().map(|s| (a1.vfs.path(s.file), s.start)).collect();
             if got != expected {
                 let missing: Vec<String> = expected.difference(&got).take(4).map(|(p, o)| format!("{}@{o}", rel(&self.root, p))).collect();
                 let extra: Vec<String> = got.difference(&expected).take(4).map(|(p, o)| format!("{}@{o}", rel(&self.root, p))).collect();

@@ -110,6 +110,8 @@ impl DirListing {
 pub struct Vfs {
     inner: RwLock<Inner>,
     dirs: RwLock<DirCache>,
+    /// Changes of known files' contents (editor or disk), counted.
+    changes: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -152,7 +154,13 @@ impl Vfs {
         e.overlay = Some(text);
         e.overlay_version = lsp_version;
         e.version += 1;
+        self.changes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         id
+    }
+
+    /// How many times a known file's contents changed (in the editor or on disk) so far.
+    pub fn changes(&self) -> u64 {
+        self.changes.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn clear_overlay(&self, path: &Path) {
@@ -162,6 +170,7 @@ impl Vfs {
             e.overlay_version = None;
             if e.overlay.take().is_some() {
                 e.version += 1;
+                self.changes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }
@@ -229,6 +238,9 @@ impl Vfs {
             e.disk = None;
             e.disk_loaded = false;
             e.version += 1;
+        }
+        if !ids.is_empty() {
+            self.changes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         ids
     }

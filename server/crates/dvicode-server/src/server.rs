@@ -1706,6 +1706,8 @@ impl Server {
         let edits = matches!(method.as_str(), "textDocument/rename" | "textDocument/codeAction");
         let plain = !self.document_changes && edits;
         let run = move |a: Arc<Analysis>| {
+            // The inputs the snapshot (up to date when a request runs) was made from.
+            let inputs = a.vfs.changes();
             rayon::spawn(move || {
                 let t0 = Instant::now();
                 // Not started when it was cancelled while it waited for a thread; its result is
@@ -1724,8 +1726,9 @@ impl Server {
                         None => Response::new_err(rid, ErrorCode::InternalError as i32, format!("{method} failed")),
                     };
                     // Edits made from a snapshot whose documents have changed since (opened, edited,
-                    // closed while it ran) would land on other text.
-                    if edits && resp.result.as_ref().is_some_and(|r| stale_edits(&a, r)) {
+                    // closed while it ran) would land on other text; and any file changed
+                    // meanwhile may have gained a use the edits leave behind.
+                    if edits && resp.result.is_some() && (a.vfs.changes() != inputs || resp.result.as_ref().is_some_and(|r| stale_edits(&a, r))) {
                         resp = Response::new_err(resp.id, ErrorCode::ContentModified as i32, "the documents changed while the edits were made: ask again".into());
                     }
                     // A client without `documentChanges`: the same edits as `changes`.

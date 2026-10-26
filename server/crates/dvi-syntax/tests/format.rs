@@ -265,3 +265,12 @@ fn review_cases_of_the_formatter() {
     let src = "module m;\n`pragma protect begin_protected\n  x  \n   y\n";
     assert_eq!(fmt(src, &o), src);
 }
+
+#[test]
+fn indentation_past_any_real_nesting_is_left_alone() {
+    let n = 2_000;
+    let src = format!("module m;\ninitial\n{}x = 1;\n{}endmodule\n", "begin\n".repeat(n), "end\n".repeat(n));
+    let out = fmt(&src, &Options::default());
+    let widest = out.lines().map(|l| l.len() - l.trim_start().len()).max().unwrap();
+    assert!(widest <= 512, "{widest} columns");
+}

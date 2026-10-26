@@ -248,6 +248,8 @@ struct Interp<'a> {
     reg_vars: FxHashMap<String, Handle>,
     /// Loops being unrolled, one inside the other.
     loops: usize,
+    /// Helpers being interpreted that were called under a condition.
+    under: usize,
 }
 
 /// Names of the UVM register classes, for what a class derives from.
@@ -327,7 +329,7 @@ impl Analysis {
 
     /// The model `top` (a block class) builds.
     pub fn register_model(&self, top: DeclRef) -> Model {
-        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default(), loops: 0 };
+        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default(), loops: 0, under: 0 };
         it.m.blocks.push(Block { name: self.decl(top).name.to_string(), class: top, maps: Vec::new(), default_map: None, regs: Vec::new(), at: None, notes: Vec::new(), vars: FxHashMap::default() });
         it.build_block(0, top, &[], &[], 0);
         let mut mounts: FxHashMap<(usize, usize), usize> = FxHashMap::default();
@@ -347,7 +349,7 @@ impl Analysis {
     pub fn register_fields(&self, model: &Model, reg: usize) -> Vec<Field> {
         let Some(r) = model.regs.get(reg) else { return Vec::new() };
         let Some(class) = r.class else { return Vec::new() };
-        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default(), loops: 0 };
+        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default(), loops: 0, under: 0 };
         it.m.regs.push(Reg { build_args: None, built: false, ..r.clone() });
         // Fields are made by the register's `build()`: none when the model never calls it.
         if !r.built {
@@ -899,7 +901,7 @@ impl<'a> Interp<'a> {
             }
             // Under a condition: by the statement map, or (when the map is cut short by code
             // being typed) right after an `if (...)`, an `else` or a case label.
-            let conditional = frames.is_some_and(|f| in_condition(f, k)) || k.checked_sub(1).is_some_and(|p| t[p].is_punct(")") || t[p].is_kw("else") || t[p].is_punct(":"));
+            let conditional = self.under > 0 || frames.is_some_and(|f| in_condition(f, k)) || k.checked_sub(1).is_some_and(|p| t[p].is_punct(")") || t[p].is_kw("else") || t[p].is_punct(":"));
             self.exec_statement(&t[k..end.min(t.len())], m, env, this, depth, conditional);
             k = end.max(k + 1);
         }
@@ -1500,7 +1502,10 @@ impl<'a> Interp<'a> {
                         This::Reg => self.class_of_method(m),
                     };
                     if let Some(f) = class.and_then(|c| self.find_method(c, method)) {
+                        // What it does is as conditional as the call.
+                        self.under += usize::from(conditional);
                         self.exec_method(f, args, handles, this, depth + 1);
+                        self.under -= usize::from(conditional);
                     }
                 }
             }
@@ -1709,10 +1714,28 @@ fn assigned_name(lhs: &[Token], it: &mut Interp, m: DeclRef, env: &Env, this: Th
 /// block or the statement a control word governs), not beyond `b`.
 fn statement_end(t: &[Token], k: usize, b: usize) -> usize {
     let mut j = k;
-    // A control word: its header, then its statement (`if (a) if (b) x;`).
-    while j < b && t.get(j).is_some_and(|x| x.is_kw("for") || x.is_kw("foreach") || x.is_kw("if") || x.is_kw("while") || x.is_kw("repeat")) && t.get(j + 1).is_some_and(|x| x.is_punct("(")) {
-        j = skip_group(t, j + 1);
+    // `if`s whose `else` may follow.
+    let mut ifs = 0usize;
+    loop {
+        // A control word: its header, then its statement (`if (a) if (b) x;`).
+        while j < b && t.get(j).is_some_and(|x| x.is_kw("for") || x.is_kw("foreach") || x.is_kw("if") || x.is_kw("while") || x.is_kw("repeat")) && t.get(j + 1).is_some_and(|x| x.is_punct("(")) {
+            ifs += usize::from(t[j].is_kw("if"));
+            j = skip_group(t, j + 1);
+        }
+        let e = simple_statement_end(t, j, b);
+        // `else` and its statement belong to the nearest `if` without one.
+        if ifs > 0 && e < b && t.get(e).is_some_and(|x| x.is_kw("else")) {
+            ifs -= 1;
+            j = e + 1;
+            continue;
+        }
+        return e;
     }
+}
+
+/// The end of a statement that starts with no control word.
+fn simple_statement_end(t: &[Token], k: usize, b: usize) -> usize {
+    let mut j = k;
     if t.get(j).is_some_and(|x| x.is_kw("begin")) {
         let mut depth = 0i32;
         while j < b {

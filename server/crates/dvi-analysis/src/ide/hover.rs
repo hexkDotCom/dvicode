@@ -343,7 +343,13 @@ impl Analysis {
         let call = text.get(mu.call_span.start as usize..mu.call_span.end as usize)?;
         let toks = dvi_syntax::lexer::lex(call, mu.call_span.file);
         let cfg = self.setup.pp_configs.get(u.invocation).cloned().unwrap_or_default();
-        let out = expand_snippet(&*self.vfs, &cfg, mu.call_span.file, toks, u.macros_after.clone(), levels);
+        // The definition the call used (a later `undef or redefinition is not it); macros
+        // it calls in turn as the unit leaves them.
+        let mut table = u.macros_after.clone();
+        if let Some(d) = &mu.def {
+            table.insert(d.clone());
+        }
+        let out = expand_snippet(&*self.vfs, &cfg, mu.call_span.file, toks, table, levels);
         Some(format_expansion(&join_tokens(&out)))
     }
 }
