@@ -443,12 +443,17 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
         }
         "--uvm" => {
             fn pr(n: &dvi_analysis::ide::views::VerifNode, d: usize) {
-                println!("{}{} : {} [{}]", "  ".repeat(d), n.name, n.class, n.kind);
+                match &n.connection {
+                    Some(c) => println!("{}{} : {} [{}] {c}", "  ".repeat(d), n.name, n.class, n.kind),
+                    None => println!("{}{} : {} [{}]", "  ".repeat(d), n.name, n.class, n.kind),
+                }
                 for c in &n.children {
                     pr(c, d + 1);
                 }
             }
+            let t = std::time::Instant::now();
             let h = a.verification_hierarchy(if arg.is_empty() || arg == "-" { None } else { Some(arg) }, 5000);
+            eprintln!("uvm: {} ms", t.elapsed().as_millis());
             println!("tests: {} (configured: {})", h.tests.join(" "), h.configured.as_deref().unwrap_or("-"));
             if let Some(hint) = &h.hint {
                 println!("{hint}");

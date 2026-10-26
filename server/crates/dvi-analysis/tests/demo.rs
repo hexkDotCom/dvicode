@@ -156,15 +156,16 @@ fn verification_hierarchy() {
     let root = &h.roots[0];
     // The configuration object created with a parent is not a component; the derived test
     // adds to what its base test builds; the extern build_phase body and `new(name, this)`
-    // are followed.
+    // are followed. Ports show their connections (the driver's and sequencer's are the UVM
+    // library's).
     assert_eq!(
         verif_tree(root),
-        "uvm_test_top:demo_full_test(env:demo_env(agents[i]:demo_agent(mon:demo_monitor(ap:uvm_analysis_port),drv:demo_driver,sqr:uvm_sequencer),sb:demo_scoreboard,vsqr:uvm_sequencer),extra_sb:demo_scoreboard)"
+        "uvm_test_top:demo_full_test(env:demo_env(agents[i]:demo_agent(mon:demo_monitor(ap:uvm_analysis_port(→ env.sb.item_imp:)),drv:demo_driver(seq_item_port:uvm_seq_item_pull_port(→ env.agents[i].sqr.seq_item_export:only when `get_is_active() == UVM_ACTIVE`)),sqr:uvm_sequencer(seq_item_export:uvm_seq_item_pull_imp(← env.agents[i].drv.seq_item_port:only when `get_is_active() == UVM_ACTIVE`))),sb:demo_scoreboard(item_imp:uvm_analysis_imp(← env.agents[i].mon.ap:)),vsqr:uvm_sequencer(seq_item_export:uvm_seq_item_pull_imp)),extra_sb:demo_scoreboard(item_imp:uvm_analysis_imp))"
     );
     let env = &root.children[0];
     assert_eq!((env.kind.as_str(), env.path.as_str()), ("env", "uvm_test_top.env"));
     assert!(env.uri.as_deref().unwrap().ends_with("tb/demo_env_pkg.sv"));
-    assert_eq!(env.line + 1, 174);
+    assert_eq!(env.line + 1, 185);
     let kinds: Vec<&str> = env.children[0].children.iter().map(|c| c.kind.as_str()).collect();
     assert_eq!(kinds, vec!["monitor", "driver", "sequencer"]);
     // Another test, picked explicitly: inherits the base test's build_phase.

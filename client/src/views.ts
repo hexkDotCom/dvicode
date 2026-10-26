@@ -772,6 +772,7 @@ const VERIF_ICONS: Record<string, string> = {
   scoreboard: 'checklist',
   subscriber: 'rss',
   port: 'plug',
+  connection: 'link',
   component: 'symbol-class',
   unresolved: 'warning',
   sequence: 'play',
@@ -832,7 +833,7 @@ export class VerificationHierarchy extends TreeBase<VerifNode> {
     const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
     const item = new Item(p, parent, n.name, state);
     item.description = verifDescription(n);
-    item.contextValue = (n.object ? 'dvicode.verifObject' : 'dvicode.verifNode') + (n.def_uri ? '.class' : '');
+    item.contextValue = n.kind === 'connection' ? 'dvicode.verifConnection' : (n.object ? 'dvicode.verifObject' : 'dvicode.verifNode') + (n.def_uri ? '.class' : '');
     item.iconPath = new vscode.ThemeIcon(VERIF_ICONS[n.kind] ?? 'symbol-class');
     item.tooltip = new vscode.MarkdownString(verifTooltip(n));
     item.command = openCommand(this.conn, n.uri, n.line, n.character);

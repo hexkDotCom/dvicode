@@ -95,23 +95,32 @@ package uvm_pkg;
     endfunction
   endclass
 
+  typedef class uvm_seq_item_pull_port;
+  typedef class uvm_seq_item_pull_imp;
+
   class uvm_driver #(type REQ = uvm_object) extends uvm_component;
     `uvm_component_utils(uvm_driver #(REQ))
+    uvm_seq_item_pull_port #(REQ) seq_item_port;
     function new(string name, uvm_component parent);
       super.new(name, parent);
+      seq_item_port = new("seq_item_port", this);
     endfunction
   endclass
 
   class uvm_sequencer #(type REQ = uvm_object) extends uvm_component;
     `uvm_component_utils(uvm_sequencer #(REQ))
+    uvm_seq_item_pull_imp #(REQ, REQ, uvm_sequencer #(REQ)) seq_item_export;
     function new(string name, uvm_component parent);
       super.new(name, parent);
+      seq_item_export = new("seq_item_export", this);
     endfunction
   endclass
 
   virtual class uvm_port_base #(type T = int) extends uvm_object;
     function new(string name, uvm_component parent);
       super.new(name);
+    endfunction
+    function void connect(uvm_port_base #(T) provider);
     endfunction
   endclass
 
@@ -120,6 +129,24 @@ package uvm_pkg;
       super.new(name, parent);
     endfunction
     function void write(T t);
+    endfunction
+  endclass
+
+  class uvm_analysis_imp #(type T = int, type IMP = int) extends uvm_port_base #(T);
+    function new(string name, IMP imp);
+      super.new(name, imp);
+    endfunction
+  endclass
+
+  class uvm_seq_item_pull_port #(type REQ = int, type RSP = REQ) extends uvm_port_base #(REQ);
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+  endclass
+
+  class uvm_seq_item_pull_imp #(type REQ = int, type RSP = REQ, type IMP = int) extends uvm_port_base #(REQ);
+    function new(string name, IMP imp);
+      super.new(name, imp);
     endfunction
   endclass
 

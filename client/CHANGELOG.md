@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **TLM connections**: with ports shown, the Verification Hierarchy shows what each port,
+  export and imp is connected to (from the `connect()` calls of `connect_phase`, including the
+  UVM library's driver, sequencer, subscriber and FIFO ports) and which imps a port may reach.
+  Calls UVM rejects or ignores, and calls whose handles cannot be followed, are shown with the
+  reason.
 - **Compile context**: Show Compile Context (editor and Compiled Files menus) reports how a
   file is compiled: each root file and invocation with the include chain, and for the one the
   editor uses the defines, the include search with where each include was found and other

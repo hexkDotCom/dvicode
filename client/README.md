@@ -55,6 +55,14 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
   following port connections down into instances and up to where its module is instantiated.
   The places are found from the source, not by elaborating the design: interfaces, `alias`,
   `bind` instances and connections through expressions are not followed.
+- **TLM connections**: with ports shown in the Verification Hierarchy, each port, export and
+  imp says what it is connected to, through the `connect()` calls of the components'
+  `connect_phase` (also the ports the UVM library makes: a driver's `seq_item_port`, a
+  sequencer's `seq_item_export`, a subscriber's and an analysis FIFO's exports), and the imps a
+  port may reach through other ports and exports. Calls UVM rejects or ignores (an imp that
+  connects, different interfaces, after the end of elaboration) are shown with the reason; a
+  call whose handles cannot be followed (a helper's argument, an alias, another array element)
+  is shown as not followed, never guessed.
 - **Compile context**: right-click a file (or a Compiled Files entry) and choose Show Compile
   Context to see how it is compiled: every root file and invocation that compiles it with the
   include chain, and for the one the editor uses the defines, the include directories in

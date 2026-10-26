@@ -200,6 +200,13 @@ test.describe('Verification Hierarchy nodes', () => {
     assert.equal(vm.verifDescription(two), 'seq · on 2 sequencers');
     assert.equal(vm.verifDescription({ ...one, starts: [] }), 'seq · not started here');
     assert.equal(vm.verifDescription({ ...base, ports_hidden: 3, truncated: true }), 'err_driver …');
+    // An endpoint shows what it leads to; a connection its notes, and its tooltip who makes it.
+    const port = { name: 'ap', path: 'uvm_test_top.env.mon.ap', class: 'uvm_analysis_port', kind: 'port', connection: 'analysis port · → env.sb.imp' };
+    assert.equal(vm.verifDescription(port), 'analysis port · → env.sb.imp');
+    assert.match(vm.verifTooltip(port), /Analysis port · → env\.sb\.imp\./);
+    const link = { name: '✕ ← e.pull', path: 'uvm_test_top.e', class: 'seq_item_pull and analysis are different interfaces', kind: 'connection' };
+    assert.equal(vm.verifDescription(link), 'seq_item_pull and analysis are different interfaces');
+    assert.match(vm.verifTooltip(link), /Made by `uvm_test_top\.e`/);
   });
   test.it('finds a class by the class built, or the class an override replaced', () => {
     const p = (node) => ({ node, parent: undefined, children: [], names: [], key: '' });

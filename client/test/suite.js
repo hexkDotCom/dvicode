@@ -209,7 +209,7 @@ async function run() {
     const h = await c.sendRequest('dvicode/verificationHierarchy', { test: null });
     const s = (n) => `${n.name}${n.children.length ? '(' + n.children.map(s).join(',') + ')' : ''}`;
     const text = h.roots.map(s).join(' ');
-    if (h.test !== 'demo_full_test' || text !== 'uvm_test_top(env(agents[i](mon(ap),drv,sqr),sb,vsqr),extra_sb)') {
+    if (h.test !== 'demo_full_test' || text !== 'uvm_test_top(env(agents[i](mon(ap(→ env.sb.item_imp)),drv(seq_item_port(→ env.agents[i].sqr.seq_item_export)),sqr(seq_item_export(← env.agents[i].drv.seq_item_port))),sb(item_imp(← env.agents[i].mon.ap)),vsqr(seq_item_export)),extra_sb(item_imp))') {
       throw new Error(`${h.test}: ${text}`);
     }
     // The tree view, with another test picked.
@@ -254,6 +254,37 @@ async function run() {
       return `${text}; view: ${kids.join(', ')}`;
     } finally {
       await vscode.commands.executeCommand('dvicode.verification.hideObjects');
+      view.test = undefined;
+      view.refresh();
+    }
+  });
+
+  await test('verification hierarchy: TLM connections of ports', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const view = api.verification();
+    view.test = 'demo_full_test';
+    await vscode.commands.executeCommand('dvicode.verification.showPorts');
+    try {
+      const child = async (item, name) => {
+        const kids = await view.getChildren(item);
+        const k = kids.find((x) => x.label === name);
+        if (!k) throw new Error(`no ${name} under ${item ? item.label : 'the root'}: ${kids.map((x) => x.label).join(', ')}`);
+        return k;
+      };
+      const root = (await view.getChildren())[0];
+      const env = await child(root, 'env');
+      const agents = await child(env, 'agents[i]');
+      const ap = await child(await child(agents, 'mon'), 'ap');
+      if (ap.description !== 'analysis port · → env.sb.item_imp') throw new Error(`ap: ${ap.description}`);
+      const port = await child(await child(agents, 'drv'), 'seq_item_port');
+      if (port.description !== 'seq_item_pull port · possibly → env.agents[i].sqr.seq_item_export') throw new Error(`seq_item_port: ${port.description}`);
+      const imp = await child(await child(env, 'sb'), 'item_imp');
+      const links = (await view.getChildren(imp)).map((k) => `${k.label}${k.description ? ` (${k.description})` : ''}`);
+      if (imp.description !== 'analysis imp · 1 connection to it' || links.join(',') !== '← env.agents[i].mon.ap') throw new Error(`item_imp: ${imp.description}; ${links.join(',')}`);
+      return `${ap.label}: ${ap.description}; ${port.label}: ${port.description}; ${imp.label}: ${imp.description}`;
+    } finally {
+      await vscode.commands.executeCommand('dvicode.verification.hidePorts');
       view.test = undefined;
       view.refresh();
     }

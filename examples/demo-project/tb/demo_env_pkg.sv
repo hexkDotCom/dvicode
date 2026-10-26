@@ -48,12 +48,21 @@ package demo_env_pkg;
         sqr = uvm_sequencer #(uvm_object)::type_id::create("sqr", this);
       end
     endfunction
+    function void connect_phase(uvm_phase phase);
+      // Ports show what they are connected to (Verification Hierarchy, ports shown).
+      if (get_is_active() == UVM_ACTIVE)
+        drv.seq_item_port.connect(sqr.seq_item_export);
+    endfunction
   endclass
 
   class demo_scoreboard extends uvm_scoreboard;
     `uvm_component_utils(demo_scoreboard)
+    uvm_analysis_imp #(int, demo_scoreboard) item_imp;
     function new(string name, uvm_component parent);
       super.new(name, parent);
+      item_imp = new("item_imp", this);
+    endfunction
+    function void write(int t);
     endfunction
   endclass
 
@@ -127,6 +136,8 @@ package demo_env_pkg;
     endfunction
     extern function void build_phase(uvm_phase phase);
     virtual function void connect_phase(uvm_phase phase);
+      foreach (agents[i])
+        agents[i].mon.ap.connect(sb.item_imp);
       adapter = demo_reg_adapter::type_id::create("adapter");
     endfunction
   endclass

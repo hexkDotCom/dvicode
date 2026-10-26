@@ -174,6 +174,8 @@ export interface VerifInfo {
   starts?: { on: string; path: boolean; phase: string; conditions?: string[][] }[];
   allocated?: string;
   notes?: string[];
+  /** A port, export or imp: its interface, role and what it is connected to or may reach. */
+  connection?: string;
 }
 
 /** Conditions as text: the ways, each its conditions joined by `&&`, joined by `or`. */
@@ -188,6 +190,14 @@ function countText(count: string): string {
 
 /** The text after a Verification Hierarchy node's name. */
 export function verifDescription(n: VerifInfo): string {
+  // A connection: why it is not followed, where it is made (its notes).
+  if (n.kind === 'connection') {
+    return n.class;
+  }
+  // An endpoint: its role and what it leads to (the class is in the tooltip).
+  if (n.connection) {
+    return n.connection + (n.truncated ? ' …' : '');
+  }
   const parts = [n.class + (n.count ? ` ${countText(n.count)}` : '')];
   const overrides = n.overrides ?? [];
   if (overrides.some((o) => o.applied)) {
@@ -215,7 +225,13 @@ export function verifDescription(n: VerifInfo): string {
 
 /** A Verification Hierarchy node's tooltip (Markdown). */
 export function verifTooltip(n: VerifInfo): string {
+  if (n.kind === 'connection') {
+    return [`**${n.name.replace(/[*_`[\]]/g, (c) => `\\${c}`)}**`, n.class ? `${n.class}.` : '', `Made by \`${n.path}\`.`].filter((l) => l).join('\n\n');
+  }
   const lines = [`**${n.name}** : \`${n.class}\` (${n.kind})`, n.object ? '' : n.path];
+  if (n.connection) {
+    lines.push(`${n.connection.charAt(0).toUpperCase()}${n.connection.slice(1)}.`);
+  }
   for (const o of n.overrides ?? []) {
     const what = `\`${o.from}\` → \`${o.to}\`: ${o.instance ? `instance override (${o.path})` : 'type override'} in \`${o.set_in}\``;
     lines.push(o.applied ? `Override: ${what}` : `May be overridden: ${what}${o.conditions?.length ? `, when ${conditionsText(o.conditions)}` : ''}`);

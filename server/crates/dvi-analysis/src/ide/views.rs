@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 mod objects;
+mod tlm;
 use objects::{ConfigSet, SeqStart, LATE_PHASES, RUN_PHASES};
 
 #[derive(Serialize, Debug, Clone)]
@@ -120,6 +121,9 @@ pub struct VerifNode {
     /// TLM ports of the component left out (`TreeQuery::ports` off).
     #[serde(skip_serializing_if = "is_zero")]
     pub ports_hidden: u32,
+    /// A port, export or imp: its interface, role and what it is connected to or may reach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     /// Factory overrides: those that make `class` what it is (`applied`), in order, then those
     /// set under conditions that would change it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -429,6 +433,8 @@ enum What {
     /// A call of a method of the object (`f()`, `this.f()`), or of the base class's (`super.f()`,
     /// `super.new()`): with the arguments given by name (`.n(v)`) or position.
     Call { name: String, sup: bool, args: Vec<(Option<String>, Arg)> },
+    /// A TLM `a.connect(b)`.
+    Connect(tlm::ConnectCall),
 }
 
 /// An argument of a call, as far as the hierarchy needs it.
@@ -473,6 +479,8 @@ struct Built {
     regs: Vec<Reg>,
     sets: Vec<SetEv>,
     run: Vec<RunEv>,
+    /// The `connect()` calls of its phases before run time.
+    connects: Vec<tlm::ConnEv>,
     /// Some creations were not followed (a budget or the call depth).
     cut: bool,
 }
@@ -598,6 +606,8 @@ struct Scan {
     cut: Cell<bool>,
     /// Objects are wanted: the phases after build and the run-time phases are scanned too.
     objects: bool,
+    /// TLM connections are wanted (ports are shown): `connect_phase` is scanned too.
+    connections: bool,
     /// What building each class makes (by its most derived class).
     built: RefCell<FxHashMap<DeclRef, Rc<Built>>>,
     /// Functions that make one component of the parent they are given, by implementation:
@@ -675,6 +685,10 @@ struct Inst {
     cut: bool,
     /// Default sequences shown under it.
     defaults: Vec<DefaultSeq>,
+    /// An endpoint the UVM library's constructor makes: its member (no creation of ours).
+    member: Option<DeclRef>,
+    /// Other members that hold the same endpoint (`blocking_put_export = put_export`).
+    aliases: Vec<(u32, u32)>,
 }
 
 /// An object made while a component builds.
@@ -1492,7 +1506,7 @@ impl Analysis {
             None => tests.clone(),
         };
         let mut w = Walk::new(q);
-        let scan = Scan { objects: q.objects, ..Scan::default() };
+        let scan = Scan { objects: q.objects, connections: q.ports, ..Scan::default() };
         let mut out = Vec::new();
         let mut seen = FxHashMap::default();
         for t in roots {
@@ -1528,7 +1542,14 @@ impl Analysis {
                     w.meta.incomplete.get_or_insert("nodes");
                 }
                 let mut stack = vec![self.decl_key(t)];
-                node.children = self.emit(&model, pin, &mut w, &mut node.truncated, &mut node.ports_hidden, &mut stack, &scan, &factory);
+                let links = scan.connections.then(|| self.tlm_links(&model, &scan));
+                node.children = self.emit(&model, pin, &mut w, &mut node.truncated, &mut node.ports_hidden, &mut stack, &scan, &factory, links.as_ref());
+                // The test's own calls that are not followed.
+                if let Some(l) = links.as_ref().filter(|_| matched || unfiltered(&w)) {
+                    let loose = tlm::loose_nodes(self, "uvm_test_top", l);
+                    let kids = admit_links(&mut w, loose, &mut node.truncated);
+                    node.children.extend(kids);
+                }
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 out.push(node);
@@ -1560,6 +1581,9 @@ impl Analysis {
         let mut stack = vec![self.decl_key(test)];
         self.construct_inst(&mut root, &mut factory, &mut nodes, &mut stack, scan);
         self.build_inst(&mut root, &mut factory, &mut nodes, &mut stack, scan);
+        if scan.connections {
+            self.add_library_endpoints(&mut root, 0);
+        }
         if scan.objects {
             // The phases after build run once every component is built, bottom up.
             for phase in LATE_PHASES {
@@ -1879,7 +1903,8 @@ impl Analysis {
     /// query asks (limits, filter, target, revealed path); `run_factory`: the overrides of the
     /// whole build, for what the run-time phases make.
     #[allow(clippy::too_many_arguments)]
-    fn emit(&self, inst: &Inst, pin: Option<&[String]>, w: &mut Walk, truncated: &mut bool, ports_hidden: &mut u32, stack: &mut Vec<(u32, u32)>, scan: &Scan, run_factory: &Factory) -> Vec<VerifNode> {
+    #[allow(clippy::too_many_arguments)]
+    fn emit(&self, inst: &Inst, pin: Option<&[String]>, w: &mut Walk, truncated: &mut bool, ports_hidden: &mut u32, stack: &mut Vec<(u32, u32)>, scan: &Scan, run_factory: &Factory, links: Option<&tlm::Links>) -> Vec<VerifNode> {
         if self.cancelled() {
             return Vec::new();
         }
@@ -1912,7 +1937,47 @@ impl Analysis {
                 }
                 break;
             };
-            let Some(m) = &child.made else { continue };
+            let Some(m) = &child.made else {
+                // An endpoint of the UVM library: where its member is declared.
+                if let Some(mem) = child.member {
+                    let loc = self.decl_location(mem);
+                    let def_loc = child.class.and_then(|c| self.decl_location(c));
+                    let mut node = VerifNode {
+                        path_known: child.path_known,
+                        class_decl: child.class,
+                        name: child.name.clone(),
+                        path: child.path.clone(),
+                        class: child.class.map(|c| self.decl(c).name.to_string()).or_else(|| self.decl(mem).ty.as_ref().map(|t| t.text.to_string())).unwrap_or_default(),
+                        kind: "port".into(),
+                        uri: loc.as_ref().map(|l| l.uri.to_string()),
+                        line: loc.as_ref().map_or(0, |l| l.range.start.line),
+                        character: loc.as_ref().map_or(0, |l| l.range.start.character),
+                        def_uri: def_loc.as_ref().map(|l| l.uri.to_string()),
+                        def_line: def_loc.as_ref().map_or(0, |l| l.range.start.line),
+                        ..Default::default()
+                    };
+                    let matched = match &w.q.target {
+                        Some(t) => {
+                            let m = t.class.as_deref().is_some_and(|c| c == node.class);
+                            w.count(m)
+                        }
+                        None => w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.')]),
+                    };
+                    if let Some(l) = links {
+                        let (status, kids) = tlm::endpoint_view(self, &child.path, l);
+                        node.connection = status;
+                        if matched || unfiltered(w) {
+                            node.children = admit_links(w, kids, &mut node.truncated);
+                        }
+                    }
+                    if matched || child_pin.is_some() {
+                        out.push(node);
+                    } else if reserved {
+                        w.nodes_left += 1;
+                    }
+                }
+                continue;
+            };
             let loc = self.to_location(m.cr.lhs_head);
             let def_loc = child.class.and_then(|c| self.decl_location(c));
             let class_name = match child.class {
@@ -1956,7 +2021,17 @@ impl Analysis {
                 None => w.matched(&[(&node.name, '.'), (&node.class, '.'), (&node.path, '.'), (&declared, '.')]),
             };
             if child.kind != "port" {
-                node.children = self.emit(child, child_pin, w, &mut node.truncated, &mut node.ports_hidden, stack, scan, run_factory);
+                node.children = self.emit(child, child_pin, w, &mut node.truncated, &mut node.ports_hidden, stack, scan, run_factory, links);
+                if let Some(l) = links.filter(|_| matched || unfiltered(w)) {
+                    let kids = admit_links(w, tlm::loose_nodes(self, &child.path, l), &mut node.truncated);
+                    node.children.extend(kids);
+                }
+            } else if let Some(l) = links {
+                let (status, kids) = tlm::endpoint_view(self, &child.path, l);
+                node.connection = status;
+                if matched || unfiltered(w) {
+                    node.children = admit_links(w, kids, &mut node.truncated);
+                }
             }
             if matched || !node.children.is_empty() || child_pin.is_some() {
                 out.push(node);
@@ -2279,12 +2354,15 @@ impl Analysis {
         if let Some((body, at)) = self.call_target("build_phase", 0, false, derived_first, scan).or_else(|| self.call_target("build", 0, false, derived_first, scan)) {
             self.run_method(body, at, derived_first, &none, &[], 0, &mut stack, scan, &mut made, Mode::Build);
         }
-        if scan.objects {
+        if scan.objects || scan.connections {
             for phase in LATE_PHASES {
-                if let Some((body, at)) = self.call_target(phase, 0, false, derived_first, scan) {
+                let target = self.call_target(phase, 0, false, derived_first, scan).or_else(|| if *phase == "connect_phase" { self.call_target("connect", 0, false, derived_first, scan) } else { None });
+                if let Some((body, at)) = target {
                     self.run_method(body, at, derived_first, &none, &[], 0, &mut stack, scan, &mut made, Mode::Late(phase));
                 }
             }
+        }
+        if scan.objects {
             for phase in RUN_PHASES {
                 // `run_phase` of the UVM library calls the old `run()`.
                 let target = self.call_target(phase, 0, false, derived_first, scan).or_else(|| if *phase == "run_phase" { self.call_target("run", 0, false, derived_first, scan) } else { None });
@@ -2358,6 +2436,11 @@ impl Analysis {
                         made.sets.push(SetEv { body, guards, set: set.clone() });
                     }
                 }
+                What::Connect(call) => {
+                    if !matches!(mode, Mode::Run(_)) {
+                        made.connects.push(tlm::ConnEv { body, guards, call: call.clone(), phase: mode.phase() });
+                    }
+                }
                 What::Call { name, sup, args } => {
                     let Some((callee, ci)) = self.call_target(name, at, *sup, derived_first, scan) else { continue };
                     let callee_env = self.literal_args(callee, args, env, &s.assigned);
@@ -2380,6 +2463,7 @@ impl Analysis {
         let t = if sup {
             self.method_from(name, at + 1, derived_first).or_else(|| match name {
                 "build_phase" => self.call_target("build", 0, false, derived_first, scan),
+                "connect_phase" => self.call_target("connect", 0, false, derived_first, scan),
                 "run_phase" => self.call_target("run", 0, false, derived_first, scan),
                 _ => None,
             })
@@ -2468,6 +2552,11 @@ impl Analysis {
         }
         for (k, set) in objects::config_sets(&toks) {
             events.push((k, Event { guards: guards_at(k), what: What::Set(set) }));
+        }
+        if scan.connections {
+            for (k, c) in tlm::connect_calls(&toks) {
+                events.push((k, Event { guards: guards_at(k), what: What::Connect(c) }));
+            }
         }
         events.sort_by_key(|(k, _)| *k);
         // After the header (whose argument defaults are not assignments).
@@ -2965,6 +3054,24 @@ fn strip_indexes(text: &str) -> String {
             _ if depth == 0 => out.push(c),
             _ => {}
         }
+    }
+    out
+}
+
+/// No filter or target: every node is shown.
+fn unfiltered(w: &Walk) -> bool {
+    w.q.filter.is_none() && w.q.target.is_none()
+}
+
+/// Connection children, within the tree's node and visit limits.
+fn admit_links(w: &mut Walk, kids: Vec<VerifNode>, truncated: &mut bool) -> Vec<VerifNode> {
+    let mut out = Vec::new();
+    for k in kids {
+        if !w.visit() || w.reserve(false).is_none() {
+            *truncated = true;
+            break;
+        }
+        out.push(k);
     }
     out
 }
