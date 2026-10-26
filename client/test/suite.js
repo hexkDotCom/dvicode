@@ -584,6 +584,53 @@ async function run() {
     return `${md.split('\n')[0]} -> ${at}`;
   });
 
+  await test('logs: links open a file from another machine and select a component', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    // A log as a farm machine writes it (its paths do not exist here). Removed after the test.
+    const dir = vscode.Uri.joinPath(folder, 'logs_e2e');
+    const log = vscode.Uri.joinPath(dir, 'sim.log');
+    const text = [
+      'UVM_INFO @ 0: reporter [RNTST] Running test demo_full_test...',
+      'UVM_ERROR /nfs/farm/demo/tb/demo_env_pkg.sv(15) @ 100: uvm_test_top.env.agents[0].drv [DRV] boom',
+      'Warning-[TMBIN] Too many bits in Based Number',
+      '/nfs/farm/demo/tb/tb_pkg.sv, 3',
+      '',
+    ].join('\n');
+    await vscode.workspace.fs.writeFile(log, Buffer.from(text));
+    try {
+      const doc = await vscode.workspace.openTextDocument(log);
+      await vscode.window.showTextDocument(doc);
+      const links = await waitFor('log links', async () => {
+        const l = await vscode.commands.executeCommand('vscode.executeLinkProvider', doc.uri);
+        const ours = (l || []).filter((x) => x.target && x.target.scheme === 'command' && x.target.path.startsWith('dvicode.logs.'));
+        return ours.length >= 3 ? ours : undefined;
+      });
+      const args = (l) => JSON.parse(decodeURIComponent(l.target.query))[0];
+      const shown = links.map((l) => doc.getText(l.range));
+      const editorAt = () => {
+        const ed = vscode.window.activeTextEditor;
+        return ed ? `${vscode.workspace.asRelativePath(ed.document.uri)}:${ed.selection.active.line + 1}` : 'none';
+      };
+      // The UVM line's file, then the VCS message's location (the next line after its header).
+      await vscode.commands.executeCommand('dvicode.logs.open', args(links[0]));
+      const first = editorAt();
+      if (first !== 'tb/demo_env_pkg.sv:15') throw new Error(`first link opened ${first}; links ${shown.join(' | ')}`);
+      await vscode.commands.executeCommand('dvicode.logs.open', args(links[2]));
+      const third = editorAt();
+      if (third !== 'tb/tb_pkg.sv:3') throw new Error(`VCS location opened ${third}`);
+      // The component: selected in the Verification Hierarchy, its class opened.
+      await vscode.commands.executeCommand('dvicode.logs.component', args(links[1]));
+      const cls = vscode.window.activeTextEditor;
+      const line = cls ? cls.document.lineAt(cls.selection.active.line).text : '';
+      if (!/class demo_driver/.test(line)) throw new Error(`component opened ${editorAt()}: ${line}`);
+      return `${shown.join(' | ')} -> ${first}; ${third}; ${line.trim()}`;
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.workspace.fs.delete(dir, { recursive: true });
+    }
+  });
+
   await test('instance repair: port completion and connect missing ports', async () => {
     const doc = await open('rtl/top.sv');
     const ed = await vscode.window.showTextDocument(doc);

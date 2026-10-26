@@ -1209,6 +1209,33 @@ export class Views implements vscode.Disposable {
     }
   }
 
+  /** Selects a component a log names (`dvicode/component`), in the test it was found in: the
+   * view switches to that test when it shows another one. Whether the node was selected (else
+   * its nearest ancestor shown is). */
+  async revealComponent(hit: { test: string; names: string[] }): Promise<boolean> {
+    const v = this.verification;
+    await vscode.commands.executeCommand('dvicode.verificationHierarchy.focus');
+    if (!v.size || !v.last) {
+      await v.refresh();
+    }
+    // All tests shown (`*`) have the test class as a root too.
+    if (v.test !== '*' && v.last?.test !== hit.test) {
+      this.followGen++;
+      v.test = hit.test;
+      await v.refresh();
+    }
+    if (await v.selectExact(hit.names)) {
+      return true;
+    }
+    // Beyond the node limit: fetched again with the component in it.
+    await v.refresh(hit.names);
+    if (await v.selectExact(hit.names)) {
+      return true;
+    }
+    await v.select(hit.names);
+    return false;
+  }
+
   /** Asks for an address and selects the register there (one of them, when several maps have one). */
   private async findRegisterAt(): Promise<void> {
     const c = this.conn.client();

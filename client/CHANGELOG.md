@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Clickable simulator logs**: in `*.log` files, `transcript` and terminals, source locations
+  open the file at the line (UVM report lines, VCS messages, and the common `file(line)` and
+  `file:line` forms), also for logs written on another machine: the project file whose path
+  ends the same way is opened. A UVM component path (`uvm_test_top.env.sb`) selects the
+  component in the Verification Hierarchy, in the test the log ran, and opens its class.
+- Preprocessor: `//` inside a `` `"...`" `` string is part of it, ``` `` ``` inside one pastes
+  (`` `"x``_vif`" ``), and a cycle of guarded headers (a.svh includes b.svh, which includes
+  a.svh) is no longer a recursive include. Escaped names keep their backslash in macro
+  expansions.
+
 ## 0.6.0 (preview)
 
 - **TLM connections**: with ports shown, the Verification Hierarchy shows what each port,

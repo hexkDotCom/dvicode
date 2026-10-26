@@ -11,6 +11,7 @@ import { ChecksView } from './checks';
 import { CompileContextReports } from './context';
 import { ContextChooser } from './contextchoice';
 import { DriversView } from './drivers';
+import { LogLinks } from './logs';
 import { Structure } from './structure';
 import { VerificationHierarchy, Views, componentClassLocation, hierarchyPath } from './views';
 
@@ -594,6 +595,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   structure = new Structure(ctx, conn);
   checks = new ChecksView(ctx, conn);
   drivers = new DriversView(conn);
+  const logs = new LogLinks(conn, (hit) => views.revealComponent(hit));
   contexts = new CompileContextReports(conn);
   chooser = new ContextChooser(ctx.workspaceState, conn);
   ctx.subscriptions.push(
@@ -601,6 +603,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     structure,
     checks,
     drivers,
+    logs,
     contexts,
     chooser,
     vscode.commands.registerCommand('dvicode.selectUvmTest', selectUvmTest),

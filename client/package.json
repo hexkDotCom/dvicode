@@ -383,6 +383,11 @@
           "default": false,
           "markdownDescription": "Show the generate blocks and instances whose condition is proven false in the Design Hierarchy, marked *not elaborated*. Blocks whose condition cannot be evaluated are always shown, marked *undetermined*."
         },
+        "dvicode.logs.links": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Make source locations and UVM component paths in simulator logs (`*.log`, `transcript`) and terminals clickable. A path from another machine opens the project file whose path ends the same way; a component path (`uvm_test_top.env.sb`) is selected in the Verification Hierarchy."
+        },
         "dvicode.inlayHints.ports": {
           "type": "boolean",
           "default": true,

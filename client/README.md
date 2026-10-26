@@ -72,6 +72,12 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
   problems. Hover an `` `include `` to see what found it. **Copy Compile Context** puts the
   report on the clipboard for an issue.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into.
+- **Clickable simulator logs**: in `*.log` files, `transcript` and terminals, source
+  locations open the file at the line (UVM report lines, VCS messages, and the common
+  `file(line)` and `file:line` forms), even when the log was written on another machine: the
+  project file whose path ends the same way is opened. A UVM component path
+  (`uvm_test_top.env.sb`) selects the component in the Verification Hierarchy, in the test the
+  log ran, and opens its class. Setting `dvicode.logs.links`.
 - **Type and call hierarchies**, outline, symbol search, rename, semantic highlighting.
 - **Quick fixes**: "did you mean", "import package", "declare variable".
 - **Uses your existing file lists** (`-f` files), or configures the project by itself.

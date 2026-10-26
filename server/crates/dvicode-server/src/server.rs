@@ -2147,6 +2147,19 @@ impl Server {
                     None => Value::Null,
                 })
             }),
+            // Simulator log links: a source file by a path from the log (perhaps from another
+            // machine), and a UVM component by its path.
+            "dvicode/findFile" => self.spawn_project(req, |a, p: Value| {
+                let path = p.get("path").and_then(Value::as_str).unwrap_or_default();
+                let base = p.get("base").and_then(Value::as_str).and_then(|u| Url::parse(u).ok()).and_then(|u| path_of(&u));
+                let files: Vec<String> = a.find_files(path, base.as_deref()).iter().map(|f| dvi_analysis::ide::url_of(f).to_string()).collect();
+                Ok(json!({ "files": files }))
+            }),
+            "dvicode/component" => self.spawn_project(req, |a, p: Value| {
+                let path = p.get("path").and_then(Value::as_str).unwrap_or_default();
+                let test = p.get("test").and_then(Value::as_str).filter(|t| !t.is_empty());
+                Ok(json!({ "revision": a.revision, "hit": a.component_at(test, path) }))
+            }),
             "dvicode/locate" => self.spawn_project(req, |a, p: LocateParams| {
                 let located = pos(a, &p.text_document.uri, p.position).map(|(f, off)| a.locate(f, off)).unwrap_or_default();
                 Ok(json!({ "revision": a.revision, "design": located.design, "instance": located.instance, "class": located.class }))

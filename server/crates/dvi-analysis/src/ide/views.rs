@@ -2918,7 +2918,7 @@ fn sibling(seen: &mut FxHashMap<String, u32>, name: &str) -> Option<u32> {
 }
 
 /// A node's name in paths: `f`, or `f#2` for the second sibling called `f`.
-fn keyed(name: &str, dup: Option<u32>) -> String {
+pub(crate) fn keyed(name: &str, dup: Option<u32>) -> String {
     match dup {
         Some(k) => format!("{name}#{k}"),
         None => name.to_string(),

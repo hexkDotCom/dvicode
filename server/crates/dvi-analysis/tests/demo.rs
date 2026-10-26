@@ -313,3 +313,22 @@ fn searches_of_a_cancelled_request_stop() {
     assert!(c.design_hierarchy(None, 1000).iter().all(|r| r.children.is_empty()));
     assert!(!a.design_hierarchy(None, 1000).iter().all(|r| r.children.is_empty()));
 }
+
+#[test]
+fn log_links_find_files_and_components() {
+    let a = build(".dvicode/default.build");
+    // A path from another machine: the project file whose path ends the same way.
+    let f = a.find_files("/nfs/elsewhere/tb/demo_env_pkg.sv", None);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].ends_with("tb/demo_env_pkg.sv"));
+    assert_eq!(a.find_files(&f[0].to_string_lossy(), None), f, "an existing path is itself");
+    assert_eq!(a.find_files("tb/demo_env_pkg.sv", None).len(), 1, "relative to the project");
+    assert!(a.find_files("/nfs/elsewhere/nothing_like_it.sv", None).is_empty());
+    // A component: arrays made in a loop match any index; the configured test by default.
+    let h = a.component_at(None, "uvm_test_top.env.agents[1].drv").unwrap();
+    assert_eq!((h.test.as_str(), h.names.join("."), h.matched, h.segments, h.class.as_str()), ("demo_full_test", "demo_full_test.env.agents[i].drv".to_string(), 4, 4, "demo_driver"));
+    assert!(h.uri.as_deref().is_some_and(|u| u.ends_with(".sv")));
+    let h = a.component_at(Some("demo_smoke_test"), "uvm_test_top.env.nothing.x").unwrap();
+    assert_eq!((h.test.as_str(), h.matched, h.segments), ("demo_smoke_test", 2, 4), "the deepest part that exists");
+    assert!(a.component_at(None, "reporter").is_none());
+}

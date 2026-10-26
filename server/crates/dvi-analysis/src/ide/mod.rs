@@ -14,6 +14,7 @@ pub mod filter;
 pub mod hints;
 pub mod hover;
 pub mod instances;
+pub mod logs;
 pub mod loops;
 pub mod nav;
 pub mod override_impact;
