@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Compile context**: Show Compile Context (editor and Compiled Files menus) reports how a
+  file is compiled: each root file and invocation with the include chain, and for the one the
+  editor uses the defines, the include search with where each include was found and other
+  copies further down, the macros the file uses or tests as defined there, lines removed by
+  `` `ifdef ``, definitions that exist more than once and the one used, and preprocessing
+  problems. Hovering an `` `include `` says what found the file.
 - The DVICode panel opens with Design Hierarchy, Verification Hierarchy and Structure
   expanded, and Register Model, Assertions and Coverage, Drivers and Loads and Compiled Files
   collapsed below them. A layout you arranged yourself is kept.

@@ -732,6 +732,17 @@
         "title": "Show Loads of This Signal",
         "category": "DVICode",
         "icon": "$(eye)"
+      },
+      {
+        "command": "dvicode.showCompileContext",
+        "title": "Show Compile Context",
+        "category": "DVICode",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "dvicode.copyCompileContext",
+        "title": "Copy Compile Context",
+        "category": "DVICode"
       }
     ],
     "menus": {
@@ -760,6 +771,11 @@
           "command": "dvicode.showLoads",
           "when": "editorLangId == systemverilog && dvicode.engine.accesses",
           "group": "navigation@94"
+        },
+        {
+          "command": "dvicode.showCompileContext",
+          "when": "(editorLangId == systemverilog || editorLangId == verilog) && dvicode.engine.compileContext",
+          "group": "navigation@93"
         }
       ],
       "view/title": [
@@ -1011,6 +1027,11 @@
         {
           "command": "dvicode.registers.openClass",
           "when": "view == dvicode.registerModel && viewItem =~ /^dvicode\\.regNode\\.class$/"
+        },
+        {
+          "command": "dvicode.showCompileContext",
+          "when": "view == dvicode.compiledFiles && viewItem == dvicode.fileNode && dvicode.engine.compileContext",
+          "group": "navigation@1"
         }
       ],
       "commandPalette": [
@@ -1077,6 +1098,14 @@
         {
           "command": "dvicode.accesses.showLoads",
           "when": "false"
+        },
+        {
+          "command": "dvicode.showCompileContext",
+          "when": "dvicode.engine.compileContext"
+        },
+        {
+          "command": "dvicode.copyCompileContext",
+          "when": "dvicode.engine.compileContext"
         }
       ]
     },

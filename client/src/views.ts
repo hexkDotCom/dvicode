@@ -708,6 +708,7 @@ export class CompiledFiles extends TreeBase<FileNode> {
       item.description = `${item.description ?? ''} …`.trim();
     }
     item.tooltip = n.path;
+    item.contextValue = 'dvicode.fileNode';
     item.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
     return item;
   }

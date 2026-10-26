@@ -763,3 +763,210 @@ export function hierTooltip(n: HierInfo, path: string): string {
   }
   return lines.join('\n\n');
 }
+
+/** A place in a file (zero-based line), as the engine sends it. */
+export interface ContextPlace {
+  uri: string;
+  line: number;
+}
+
+/** `dvicode/compileContext`: how a file is compiled (see the engine's `ide/context.rs`). */
+export interface CompileContextInfo {
+  uri: string;
+  known: boolean;
+  auto: boolean;
+  build_file: string | null;
+  contexts: {
+    invocation: number;
+    mode: string;
+    root_role: string;
+    root: string;
+    order: [number, number] | null;
+    is_root: boolean;
+    chain: ContextPlace[];
+    chain_cut: boolean;
+  }[];
+  contexts_total: number;
+  skip_matches: [number, string][];
+  detail: {
+    invocation: {
+      index: number;
+      mode: string;
+      auto: boolean;
+      top_files: number;
+      defines: [string, string | null][];
+      defines_total: number;
+      undefines: string[];
+      incdirs: string[];
+      incdirs_total: number;
+      lib_dirs: number;
+      lib_files: number;
+    } | null;
+    macros: {
+      name: string;
+      used: boolean;
+      tested: boolean;
+      undefined: boolean;
+      seen: { defined: boolean; at: ContextPlace | null; command_line: boolean; params: string | null; value: string; count: number }[];
+      states_cut: number;
+    }[];
+    macros_total: number;
+    includes: { line: number; text: string; resolved: string | null; entered: boolean; step: string | null; incdir: [number, string] | null; shadowed: string[] }[];
+    includes_total: number;
+    probes_cut: boolean;
+    inactive_lines: number;
+    duplicates: { kind: string; name: string; here: ContextPlace; others: ContextPlace[]; others_total: number; default: ContextPlace | null; rule: string }[];
+    duplicates_cut: boolean;
+    problem_counts: [string, number][];
+    problems_capped: boolean;
+    preprocessing: { code: string; line: number; message: string }[];
+  } | null;
+}
+
+/** Text in inline code, whatever backticks it holds. */
+export function mdCode(s: string): string {
+  const flat = s.replace(/\r?\n/g, ' ');
+  const run = Math.max(0, ...(flat.match(/`+/g) ?? []).map((m) => m.length));
+  const fence = '`'.repeat(run + 1);
+  const pad = run > 0 ? ' ' : '';
+  return `${fence}${pad}${flat}${pad}${fence}`;
+}
+
+/** Plain text safe in Markdown (source-derived names and messages). */
+export function mdPlain(s: string): string {
+  return s.replace(/[\\`*_{}[\]<>()#+!|~]/g, (c) => `\\${c}`).replace(/\r?\n/g, ' ');
+}
+
+/**
+ * The compile-context report as Markdown. `link(uri, line?)` gives a link target for an engine
+ * uri (mapped for this machine) and `name(uri)` the text to show for it.
+ */
+export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string, line?: number) => string, name: (uri: string) => string): string {
+  const code = mdCode;
+  const plain = mdPlain;
+  const at = (p: ContextPlace): string => `[${plain(name(p.uri))}:${p.line + 1}](${link(p.uri, p.line)})`;
+  const file = (uri: string): string => `[${plain(name(uri))}](${link(uri)})`;
+  const out: string[] = [`# Compile context of ${plain(name(c.uri))}`, ''];
+  out.push(c.build_file ? `Build file: ${file(c.build_file)}` : 'No build file: the project is configured automatically.', '');
+  for (const [inv, pat] of c.skip_matches) {
+    out.push(`- Matches ${code(`+dvicode_skip_compile+${pat}`)} of invocation ${inv + 1}: not a top file there (it can still be included).`);
+  }
+  if (c.skip_matches.length) {
+    out.push('');
+  }
+  if (!c.known || !c.contexts.length) {
+    out.push(
+      c.known
+        ? '**Not compiled.** No compiled file includes it, and the build does not list it as a top file.'
+        : '**Not compiled.** The engine has not read this file: the build does not list it and no compiled file includes it.',
+    );
+    return out.join('\n') + '\n';
+  }
+  const roles: Record<string, string> = { top: 'top file', library: 'library file', adhoc: 'open in the editor, not part of the build', builtin: 'built-in file' };
+  out.push(`## Compiled in ${c.contexts_total} context${c.contexts_total === 1 ? '' : 's'}`, '');
+  if (c.contexts_total > 1) {
+    out.push('The editor features (problems, hover, highlighting) use the first one.', '');
+  }
+  c.contexts.forEach((x, i) => {
+    const order = x.order ? `, ${x.order[0]} of ${x.order[1]} top files` : '';
+    const mode = x.mode && x.mode !== 'default' ? ` (${plain(x.mode)})` : '';
+    const root = `${file(x.root)} (${roles[x.root_role] ?? x.root_role}${order}) in invocation ${x.invocation + 1}${mode}`;
+    if (x.is_root) {
+      out.push(`${i + 1}. As ${root}`);
+    } else {
+      const chain = x.chain.map(at).join(' → ');
+      out.push(`${i + 1}. From ${root}: ${chain || 'included'}${x.chain_cut ? ' → …' : ''}`);
+    }
+  });
+  if (c.contexts_total > c.contexts.length) {
+    out.push(`${c.contexts.length + 1}. … and ${c.contexts_total - c.contexts.length} more`);
+  }
+  const d = c.detail;
+  if (!d) {
+    return out.join('\n') + '\n';
+  }
+  out.push('', '## In the first context', '');
+  const inv = d.invocation;
+  if (inv) {
+    out.push(`**Invocation ${inv.index + 1}**${inv.auto ? ' (auto-configured)' : ''}: ${inv.top_files} top files, ${inv.incdirs_total} include directories, ${inv.lib_dirs} \`-y\` and ${inv.lib_files} \`-v\` libraries.`, '');
+    if (inv.defines_total || inv.undefines.length) {
+      const defs = inv.defines.map(([n, v]) => code(v === null ? `+define+${n}` : `+define+${n}=${v}`));
+      defs.push(...inv.undefines.map((n) => code(`undefine ${n}`)));
+      const more = inv.defines_total > inv.defines.length ? ` … (${inv.defines_total} in all)` : '';
+      out.push(`Command-line macros: ${defs.join(' ')}${more}`, '');
+    }
+    if (inv.incdirs.length) {
+      out.push('Include directories, in search order:', '');
+      inv.incdirs.forEach((p, i) => out.push(`${i + 1}. ${code(p)}`));
+      if (inv.incdirs_total > inv.incdirs.length) {
+        out.push(`${inv.incdirs.length + 1}. … ${inv.incdirs_total - inv.incdirs.length} more`);
+      }
+      out.push('');
+    }
+  }
+  if (d.includes.length) {
+    out.push(`### Includes (${d.includes_total}, as executed)`, '');
+    const steps: Record<string, string> = { absolute: 'as an absolute path', folder: "in this file's folder", root: 'in the project folder' };
+    for (const r of d.includes) {
+      const how = r.step === 'incdir' && r.incdir ? `in include directory ${r.incdir[0]} (${code(r.incdir[1])})` : (steps[r.step ?? ''] ?? '');
+      const what = r.resolved ? `${file(r.resolved)}, found ${how}${r.entered ? '' : ' (not read: recursive)'}` : '**not found**';
+      out.push(`- Line ${r.line + 1}: ${code(`\`include "${r.text}"`)} → ${what}`);
+      if (r.shadowed.length) {
+        out.push(`  - Also there today, later in the search: ${r.shadowed.map(file).join(', ')}`);
+      }
+    }
+    if (d.includes_total > d.includes.length) {
+      out.push(`- … ${d.includes_total - d.includes.length} more`);
+    }
+    if (d.probes_cut) {
+      out.push('- (The look for other copies stopped at its limit.)');
+    }
+    out.push('');
+  }
+  if (d.macros.length) {
+    out.push(`### Macros this file uses or tests (${d.macros_total})`, '');
+    for (const m of d.macros) {
+      const how = [m.used ? 'used' : '', m.tested ? 'tested' : '', m.undefined ? '`undef' : ''].filter((x) => x).join(', ');
+      const states = m.seen.map((s) => {
+        const n = m.seen.length > 1 ? ` (at ${s.count} place${s.count === 1 ? '' : 's'})` : '';
+        if (!s.defined) {
+          return `not defined${n}`;
+        }
+        const where = s.command_line ? 'on the command line' : s.at ? `at ${at(s.at)}` : '';
+        const value = s.value.trim() ? ` as ${code(s.value.trim())}` : '';
+        return `${s.params ? `${code(s.params)} ` : ''}defined ${where}${value}${n}`;
+      });
+      const more = m.states_cut ? `; … ${m.states_cut} more` : '';
+      out.push(`- ${code(m.name)} (${how}): ${states.join('; ')}${more}`);
+    }
+    if (d.macros_total > d.macros.length) {
+      out.push(`- … ${d.macros_total - d.macros.length} more`);
+    }
+    out.push('');
+  }
+  if (d.inactive_lines) {
+    out.push(`${d.inactive_lines} line${d.inactive_lines === 1 ? ' is' : 's are'} in regions that \`ifdef removes in this context.`, '');
+  }
+  if (d.duplicates.length) {
+    out.push('### Defined more than once', '');
+    for (const x of d.duplicates) {
+      const others = x.others.map(at).join(', ') + (x.others_total > x.others.length ? `, … ${x.others_total - x.others.length} more` : '');
+      const used = x.default ? (x.default.uri === x.here.uri && x.default.line === x.here.line ? 'this one' : at(x.default)) : 'not known';
+      out.push(`- ${plain(x.kind)} ${code(x.name)}: also at ${others}. A use from here gets ${used} by default (${x.rule}).`);
+    }
+    if (d.duplicates_cut) {
+      out.push('- …');
+    }
+    out.push('');
+  }
+  if (d.problem_counts.length) {
+    const total = d.problem_counts.reduce((a, [, n]) => a + n, 0);
+    out.push(`### Problems (${total}${d.problems_capped ? ', the list is cut' : ''})`, '');
+    out.push(d.problem_counts.map(([k, n]) => `${code(k)} ${n}`).join(' · '), '');
+    for (const p of d.preprocessing) {
+      out.push(`- Line ${p.line + 1}: ${code(p.code)} ${plain(p.message)}`);
+    }
+    out.push('');
+  }
+  return out.join('\n') + '\n';
+}

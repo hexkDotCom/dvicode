@@ -8,6 +8,7 @@ import { Mapper } from './pathmap';
 import { RemoteFs } from './remotefs';
 import { InternalError, LogChannel, Reporter } from './report';
 import { ChecksView } from './checks';
+import { CompileContextReports } from './context';
 import { DriversView } from './drivers';
 import { Structure } from './structure';
 import { VerificationHierarchy, Views, componentClassLocation, hierarchyPath } from './views';
@@ -50,6 +51,7 @@ let views: Views;
 let structure: Structure;
 let checks: ChecksView;
 let drivers: DriversView;
+let contexts: CompileContextReports;
 
 const SV_SELECTOR = [
   { scheme: 'file', language: 'systemverilog' },
@@ -179,12 +181,13 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   }
   pendingClient = undefined;
   // What this engine's views support (an engine at a custom path or remote may be older).
-  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number; registers?: number; checks?: number; accesses?: number } } | undefined;
+  const experimental = c.initializeResult?.capabilities.experimental as { dvicode?: { verificationObjects?: number; structure?: number; registers?: number; checks?: number; accesses?: number; compileContext?: number } } | undefined;
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.objects', (experimental?.dvicode?.verificationObjects ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.structure', (experimental?.dvicode?.structure ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.registers', (experimental?.dvicode?.registers ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.checks', (experimental?.dvicode?.checks ?? 0) >= 1);
   void vscode.commands.executeCommand('setContext', 'dvicode.engine.accesses', (experimental?.dvicode?.accesses ?? 0) >= 1);
+  void vscode.commands.executeCommand('setContext', 'dvicode.engine.compileContext', (experimental?.dvicode?.compileContext ?? 0) >= 1);
   c.onNotification('dvicode/status', (s: Status) => {
     lastStatus = s;
     if (s.build_error) {
@@ -204,6 +207,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     structure.reset();
     // A full build makes no revision: the results searched before it are out of date.
     checks.rebuilt();
+    contexts.refresh();
     drivers.rebuilt();
   });
   c.onNotification('dvicode/revision', (r: { revision?: number }) => {
@@ -211,6 +215,7 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
     structure.onRevision();
     checks.onRevision(r?.revision);
     drivers.onRevision(r?.revision);
+    contexts.refresh();
   });
   client = c;
   statusItem.text = '$(sync~spin) DVICode';
@@ -464,12 +469,15 @@ async function showStatus(): Promise<void> {
     [
       ...lines.map((l) => ({ label: l })),
       { label: '$(output) Show server output' },
+      ...(vscode.window.activeTextEditor ? [{ label: '$(file-code) Show compile context of the current file' }] : []),
       { label: '$(refresh) Rebuild project' },
       { label: '$(report) Report an issue' },
     ],
     { placeHolder: 'DVICode status' },
   );
-  if (pick?.label.includes('Show server output')) {
+  if (pick?.label.includes('compile context')) {
+    await vscode.commands.executeCommand('dvicode.showCompileContext');
+  } else if (pick?.label.includes('Show server output')) {
     output.show();
   } else if (pick?.label.includes('Rebuild')) {
     await client.sendRequest('dvicode/rebuild');
@@ -564,11 +572,13 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
   structure = new Structure(ctx, conn);
   checks = new ChecksView(ctx, conn);
   drivers = new DriversView(conn);
+  contexts = new CompileContextReports(conn);
   ctx.subscriptions.push(
     views,
     structure,
     checks,
     drivers,
+    contexts,
     vscode.commands.registerCommand('dvicode.selectUvmTest', selectUvmTest),
     vscode.commands.registerCommand('dvicode.openComponentClass', async (item: unknown) => {
       const l = componentClassLocation(item, conn);

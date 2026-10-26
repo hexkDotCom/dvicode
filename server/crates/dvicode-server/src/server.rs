@@ -113,7 +113,7 @@ fn capabilities() -> ServerCapabilities {
         })),
         // What the views can ask for, so a newer extension with an older engine shows only what
         // it supports.
-        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1 } })),
+        experimental: Some(json!({ "dvicode": { "verificationObjects": 1, "structure": 1, "registers": 1, "checks": 1, "accesses": 1, "compileContext": 1 } })),
         ..Default::default()
     }
 }
@@ -2057,6 +2057,10 @@ impl Server {
                 let t = a.structure(f, filter.as_ref(), p.max_nodes.unwrap_or(20_000).min(100_000));
                 let version = a.source(f).and_then(|s| s.lsp_version);
                 Ok(json!({ "revision": a.revision, "version": version, "status": t.status, "context": t.context, "others": t.others, "incomplete": t.incomplete, "nodes": t.nodes }))
+            }),
+            "dvicode/compileContext" => self.spawn_project(req, |a, p: TextDocumentIdentifierParams| {
+                let Some(path) = path_of(&p.text_document.uri) else { return Err("not a file".to_string()) };
+                Ok(a.compile_context(&path, a.file_of_url(&p.text_document.uri)))
             }),
             "dvicode/includingFiles" => self.spawn_project(req, |a, p: TextDocumentIdentifierParams| {
                 let Some(f) = a.file_of_url(&p.text_document.uri) else { return Ok(Vec::new()) };

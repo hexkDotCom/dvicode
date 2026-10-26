@@ -68,6 +68,14 @@ currently in preview.
   following port connections down into instances and up to where its module is instantiated.
   The places are found from the source, not by elaborating the design: interfaces, `alias`,
   `bind` instances and connections through expressions are not followed.
+- **Compile context**: right-click a file (or a Compiled Files entry) and choose Show Compile
+  Context to see how it is compiled: every root file and invocation that compiles it with the
+  include chain, and for the one the editor uses the defines, the include directories in
+  search order, where each `` `include `` was found (and other copies further down the
+  search), the macros the file uses or tests as defined there, the lines `` `ifdef `` removes,
+  design elements defined more than once and which one is used, and the preprocessing
+  problems. Hover an `` `include `` to see what found it. **Copy Compile Context** puts the
+  report on the clipboard for an issue.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.

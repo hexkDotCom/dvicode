@@ -9,6 +9,16 @@ use dvi_syntax::{FileId, SourceProvider, Span};
 impl Analysis {
     /// Markdown hover text and the span it applies to.
     pub fn hover(&self, file: FileId, off: u32) -> Option<(String, Span)> {
+        // An include's file name (also one a macro gives, or one not found): what was read and
+        // what found it. Before the macro hover: `` `include `HDR `` is an include first.
+        if let Some((text, resolved, how, span)) = self.include_at(file, off) {
+            let inc = super::context::md_code(&format!("`include \"{text}\""));
+            let md = match resolved {
+                Some(p) => format!("{inc} reads {}\n\nFound {how}.", super::context::md_code(&p)),
+                None => format!("{inc}: {how}."),
+            };
+            return Some((md, span));
+        }
         // A `uvm_config_db` get or set: what provides it, or what it reaches.
         if let Some(h) = self.config_hover(file, off) {
             return Some(h);

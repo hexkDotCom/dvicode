@@ -464,6 +464,25 @@ async function run() {
     return `${drivers} || ${loads}`;
   });
 
+  await test('compile context: include hover and the report', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const pkg = await open('tb/tb_pkg.sv');
+    const at = lineOf(pkg, '`include "macros.svh"').translate(0, '  `include "'.length + 2);
+    const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', pkg.uri, at);
+    const hover = (hovers || []).map((h) => h.contents.map((c) => c.value ?? c).join(' ')).join(' ');
+    if (!/macros\.svh/.test(hover) || !/Found in the folder of the including file/.test(hover)) throw new Error(`hover: ${hover}`);
+    const header = await open('tb/macros.svh');
+    const report = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'dvicode-context', path: '/macros.svh (compile context).md', query: header.uri.toString() }));
+    const text = report.getText();
+    for (const want of ['Compiled in 1 context', 'tb_pkg.sv', '+define+DEMO_WIDTH=16', 'Include directories, in search order']) {
+      if (!text.includes(want)) throw new Error(`report lacks '${want}': ${text.slice(0, 600)}`);
+    }
+    await vscode.window.showTextDocument(header);
+    await vscode.commands.executeCommand('dvicode.showCompileContext');
+    return `${hover.slice(0, 80)}; ${text.split('\n').find((l) => l.startsWith('1. ')) ?? ''}`;
+  });
+
   await test('config_db: hover and go to definition from a get to its set', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

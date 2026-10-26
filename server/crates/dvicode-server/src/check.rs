@@ -111,7 +111,7 @@ pub fn run(args: &[String]) -> i32 {
                 sweep = true;
             }
             "--format-check" => queries.push((a.to_string(), String::new())),
-            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--format" | "--format-twice" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
+            "--registers" | "--regtree" | "--checks" | "--drivers" | "--loads" | "--format" | "--format-twice" | "--goto" | "--hover" | "--refs" | "--complete" | "--outline" | "--structure" | "--context" | "--hier" | "--uvm" | "--uvm-tests" | "--calls" | "--fixes" | "--sig" | "--impl" | "--tokens" | "--symbols" | "--expand" | "--expandall" | "--files" => {
                 i += 1;
                 queries.push((a.to_string(), args.get(i).cloned().unwrap_or_default()));
             }
@@ -409,6 +409,15 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
                 }
                 pr(&a.document_symbols(f), 0);
             }
+        }
+        "--context" => {
+            // How the file is compiled, as the editor's report gets it.
+            let p = canonical(Path::new(arg));
+            let t = std::time::Instant::now();
+            let c = a.compile_context(Path::new(&p), a.vfs.lookup(Path::new(&p)));
+            let ms = t.elapsed().as_millis();
+            println!("{}", serde_json::to_string_pretty(&c).unwrap_or_default());
+            eprintln!("context: {ms} ms");
         }
         "--structure" => {
             let p = canonical(Path::new(arg));

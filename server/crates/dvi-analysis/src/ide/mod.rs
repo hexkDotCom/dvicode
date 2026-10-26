@@ -5,6 +5,7 @@ pub mod calls;
 pub mod checks;
 pub mod completion;
 pub mod configdb;
+pub mod context;
 pub mod drivers;
 pub mod elab;
 pub mod diagnostics;

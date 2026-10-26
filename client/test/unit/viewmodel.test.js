@@ -19,6 +19,62 @@ const design = [
   ]),
 ];
 
+test.describe('compile context report', () => {
+  const ctx = {
+    uri: 'file:///p/shared/common.svh',
+    known: true,
+    auto: false,
+    build_file: 'file:///p/.dvicode/default.build',
+    contexts: [
+      { invocation: 0, mode: 'default', root_role: 'top', root: 'file:///p/top_a.sv', order: [1, 2], is_root: false, chain: [{ uri: 'file:///p/top_a.sv', line: 1 }], chain_cut: false },
+      { invocation: 1, mode: 'second', root_role: 'top', root: 'file:///p/top_b.sv', order: [1, 1], is_root: false, chain: [{ uri: 'file:///p/top_b.sv', line: 2 }], chain_cut: false },
+    ],
+    contexts_total: 3,
+    skip_matches: [],
+    detail: {
+      invocation: { index: 0, mode: 'default', auto: false, top_files: 2, defines: [['MODE_A', null]], defines_total: 1, undefines: [], incdirs: ['/p/shared'], incdirs_total: 1, lib_dirs: 0, lib_files: 0 },
+      macros: [
+        { name: 'MODE_A', used: false, tested: true, undefined: false, seen: [{ defined: true, at: null, command_line: true, params: null, value: '', count: 1 }], states_cut: 0 },
+        { name: 'Y', used: true, tested: false, undefined: true, seen: [{ defined: true, at: { uri: 'file:///p/a.sv', line: 0 }, command_line: false, params: '(x)', value: 'x+1', count: 2 }, { defined: false, at: null, command_line: false, params: null, value: '', count: 1 }], states_cut: 3 },
+      ],
+      macros_total: 1,
+      includes: [{ line: 6, text: 'leaf.svh', resolved: 'file:///p/shared/leaf.svh', entered: true, step: 'folder', incdir: null, shadowed: ['file:///p/leaf.svh'] }],
+      includes_total: 1,
+      probes_cut: false,
+      inactive_lines: 2,
+      duplicates: [{ kind: 'module', name: 'fifo`x', here: { uri: 'file:///p/top_a.sv', line: 3 }, others: [{ uri: 'file:///p/other.sv', line: 0 }], others_total: 1, default: { uri: 'file:///p/top_a.sv', line: 3 }, rule: 'first compiled' }],
+      duplicates_cut: false,
+      problem_counts: [['INCLUDE_NOT_FOUND', 1]],
+      problems_capped: false,
+      preprocessing: [{ code: 'INCLUDE_NOT_FOUND', line: 7, message: 'Cannot find include file "missing_<x>.svh"' }],
+    },
+  };
+  const md = vm.compileContextMarkdown(ctx, (u, line) => `<${u}${line === undefined ? '' : `#L${line + 1}`}>`, (u) => u.replace('file:///p/', ''));
+  test.it('lists the contexts with their chains and says which one the features use', () => {
+    assert.match(md, /## Compiled in 3 contexts/);
+    assert.match(md, /use the first one/);
+    assert.match(md, /1\. From \[top\\_a\.sv\]\(<file:\/\/\/p\/top_a\.sv>\) \(top file, 1 of 2 top files\) in invocation 1: \[top\\_a\.sv:2\]\(<file:\/\/\/p\/top_a\.sv#L2>\)/);
+    assert.match(md, /in invocation 2 \(second\)/);
+    assert.match(md, /3\. … and 1 more/);
+  });
+  test.it('shows the first context: macros, includes, removed lines, duplicates, problems', () => {
+    assert.match(md, /`MODE_A` \(tested\): defined on the command line/);
+    assert.match(md, /`Y` \(used, `undef\): `\(x\)` defined at \[a\.sv:1\]\(<file:\/\/\/p\/a\.sv#L1>\) as `x\+1` \(at 2 places\); not defined \(at 1 place\); … 3 more/);
+    assert.match(md, /found in this file's folder/);
+    assert.match(md, /Also there today, later in the search: \[leaf\.svh\]/);
+    assert.match(md, /2 lines are in regions/);
+    assert.match(md, /module `` fifo`x ``: also at \[other\.sv:1\]/);
+    assert.match(md, /gets this one by default \(first compiled\)/);
+    // Source text is escaped.
+    assert.match(md, /missing\\_\\<x\\>\.svh/);
+  });
+  test.it('says plainly when a file is not compiled', () => {
+    const none = vm.compileContextMarkdown({ ...ctx, known: false, contexts: [], contexts_total: 0, detail: null, skip_matches: [[0, '*gen*']] }, (u) => u, (u) => u);
+    assert.match(none, /\*\*Not compiled\.\*\* The engine has not read this file/);
+    assert.match(none, /Matches `\+dvicode_skip_compile\+\*gen\*` of invocation 1/);
+  });
+});
+
 test.describe('placeTree', () => {
   const t = vm.placeTree(design, (n) => n.name);
   test.it('gives repeated sibling names their own keys and keeps the names', () => {

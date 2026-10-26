@@ -5,7 +5,7 @@
 //! build file exists.
 
 mod auto;
-mod glob;
+pub mod glob;
 mod jinja;
 pub mod fsx;
 pub mod netpath;

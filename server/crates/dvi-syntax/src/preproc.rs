@@ -128,6 +128,26 @@ pub struct IncludeInfo {
     pub span: Span,
     pub path_text: String,
     pub resolved: Option<FileId>,
+    /// The include (an index in the same list) that entered the file holding this one; `None`
+    /// in the root file.
+    pub from: Option<u32>,
+    /// The file was read here (not when it is missing or the include is recursive).
+    pub entered: bool,
+    /// What found the file.
+    pub step: Option<IncludeStep>,
+}
+
+/// Where an include's file was found, in the order they are tried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncludeStep {
+    /// The name is an absolute path.
+    Absolute,
+    /// In the folder of the file holding the `` `include ``.
+    IncluderFolder,
+    /// In the `+incdir` of this index (in the invocation's order).
+    Incdir(u32),
+    /// In the project's root folder (the last resort).
+    Root,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -135,6 +155,21 @@ pub struct PpConfig {
     pub incdirs: Vec<PathBuf>,
     /// Last resort for relative includes, usually the project directory.
     pub root_dir: PathBuf,
+}
+
+/// The places an include of `name` is looked for, in order, with the step each one is: the
+/// name itself when it is absolute; else the including file's folder (`folder`), each incdir,
+/// the project root.
+pub fn include_candidates<'c>(name: &'c str, folder: Option<&'c Path>, cfg: &'c PpConfig) -> impl Iterator<Item = (PathBuf, IncludeStep)> + 'c {
+    let path = Path::new(name);
+    let absolute = path.is_absolute();
+    let abs = absolute.then(|| (path.to_path_buf(), IncludeStep::Absolute));
+    let rest = (!absolute).then(move || {
+        let here = folder.map(|d| (d.join(path), IncludeStep::IncluderFolder));
+        let dirs = cfg.incdirs.iter().enumerate().map(move |(i, d)| (d.join(path), IncludeStep::Incdir(i as u32)));
+        here.into_iter().chain(dirs).chain(std::iter::once((cfg.root_dir.join(path), IncludeStep::Root)))
+    });
+    abs.into_iter().chain(rest.into_iter().flatten())
 }
 
 #[derive(Debug, Default)]
@@ -183,7 +218,7 @@ pub fn preprocess(
         line_index: Default::default(),
         work: Default::default(),
     };
-    pp.enter_file(root);
+    pp.enter_file(root, None);
     // The root file's tokens are most of the output: room for them at once.
     if let Some(f) = pp.frames.last() {
         let n = f.toks.len().min(1 << 20);
@@ -226,7 +261,7 @@ pub fn expand_snippet(
         line_index: Default::default(),
         work: Default::default(),
     };
-    pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
+    pp.frames.push(Frame { toks: Arc::new(tokens), pos: 0, include: None, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
     pp.max_macro_depth_override(levels);
     pp.run();
     pp.res.tokens
@@ -253,6 +288,8 @@ pub fn join_tokens(toks: &[Token]) -> String {
 struct Frame {
     toks: Arc<Vec<Token>>,
     pos: usize,
+    /// For a file: the include (index in `includes`) that entered it; `None` for the root.
+    include: Option<u32>,
     /// A file included again: its active tokens count against the work budget.
     repeat: bool,
     kind: FrameKind,
@@ -319,7 +356,7 @@ impl<'a> Pp<'a> {
         self.conds.last().map_or(true, |c| c.active)
     }
 
-    fn enter_file(&mut self, id: FileId) {
+    fn enter_file(&mut self, id: FileId, include: Option<u32>) {
         let first = self.file_set.insert(id, ()).is_none();
         if first {
             self.res.files.push(id);
@@ -332,7 +369,7 @@ impl<'a> Pp<'a> {
             self.res.sources.push((id, text));
         }
         let depth = self.conds.len();
-        self.frames.push(Frame { toks, pos: 0, repeat: !first, kind: FrameKind::File(id), cond_depth: depth });
+        self.frames.push(Frame { toks, pos: 0, include, repeat: !first, kind: FrameKind::File(id), cond_depth: depth });
     }
 
     /// Text a file was lexed from in this run (falls back to the provider).
@@ -836,7 +873,7 @@ impl<'a> Pp<'a> {
                 // Within the expansion around it: same macros being expanded, depth and budget.
                 let (out, uses) = match self.nested(None) {
                     Some(mut pp) => {
-                        pp.frames.push(Frame { toks: Arc::new(call), pos: 0, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
+                        pp.frames.push(Frame { toks: Arc::new(call), pos: 0, include: None, repeat: false, kind: FrameKind::File(file), cond_depth: 0 });
                         pp.run();
                         (pp.res.tokens, pp.res.macro_uses)
                     }
@@ -878,8 +915,14 @@ impl<'a> Pp<'a> {
             }
         };
         let span = if self.in_macro().is_some() { self.real_span(&tok) } else { span };
-        let resolved = self.resolve_include(&path_text);
-        self.res.includes.push(IncludeInfo { span, path_text: path_text.clone(), resolved });
+        let (resolved, step) = match self.resolve_include(&path_text) {
+            Some((id, step)) => (Some(id), Some(step)),
+            None => (None, None),
+        };
+        // The include that entered the file this directive is in.
+        let from = self.frames.iter().rev().find(|f| matches!(f.kind, FrameKind::File(_))).and_then(|f| f.include);
+        let index = self.res.includes.len() as u32;
+        self.res.includes.push(IncludeInfo { span, path_text: path_text.clone(), resolved, from, entered: false, step });
         let Some(id) = resolved else {
             self.res.diags.push(Diag::error(span, "INCLUDE_NOT_FOUND", format!("Cannot find include file \"{path_text}\"")));
             return;
@@ -889,25 +932,15 @@ impl<'a> Pp<'a> {
             self.res.diags.push(Diag::error(span, "RECURSIVE_INCLUDE", format!("Recursive include of \"{path_text}\"")));
             return;
         }
-        self.enter_file(id);
+        self.res.includes[index as usize].entered = true;
+        self.enter_file(id, Some(index));
     }
 
-    fn resolve_include(&self, p: &str) -> Option<FileId> {
-        let path = Path::new(p);
-        if path.is_absolute() {
-            return self.src.is_file(path).then(|| self.src.file_id(path));
-        }
-        let mut candidates: Vec<PathBuf> = Vec::with_capacity(self.cfg.incdirs.len() + 2);
-        if let Some(cur) = self.current_file() {
-            if let Some(dir) = self.src.path(cur).parent() {
-                candidates.push(dir.join(path));
-            }
-        }
-        for d in &self.cfg.incdirs {
-            candidates.push(d.join(path));
-        }
-        candidates.push(self.cfg.root_dir.join(path));
-        candidates.into_iter().find(|c| self.src.is_file(c)).map(|c| self.src.file_id(&normalize(&c)))
+    fn resolve_include(&self, p: &str) -> Option<(FileId, IncludeStep)> {
+        let folder = self.current_file().and_then(|cur| self.src.path(cur).parent().map(Path::to_path_buf));
+        let (path, step) = include_candidates(p, folder.as_deref(), &self.cfg).find(|(c, _)| self.src.is_file(c))?;
+        let id = if step == IncludeStep::Absolute { self.src.file_id(&path) } else { self.src.file_id(&normalize(&path)) };
+        Some((id, step))
     }
 
     fn macro_call(&mut self, tok: Token) {
@@ -1017,6 +1050,7 @@ impl<'a> Pp<'a> {
         self.frames.push(Frame {
             toks: Arc::new(toks),
             pos: 0,
+            include: None,
             repeat: false,
             kind: FrameKind::Macro { site, name: def.name.clone() },
             cond_depth: self.conds.len(),
@@ -1044,7 +1078,7 @@ impl<'a> Pp<'a> {
     /// work). `current`: the macro whose body `actual` is in.
     fn expand_tokens(&self, actual: &[Token], site: Span, current: &SmolStr) -> Option<Vec<Token>> {
         let mut pp = self.nested(Some(current))?;
-        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, repeat: false, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
+        pp.frames.push(Frame { toks: Arc::new(actual.to_vec()), pos: 0, include: None, repeat: false, kind: FrameKind::Macro { site, name: SmolStr::default() }, cond_depth: 0 });
         pp.run();
         if pp.res.diags.iter().any(|d| d.code == "UNDEFINED_MACRO" || d.code == "MACRO_RECURSION") {
             return None;
