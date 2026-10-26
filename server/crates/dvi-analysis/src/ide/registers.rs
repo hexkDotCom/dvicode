@@ -1477,7 +1477,9 @@ impl<'a> Interp<'a> {
             let Some(class) = self.class_of_method(m) else { return };
             let Some(base) = self.a.class_base(class) else { return };
             if let Some(f) = self.find_method(base, method) {
+                self.under += usize::from(conditional);
                 self.exec_method(f, args, handles, this, depth + 1);
+                self.under -= usize::from(conditional);
             }
             return;
         }

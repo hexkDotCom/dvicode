@@ -725,7 +725,6 @@ impl Walk<'_> {
             }
         }
         // A call's argument.        // A call's argument.
-        let _ = target;
         let (written, read) = if callee.kind == TokKind::SysIdent {
             let w = system_writes(&callee.text, k);
             (w, !w)
@@ -754,6 +753,10 @@ impl Walk<'_> {
         } else {
             return None;
         };
+        // A member of a class object as the actual: the call writes the member; the handle is
+        // only read (as for assignments).
+        let member_of_handle = a.type_of(target).is_some_and(|t| a.decl(t).kind == DeclKind::Class) && (o.seg as usize) + 1 < a.unit(o.unit).parsed.reference(o.rid).segs.len();
+        let (written, read) = if member_of_handle { (false, true) } else { (written, read) };
         if (self.writes && written) || (!self.writes && read) {
             let mut s = self.site("argument", if self.writes { "writes" } else { "reads" }, o.span, ctx);
             s.label = format!("argument of {}", callee.text);

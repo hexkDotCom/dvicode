@@ -178,7 +178,8 @@ enum Ex {
     Bin(&'static str, Box<Ex>, Box<Ex>),
     Cond(Box<Ex>, Box<Ex>, Box<Ex>),
     Concat(Vec<Ex>),
-    Repl(Box<Ex>, Vec<Ex>),
+    /// `{n{...}}`: the count and the concatenation repeated.
+    Repl(Box<Ex>, Box<Ex>),
     /// `x[i]`, `x[a:b]`, `x[a+:w]`, `x[a-:w]`.
     Select(Box<Ex>, &'static str, Box<Ex>, Option<Box<Ex>>),
     /// `T'(x)`: a size, `signed`/`unsigned` or a type.
@@ -443,7 +444,7 @@ impl P<'_> {
                         }
                         self.expect("}")?;
                         self.expect("}")?;
-                        return Ok(Ex::Repl(Box::new(first), items));
+                        return Ok(Ex::Repl(Box::new(first), Box::new(Ex::Concat(items))));
                     }
                     let mut items = vec![first];
                     while self.eat(",") {
@@ -947,7 +948,7 @@ impl<'a> Eval<'a> {
                 if !(1..=MAX_WIDTH as i128).contains(&n) {
                     return unsupported(format!("a replication {n} times"));
                 }
-                let one = self.ty(&Ex::Concat(items.clone()), unit, frame)?;
+                let one = self.ty(items, unit, frame)?;
                 if one.string {
                     return unsupported("a replication of strings");
                 }
@@ -1087,8 +1088,8 @@ impl<'a> Eval<'a> {
             }
             Ex::Repl(n, items) => {
                 let n = self.value(n, unit, frame)?.num().unwrap_or(-1);
-                let t = self.ty(&Ex::Concat(items.clone()), unit, frame)?;
-                let one = self.eval(&Ex::Concat(items.clone()), unit, frame, t)?;
+                let t = self.ty(items, unit, frame)?;
+                let one = self.eval(items, unit, frame, t)?;
                 let Val::Int { bits, width, .. } = one else { return unsupported("a replication of strings") };
                 let total = width.saturating_mul(n.clamp(0, MAX_WIDTH as i128) as u32);
                 if total > MAX_WIDTH || total == 0 || n <= 0 {

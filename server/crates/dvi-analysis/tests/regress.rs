@@ -4327,3 +4327,63 @@ fn a_macro_preview_uses_the_definition_of_the_call() {
     let idx = a.unit(uid).macro_uses.iter().position(|m| m.name == "V").unwrap();
     assert_eq!(a.expand_macro_use(uid, idx, 1).as_deref(), Some("1"));
 }
+
+#[test]
+fn rename_review_round_three_cases() {
+    // A shared call through a base handle in one module and a derived one in another: both are
+    // the family renamed, not a conflict.
+    let cls = "class B;\n  virtual function void f(); endfunction\nendclass\nclass D extends B;\n  virtual function void f(); endfunction\nendclass\n";
+    let hdr = "initial obj.f();\n";
+    let ma = "module a;\n  B obj;\n  `include \"h.svh\"\nendmodule\n";
+    let mb = "module b;\n  D obj;\n  `include \"h.svh\"\nendmodule\n";
+    let (a, root) = project("review3fam", &[("c.sv", cls), ("h.svh", hdr), ("a.sv", ma), ("b.sv", mb)]);
+    let f = a.vfs.lookup(&root.join("c.sv")).unwrap();
+    assert!(a.rename(f, cls.find("f()").unwrap() as u32, "g").is_ok());
+    // `ifdef M in a shared header, M defined differently by its two includers.
+    let hdr = "`ifdef M\nlocalparam X = 1;\n`endif\n";
+    let ma = "`define M\nmodule a;\n  `include \"h.svh\"\nendmodule\n";
+    let mb = "`undef M\n`define M\nmodule b;\n  `include \"h.svh\"\nendmodule\n";
+    let (a, root) = project("review3ifdef", &[("h.svh", hdr), ("a.sv", ma), ("b.sv", mb)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let e = a.rename(f, ma.find("M\n").unwrap() as u32, "N").unwrap_err();
+    assert!(e.contains("another definition"), "{e}");
+}
+
+#[test]
+fn review_round_three_generated_text_and_values() {
+    let src = "package p;\n  typedef int T;\nendpackage\nvirtual class B #(type T = byte);\n  pure virtual function void f(p::T x, T y);\nendclass\nclass D extends B #(int);\nendclass\n";
+    let (a, _) = project("review3qual", &[("t.sv", src)]);
+    let class = {
+        let u = a.unit(a.units_for(a.project_files()[0])[0]);
+        let d = u.parsed.decls.iter().position(|d| d.name == "D").unwrap();
+        dvi_analysis::DeclRef { unit: u.id, decl: d as u32 }
+    };
+    let os = a.overridable_methods(class);
+    let text = os.iter().find(|o| o.name == "f").and_then(|o| a.override_text(o, class, "  ", "\n", false));
+    assert_eq!(text.as_deref(), Some("virtual function void f(p::T x, int y);\nendfunction"), "a qualified name is another scope's");
+    assert_eq!(dvi_analysis::ide::instances::ident("wire"), "\\wire ", "a keyword as a name is escaped");
+    assert_eq!(dvi_analysis::ide::instances::ident("w1"), "w1");
+    // Replications of different operands evaluate each one.
+    let src = "module top;\n  localparam bit [1:0] A = 1;\n  localparam bit [1:0] B = 2;\n  localparam P = {2{A}} | {2{B}};\nendmodule\n";
+    let (a, _) = project("review3repl", &[("t.sv", src)]);
+    let (t, _) = a.design_tree(Some("top"), &dvi_analysis::ide::views::TreeQuery::new(100));
+    let p = t[0].params.iter().find(|x| x.name == "P").and_then(|x| x.value.clone());
+    assert_eq!(p.as_deref(), Some("15"));
+}
+
+#[test]
+fn review_round_three_registers_and_drivers() {
+    let src = "virtual class uvm_reg_block; endclass\nvirtual class uvm_reg; endclass\nclass uvm_reg_map; endclass\nclass r_t extends uvm_reg;\n  function new(string name = \"r_t\"); super.new(name, 32, 0); endfunction\nendclass\nclass base_block extends uvm_reg_block;\n  function new(string name = \"base_block\"); super.new(name); endfunction\n  function void freeze(); lock_model(); endfunction\nendclass\nclass top_block extends base_block;\n  rand r_t z;\n  bit pre;\n  function new(string name = \"top_block\"); super.new(name); endfunction\n  virtual function void build();\n    default_map = create_map(\"map\", 0, 4, UVM_LITTLE_ENDIAN);\n    if (pre) super.freeze();\n    z = r_t::type_id::create(\"z\");\n    z.configure(this, null, \"\");\n    default_map.add_reg(z, 'h8, \"RW\");\n  endfunction\nendclass\n";
+    let (a, _) = project("review3super", &[("ral.sv", src)]);
+    let (blocks, _) = a.register_blocks();
+    let top = *blocks.iter().find(|b| a.decl(**b).name == "top_block").unwrap();
+    let model = a.register_model(top);
+    assert!(model.regs.iter().any(|r| r.name == "z"), "a lock in a super helper under a condition does not stop the model");
+    let src = "class C;\n  int x;\nendclass\nmodule top;\n  C c;\n  function void fill(output int v); v = 1; endfunction\n  initial fill(c.x);\nendmodule\n";
+    let (a, root) = project("review3drv", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let (writes, _, _) = access_lines(&a, f, word_at(src, "C c", "c"), true);
+    assert!(writes.is_empty(), "the call writes c.x, not the handle: {writes:?}");
+    let (reads, _, _) = access_lines(&a, f, word_at(src, "C c", "c"), false);
+    assert!(reads.iter().any(|l| l.contains("argument")), "the handle is read: {reads:?}");
+}

@@ -289,12 +289,13 @@ impl Analysis {
     }
 
     pub fn decl_references(&self, r: DeclRef, include_decl: bool) -> Vec<Span> {
-        self.decl_references_checked(r, include_decl, false).0
+        self.decl_references_checked(r, include_decl, false, None).0
     }
 
     /// [`Analysis::decl_references`]; with `check`, also a use found that means another
-    /// declaration in another unit (a file compiled in several contexts).
-    fn decl_references_checked(&self, r: DeclRef, include_decl: bool, check: bool) -> (Vec<Span>, Option<Span>) {
+    /// declaration in another unit (a file compiled in several contexts) than `r` or one of
+    /// `family` (declarations renamed with it).
+    fn decl_references_checked(&self, r: DeclRef, include_decl: bool, check: bool, family: Option<&FxHashSet<(u32, u32)>>) -> (Vec<Span>, Option<Span>) {
         let canon = self.canonical(r);
         let key = self.decl_key(canon);
         let name = self.decl(r).name.clone();
@@ -337,8 +338,10 @@ impl Analysis {
                             if check {
                                 ours.insert((s.span, std::mem::discriminant(&reference.kind)));
                             }
-                        } else if check {
+                        } else if check && !family.is_some_and(|f| f.contains(&self.decl_key(self.canonical(t)))) {
                             other.insert((s.span, std::mem::discriminant(&reference.kind)));
+                        } else if check {
+                            ours.insert((s.span, std::mem::discriminant(&reference.kind)));
                         }
                     }
                 }
@@ -363,7 +366,7 @@ impl Analysis {
                 let mut tokens: FxHashMap<FileId, Option<Arc<Vec<Token>>>> = FxHashMap::default();
                 // A call in a shared file that calls another subroutine elsewhere names an
                 // argument that one may not have.
-                let (calls, call_conflict) = self.decl_references_checked(sub, false, check);
+                let (calls, call_conflict) = self.decl_references_checked(sub, false, check, None);
                 if let Some(c) = call_conflict {
                     return (out, Some(c));
                 }
@@ -528,6 +531,14 @@ impl Analysis {
                     None => false,
                 };
             }
+            // `ifdef NAME and friends: defined there by another definition.
+            for mn in u.macro_names.iter().filter(|x| x.name == m.name) {
+                match &mn.def {
+                    Some(d) if d.name_span == m.name_span => ours.insert(mn.span),
+                    Some(_) => other.insert(mn.span),
+                    None => false,
+                };
+            }
         }
         ours.intersection(&other).min_by_key(|s| (s.file, s.start)).copied()
     }
@@ -574,8 +585,10 @@ impl Analysis {
                 // handle reaches them all).
                 let mut spans = Vec::new();
                 let mut conflict = None;
-                for x in self.method_family(r) {
-                    let (s, c) = self.decl_references_checked(x, true, true);
+                let family = self.method_family(r);
+                let keys: FxHashSet<(u32, u32)> = family.iter().map(|x| self.decl_key(*x)).collect();
+                for x in family {
+                    let (s, c) = self.decl_references_checked(x, true, true, Some(&keys));
                     spans.extend(s);
                     conflict = conflict.or(c);
                 }

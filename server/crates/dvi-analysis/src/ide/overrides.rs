@@ -237,7 +237,8 @@ impl Analysis {
             let p = &self.unit(m.unit).parsed;
             p.decl(m.decl).children.iter().map(|c| p.decl(*c)).filter(|c| c.kind == DeclKind::Argument).map(|c| c.name.clone()).collect()
         };
-        for t in toks {
+        for (ti, t) in toks.iter().enumerate() {
+            let qualified = ti > 0 && (toks[ti - 1].is_punct("::") || toks[ti - 1].is_punct("."));
             if t.kind == TokKind::Keyword && matches!(t.text.as_str(), "extern" | "pure") {
                 continue;
             }
@@ -247,7 +248,7 @@ impl Analysis {
                     out.push(' ');
                 }
             }
-            match subst.get(t.text.as_str()).filter(|_| t.kind == TokKind::Ident && !formals.contains(t.text.as_str())) {
+            match subst.get(t.text.as_str()).filter(|_| t.kind == TokKind::Ident && !qualified && !formals.contains(t.text.as_str())) {
                 Some(v) => out.push_str(v),
                 None => {
                     // A package's name the class it goes in does not see: qualified.

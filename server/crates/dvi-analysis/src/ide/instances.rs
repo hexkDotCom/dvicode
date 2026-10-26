@@ -107,7 +107,8 @@ pub fn conn_list(toks: &[Token], open: usize) -> Option<ConnList> {
 pub fn ident(n: &str) -> String {
     let mut c = n.chars();
     let plain = c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_' || x == '$');
-    if plain {
+    // A keyword as a name is escaped; `new`, a method's name in calls (`super.new(...)`), is not.
+    if plain && (n == "new" || !dvi_syntax::token::is_keyword(n)) {
         n.to_string()
     } else {
         format!("\\{n} ")
