@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 /// Nested calls followed at most.
 const MAX_DEPTH: usize = 8;
+/// Loops unrolled one inside the other at most.
+const MAX_LOOP_NESTING: usize = 32;
 /// Tokens interpreted at most, over a whole model.
 const MAX_WORK: usize = 10_000_000;
 /// Objects (registers, fields...) made at most.
@@ -244,6 +246,8 @@ struct Interp<'a> {
     expanding: u8,
     /// The members of the register whose `build` is interpreted (`This::Reg`).
     reg_vars: FxHashMap<String, Handle>,
+    /// Loops being unrolled, one inside the other.
+    loops: usize,
 }
 
 /// Names of the UVM register classes, for what a class derives from.
@@ -323,7 +327,7 @@ impl Analysis {
 
     /// The model `top` (a block class) builds.
     pub fn register_model(&self, top: DeclRef) -> Model {
-        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default() };
+        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default(), loops: 0 };
         it.m.blocks.push(Block { name: self.decl(top).name.to_string(), class: top, maps: Vec::new(), default_map: None, regs: Vec::new(), at: None, notes: Vec::new(), vars: FxHashMap::default() });
         it.build_block(0, top, &[], &[], 0);
         let mut mounts: FxHashMap<(usize, usize), usize> = FxHashMap::default();
@@ -343,7 +347,7 @@ impl Analysis {
     pub fn register_fields(&self, model: &Model, reg: usize) -> Vec<Field> {
         let Some(r) = model.regs.get(reg) else { return Vec::new() };
         let Some(class) = r.class else { return Vec::new() };
-        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default() };
+        let mut it = Interp { a: self, m: Model::default(), regfiles: Vec::new(), fields: Vec::new(), work: 0, locked: false, tokens: FxHashMap::default(), expanding: 0, reg_vars: FxHashMap::default(), loops: 0 };
         it.m.regs.push(Reg { build_args: None, built: false, ..r.clone() });
         // Fields are made by the register's `build()`: none when the model never calls it.
         if !r.built {
@@ -373,21 +377,16 @@ impl Analysis {
             }
         }
         used.sort();
-        // Every pair that overlaps: each field against the ones still open where it starts.
-        let mut overlaps: Vec<usize> = Vec::new();
-        let mut open: Vec<(u128, usize)> = Vec::new();
-        for &(lo, hi, i) in &used {
-            open.retain(|(end, _)| *end > lo);
-            for &(_, j) in &open {
-                overlaps.push(i);
-                overlaps.push(j);
-            }
-            open.push((hi, i));
-        }
-        for i in overlaps {
-            if !fields[i].notes.iter().any(|n| n == "overlaps another field") {
+        // By start: a field overlaps one before it when it starts before the furthest end so
+        // far, and one after it when the next starts before its end.
+        let mut furthest = 0u128;
+        for (k, &(lo, hi, i)) in used.iter().enumerate() {
+            let before = k > 0 && lo < furthest;
+            let after = used.get(k + 1).is_some_and(|n| n.0 < hi);
+            if before || after {
                 fields[i].notes.push("overlaps another field".into());
             }
+            furthest = furthest.max(hi);
         }
         fields
     }
@@ -864,7 +863,13 @@ impl<'a> Interp<'a> {
                     return;
                 }
                 let body_end = statement_end(t, hdr_end, b);
+                if self.loops >= MAX_LOOP_NESTING {
+                    self.m.cut.get_or_insert("depth");
+                    return;
+                }
+                self.loops += 1;
                 self.exec_loop(t, k, hdr_end, body_end, m, env, this, depth, frames);
+                self.loops -= 1;
                 k = body_end;
                 continue;
             }
@@ -1704,6 +1709,10 @@ fn assigned_name(lhs: &[Token], it: &mut Interp, m: DeclRef, env: &Env, this: Th
 /// block or the statement a control word governs), not beyond `b`.
 fn statement_end(t: &[Token], k: usize, b: usize) -> usize {
     let mut j = k;
+    // A control word: its header, then its statement (`if (a) if (b) x;`).
+    while j < b && t.get(j).is_some_and(|x| x.is_kw("for") || x.is_kw("foreach") || x.is_kw("if") || x.is_kw("while") || x.is_kw("repeat")) && t.get(j + 1).is_some_and(|x| x.is_punct("(")) {
+        j = skip_group(t, j + 1);
+    }
     if t.get(j).is_some_and(|x| x.is_kw("begin")) {
         let mut depth = 0i32;
         while j < b {
@@ -1722,10 +1731,6 @@ fn statement_end(t: &[Token], k: usize, b: usize) -> usize {
             j += 1;
         }
         return b;
-    }
-    // A control word: its header, then its statement.
-    if t.get(j).is_some_and(|x| x.is_kw("for") || x.is_kw("foreach") || x.is_kw("if") || x.is_kw("while") || x.is_kw("repeat")) && t.get(j + 1).is_some_and(|x| x.is_punct("(")) {
-        return statement_end(t, skip_group(t, j + 1), b);
     }
     // A macro call is a statement of its own, with or without a `;` (`` `uvm_info(...) ``);
     // so is a macro alone on its line.

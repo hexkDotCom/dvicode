@@ -392,8 +392,8 @@ fn header_end(toks: &[Token]) -> Option<usize> {
 
 /// The values of a specialization `name #(a, .P(b))`: `(None, "a")`, `(Some("P"), "b")`.
 fn specialization_args(written: &str) -> Vec<(Option<String>, String)> {
-    let Some(at) = written.find("#(") else { return Vec::new() };
-    let body = &written[at + 2..];
+    // `#(`, or `#` and `(` with space between.
+    let Some(body) = written.match_indices('#').find_map(|(at, _)| written[at + 1..].trim_start().strip_prefix('(')) else { return Vec::new() };
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut item = String::new();

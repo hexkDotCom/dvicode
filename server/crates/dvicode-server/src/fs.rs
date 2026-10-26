@@ -216,9 +216,18 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
                 remove(&aside, true).map_err(|e| err(e, &aside))?;
                 return Ok(Value::Null);
             }
-            // Without overwrite, a file is linked under the new name (refused when the name was
-            // taken meanwhile: two renames at once cannot both win) and then unlinked; where
-            // links are not possible (another file system), renamed.
+            // Without overwrite, a rename that refuses a name taken meanwhile (two renames at
+            // once cannot both win), where the system has one.
+            if !p.overwrite && !same {
+                match rename_no_replace(&from, &to) {
+                    Some(Ok(())) => return Ok(Value::Null),
+                    Some(Err(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(FsError { code: "FileExists", message: to.display().to_string() }),
+                    Some(Err(e)) => return Err(err(e, &from)),
+                    None => {}
+                }
+            }
+            // Else a file is linked under the new name (refused when the name was taken) and
+            // then unlinked; where links are not possible (another file system), renamed.
             if !p.overwrite && !same && std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
                 match std::fs::hard_link(&from, &to) {
                     Ok(()) => {
@@ -234,6 +243,64 @@ pub fn handle(op: &str, params: Value) -> Result<Value, FsError> {
         }
         _ => Err(FsError { code: "Unavailable", message: format!("unknown file system operation {op}") }),
     }
+}
+
+/// Renames without replacing what `to` names (an error of kind `AlreadyExists` then); `None`
+/// where the system or the file system has no such rename.
+#[cfg(windows)]
+fn rename_no_replace(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    // MOVEFILE_COPY_ALLOWED (a file to another volume); without MOVEFILE_REPLACE_EXISTING.
+    const COPY_ALLOWED: u32 = 0x2;
+    let wide = |p: &Path| p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    let (f, t) = (wide(from), wide(to));
+    // SAFETY: both are NUL-terminated wide strings that live across the call.
+    if unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), COPY_ALLOWED) } != 0 {
+        return Some(Ok(()));
+    }
+    let e = std::io::Error::last_os_error();
+    // ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS.
+    Some(match e.raw_os_error() {
+        Some(80 | 183) => Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
+        _ => Err(e),
+    })
+}
+
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn rename_no_replace(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    use std::os::unix::ffi::OsStrExt;
+    extern "C" {
+        fn syscall(number: std::ffi::c_long, ...) -> std::ffi::c_long;
+    }
+    #[cfg(target_arch = "x86_64")]
+    const SYS_RENAMEAT2: std::ffi::c_long = 316;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_RENAMEAT2: std::ffi::c_long = 276;
+    const AT_FDCWD: std::ffi::c_int = -100;
+    const RENAME_NOREPLACE: std::ffi::c_uint = 1;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).ok();
+    let (Some(f), Some(t)) = (c(from), c(to)) else { return None };
+    // SAFETY: renameat2(2) with two NUL-terminated paths that live across the call.
+    let r = unsafe { syscall(SYS_RENAMEAT2, AT_FDCWD, f.as_ptr(), AT_FDCWD, t.as_ptr(), RENAME_NOREPLACE) };
+    if r == 0 {
+        return Some(Ok(()));
+    }
+    let e = std::io::Error::last_os_error();
+    // ENOSYS (an old kernel), EINVAL (a file system without the flag): not available here.
+    match e.raw_os_error() {
+        Some(38 | 22) => None,
+        Some(17) => Some(Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))),
+        _ => Some(Err(e)),
+    }
+}
+
+#[cfg(not(any(windows, all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))))]
+fn rename_no_replace(_from: &Path, _to: &Path) -> Option<std::io::Result<()>> {
+    None
 }
 
 /// Deletes a file, a directory (with its contents when `recursive`), or a symbolic link

@@ -2651,9 +2651,17 @@ fn stale_edits(a: &Analysis, v: &Value) -> bool {
                     let Some(doc) = c.get("textDocument") else { continue };
                     let Some(uri) = doc.get("uri").and_then(Value::as_str).and_then(|u| Url::parse(u).ok()) else { continue };
                     let made = doc.get("version").and_then(Value::as_i64).map(|v| v as i32);
-                    let now = path_of(&uri).and_then(|p| a.vfs.lookup(&p)).and_then(|f| a.vfs.editor_version(f));
-                    if made != now {
+                    let Some(f) = path_of(&uri).and_then(|p| a.vfs.lookup(&p)) else { continue };
+                    if made != a.vfs.editor_version(f) {
                         return true;
+                    }
+                    // The same version (or none: a closed file) with other text: changed on disk,
+                    // or closed and opened again.
+                    let (was, now) = (a.source(f).map(|s| s.text.clone()), a.vfs.text_versioned(f).map(|(t, _)| t));
+                    if let (Some(was), Some(now)) = (was, now) {
+                        if !Arc::ptr_eq(&was, &now) && was != now {
+                            return true;
+                        }
                     }
                 }
             }

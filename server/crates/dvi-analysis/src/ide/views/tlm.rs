@@ -295,6 +295,8 @@ pub(super) struct Reach {
     pub ends: Vec<String>,
     pub possible: bool,
     pub more: usize,
+    /// `more` adds hidden ends of several ways, which may be the same ones (an upper bound).
+    pub more_at_most: bool,
     pub incomplete: bool,
 }
 
@@ -540,6 +542,7 @@ fn reach(at: &str, next: &FxHashMap<&str, Vec<(&str, bool)>>, open: &FxHashSet<&
     let mut r = Reach { incomplete: open.contains(at), ..Default::default() };
     let mut any = false;
     let mut all_possible = true;
+    let mut ways = 0usize;
     for &(to, cond) in next.get(at).map(|v| v.as_slice()).unwrap_or(&[]) {
         // An imp, or an endpoint the library makes (what it leads to is inside the library),
         // ends the search.
@@ -547,6 +550,8 @@ fn reach(at: &str, next: &FxHashMap<&str, Vec<(&str, bool)>>, open: &FxHashSet<&
         let sub = if terminal { Reach { ends: vec![to.to_string()], ..Default::default() } } else { reach(to, next, open, kinds, memo, on_path, depth + 1, visits) };
         r.incomplete |= sub.incomplete;
         r.more += sub.more;
+        r.more_at_most |= sub.more_at_most;
+        ways += usize::from(!sub.ends.is_empty());
         if !sub.ends.is_empty() {
             any = true;
             all_possible &= cond || sub.possible;
@@ -563,6 +568,7 @@ fn reach(at: &str, next: &FxHashMap<&str, Vec<(&str, bool)>>, open: &FxHashSet<&
         }
     }
     r.possible = any && all_possible;
+    r.more_at_most |= r.more > 0 && ways > 1;
     on_path.remove(at);
     if !r.incomplete || depth == 0 {
         memo.insert(at.to_string(), r.clone());
@@ -612,7 +618,11 @@ pub(super) fn endpoint_view(a: &Analysis, path: &str, l: &Links) -> (Option<Stri
                 format!("{iface}{what} · reaches no implementation{cut}")
             } else {
                 let names: Vec<&str> = r.ends.iter().map(|p| p.strip_prefix("uvm_test_top.").unwrap_or(p)).collect();
-                let more = if r.more > 0 { format!(" and {} more", r.more) } else { String::new() };
+                let more = match (r.more, r.more_at_most) {
+                    (0, _) => String::new(),
+                    (n, false) => format!(" and {n} more"),
+                    (n, true) => format!(" and up to {n} more"),
+                };
                 let partial = if r.incomplete { " (perhaps more: a call on the way not followed)" } else { "" };
                 format!("{iface}{what} · {}→ {}{more}{partial}{cut}", if r.possible { "possibly " } else { "" }, names.join(", "))
             }

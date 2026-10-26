@@ -289,11 +289,21 @@ impl Analysis {
     }
 
     pub fn decl_references(&self, r: DeclRef, include_decl: bool) -> Vec<Span> {
+        self.decl_references_checked(r, include_decl, false).0
+    }
+
+    /// [`Analysis::decl_references`]; with `check`, also a use found that means another
+    /// declaration in another unit (a file compiled in several contexts).
+    fn decl_references_checked(&self, r: DeclRef, include_decl: bool, check: bool) -> (Vec<Span>, Option<Span>) {
         let canon = self.canonical(r);
         let key = self.decl_key(canon);
         let name = self.decl(r).name.clone();
         let mut out: Vec<Span> = Vec::new();
         let mut seen: FxHashSet<Span> = FxHashSet::default();
+        // With `check`: uses by place and kind of reference, that mean the target and that do not
+        // (an implicit `.name` connection is two references at one place: port and signal).
+        let mut ours: FxHashSet<(Span, std::mem::Discriminant<RefKind>)> = FxHashSet::default();
+        let mut other: FxHashSet<(Span, std::mem::Discriminant<RefKind>)> = FxHashSet::default();
         if include_decl {
             for s in [self.decl(canon).name_span].into_iter().chain(self.implementation_of(canon).map(|i| self.decl(i).name_span)) {
                 if seen.insert(s) {
@@ -312,16 +322,23 @@ impl Analysis {
             }
             if let Some(occ) = u.names.get(&name) {
                 for (rid, seg) in occ {
-                    let s = &u.parsed.reference(*rid).segs[*seg as usize];
-                    if s.from_macro || seen.contains(&s.span) {
+                    let reference = u.parsed.reference(*rid);
+                    let s = &reference.segs[*seg as usize];
+                    if s.from_macro || (!check && seen.contains(&s.span)) {
                         continue;
                     }
                     // A file compiled in several units is searched once per unit; that is fine
                     // because spans are de-duplicated.
                     if let Some(t) = self.resolve_ref(u.id, *rid, *seg as usize) {
                         if self.decl_key(self.canonical(t)) == key {
-                            seen.insert(s.span);
-                            out.push(s.span);
+                            if seen.insert(s.span) {
+                                out.push(s.span);
+                            }
+                            if check {
+                                ours.insert((s.span, std::mem::discriminant(&reference.kind)));
+                            }
+                        } else if check {
+                            other.insert((s.span, std::mem::discriminant(&reference.kind)));
                         }
                     }
                 }
@@ -354,7 +371,8 @@ impl Analysis {
                 }
             }
         }
-        out
+        let conflict = ours.iter().filter(|k| other.contains(k)).map(|k| k.0).min_by_key(|s| (s.file, s.start));
+        (out, conflict)
     }
 
     pub fn document_highlights(&self, file: FileId, off: u32) -> Vec<Span> {
@@ -439,8 +457,10 @@ impl Analysis {
             return Err("This element cannot be renamed".into());
         }
         let line = |s: Span| format!("{}:{}", self.vfs.path(s.file).display(), self.to_range(s).map_or(0, |r| r.start.line + 1));
+        let mut decl = None;
         let target = match self.target_at(file, off) {
             Some(Target::Decl(r)) => {
+                decl = Some(r);
                 if let Some((m, at)) = self.use_in_macro_body(r) {
                     return Err(format!("'{}' is also used inside the macro `{m} (expanded at {}), which rename cannot change", self.decl(r).name, line(at)));
                 }
@@ -462,7 +482,20 @@ impl Analysis {
             }
             _ => None,
         };
-        let spans = self.reference_spans(file, off, true);
+        let spans = match decl {
+            Some(r) => {
+                let (spans, conflict) = self.decl_references_checked(r, true, true);
+                if let Some(at) = conflict {
+                    return Err(format!(
+                        "'{}' at {} also means another declaration where that file is included again or compiled in another context, which rename would change too",
+                        self.decl(r).name,
+                        line(at)
+                    ));
+                }
+                spans
+            }
+            None => self.reference_spans(file, off, true),
+        };
         // A use in a library outside the workspace would be left behind, or the library
         // changed: neither is what the user asked for.
         let mut checked: FxHashMap<FileId, bool> = FxHashMap::default();

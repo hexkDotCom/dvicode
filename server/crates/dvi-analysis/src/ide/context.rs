@@ -566,10 +566,14 @@ impl Analysis {
         let li = self.file_lines(file)?;
         let (line, _) = li.position(&text, off);
         let (a, b) = (li.offset(&text, line, 0) as usize, li.offset(&text, line + 1, 0) as usize);
-        if !text.get(a..b.max(a)).is_some_and(|l| l.contains("include")) {
+        let l = text.get(a..b.max(a)).unwrap_or("");
+        if !l.contains('`') {
             return None;
         }
-        for uid in self.editor_units(file) {
+        // A macro call that writes an include (no `include` on the line): the editor's unit only.
+        let units = self.editor_units(file);
+        let n = if l.contains("include") { units.len() } else { 1 };
+        for uid in units.into_iter().take(n) {
             let u = self.unit(uid);
             let Some(inc) = u.includes.iter().find(|i| i.span.file == file && i.span.start <= off && off <= i.span.end) else { continue };
             let pp = self.setup.pp_configs.get(u.invocation).unwrap_or(&self.setup.pp_configs[0]);

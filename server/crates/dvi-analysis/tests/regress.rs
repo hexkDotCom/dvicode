@@ -4213,3 +4213,54 @@ fn instance_lists_assertions_and_drivers_review_cases() {
 
 
 
+
+// ------------------------------------------------------------------ general review 3
+
+#[test]
+fn register_fields_overlap_by_interval_and_deep_conditions_do_not_recurse() {
+    std::thread::Builder::new().stack_size(16 << 20).spawn(register_overlap_case).unwrap().join().unwrap();
+}
+
+fn register_overlap_case() {
+    let ifs = "if (1) ".repeat(100_000);
+    let src = format!(
+        "virtual class uvm_reg_block; endclass\nvirtual class uvm_reg; endclass\nclass uvm_reg_field; endclass\nclass uvm_reg_map; endclass\nclass r_t extends uvm_reg;\n  rand uvm_reg_field a, b, c, e, f;\n  function new(string name = \"r_t\"); super.new(name, 32, 0); endfunction\n  virtual function void build();\n    a = uvm_reg_field::type_id::create(\"a\"); a.configure(this, 4, 0, \"RW\", 0, 0, 1, 1, 0);\n    b = uvm_reg_field::type_id::create(\"b\"); b.configure(this, 1, 2, \"RW\", 0, 0, 1, 1, 0);\n    c = uvm_reg_field::type_id::create(\"c\"); c.configure(this, 1, 8, \"RW\", 0, 0, 1, 1, 0);\n    e = uvm_reg_field::type_id::create(\"e\"); e.configure(this, 2, 9, \"RW\", 0, 0, 1, 1, 0);\n    f = uvm_reg_field::type_id::create(\"f\"); f.configure(this, 1, 10, \"RW\", 0, 0, 1, 1, 0);\n  endfunction\nendclass\nclass top_block extends uvm_reg_block;\n  rand r_t r;\n  function new(string name = \"top_block\"); super.new(name); endfunction\n  virtual function void build();\n    default_map = create_map(\"map\", 0, 4, UVM_LITTLE_ENDIAN);\n    for (int i = 0; i < 1; i++) {ifs};\n    r = r_t::type_id::create(\"r\");\n    r.configure(this, null, \"\");\n    r.build();\n    default_map.add_reg(r, 'h4, \"RW\");\n  endfunction\nendclass\n"
+    );
+    let (a, _) = project("review3ral", &[("ral.sv", &src)]);
+    let (blocks, _) = a.register_blocks();
+    let model = a.register_model(*blocks.iter().find(|b| a.decl(**b).name == "top_block").unwrap());
+    let r = model.regs.iter().position(|r| r.name == "r").expect("the register after the deep loop");
+    let f: Vec<String> = a.register_fields(&model, r).iter().map(|f| format!("{} {}", f.name, f.notes.iter().any(|n| n == "overlaps another field"))).collect();
+    assert_eq!(f, ["a true", "b true", "c false", "e true", "f true"]);
+}
+
+#[test]
+fn override_text_reads_a_specialization_with_space_after_the_hash() {
+    let src = "virtual class base #(type T = int);\n  pure virtual function void f(T x);\nendclass\nclass child extends base # (byte);\nendclass\n";
+    let (a, _) = project("review3ovr", &[("t.sv", src)]);
+    let class = {
+        let u = a.unit(a.units_for(a.project_files()[0])[0]);
+        let d = u.parsed.decls.iter().position(|d| d.name == "child").unwrap();
+        dvi_analysis::DeclRef { unit: u.id, decl: d as u32 }
+    };
+    let os = a.overridable_methods(class);
+    let text = os.iter().find(|o| o.name == "f").and_then(|o| a.override_text(o, class, "  ", "\n", false));
+    assert_eq!(text.as_deref(), Some("virtual function void f(byte x);\nendfunction"));
+}
+
+#[test]
+fn rename_refuses_a_shared_header_use_that_means_another_declaration_elsewhere() {
+    let pkgs = "package p;\n  int value;\nendpackage\npackage q;\n  int value;\nendpackage\n";
+    let hdr = "function int f();\n  return value;\nendfunction\n";
+    let ma = "module a;\n  import p::*;\n  `include \"f.svh\"\nendmodule\n";
+    let mb = "module b;\n  import q::*;\n  `include \"f.svh\"\nendmodule\n";
+    let (a, root) = project("review3rename", &[("pkgs.sv", pkgs), ("f.svh", hdr), ("a.sv", ma), ("b.sv", mb)]);
+    let f = a.vfs.lookup(&root.join("pkgs.sv")).unwrap();
+    let e = a.rename(f, pkgs.find("value").unwrap() as u32, "v2").unwrap_err();
+    assert!(e.contains("another declaration"), "{e}");
+    // Only p's own uses: renamed.
+    let solo = "package p;\n  int value;\n  function int g(); return value; endfunction\nendpackage\n";
+    let (a, root) = project("review3rename2", &[("p.sv", solo)]);
+    let f = a.vfs.lookup(&root.join("p.sv")).unwrap();
+    assert!(a.rename(f, solo.find("value").unwrap() as u32, "v2").is_ok());
+}
