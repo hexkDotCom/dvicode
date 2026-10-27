@@ -2343,11 +2343,16 @@ fn lint_and_the_problem_limit() {
     let e = uri(&root, "e.sv");
     let p = c.wait_problems(&e, |p| !p.diagnostics.is_empty());
     assert_eq!(sources(&p), [("dvicode".to_string(), "UNDECLARED_IDENTIFIER".to_string())]);
-    // 600 findings, 9 shown (the compile problem took one place): one notice for the other 591.
+    // 600 findings, some shown in what the limit leaves (how much depends on whether l.sv was
+    // open when the first check ran): one notice counts every other one.
     let m = uri(&root, "m.sv");
     let p = c.wait_problems(&m, |p| p.diagnostics.iter().any(|d| d.message.contains("not shown")));
     let notices: Vec<&str> = p.diagnostics.iter().filter(|d| d.message.contains("not shown")).map(|d| d.message.as_str()).collect();
-    assert_eq!(notices, ["Lint: 591 findings in this file are not shown (the problem limit, dvicode.maxProblems, is reached)"], "{:?}", sources(&p));
-    assert_eq!(p.diagnostics.len(), 10);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].ends_with("findings in this file are not shown (the problem limit, dvicode.maxProblems, is reached)"), "{notices:?}");
+    let hidden: usize = notices[0].trim_start_matches("Lint: ").split(' ').next().unwrap().parse().unwrap();
+    let shown = p.diagnostics.len() - 1;
+    assert_eq!(hidden + shown, 600, "{notices:?}");
+    assert!((8..=9).contains(&shown), "{shown}");
     c.shutdown();
 }

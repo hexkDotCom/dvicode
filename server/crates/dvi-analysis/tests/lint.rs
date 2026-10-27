@@ -94,6 +94,9 @@ package uvm_pkg;
   class uvm_sequence #(type REQ = uvm_sequence_item, type RSP = REQ) extends uvm_sequence_base;
     function new(string name = ""); super.new(name); endfunction
   endclass
+  class uvm_reg_sequence #(type BASE = uvm_sequence #(uvm_sequence_item)) extends BASE;
+    function new(string name = ""); super.new(name); endfunction
+  endclass
   class uvm_tlm_analysis_fifo #(type T = int) extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
   class uvm_config_db #(type T = int);
     static function void set(uvm_component cntxt, string inst_name, string field_name, T value); endfunction
@@ -831,4 +834,71 @@ fn explicit_configuration_paths() {
     assert_eq!(c.base, dir);
     assert!(dvi_analysis::lint::json::parse(r#"{ "comment": "\u+041" }"#).is_err());
     assert!(dvi_analysis::lint::json::parse(r#"{ "comment": "A" }"#).is_ok());
+}
+
+/// From the corpus: a `pragma protect begin/end region is plain text (only begin_protected is
+/// encrypted); `disable fork;` and `wait fork;` are statements; a macro's arguments may follow
+/// a space.
+#[test]
+fn corpus_review_cases() {
+    let plain = "module m;\n`pragma protect begin\n  initial std::randomize();\n`pragma protect end\nendmodule\n";
+    let enc = "module e;\n`pragma protect begin_protected\n`pragma protect end_protected\nendmodule\n";
+    let tb = r#"`define note(ID, MSG) begin $display(MSG); end
+class item; rand int a; endclass
+class t;
+  item seq;
+  task b();
+    fork
+      begin : s seq.randomize(); end
+      begin : r #1; end
+    join_any
+    disable fork;
+    wait fork;
+    `note ("id", "msg")
+    seq.randomize();
+    if (seq == null) begin `note("id", "none") end
+    seq.randomize();
+  endtask
+endclass
+"#;
+    let (a, root) = project("corpusrev", &[("plain.sv", plain), ("enc.sv", enc), ("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("randomize-result-discarded")).collect();
+    assert_eq!(got, ["plain.sv:3 randomize-result-discarded", "tb.sv:7 randomize-result-discarded", "tb.sv:13 randomize-result-discarded", "tb.sv:15 randomize-result-discarded"]);
+    let set = ConfigSet::new(&root, Defaults { rulesets: vec![Ruleset::Recommended], ..Defaults::default() }, None);
+    for (name, incomplete) in [("plain.sv", false), ("enc.sv", true), ("tb.sv", false)] {
+        let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with(name)).unwrap();
+        let r = a.lint_file(f, &a.lint_config(&set, &DiskEnv, f), None);
+        assert_eq!(!r.incomplete.is_empty(), incomplete, "{name}: {:?}", r.incomplete);
+        assert!(r.unknown.is_empty(), "{name}: {:?}", r.unknown);
+    }
+}
+
+/// A class whose base is its own type parameter (UVM's `uvm_reg_sequence #(type BASE = ...)
+/// extends BASE`): the ancestry follows the type given, or the default.
+#[test]
+fn ancestry_through_a_type_parameter() {
+    let tb = r#"`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class rs1 extends uvm_reg_sequence;
+    `uvm_object_utils(rs1)
+    function new(string name = ""); super.new(name); endfunction
+  endclass
+  class rs2 extends uvm_reg_sequence #(uvm_sequence #(uvm_sequence_item));
+    `uvm_component_utils(rs2)
+    function new(string name = ""); super.new(name); endfunction
+  endclass
+  class rs3 extends uvm_reg_sequence #(.BASE(uvm_sequence #(uvm_sequence_item)));
+    `uvm_component_utils(rs3)
+    function new(string name = ""); super.new(name); endfunction
+  endclass
+endpackage
+"#;
+    let (a, root) = project("anc-tparam", &[("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("uvm-registration-mismatch")).collect();
+    assert_eq!(got, ["tb.sv:9 uvm-registration-mismatch/family", "tb.sv:13 uvm-registration-mismatch/family"]);
+    let set = ConfigSet::new(&root, Defaults { rulesets: vec![Ruleset::Recommended], ..Defaults::default() }, None);
+    let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with("tb.sv")).unwrap();
+    let r = a.lint_file(f, &a.lint_config(&set, &DiskEnv, f), None);
+    assert!(r.unknown.is_empty(), "{:?}", r.unknown);
 }

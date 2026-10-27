@@ -256,10 +256,15 @@ impl Walker<'_> {
                     self.mark(end, after + 1, f);
                     return Some(after + 1);
                 }
-                "wait" => {
-                    if t.get(k + 1).is_some_and(|y| y.is_kw("fork")) {
-                        return self.expr_stmt(k, f);
+                // `wait fork;` and `disable fork;` (the expression path stops at `fork`).
+                "wait" | "disable" if t.get(k + 1).is_some_and(|y| y.is_kw("fork")) => {
+                    if !t.get(k + 2)?.is_punct(";") {
+                        return None;
                     }
+                    self.mark(k, k + 3, f);
+                    return Some(k + 3);
+                }
+                "wait" => {
                     let (_, after) = self.parens(k + 1)?;
                     self.mark(k, after, f);
                     return self.stmt(after, f);
@@ -500,14 +505,16 @@ impl Walker<'_> {
             }
             _ => {
                 let mut j = k + 1;
-                if t.get(j).is_some_and(|y| y.is_punct("(") && !y.ws_before()) {
+                // Its arguments, also after a space (`` `uvm_info (...) ``), not on the next line.
+                if t.get(j).is_some_and(|y| y.is_punct("(") && !y.nl_before()) {
                     j = self.group(j)?;
                 }
                 let call = j;
                 let next = match t.get(j) {
                     Some(y) if y.is_punct(";") => j + 1,
-                    // The next statement starts on a new line.
-                    Some(y) if y.nl_before() => j,
+                    // The next statement starts on a new line, or the block ends right after it
+                    // (`` begin `uvm_fatal(...) end ``).
+                    Some(y) if y.nl_before() || y.kind == TokKind::Keyword && ENDS.contains(&y.text.as_str()) => j,
                     None => j,
                     // Part of an expression (`` `CFG.x = 1; ``).
                     Some(_) => return self.expr_stmt(k, f),

@@ -38,6 +38,20 @@ pub fn lower_snake(s: &str) -> bool {
     !b.is_empty() && b[0].is_ascii_lowercase() && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_') && !s.contains("__") && !s.ends_with('_')
 }
 
+/// Why a name in the right case is still not snake case: its underscores.
+fn underscores(s: &str, upper: bool) -> &'static str {
+    let case_ok = s.bytes().all(|c| c == b'_' || c.is_ascii_digit() || if upper { c.is_ascii_uppercase() } else { c.is_ascii_lowercase() });
+    if !case_ok {
+        ""
+    } else if s.contains("__") {
+        " (no double underscores)"
+    } else if s.starts_with('_') || s.ends_with('_') {
+        " (no underscore at the start or the end)"
+    } else {
+        ""
+    }
+}
+
 pub fn upper_snake(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty() && b[0].is_ascii_uppercase() && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_') && !s.contains("__") && !s.ends_with('_')
@@ -128,7 +142,7 @@ impl Rule for NamingCase {
                 continue;
             }
             let (sub, want) = if upper { ("upper", "UPPER_SNAKE_CASE") } else { ("lower", "lower_snake_case") };
-            cx.report(Some(sub), d.name_span, format!("{} should be {want}", d.name), Vec::new());
+            cx.report(Some(sub), d.name_span, format!("{} should be {want}{}", d.name, underscores(&d.name, upper)), Vec::new());
         }
         // Constant macros: object-like macros whose body is one literal.
         for m in u.macro_defs.iter() {

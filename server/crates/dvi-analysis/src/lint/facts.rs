@@ -283,8 +283,12 @@ fn file_facts(a: &Analysis, unit: UnitId, file: FileId) -> FileFacts {
     // Included more than once, and not guarded (a guarded header's later copies are empty).
     let repeated = u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count() > 1 && !guarded(&raw);
     let syntax_errors = u.parsed.diags.iter().any(|d| d.code == "SYNTAX_ERROR" && d.span.file == file);
+    // Encrypted: Verilog-XL's `protected, or a `pragma protect begin_protected envelope. A
+    // `pragma protect begin ... end region is plain text that a tool is to encrypt later.
     let encrypted = tokens.iter().enumerate().any(|(i, t)| {
-        t.kind == TokKind::Directive && (t.text == "protected" || t.text == "pragma" && tokens.get(i + 1).is_some_and(|n| n.text == "protect"))
+        t.kind == TokKind::Directive
+            && (t.text == "protected"
+                || t.text == "pragma" && tokens.get(i + 1).is_some_and(|n| n.text == "protect") && tokens[i + 1..].iter().take_while(|n| !n.nl_before()).any(|n| n.text == "begin_protected"))
     }) || u.parsed.decls.iter().any(|d| d.span.file == file && d.has(dflags::ENCRYPTED));
     let classes = ClassIndex::new(u, file);
     FileFacts { file, tokens, bodies, waivers, defines, comments, repeated, syntax_errors, encrypted, classes }
@@ -354,7 +358,8 @@ fn class_facts(a: &Analysis, c: DeclRef) -> ClassFacts {
         if a.decl(cur).extends.is_none() {
             break Ok(chain);
         }
-        let Some(b) = a.class_base(cur) else { break Err("unresolved base class") };
+        let from = chain.len().checked_sub(2).map(|i| chain[i]);
+        let Some(b) = a.class_base(cur).or_else(|| type_param_base(a, cur, from)) else { break Err("unresolved base class") };
         if !seen.insert(a.decl_key(b)) {
             break Err("cyclic base classes");
         }
@@ -370,6 +375,66 @@ fn class_facts(a: &Analysis, c: DeclRef) -> ClassFacts {
         (Err(e), None) => Err(*e),
     };
     ClassFacts { ancestry, role, parameterized, is_virtual }
+}
+
+/// The base of `cur` when its `extends` names one of its own type parameters (UVM's
+/// `uvm_reg_sequence #(type BASE = uvm_sequence #(uvm_reg_item)) extends BASE`): the type the
+/// derived class `from` gives for it in its own `extends`, else the parameter's default.
+fn type_param_base(a: &Analysis, cur: DeclRef, from: Option<DeclRef>) -> Option<DeclRef> {
+    let d = a.decl(cur);
+    let p = d.extends.as_ref().and_then(|t| a.resolve_typeref(cur.unit, t))?;
+    if p.unit != cur.unit || a.decl(p).kind != DeclKind::TypeParam || a.decl(p).parent != Some(cur.decl) {
+        return None;
+    }
+    let u = a.unit(cur.unit);
+    let ports: Vec<DeclId> = d.children.iter().copied().filter(|c| u.parsed.decl(*c).has(dflags::PARAM_PORT)).collect();
+    let index = ports.iter().position(|c| *c == p.decl)?;
+    let name = a.decl(p).name.clone();
+    let given = from.and_then(|f| Some((f, param_arg(&a.decl(f).extends.as_ref()?.text, index, &name)?)));
+    let (unit, scope, text) = match given {
+        Some((f, t)) => (f.unit, f.decl, t),
+        None => (cur.unit, cur.decl, a.decl(p).detail.to_string()),
+    };
+    // The type's name, maybe package-qualified, before its own parameters.
+    let head: String = text.trim().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':' || *c == '$').collect();
+    let r = match head.rsplit_once("::") {
+        Some((pkg, n)) => {
+            let pkg = a.lookup(unit, scope, pkg)?;
+            let m = a.unit(pkg.unit).parsed.lookup_member(pkg.decl, n).first().copied()?;
+            DeclRef { unit: pkg.unit, decl: m }
+        }
+        None => a.lookup(unit, scope, &head)?,
+    };
+    a.follow_typedef(r).filter(|b| matches!(a.decl(*b).kind, DeclKind::Class | DeclKind::InterfaceClass))
+}
+
+/// The argument of parameter `name` (position `index`) in a type's text: `C #(A, .B(x))`.
+fn param_arg(text: &str, index: usize, name: &str) -> Option<String> {
+    let open = text.find('#')?;
+    let rest = text[open + 1..].trim_start().strip_prefix('(')?;
+    let mut args: Vec<String> = vec![String::new()];
+    let mut depth = 0i32;
+    for c in rest.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => break,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        args.last_mut()?.push(c);
+    }
+    let named = |x: &str| x.trim().strip_prefix('.').map(|r| r.trim_start().to_string());
+    if args.iter().any(|x| named(x).is_some()) {
+        return args.iter().filter_map(|x| named(x)).find_map(|r| {
+            let (n, v) = r.split_once('(')?;
+            (n.trim() == name).then(|| v.trim_end().trim_end_matches(')').trim().to_string())
+        });
+    }
+    args.get(index).map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
 }
 
 /// Whether the declaration at `name` is made by a macro: its name is written as an argument of

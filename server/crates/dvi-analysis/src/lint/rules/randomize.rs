@@ -42,7 +42,7 @@ impl Rule for RandomizeInAssert {
             }
             let Some(stmts) = &b.stmts else {
                 if has(b.start, b.end) {
-                    cx.unknown("statement structure");
+                    cx.unknown_at("statement structure", t[b.start].span);
                 }
                 continue;
             };
