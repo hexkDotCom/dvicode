@@ -10,7 +10,8 @@ A compiled file or an included file has the wrong extension.
 
 A compiled file whose name does not end in `.sv`; an included file that ends neither in `.sv`
 nor in `.svh`; a `.svh` file that holds code (classes, functions, design elements) rather than
-macros, types and parameters.
+macros, types and parameters. Verilog files (`.v`, `.vh`) are not checked, and extensions are
+compared without regard to case.
 
 ## Why
 
@@ -19,20 +20,32 @@ FIL-2).
 
 ## Example
 
+`ex.sv`:
+
 ```systemverilog bad
 package p;
   `include "bus_item.svh"
 endpackage
-//@ file: bus_item.svh
+```
+
+`bus_item.svh`:
+
+```systemverilog bad
 class bus_item;
 endclass
 ```
+
+`ex.sv`:
 
 ```systemverilog good
 package p;
   `include "bus_defs.svh"
 endpackage
-//@ file: bus_defs.svh
+```
+
+`bus_defs.svh`:
+
+```systemverilog good
 `define BUS_WIDTH 32
 ```
 

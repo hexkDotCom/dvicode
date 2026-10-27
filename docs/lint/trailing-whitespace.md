@@ -30,4 +30,4 @@ endmodule
 
 ## Waive
 
-One finding: `// FMT-2 waived: <reason>` on the line before the statement or declaration. The rule: `"trailing-whitespace": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+A waiver cannot cover where this rule reports. Turn it off for some lines with `// dvicode-lint: disable=trailing-whitespace <reason>` and `// dvicode-lint: enable=trailing-whitespace`, or for a file with `// dvicode-lint: disable-file=trailing-whitespace <reason>`. The rule: `"trailing-whitespace": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

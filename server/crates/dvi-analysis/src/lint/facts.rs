@@ -294,7 +294,8 @@ fn file_facts(a: &Analysis, unit: UnitId, file: FileId) -> FileFacts {
 /// the file (the later inclusions of a guarded header are empty, its first is not).
 pub fn inactive(a: &Analysis, unit: UnitId, file: FileId) -> Vec<dvi_syntax::Span> {
     let u = a.unit(unit);
-    let times = u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count().max(1) as i32;
+    // Each inclusion, and the unit's own visit when the file is its root.
+    let times = (u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count() + usize::from(u.root == file)).max(1) as i32;
     // Each inclusion's ranges do not overlap: count how many inclusions leave each place out.
     let mut ev: Vec<(u32, i32)> = u.inactive.iter().filter(|s| s.file == file && s.start < s.end).flat_map(|s| [(s.start, 1), (s.end, -1)]).collect();
     ev.sort_unstable();

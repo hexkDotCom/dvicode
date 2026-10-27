@@ -82,8 +82,56 @@ pub fn member_class_name(cx: &Cx, d: DeclRef) -> Option<smol_str::SmolStr> {
 }
 
 /// The text of a simple string literal token (`"abc"`), without escapes decoded.
-pub fn string_value(x: &Token) -> Option<&str> {
-    (x.kind == TokKind::String).then(|| x.text.strip_prefix('"').and_then(|s| s.strip_suffix('"'))).flatten()
+pub fn string_value(x: &Token) -> Option<std::borrow::Cow<'_, str>> {
+    let s = (x.kind == TokKind::String).then(|| x.text.strip_prefix('"').and_then(|s| s.strip_suffix('"'))).flatten()?;
+    if !s.contains('\\') {
+        return Some(std::borrow::Cow::Borrowed(s));
+    }
+    // The string's value: `\n`, `\t`, `\\`, `\"`, `\v`, `\f`, `\a`, octal `\ddd`, hex `\xhh`.
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 == b.len() {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let c = b[i + 1];
+        i += 2;
+        match c {
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(11),
+            b'f' => out.push(12),
+            b'a' => out.push(7),
+            b'0'..=b'7' => {
+                let mut v = u32::from(c - b'0');
+                for _ in 0..2 {
+                    match b.get(i) {
+                        Some(d @ b'0'..=b'7') => {
+                            v = v * 8 + u32::from(d - b'0');
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out.push(v as u8);
+            }
+            b'x' => {
+                let mut v = 0u32;
+                let mut n = 0;
+                while n < 2 && b.get(i).is_some_and(u8::is_ascii_hexdigit) {
+                    v = v * 16 + (b[i] as char).to_digit(16).unwrap_or(0);
+                    i += 1;
+                    n += 1;
+                }
+                out.push(v as u8);
+            }
+            other => out.push(other),
+        }
+    }
+    Some(std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned()))
 }
 
 #[cfg(test)]

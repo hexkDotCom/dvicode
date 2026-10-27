@@ -275,6 +275,42 @@ fn uses_time(t: &[Token], k: usize) -> bool {
     delay_hash(t, k) && t.get(k + 1).is_some_and(|n| n.kind == TokKind::Number || n.is_punct("(") || n.kind == TokKind::Ident) || timed(t, k)
 }
 
+/// Whether a macro's text uses time, through the macros it calls too (by name, among the unit's
+/// definitions), each macro decided once.
+struct MacroTimes<'u> {
+    by_name: rustc_hash::FxHashMap<&'u str, &'u dvi_syntax::preproc::MacroDef>,
+    known: rustc_hash::FxHashMap<*const dvi_syntax::preproc::MacroDef, bool>,
+}
+
+impl<'u> MacroTimes<'u> {
+    fn new(u: &'u crate::world::Unit) -> MacroTimes<'u> {
+        MacroTimes { by_name: u.macro_defs.iter().map(|d| (d.name.as_str(), &**d)).collect(), known: Default::default() }
+    }
+
+    fn uses(&mut self, d: &dvi_syntax::preproc::MacroDef, depth: usize) -> bool {
+        let key = d as *const _;
+        if let Some(&b) = self.known.get(&key) {
+            return b;
+        }
+        // Not known while it is being decided: a macro that calls itself does not loop.
+        self.known.insert(key, false);
+        let b = &d.body;
+        let mut found = (0..b.len()).any(|k| uses_time(b, k));
+        if !found && depth < 16 {
+            for x in b.iter().filter(|x| x.kind == TokKind::Directive) {
+                if let Some(c) = self.by_name.get(x.text.as_str()).copied() {
+                    if self.uses(c, depth + 1) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        self.known.insert(key, found);
+        found
+    }
+}
+
 impl Rule for TimeunitFirst {
     fn meta(&self) -> &'static RuleMeta {
         &TIMEUNIT_FIRST
@@ -291,6 +327,7 @@ impl Rule for TimeunitFirst {
             .filter(|(_, d)| matches!(d.kind, DeclKind::Module | DeclKind::Interface | DeclKind::Package) && d.name_span.file == cx.file && !d.has(dflags::FROM_MACRO))
             .map(|(i, d)| (i as DeclId, d.span, d.name.to_string()))
             .collect();
+        let mut macro_times = MacroTimes::new(&u);
         for (i, span, name) in &scopes {
             let lo = t.partition_point(|x| x.span.start < span.start);
             let hi = t.partition_point(|x| x.span.start < span.end);
@@ -324,6 +361,13 @@ impl Rule for TimeunitFirst {
                     let ff = cx.a.lint_facts.file(cx.a, cx.unit, *f);
                     (0..ff.tokens.len()).any(|k| !ff.in_define(k) && uses_time(&ff.tokens, k))
                 });
+                // Macros called in it or in those files whose text uses time (`DV_SPINWAIT`).
+                if !uses {
+                    uses = u.macro_uses.iter().any(|m| {
+                        let here = m.call_span.file == cx.file && span.start <= m.call_span.start && m.call_span.end <= span.end && !nested.iter().any(|s| s.start <= m.call_span.start && m.call_span.start < s.end);
+                        (here || files.contains(&m.call_span.file)) && m.def.as_ref().is_some_and(|d| macro_times.uses(d, 0))
+                    });
+                }
             }
             if !uses {
                 continue;
@@ -352,8 +396,19 @@ impl Rule for TimeunitFirst {
                 }
                 j += 1;
             }
-            // `timeunit`/`timeprecision` (either order) as the first body items.
+            // `timeunit`/`timeprecision` (either order) as the first body items, those of files
+            // included first too: the first items as the compiler reads them.
+            let mut first: Vec<Token> = Vec::new();
             let mut k = j + 1;
+            while k + 1 < hi && t[k].kind == TokKind::Directive && t[k].text == "include" {
+                if let Some(f) = u.includes.iter().find(|i| i.span == t[k + 1].span && i.entered).and_then(|i| i.resolved) {
+                    first.extend(cx.a.lint_facts.file(cx.a, cx.unit, f).tokens.iter().take(64).cloned());
+                }
+                k += 2;
+            }
+            first.extend(t[k..hi.min(k + 64)].iter().cloned());
+            let (t, hi) = (&first, first.len());
+            let mut k = 0;
             let (mut unit_seen, mut prec_seen) = (false, false);
             while k < hi && (t[k].is_kw("timeunit") || t[k].is_kw("timeprecision")) {
                 let tu = t[k].is_kw("timeunit");

@@ -23,7 +23,7 @@ inputs:
     required: false
     default: ''
   fail-on:
-    description: 'The lowest level that fails the step (error, warning, info, never)'
+    description: 'The lowest level that fails the step (error, warning, info, hint, never)'
     required: false
     default: warning
   sarif:
@@ -85,8 +85,11 @@ runs:
           fi
           while IFS= read -r -d '' a; do args+=("$a"); done < <(printf '%s' "$LINT_ARGS" | xargs printf '%s\0')
         fi
-        dvicode lint "$LINT_PATH" --format github --output-sarif "$SARIF" --fail-on "$FAIL_ON" ${args[@]+"${args[@]}"}
-        echo "code=$?" >> "$GITHUB_OUTPUT"
+        # The step runs with `bash -e`: keep the status, so that the outputs are set and the
+        # SARIF is uploaded when lint fails (the Result step fails the job).
+        code=0
+        dvicode lint "$LINT_PATH" --format github --output-sarif "$SARIF" --fail-on "$FAIL_ON" ${args[@]+"${args[@]}"} || code=$?
+        echo "code=$code" >> "$GITHUB_OUTPUT"
         # hashFiles() sees only the workspace: say here whether there is a report.
         if [ -f "$SARIF" ]; then echo "sarif=$SARIF" >> "$GITHUB_OUTPUT"; fi
     - name: Upload SARIF

@@ -123,11 +123,30 @@ fn item(t: &[Token]) -> Item {
     // A user type is a name, maybe scoped (`pkg::item_t`), then the variable's name or a
     // parameter list; `pkg::f();` is a call.
     let user_type = first.kind == TokKind::Ident && {
-        let mut j = 1;
+        // `name`, `name#(...)`, `pkg::name#(...)::inner`...
+        let skip_params = |mut j: usize| {
+            if t.get(j).is_some_and(|x| x.is_punct("#")) && t.get(j + 1).is_some_and(|x| x.is_punct("(")) {
+                let mut depth = 0i32;
+                j += 1;
+                while let Some(x) = t.get(j) {
+                    if x.is_punct("(") {
+                        depth += 1;
+                    } else if x.is_punct(")") {
+                        depth -= 1;
+                        if depth == 0 {
+                            return j + 1;
+                        }
+                    }
+                    j += 1;
+                }
+            }
+            j
+        };
+        let mut j = skip_params(1);
         while t.get(j).is_some_and(|x| x.is_punct("::")) && t.get(j + 1).is_some_and(|x| x.kind == TokKind::Ident) {
-            j += 2;
+            j = skip_params(j + 2);
         }
-        t.get(j).is_some_and(|x| x.kind == TokKind::Ident || x.is_punct("#"))
+        t.get(j).is_some_and(|x| x.kind == TokKind::Ident)
     };
     let typed = first.kind == TokKind::Keyword && matches!(first.text.as_str(), "int" | "bit" | "logic" | "reg" | "byte" | "shortint" | "longint" | "integer" | "real" | "time" | "string" | "event" | "chandle" | "automatic" | "static" | "const" | "var")
         || user_type;
@@ -137,7 +156,7 @@ fn item(t: &[Token]) -> Item {
     // A call in the initializer: a `(` right after a name or `new` (not a parameterized type's
     // `#(...)`, a cast's `'(...)` or parentheses that group).
     match t.iter().position(|x| x.is_punct("=")) {
-        Some(eq) if t[eq..].windows(2).any(|w| w[1].is_punct("(") && (matches!(w[0].kind, TokKind::Ident | TokKind::SysIdent) || w[0].is_kw("new"))) => Item::DeclWithCall,
+        Some(eq) if t[eq..].iter().any(|x| x.is_kw("new")) || t[eq..].windows(2).any(|w| w[1].is_punct("(") && matches!(w[0].kind, TokKind::Ident | TokKind::SysIdent)) => Item::DeclWithCall,
         _ => Item::Decl,
     }
 }
@@ -470,7 +489,7 @@ impl Rule for DefaultSequence {
             };
             let Some(args) = call_args(&t, k + 1) else { continue };
             let Some(Some((s, e))) = argument(&t, &args, pos, formal) else { continue };
-            if e == s + 1 && string_value(&t[s]) == Some("default_sequence") {
+            if e == s + 1 && string_value(&t[s]).as_deref() == Some("default_sequence") {
                 cx.report(None, t[s].span, "default_sequence: start the sequence explicitly from the test", Vec::new());
             }
         }
@@ -650,7 +669,7 @@ impl Rule for CreateNameMatches {
                 continue;
             }
             let Some(name) = dest.last().filter(|x| x.kind == TokKind::Ident) else { continue };
-            if name.text != v {
+            if name.text.as_str() != v.as_ref() {
                 cx.report(None, t[s].span, format!("create(\"{v}\") is assigned to {}: name it \"{}\"", name.text, name.text), Vec::new());
             }
         }

@@ -90,6 +90,9 @@ impl Rule for OverrideSignature {
                     (None, None) => Some(x.ty == y.ty && x.dims == y.dims),
                     _ => match (resolve(xu, x.name_at), resolve(yu, y.name_at)) {
                         (Some(p), Some(q)) => Some(a.decl_key(a.canonical(p)) == a.decl_key(a.canonical(q)) && x.dims == y.dims),
+                        // A built-in type (`int`) is never a class.
+                        (Some(p), None) if y.name_at.is_none() && a.decl(p).kind == DeclKind::Class => Some(false),
+                        (None, Some(q)) if x.name_at.is_none() && a.decl(q).kind == DeclKind::Class => Some(false),
                         _ if x.ty == y.ty && x.dims == y.dims => Some(true),
                         _ => None,
                     },

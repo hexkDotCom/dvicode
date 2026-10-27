@@ -8,8 +8,9 @@
 
 ## What it finds
 
-`$display`, `$write`, `$monitor`, `$strobe` (and their `b`, `h`, `o` forms) in a method of a
-class derived from a UVM class.
+`$display` (and its `b`, `h`, `o` forms) in any class; in a class derived from a UVM class,
+also `$write`, `$monitor`, `$strobe` (and their forms) and `$info`, `$warning`, `$error`,
+`$fatal`.
 
 ## Why
 

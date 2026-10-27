@@ -22,7 +22,7 @@ written out, each step is visible and the randomization is checked (style guide 
 `include "uvm_macros.svh"
 package p;
   import uvm_pkg::*;
-  class bus_seq extends uvm_sequence_item;
+  class bus_seq extends uvm_sequence #(uvm_sequence_item);
     uvm_sequence_item req;
     task body();
       `uvm_do(req)
@@ -35,7 +35,7 @@ endpackage
 `include "uvm_macros.svh"
 package p;
   import uvm_pkg::*;
-  class bus_seq extends uvm_sequence_item;
+  class bus_seq extends uvm_sequence #(uvm_sequence_item);
     task body();
     endtask
   endclass

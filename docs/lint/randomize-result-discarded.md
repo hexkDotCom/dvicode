@@ -48,9 +48,9 @@ The quick fix wraps the statement: `if (!x.randomize()) `uvm_fatal("RAND", "x.ra
 
 ## Not reported
 
-A `randomize` call inside a macro argument or produced by a macro, a receiver whose type is not
-known, and a method that the project itself declares under that name: these are counted as
-unknown (see `--stats`).
+A `randomize` call inside a macro argument and a receiver whose type is not known: these are
+counted as unknown (see `--stats`). A method, task or variable that the project itself declares
+under that name is not the built-in and is left alone.
 
 ## Waive
 

@@ -16,7 +16,9 @@ A class registered with the UVM factory whose constructor the factory cannot cal
   default value.
 
 Arguments after those need default values. A class without a constructor has the implicit
-`new()`, which fits neither components nor objects.
+`new()`, which fits neither components nor objects. Abstract registrations are not checked
+(the factory never constructs them). With `UVM_OBJECT_DO_NOT_NEED_CONSTRUCTOR` defined, an
+object needs only `new()`, and the implicit one fits.
 
 ## Why
 

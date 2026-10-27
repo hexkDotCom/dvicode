@@ -34,4 +34,4 @@ endmodule
 
 ## Waive
 
-One finding: `// waiver-unattached waived: <reason>` on the line before the statement or declaration. The rule: `"waiver-unattached": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+Its findings are about waivers themselves and cannot be waived or suppressed in the code: correct the comment. The rule: `"waiver-unattached": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

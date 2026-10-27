@@ -90,7 +90,9 @@ impl Analysis {
     fn diagnostics_of(&self, file: FileId, all_contexts: bool) -> Vec<Diag> {
         let mut out: Vec<Diag> = Vec::new();
         // By place and a hash of the message (not a second copy of every message).
-        let mut seen: FxHashSet<(u32, u32, u64)> = FxHashSet::default();
+        // With `all_contexts`, also by unit: the same error in two contexts is two errors.
+        let mut seen: FxHashSet<(u32, u32, u32, u64)> = FxHashSet::default();
+        let context = std::cell::Cell::new(0u32);
         let mut push = |d: Diag, out: &mut Vec<Diag>| {
             let h = {
                 use std::hash::{Hash, Hasher};
@@ -98,12 +100,15 @@ impl Analysis {
                 d.message.hash(&mut h);
                 h.finish()
             };
-            if seen.insert((d.span.start, d.span.end, h)) {
+            if seen.insert((context.get(), d.span.start, d.span.end, h)) {
                 out.push(d);
             }
         };
         let units = if all_contexts { self.units_for(file) } else { self.editor_units(file) };
         for &uid in &units {
+            if all_contexts {
+                context.set(uid as u32);
+            }
             let u = self.unit(uid);
             for d in u.pp_diags.iter().chain(u.parsed.diags.iter()) {
                 if d.span.file == file {

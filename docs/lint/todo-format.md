@@ -31,4 +31,4 @@ endmodule
 
 ## Waive
 
-One finding: `// DOC-6 waived: <reason>` on the line before the statement or declaration. The rule: `"todo-format": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+A waiver cannot cover where this rule reports. Turn it off for some lines with `// dvicode-lint: disable=todo-format <reason>` and `// dvicode-lint: enable=todo-format`, or for a file with `// dvicode-lint: disable-file=todo-format <reason>`. The rule: `"todo-format": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

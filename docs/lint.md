@@ -29,6 +29,10 @@ problems of the same file. Each one links to its rule's page. The quick fixes (C
   for you to type;
 - **Turn off in this file**: inserts `// dvicode-lint: disable-file=<rule> <reason>`.
 
+A file shows at most 500 lint findings, fewer when its compile problems take room; the files
+that are not open also share `dvicode.maxProblems` with the compile problems. Open a file to
+see its own findings whatever the project has, or run the command for the full report.
+
 Settings:
 
 | Setting | Default | |
@@ -56,7 +60,7 @@ dvicode lint .
 ```text
 dvicode lint <dir> [PATH...] [--build FILE] [--env K=V] [--config FILE]
      [--rulesets r1,r2] [--rule ID=LEVEL]... [--format text|json|sarif|junit|github]
-     [--output FILE] [--output-sarif FILE] [--fail-on error|warning|info|never]
+     [--output FILE] [--output-sarif FILE] [--fail-on error|warning|info|hint|never]
      [--baseline FILE] [--write-baseline FILE] [--changed-since REF [--changed-exact]]
      [--all-contexts] [--jobs N] [--allow-incomplete] [--no-fail-on-compile-errors]
      [--show-suppressed] [--stats]
@@ -76,13 +80,21 @@ dvicode lint --print-config FILE [<dir>]
   context.
 - Compile errors fail the run (status 1); the first 100 are printed on stderr, and the JSON
   output lists them under `compile.first`.
-- `--output`, `--output-sarif` and `--write-baseline` refuse a symbolic link, so that a
-  project cannot point them elsewhere.
+- `--output`, `--output-sarif` and `--write-baseline` refuse a path that is itself a symbolic
+  link (a link in the folders above it is followed).
 - On Windows, a network path (`\\host\share\...`) in the project is read only when its host is
   the host of the folder or build file given, or is listed in `DVICODE_ALLOWED_UNC_HOSTS`
   (comma-separated): reading one makes Windows sign in to that host.
+- `--config FILE` uses that one configuration instead of the project's `.dvicode/lint.json`
+  files. Its paths are relative to the folder that holds it, or, for a file in a `.dvicode`
+  folder, to the folder above (as for the project's own).
+- `--rule ID=LEVEL` takes a rule ID or a style-guide ID (`--rule LNG-10=error` sets every rule
+  that checks LNG-10).
 - `--print-config FILE` shows the configuration of one file: where each value comes from, and
-  whether the file is linted at all.
+  whether the configuration lints it. It does not load the project, so it does not know the
+  files that are never linted whatever the configuration says (the UVM library, built-in files,
+  files reached through a link).
+- `--fail-on` takes `error`, `warning` (the default), `info`, `hint` or `never`.
 
 Exit status, the first that applies:
 
@@ -99,8 +111,14 @@ Output formats:
 - `text`: `path:line:col: level: message [rule/GUIDE-ID]`, the default;
 - `json`: a versioned envelope with the findings, their fingerprints, unknowns and completeness;
 - `sarif`: SARIF 2.1.0, for GitHub code scanning and other viewers;
-- `junit`: JUnit XML, one test suite per rule and one test case per file, for CI dashboards;
-- `github`: workflow annotations, shown on the pull request's changed lines.
+- `junit`: JUnit XML, one test suite per rule and one test case per file, for CI dashboards.
+  It holds lint findings only: compile errors and an incomplete analysis show on stderr and in
+  the exit status, so keep the status when you publish the report;
+- `github`: workflow annotations, shown on the pull request's changed lines; at most ten per
+  level (what GitHub shows of a step), long messages cut.
+
+Findings that a waiver, a suppression or the baseline accepts never fail the run. The text
+output leaves them out unless `--show-suppressed`; JSON and SARIF keep them, marked.
 
 ## Configuration: `.dvicode/lint.json`
 
@@ -133,16 +151,16 @@ object form. The extension validates the file and completes rule IDs as you type
 
 | Key | |
 |---|---|
-| `rulesets` | `recommended`, `recommended-preview`, `hexk`. Replaces what the configuration above chose. |
+| `rulesets` | `recommended`, `recommended-preview` (correctness rules under review: none at present, and it does not include `recommended`), `hexk`. Replaces the rulesets the configuration above chose; levels it set in `rules` stay (set them again, or start over with `"extends": "none"`). |
 | `rules` | By rule ID or style-guide ID (`LNG-10` sets every rule that checks it). The value is a level (`off`, `hint`, `info`, `warning`, `error`) or `{ "level", "comment", <parameters> }`. A rule's own ID wins over its guide ID. |
 | `overrides` | `[{ "paths", "rulesets", "rules", "reason", "comment" }]`: changes for some paths, in order. |
 | `owned` | The folders that are linted (default: the project). `exclude` and `include` are applied after it, in order, and the last match wins. |
-| `exclude` / `include` | Paths or `{ "path", "reason", "comment" }`. Excluded files are still compiled and analysed; they get no findings and no fixes. |
+| `exclude` / `include` | Paths or `{ "path", "reason", "comment" }`. Excluded files are still compiled and analysed; they get no findings and no fixes. `include` makes files of the project linted (the build or auto-configuration must already compile them): it does not add sources. |
 | `examples` | Files where the style guide's example exceptions apply (FIL-3: classes in a single-module example or unit test). |
 | `baseline` | A baseline file (see below). |
 | `formatter` | `"dvicode"`: the project formats with DVICode's formatter, and the `hexk` rule `formatter-drift` reports lines it would change. |
 | `extends` | `"parent"` (default) or `"none"`: start from the defaults instead of the configuration above. |
-| `uvm` | `"1.2"` or `"ieee"`. |
+| `uvm` | `"1.2"` or `"ieee"`: reserved; no rule reads it yet. The UVM library is the one the build compiles. |
 
 How configurations combine for a file:
 
@@ -198,9 +216,16 @@ own suppressions turn rules off for a region. They are not the guide's waiver re
 **A baseline** records today's findings so that only new ones are reported:
 
 ```bash
-dvicode lint . --write-baseline .dvicode/lint-baseline.json
+dvicode lint . --write-baseline .dvicode/lint-baseline.json --fail-on never
 dvicode lint . --baseline .dvicode/lint-baseline.json
 ```
+
+`--fail-on never` keeps the first command from failing on the findings it records (compile
+errors and an incomplete analysis still fail it). Writing replaces the file with every finding
+of the run that the code does not waive, those of an older baseline included. `PATH...`
+arguments limit what is recorded; `--changed-since` does not. A baseline written by another
+version, or one that cannot be read, is written again the same way, without `--baseline`; a
+baseline is a UTF-8 JSON file of at most 256 MB.
 
 Name the file under `"baseline"` in `lint.json` and the editor uses it too: listed findings
 show as hints. A finding is recognized by its rule, file, enclosing declaration, text and the
@@ -223,6 +248,7 @@ edit causes elsewhere (in a subclass, say): lint the whole project where that ma
 - **With pip:** `pip install dvicode`. The wheels carry the engine, so nothing else is needed,
   and they work on ordinary EDA Linux hosts without root.
 - **As a container:** `docker run --rm -v "$PWD:/src" ghcr.io/hexkdotcom/dvicode lint /src`.
+  The image is for Linux x64 (amd64); on arm64 hosts use the wheel or the release archive.
 
 ## CI recipes
 

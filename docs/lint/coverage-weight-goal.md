@@ -9,8 +9,9 @@
 ## What it finds
 
 `option.weight` or `option.goal` set in a covergroup, coverpoint or cross, or through a
-covergroup handle. `option.weight = 0` in a coverpoint (one that exists only to build a cross)
-is the guide's exception and is not reported.
+covergroup handle, to anything but its default: `weight` 1 and `goal` 100, in any literal form
+(`32'd1`), are not reported. `option.weight = 0` on a coverpoint that a cross of its covergroup
+names (one that exists to build the cross) is the guide's exception and is not reported.
 
 ## Why
 

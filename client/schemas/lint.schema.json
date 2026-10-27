@@ -4918,7 +4918,7 @@
       "type": "object"
     },
     "rulesets": {
-      "description": "recommended: provable correctness rules; recommended-preview: correctness rules still under review; hexk: the HEXK SV/UVM Style Guide (includes the others)",
+      "description": "recommended: provable correctness rules; recommended-preview: correctness rules still under review (none at present; it does not include recommended); hexk: the HEXK SV/UVM Style Guide (includes the others)",
       "items": {
         "enum": [
           "recommended",
@@ -4953,7 +4953,7 @@
       "type": "string"
     },
     "baseline": {
-      "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists are not reported",
+      "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists do not fail the run (the text output hides them, JSON and SARIF mark them, the editor shows them as hints)",
       "type": "string"
     },
     "comment": {
@@ -4990,10 +4990,7 @@
             "type": "string"
           },
           "paths": {
-            "items": {
-              "$ref": "#/definitions/path"
-            },
-            "type": "array"
+            "$ref": "#/definitions/paths"
           },
           "reason": {
             "description": "Why these paths are linted differently",

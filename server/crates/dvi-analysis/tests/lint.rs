@@ -91,6 +91,9 @@ package uvm_pkg;
     function new(string name = ""); super.new(name); endfunction
     virtual task pre_do(bit is_item); endtask
   endclass
+  class uvm_sequence #(type REQ = uvm_sequence_item, type RSP = REQ) extends uvm_sequence_base;
+    function new(string name = ""); super.new(name); endfunction
+  endclass
   class uvm_tlm_analysis_fifo #(type T = int) extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
   class uvm_config_db #(type T = int);
     static function void set(uvm_component cntxt, string inst_name, string field_name, T value); endfunction
@@ -737,4 +740,95 @@ fn remove_virtual_keeps_comments() {
     assert_eq!(fixed.len(), 2);
     assert!(fixed[0].contains("    // dvicode-lint: disable=trailing-whitespace legacy\n    function void build_phase"), "{}", fixed[0]);
     assert!(fixed[1].contains("    function void connect_phase"), "{}", fixed[1]);
+}
+
+/// A delay a package reaches only through a macro call (one calling another) is a use of time;
+/// a header that only defines such a macro is not.
+#[test]
+fn timeunit_first_sees_time_in_called_macros() {
+    let macros = "`ifndef M_SVH\n`define M_SVH\n`define WAIT_A_BIT #1ns;\n`define SPIN(x) begin `WAIT_A_BIT x end\n`endif\n";
+    let used = "package used_p;\n  `include \"m.svh\"\n  class c;\n    task t(); `SPIN(;) endtask\n  endclass\nendpackage\n";
+    let unused = "package unused_p;\n  `include \"m.svh\"\n  class d;\n  endclass\nendpackage\n";
+    let (a, root) = project("tu-macro", &[("m.svh", macros), ("used.sv", used), ("unused.sv", unused)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.contains(" timeunit-first")).collect();
+    assert_eq!(got, ["used.sv:1 timeunit-first"]);
+}
+
+/// From the second bug review: a root file that includes itself under its guard, a built-in
+/// argument type against UVM's class, scoped and parameterized calls and `new` before the super
+/// call, string escapes in factory names, sized literals, and time units from an include.
+#[test]
+fn second_review_cases() {
+    let selfinc = "`ifndef P_SV\n`define P_SV\n`include \"p.sv\"\nclass c;\n  rand int n;\n  function void f(); randomize(); endfunction\nendclass\n`endif\n";
+    let (a, root) = project("selfinc", &[("p.sv", selfinc)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("randomize-result-discarded")).collect();
+    assert_eq!(got, ["p.sv:6 randomize-result-discarded"]);
+
+    let tb = r#"`include "uvm_macros.svh"
+package q;
+  import uvm_pkg::*;
+  class helper #(int N = 1);
+    static function void prepare(); endfunction
+  endclass
+  class e1 extends uvm_env;
+    `uvm_component_utils(e1)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(int phase);
+    endfunction
+    function void connect_phase(uvm_phase phase);
+      helper#(1)::prepare();
+      super.connect_phase(phase);
+    endfunction
+  endclass
+  class e2 extends uvm_env;
+    `uvm_component_utils(e2)
+    e1 bus_agent;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      helper#(1) h = new;
+      super.build_phase(phase);
+      bus_agent = e1::type_id::create("bus\137agent", this);
+    endfunction
+  endclass
+endpackage
+module m;
+  bit [1:0] a;
+  covergroup cg;
+    option.goal = 6'd100;
+    option.weight = 1'd3;
+    coverpoint a;
+  endgroup
+endmodule
+"#;
+    let (a, root) = project("review7", &[("tb.sv", tb)]);
+    let want = ["uvm-override-signature", "missing-super-phase-call", "create-name", "coverage-weight-goal"];
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| want.iter().any(|w| s.contains(&format!(" {w}")))).collect();
+    assert_eq!(
+        got,
+        [
+            "tb.sv:10 missing-super-phase-call",
+            "tb.sv:10 uvm-override-signature/arguments",
+            "tb.sv:12 missing-super-phase-call",
+            "tb.sv:21 missing-super-phase-call",
+            "tb.sv:31 coverage-weight-goal",
+        ]
+    );
+
+    let time = "timeunit 1ns;\ntimeprecision 1ps;\n";
+    let top = "module m;\n  `include \"time.svh\"\n  initial #1ns;\nendmodule\n";
+    let (a, root) = project("tu-inc", &[("time.svh", time), ("top.sv", top)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.contains(" timeunit-first")).collect();
+    assert!(got.is_empty(), "{got:?}");
+}
+
+/// `--config` outside a `.dvicode` folder: its paths are relative to its own folder.
+#[test]
+fn explicit_configuration_paths() {
+    let dir = std::env::temp_dir().join(format!("dvicode-cfgbase-{}", std::process::id()));
+    let c = dvi_analysis::lint::config::ConfigFile::parse(&dir.join("lint.json"), r#"{ "exclude": ["tb"] }"#);
+    assert_eq!(c.base, dir);
+    let c = dvi_analysis::lint::config::ConfigFile::parse(&dir.join(".dvicode").join("lint.json"), "{}");
+    assert_eq!(c.base, dir);
+    assert!(dvi_analysis::lint::json::parse(r#"{ "comment": "\u+041" }"#).is_err());
+    assert!(dvi_analysis::lint::json::parse(r#"{ "comment": "A" }"#).is_ok());
 }

@@ -19,19 +19,31 @@ CLI use the same ones.
 
 ## Example
 
+`ex.sv`:
+
 ```systemverilog bad
 module m;
 wire a;
 endmodule
-//@ file: .dvicode/lint.json
+```
+
+`.dvicode/lint.json`:
+
+```json bad
 { "formatter": "dvicode" }
 ```
+
+`ex.sv`:
 
 ```systemverilog good
 module m;
   wire a;
 endmodule
-//@ file: .dvicode/lint.json
+```
+
+`.dvicode/lint.json`:
+
+```json good
 { "formatter": "dvicode" }
 ```
 

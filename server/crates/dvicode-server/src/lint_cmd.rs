@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 const USAGE: &str = "usage: dvicode lint <dir> [PATH...] [--build FILE] [--env K=V] [--config FILE]
          [--rulesets r1,r2] [--rule ID=LEVEL]... [--format text|json|sarif|junit|github]
-         [--output FILE] [--fail-on error|warning|info|never] [--all-contexts] [--jobs N]
+         [--output FILE] [--fail-on error|warning|info|hint|never] [--all-contexts] [--jobs N]
          [--output-sarif FILE] [--baseline FILE] [--write-baseline FILE]
          [--changed-since REF [--changed-exact]]
          [--allow-incomplete] [--no-fail-on-compile-errors] [--show-suppressed] [--stats]
@@ -115,9 +115,16 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--rule" => {
                 let v = value(&mut i, a)?;
                 let (id, level) = v.split_once('=').ok_or("--rule needs ID=LEVEL")?;
-                let meta = rules::meta(id).ok_or_else(|| format!("unknown rule {id} (see --list-rules)"))?;
                 let level = Level::parse(level).ok_or_else(|| format!("unknown level {level} (off, hint, info, warning, error)"))?;
-                o.rules.push((meta.id, level));
+                // A rule ID, or a style-guide ID: every rule that checks it.
+                let ids: Vec<&'static str> = match rules::meta(id) {
+                    Some(m) => vec![m.id],
+                    None => rules::all().iter().map(|r| r.meta()).filter(|m| m.guide.contains(&id)).map(|m| m.id).collect(),
+                };
+                if ids.is_empty() {
+                    return Err(format!("unknown rule {id} (see --list-rules)"));
+                }
+                o.rules.extend(ids.into_iter().map(|r| (r, level)));
             }
             "--format" => o.format = value(&mut i, a)?,
             "--output" => o.output = Some(PathBuf::from(value(&mut i, a)?)),
@@ -171,6 +178,13 @@ pub fn run(args: &[String]) -> i32 {
             return if e.is_empty() { 0 } else { 2 };
         }
     };
+    // Files written are never reached through a symbolic link (one a project could plant).
+    for p in [&o.output, &o.output_sarif, &o.write_baseline].into_iter().flatten() {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            eprintln!("lint: {} is a symbolic link: give the file itself", p.display());
+            return 2;
+        }
+    }
     if o.schema {
         return emit(&o, &(serde_json::to_string_pretty(&schema()).unwrap_or_default() + "\n"));
     }
@@ -201,13 +215,6 @@ pub fn run(args: &[String]) -> i32 {
                 2
             }
         };
-    }
-    // Files written are never reached through a symbolic link (one a project could plant).
-    for p in [&o.output, &o.output_sarif, &o.write_baseline].into_iter().flatten() {
-        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
-            eprintln!("lint: {} is a symbolic link: give the file itself", p.display());
-            return 2;
-        }
     }
     let defaults = Defaults { cli_rulesets: o.rulesets.clone(), cli_rules: o.rules.clone(), ..Defaults::default() };
     if let Some(c) = &o.config {
@@ -310,8 +317,10 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     for c in set.loaded() {
         for p in c.problems.iter().chain(set.reason_notes(&DiskEnv, &c).iter()) {
             let (line, col) = line_col(&c.text, p.start);
-            // A baseline that cannot be read is what `--write-baseline` writes again.
-            let warning = p.warning || o.write_baseline.is_some() && p.message.starts_with("The baseline ");
+            // A configured baseline that cannot be read does not matter when `--baseline` gives
+            // another, or when `--write-baseline` writes that very file again.
+            let rewritten = |b: &Path| o.write_baseline.as_ref().is_some_and(|w| same_file(&crate::check::canonical_path(w), &crate::check::canonical_path(b)));
+            let warning = p.warning || c.is_baseline_problem(p) && (o.baseline.is_some() || c.baseline.as_deref().is_some_and(rewritten));
             eprintln!("{}:{}:{}: {}: {}", lint_out::plain(&p.path.display().to_string()), line + 1, col + 1, if warning { "warning" } else { "error" }, lint_out::plain(&p.message));
             config_problems += usize::from(!warning);
         }
@@ -559,7 +568,18 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
         }
         "sarif" => sarif_text(&items, &root, complete),
-        "junit" => lint_out::junit(&items, &linted_files, o.fail_on),
+        "junit" => {
+            // What fails the run besides findings: compile errors and an incomplete analysis.
+            let compile = (o.fail_on_compile && (compile_errors > 0 || input_failures > 0)).then(|| {
+                let mut s: Vec<String> = compile_list.iter().map(|c| format!("{}:{}:{}: error: {}", c["path"].as_str().unwrap_or(""), c["line"], c["column"], c["message"].as_str().unwrap_or(""))).collect();
+                if input_failures > 0 {
+                    s.push(format!("{input_failures} build inputs not read"));
+                }
+                (compile_errors + input_failures, s.join("\n"))
+            });
+            let incomplete_text = (!complete && !o.allow_incomplete).then(|| incomplete.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("\n"));
+            lint_out::junit(&items, &linted_files, o.fail_on, compile, incomplete_text)
+        }
         "github" => lint_out::github(&items, std::env::current_dir().ok().map(|d| crate::check::canonical_path(&d)).as_deref()),
         _ => lint_out::text(&items, o.show_suppressed),
     };
@@ -596,6 +616,15 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         return 1;
     }
     0
+}
+
+/// Whether two canonical paths name the same file (case-insensitive where the file system is).
+fn same_file(a: &Path, b: &Path) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
 }
 
 /// Writes `path` whole or not at all: into a new file beside it (never one that exists), then
@@ -662,18 +691,31 @@ pub fn docs() -> Vec<(String, String)> {
             page.push_str(&format!("- Subchecks: {}\n", m.subchecks.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")));
         }
         page.push('\n');
-        page.push_str(dvi_analysis::lint::docs::page(m.id).unwrap_or(""));
+        page.push_str(&dvi_analysis::lint::docs::render(dvi_analysis::lint::docs::page(m.id).unwrap_or("")));
         let id = m.guide.first().copied().unwrap_or(m.id);
-        page.push_str(&format!(
-            "\n## Waive\n\nOne finding: `// {id} waived: <reason>` on the line before the statement or declaration. \
-             The rule: `\"{}\": \"off\"` in `.dvicode/lint.json`, for all files or under `overrides` for some.\n",
-            m.id
-        ));
+        let off = format!("The rule: `\"{}\": \"off\"` in `.dvicode/lint.json`, for all files or under `overrides` for some.", m.id);
+        let waive = if m.id.starts_with("waiver-") || m.id.starts_with("suppression-") {
+            "Its findings are about waivers themselves and cannot be waived or suppressed in the code: correct the comment.".to_string()
+        } else if NOT_COVERED.contains(&m.id) {
+            // Where it reports (a closing keyword, a line's end, the end of the file, a comment), no
+            // statement starts: a waiver there covers nothing.
+            format!(
+                "A waiver cannot cover where this rule reports. Turn it off for some lines with `// dvicode-lint: disable={} <reason>` \
+                 and `// dvicode-lint: enable={}`, or for a file with `// dvicode-lint: disable-file={} <reason>`.",
+                m.id, m.id, m.id
+            )
+        } else {
+            format!("One finding: `// {id} waived: <reason>` on the line before the statement or declaration.")
+        };
+        page.push_str(&format!("\n## Waive\n\n{waive} {off}\n"));
         out.push((format!("{}.md", m.id), page));
     }
     out.push(("README.md".to_string(), index));
     out
 }
+
+/// Rules that report where no statement or declaration starts, so that no waiver covers them.
+const NOT_COVERED: &[&str] = &["end-label", "end-comment", "final-newline", "trailing-whitespace", "todo-format"];
 
 /// The JSON Schema of `.dvicode/lint.json` (editors validate and complete the file with it).
 pub fn schema() -> Value {
@@ -724,7 +766,7 @@ pub fn schema() -> Value {
             "setting": { "oneOf": [level.clone(), { "type": "object", "properties": { "level": level.clone(), "comment": { "type": "string" } }, "additionalProperties": false }] },
             "path": { "type": "string", "description": "A path or glob relative to the folder holding .dvicode, with / separators; a folder covers what is in it" },
             "paths": { "type": "array", "items": { "oneOf": [{ "$ref": "#/definitions/path" }, { "type": "object", "properties": { "path": { "$ref": "#/definitions/path" }, "reason": { "type": "string" }, "comment": { "type": "string" } }, "required": ["path"], "additionalProperties": false }] } },
-            "rulesets": { "type": "array", "items": { "enum": rulesets }, "description": "recommended: provable correctness rules; recommended-preview: correctness rules still under review; hexk: the HEXK SV/UVM Style Guide (includes the others)" },
+            "rulesets": { "type": "array", "items": { "enum": rulesets }, "description": "recommended: provable correctness rules; recommended-preview: correctness rules still under review (none at present; it does not include recommended); hexk: the HEXK SV/UVM Style Guide (includes the others)" },
             "rules": rules,
         },
         "properties": {
@@ -734,7 +776,7 @@ pub fn schema() -> Value {
             "rulesets": sets.clone(),
             "rules": { "$ref": "#/definitions/rules" },
             "overrides": { "type": "array", "items": { "type": "object", "required": ["paths"], "additionalProperties": false, "properties": {
-                "paths": { "type": "array", "items": { "$ref": "#/definitions/path" } },
+                "paths": { "$ref": "#/definitions/paths" },
                 "rulesets": sets,
                 "rules": { "$ref": "#/definitions/rules" },
                 "reason": { "type": "string", "description": "Why these paths are linted differently" },
@@ -746,7 +788,7 @@ pub fn schema() -> Value {
             "examples": paths,
             "uvm": { "enum": ["1.2", "ieee"] },
             "formatter": { "enum": ["dvicode", "none"], "description": "The project's formatter (FMT-13): with \"dvicode\", the hexk rule formatter-drift reports lines DVICode's formatter would change" },
-            "baseline": { "type": "string", "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists are not reported" },
+            "baseline": { "type": "string", "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists do not fail the run (the text output hides them, JSON and SARIF mark them, the editor shows them as hints)" },
         },
     })
 }

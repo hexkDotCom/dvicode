@@ -39,4 +39,4 @@ endclass
 
 ## Waive
 
-One finding: `// waiver-without-reason waived: <reason>` on the line before the statement or declaration. The rule: `"waiver-without-reason": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+Its findings are about waivers themselves and cannot be waived or suppressed in the code: correct the comment. The rule: `"waiver-without-reason": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

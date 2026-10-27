@@ -30,4 +30,4 @@ endmodule : m
 
 ## Waive
 
-One finding: `// FMT-6 waived: <reason>` on the line before the statement or declaration. The rule: `"end-label": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+A waiver cannot cover where this rule reports. Turn it off for some lines with `// dvicode-lint: disable=end-label <reason>` and `// dvicode-lint: enable=end-label`, or for a file with `// dvicode-lint: disable-file=end-label <reason>`. The rule: `"end-label": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

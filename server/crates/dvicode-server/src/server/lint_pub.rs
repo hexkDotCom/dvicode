@@ -53,6 +53,9 @@ pub struct LintConfigs {
     /// Baselines read, by path, with the size and time of the file read (`None`: missing or
     /// unreadable).
     baselines: Mutex<FxHashMap<PathBuf, (Option<(u64, std::time::SystemTime)>, Option<Arc<Baseline>>)>>,
+    /// A baseline changed: the configurations are read again when the next publication starts
+    /// (not in the middle of one, whose configuration problems would then be lost).
+    stale: std::sync::atomic::AtomicBool,
 }
 
 impl LintConfigs {
@@ -61,6 +64,11 @@ impl LintConfigs {
             return None;
         }
         let mut cur = self.set.lock().unwrap();
+        if self.stale.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(c) = cur.as_ref() {
+                c.invalidate();
+            }
+        }
         let rulesets = s.rulesets.clone().unwrap_or_else(|| vec![Ruleset::Recommended]);
         if let Some(c) = cur.as_ref() {
             if c.root == root && c.defaults.rulesets == rulesets {
@@ -84,8 +92,8 @@ impl LintConfigs {
     }
 
     /// The baseline at `path`, read again when the file changed (wherever it is, watched or
-    /// not). A change also has the configurations read again, so that what they say about
-    /// their baseline (missing, unreadable) is current.
+    /// not). A change also has the configurations read again at the next publication, so that
+    /// what they say about their baseline (missing, unreadable) is current.
     pub fn baseline(&self, path: &Path) -> Option<Arc<Baseline>> {
         let stamp = dvi_project::fsx::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
         let changed = match self.baselines.lock().unwrap().get(path) {
@@ -94,9 +102,7 @@ impl LintConfigs {
             None => false,
         };
         if changed {
-            if let Some(c) = self.set.lock().unwrap().as_ref() {
-                c.invalidate();
-            }
+            self.stale.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         let b = dvi_analysis::lint::read_control_file(path).and_then(|t| String::from_utf8(t).ok()).and_then(|t| Baseline::read(&t).ok()).map(Arc::new);
         self.baselines.lock().unwrap().insert(path.to_path_buf(), (stamp, b.clone()));

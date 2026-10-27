@@ -19,19 +19,31 @@ sharing one guard (style guide FIL-6).
 
 ## Example
 
+`ex.sv`:
+
 ```systemverilog bad
 package p;
   `include "bus_cfg.svh"
 endpackage
-//@ file: bus_cfg.svh
+```
+
+`bus_cfg.svh`:
+
+```systemverilog bad
 typedef int bus_word_t;
 ```
+
+`ex.sv`:
 
 ```systemverilog good
 package p;
   `include "bus_cfg.svh"
 endpackage
-//@ file: bus_cfg.svh
+```
+
+`bus_cfg.svh`:
+
+```systemverilog good
 `ifndef BUS_CFG_SVH
 `define BUS_CFG_SVH
 typedef int bus_word_t;

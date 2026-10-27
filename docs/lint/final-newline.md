@@ -20,8 +20,9 @@ lines at the end are noise in diffs (style guide FMT-2).
 ```systemverilog bad
 module m;
 endmodule
-@@EOF
 ```
+
+(The file ends without a newline after its last line.)
 
 ```systemverilog good
 module m;
@@ -30,4 +31,4 @@ endmodule
 
 ## Waive
 
-One finding: `// FMT-2 waived: <reason>` on the line before the statement or declaration. The rule: `"final-newline": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+A waiver cannot cover where this rule reports. Turn it off for some lines with `// dvicode-lint: disable=final-newline <reason>` and `// dvicode-lint: enable=final-newline`, or for a file with `// dvicode-lint: disable-file=final-newline <reason>`. The rule: `"final-newline": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

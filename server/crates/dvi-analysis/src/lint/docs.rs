@@ -105,9 +105,9 @@ The quick fix wraps the statement: `if (!x.randomize()) `uvm_fatal("RAND", "x.ra
 
 ## Not reported
 
-A `randomize` call inside a macro argument or produced by a macro, a receiver whose type is not
-known, and a method that the project itself declares under that name: these are counted as
-unknown (see `--stats`).
+A `randomize` call inside a macro argument and a receiver whose type is not known: these are
+counted as unknown (see `--stats`). A method, task or variable that the project itself declares
+under that name is not the built-in and is left alone.
 "#;
 
 const RANDOMIZE_IN_ASSERT: &str = r#"## What it finds
@@ -197,7 +197,9 @@ A class registered with the UVM factory whose constructor the factory cannot cal
   default value.
 
 Arguments after those need default values. A class without a constructor has the implicit
-`new()`, which fits neither components nor objects.
+`new()`, which fits neither components nor objects. Abstract registrations are not checked
+(the factory never constructs them). With `UVM_OBJECT_DO_NOT_NEED_CONSTRUCTOR` defined, an
+object needs only `new()`, and the implicit one fits.
 
 ## Why
 
@@ -427,7 +429,8 @@ endmodule : m
 
 const END_COMMENT: &str = r#"## What it finds
 
-A comment on the same line right after `end`, `join`, `join_any`, `join_none` or `endcase`.
+A comment on the same line right after `end` (or `end : label`). Comments after `join`,
+`join_any`, `join_none` and `endcase` are not checked.
 
 ## Why
 
@@ -669,7 +672,7 @@ written out, each step is visible and the randomization is checked (style guide 
 `include "uvm_macros.svh"
 package p;
   import uvm_pkg::*;
-  class bus_seq extends uvm_sequence_item;
+  class bus_seq extends uvm_sequence #(uvm_sequence_item);
     uvm_sequence_item req;
     task body();
       `uvm_do(req)
@@ -682,7 +685,7 @@ endpackage
 `include "uvm_macros.svh"
 package p;
   import uvm_pkg::*;
-  class bus_seq extends uvm_sequence_item;
+  class bus_seq extends uvm_sequence #(uvm_sequence_item);
     task body();
     endtask
   endclass
@@ -793,8 +796,9 @@ endclass
 
 const DISPLAY_PAGE: &str = r#"## What it finds
 
-`$display`, `$write`, `$monitor`, `$strobe` (and their `b`, `h`, `o` forms) in a method of a
-class derived from a UVM class.
+`$display` (and its `b`, `h`, `o` forms) in any class; in a class derived from a UVM class,
+also `$write`, `$monitor`, `$strobe` (and their forms) and `$info`, `$warning`, `$error`,
+`$fatal`.
 
 ## Why
 
@@ -1625,7 +1629,8 @@ const FILE_EXTENSION_PAGE: &str = r#"## What it finds
 
 A compiled file whose name does not end in `.sv`; an included file that ends neither in `.sv`
 nor in `.svh`; a `.svh` file that holds code (classes, functions, design elements) rather than
-macros, types and parameters.
+macros, types and parameters. Verilog files (`.v`, `.vh`) are not checked, and extensions are
+compared without regard to case.
 
 ## Why
 
@@ -1704,8 +1709,9 @@ endclass
 const WEIGHT_GOAL_PAGE: &str = r#"## What it finds
 
 `option.weight` or `option.goal` set in a covergroup, coverpoint or cross, or through a
-covergroup handle. `option.weight = 0` in a coverpoint (one that exists only to build a cross)
-is the guide's exception and is not reported.
+covergroup handle, to anything but its default: `weight` 1 and `goal` 100, in any literal form
+(`32'd1`), are not reported. `option.weight = 0` on a coverpoint that a cross of its covergroup
+names (one that exists to build the cross) is the guide's exception and is not reported.
 
 ## Why
 
@@ -1872,6 +1878,54 @@ module m;
 endmodule
 ```
 "#;
+
+/// A page as it is published: an example's `//@ file: NAME` lines become a block per file,
+/// named, and `@@EOF` (the file ends without a newline) a note under its block.
+pub fn render(page: &str) -> String {
+    let mut out = String::new();
+    let mut lines = page.lines();
+    while let Some(l) = lines.next() {
+        let tag = match l.trim() {
+            "```systemverilog bad" => "bad",
+            "```systemverilog good" => "good",
+            _ => {
+                out.push_str(l);
+                out.push('\n');
+                continue;
+            }
+        };
+        let mut code = String::new();
+        for c in lines.by_ref() {
+            if c.trim() == "```" {
+                break;
+            }
+            code.push_str(c);
+            code.push('\n');
+        }
+        let files = example_files(&code);
+        let named = files.len() > 1 || files.first().is_some_and(|(n, _)| n != "ex.sv");
+        for (i, (name, text)) in files.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            if named {
+                out.push_str(&format!("`{name}`:\n\n"));
+            }
+            let lang = if name.ends_with(".json") { "json" } else { "systemverilog" };
+            out.push_str(&format!("```{lang} {tag}\n"));
+            let no_newline = text.lines().any(|x| x.trim() == "@@EOF");
+            for x in text.lines().filter(|x| x.trim() != "@@EOF") {
+                out.push_str(x);
+                out.push('\n');
+            }
+            out.push_str("```\n");
+            if no_newline {
+                out.push_str("\n(The file ends without a newline after its last line.)\n");
+            }
+        }
+    }
+    out
+}
 
 /// The files of an example: `//@ file: <name>` lines start each file; without one the code is
 /// `ex.sv`.

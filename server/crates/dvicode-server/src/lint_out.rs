@@ -219,8 +219,9 @@ fn xml(s: &str) -> String {
 }
 
 /// JUnit XML: one suite per rule, one case per linted file; a case fails with the findings at
-/// or above `fail_on` (none fail with `never`).
-pub fn junit(items: &[Item], files: &[String], fail_on: Option<Level>) -> String {
+/// or above `fail_on` (none fail with `never`). A `dvicode` suite holds what else fails the run:
+/// `compile` (how many errors, and the first ones) and `incomplete` (where).
+pub fn junit(items: &[Item], files: &[String], fail_on: Option<Level>, compile: Option<(usize, String)>, incomplete: Option<String>) -> String {
     let mut s = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     let metas: Vec<_> = rules::all().iter().map(|r| r.meta()).collect();
     let failing = |x: &&Item| x.counts() && fail_on.is_some_and(|f| x.level >= f);
@@ -230,8 +231,21 @@ pub fn junit(items: &[Item], files: &[String], fail_on: Option<Level>) -> String
         by.entry((x.rule, x.rel.as_str())).or_default().push(x);
     }
     let fails_of = |id: &str| files.iter().filter(|f| by.contains_key(&(id, f.as_str()))).count();
-    let total_fail: usize = metas.iter().map(|m| fails_of(m.id)).sum();
-    s.push_str(&format!("<testsuites name=\"DVICode Lint\" tests=\"{}\" failures=\"{total_fail}\">\n", metas.len() * files.len()));
+    let run_fail = usize::from(compile.is_some()) + usize::from(incomplete.is_some());
+    let total_fail: usize = metas.iter().map(|m| fails_of(m.id)).sum::<usize>() + run_fail;
+    s.push_str(&format!("<testsuites name=\"DVICode Lint\" tests=\"{}\" failures=\"{total_fail}\">\n", metas.len() * files.len() + 2));
+    s.push_str(&format!("  <testsuite name=\"dvicode\" tests=\"2\" failures=\"{run_fail}\">\n"));
+    for (name, fail) in [("compile", compile.map(|(n, t)| (format!("{n} compile error(s)"), t))), ("incomplete", incomplete.map(|t| ("the analysis is incomplete".to_string(), t)))] {
+        match fail {
+            None => s.push_str(&format!("    <testcase classname=\"dvicode\" name=\"{name}\"/>\n")),
+            Some((m, body)) => s.push_str(&format!(
+                "    <testcase classname=\"dvicode\" name=\"{name}\">\n      <failure message=\"{}\" type=\"{name}\">{}</failure>\n    </testcase>\n",
+                xml(&m),
+                xml(&body)
+            )),
+        }
+    }
+    s.push_str("  </testsuite>\n");
     let none = Vec::new();
     for m in &metas {
         let fails = fails_of(m.id);
@@ -396,12 +410,16 @@ mod tests {
     #[test]
     fn junit_is_escaped_and_counts_failures() {
         let x = item("randomize-result-discarded", Level::Warning, "a&b.sv", "x < y");
-        let out = junit(&[x], &["a&b.sv".to_string(), "c.sv".to_string()], Some(Level::Warning));
+        let out = junit(&[x], &["a&b.sv".to_string(), "c.sv".to_string()], Some(Level::Warning), None, None);
         assert!(out.contains("name=\"a&amp;b.sv\""));
         assert!(out.contains("x &lt; y"));
         assert!(out.contains("<testsuites name=\"DVICode Lint\""));
         assert!(out.contains("failures=\"1\""));
-        let none = junit(&[item("randomize-result-discarded", Level::Warning, "a.sv", "m")], &["a.sv".to_string()], None);
+        let none = junit(&[item("randomize-result-discarded", Level::Warning, "a.sv", "m")], &["a.sv".to_string()], None, None, None);
         assert!(!none.contains("<failure"));
+        // Compile errors and an incomplete analysis fail the `dvicode` suite.
+        let run = junit(&[], &["a.sv".to_string()], Some(Level::Warning), Some((1, "a.sv:2:3: error: x".into())), Some("where".into()));
+        assert!(run.contains("<testsuite name=\"dvicode\" tests=\"2\" failures=\"2\">"), "{run}");
+        assert!(run.contains("1 compile error(s)") && run.contains("a.sv:2:3: error: x"), "{run}");
     }
 }

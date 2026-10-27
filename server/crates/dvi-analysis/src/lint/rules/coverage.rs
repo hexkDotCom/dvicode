@@ -23,8 +23,9 @@ static META: RuleMeta = RuleMeta {
 /// Where an `option` assignment is.
 #[derive(PartialEq)]
 enum Place {
-    /// With the coverpoint's name (its label, else the variable it covers).
-    Coverpoint(Option<String>),
+    /// With the coverpoint's name (its label, else the variable it covers), and, for one named
+    /// through a handle, whether a cross of its covergroup names it.
+    Coverpoint(Option<String>, Option<bool>),
     Cross,
     Covergroup,
 }
@@ -47,7 +48,13 @@ fn int_value(text: &str) -> Option<u64> {
         None => (10, text),
     };
     let d: String = digits.chars().filter(|c| *c != '_' && !c.is_whitespace()).collect();
-    u64::from_str_radix(&d, radix).ok()
+    let v = u64::from_str_radix(&d, radix).ok()?;
+    // A sized literal keeps its low bits only (`6'd100` is 36).
+    match text.find('\'').map(|q| text[..q].trim()).filter(|w| !w.is_empty()).map(|w| w.replace('_', "").parse::<u32>()) {
+        Some(Ok(w)) if w < 64 => Some(v & ((1u64 << w) - 1)),
+        Some(Err(_)) => None,
+        _ => Some(v),
+    }
 }
 
 /// Whether a `cross` of the covergroup `t[lo..hi]` names the coverpoint `name`.
@@ -92,7 +99,7 @@ fn place(t: &[Token], lo: usize, k: usize) -> Place {
                     if y.is_kw("coverpoint") {
                         let label = (p >= 2 && t[p - 1].is_punct(":") && t[p - 2].kind == TokKind::Ident).then(|| t[p - 2].text.to_string());
                         let var = t.get(p + 1).filter(|x| x.kind == TokKind::Ident && t.get(p + 2).is_some_and(|n| n.is_punct("{") || n.is_kw("iff"))).map(|x| x.text.to_string());
-                        return Place::Coverpoint(label.or(var));
+                        return Place::Coverpoint(label.or(var), None);
                     }
                     if y.is_kw("cross") {
                         return Place::Cross;
@@ -146,7 +153,17 @@ impl Rule for WeightGoal {
                 };
                 let ty = a.type_of(r).map(|ty| if a.decl(ty).kind == DeclKind::Typedef { a.follow_typedef(ty).unwrap_or(ty) } else { ty });
                 match (a.decl(r).kind, ty.map(|ty| a.decl(ty).kind)) {
-                    (DeclKind::Coverpoint, _) => Place::Coverpoint(Some(a.decl(r).name.to_string())),
+                    (DeclKind::Coverpoint, _) => {
+                        // Its covergroup may be written in another file.
+                        let name = a.decl(r).name.to_string();
+                        let crossed_there = a.decl(r).parent.map(|g| {
+                            let g = a.decl(crate::world::DeclRef { unit: r.unit, decl: g });
+                            let ff = a.lint_facts.file(a, r.unit, g.span.file);
+                            let (lo, hi) = (ff.tokens.partition_point(|x| x.span.start < g.span.start), ff.tokens.partition_point(|x| x.span.start < g.span.end));
+                            crossed(&ff.tokens, lo, hi, &name)
+                        });
+                        Place::Coverpoint(Some(name), crossed_there)
+                    }
                     (DeclKind::Cross, _) => Place::Cross,
                     (_, Some(DeclKind::Covergroup)) | (DeclKind::Covergroup, _) => Place::Covergroup,
                     _ => continue,
@@ -159,12 +176,13 @@ impl Rule for WeightGoal {
             // COV-7's exception: weight 0 on a coverpoint that only builds a cross (one of
             // this file's covergroups crosses it).
             if what == "weight" && is_zero {
-                if let Place::Coverpoint(name) = &place {
+                if let Place::Coverpoint(name, crossed_there) = &place {
                     let Some(name) = name else {
                         cx.unknown_at("coverpoint without a name", t[k].span);
                         continue;
                     };
-                    if groups.iter().any(|(lo, hi)| crossed(t, *lo, *hi, name)) {
+                    let here = || groups.iter().any(|(lo, hi)| *lo <= k && k < *hi && crossed(t, *lo, *hi, name));
+                    if crossed_there.unwrap_or_else(here) {
                         continue;
                     }
                 }

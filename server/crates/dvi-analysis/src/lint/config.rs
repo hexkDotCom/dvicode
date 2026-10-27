@@ -210,9 +210,11 @@ pub struct ConfigFile {
 const TOP_KEYS: &[&str] = &["$schema", "comment", "extends", "rulesets", "rules", "overrides", "owned", "exclude", "include", "examples", "uvm", "baseline", "formatter"];
 
 impl ConfigFile {
-    /// Reads `text` as the configuration at `path` (`<base>/.dvicode/lint.json`).
+    /// Reads `text` as the configuration at `path`: paths in it are relative to `<base>` for
+    /// `<base>/.dvicode/lint.json`, else to the folder that holds it.
     pub fn parse(path: &Path, text: &str) -> ConfigFile {
-        let base = path.parent().and_then(Path::parent).unwrap_or(Path::new("")).to_path_buf();
+        let dir = path.parent().unwrap_or(Path::new(""));
+        let base = if dir.file_name().is_some_and(|n| n == ".dvicode") { dir.parent().unwrap_or(Path::new("")) } else { dir }.to_path_buf();
         let mut c = ConfigFile { path: path.to_path_buf(), base, text: Arc::from(text), ..Default::default() };
         let root = match json::parse(text) {
             Ok(r) => r,
@@ -275,6 +277,11 @@ impl ConfigFile {
     }
 
     /// The problems that make it unusable.
+    /// Whether `p` is this file's problem with its baseline (missing, unreadable, another version).
+    pub fn is_baseline_problem(&self, p: &ConfigProblem) -> bool {
+        self.baseline.is_some() && (p.start, p.end) == self.baseline_at
+    }
+
     pub fn errors(&self) -> impl Iterator<Item = &ConfigProblem> {
         self.problems.iter().filter(|p| !p.warning)
     }

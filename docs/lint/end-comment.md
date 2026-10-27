@@ -8,7 +8,8 @@ A comment follows `end` on its line.
 
 ## What it finds
 
-A comment on the same line right after `end`, `join`, `join_any`, `join_none` or `endcase`.
+A comment on the same line right after `end` (or `end : label`). Comments after `join`,
+`join_any`, `join_none` and `endcase` are not checked.
 
 ## Why
 
@@ -33,4 +34,4 @@ endmodule
 
 ## Waive
 
-One finding: `// FMT-7 waived: <reason>` on the line before the statement or declaration. The rule: `"end-comment": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+A waiver cannot cover where this rule reports. Turn it off for some lines with `// dvicode-lint: disable=end-comment <reason>` and `// dvicode-lint: enable=end-comment`, or for a file with `// dvicode-lint: disable-file=end-comment <reason>`. The rule: `"end-comment": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

@@ -30,4 +30,4 @@ endmodule
 
 ## Waive
 
-One finding: `// suppression-not-waiver waived: <reason>` on the line before the statement or declaration. The rule: `"suppression-not-waiver": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.
+Its findings are about waivers themselves and cannot be waived or suppressed in the code: correct the comment. The rule: `"suppression-not-waiver": "off"` in `.dvicode/lint.json`, for all files or under `overrides` for some.

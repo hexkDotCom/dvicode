@@ -229,7 +229,7 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, Error> {
-        let h = self.text.get(self.i..self.i + 4).ok_or_else(|| self.err("a bad \\u escape"))?;
+        let h = self.text.get(self.i..self.i + 4).filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit())).ok_or_else(|| self.err("a bad \\u escape"))?;
         let v = u32::from_str_radix(h, 16).map_err(|_| self.err("a bad \\u escape"))?;
         self.i += 4;
         Ok(v)
