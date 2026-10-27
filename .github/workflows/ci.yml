@@ -67,6 +67,15 @@ jobs:
           status=$?
           cat errors.txt
           test "$status" -eq 1
+      - name: Lint the demo project, and its SARIF
+        if: runner.os == 'Linux'
+        working-directory: server
+        run: |
+          cargo run --release --locked -p dvicode-server -- lint ../examples/demo-project --output-sarif lint.sarif
+          python3 -c "import json; r = json.load(open('lint.sarif'))['runs'][0]; assert r['tool']['driver']['rules'] and 'results' in r"
+          # The rule pages and the schema the extension ships are the rules' own.
+          cargo run --release --locked -p dvicode-server -- lint --docs /tmp/lint-docs
+          diff -r /tmp/lint-docs ../docs/lint
 
   client:
     name: Extension (${{ matrix.os }})

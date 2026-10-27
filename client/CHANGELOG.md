@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **DVICode Lint**: rules that check what SystemVerilog and UVM code means, shown with the
+  compile problems and run in CI by the same engine as `dvicode lint`.
+  - `recommended` (on by default): a discarded `randomize()` result, `randomize()` inside an
+    `assert`, a UVM registration macro that does not fit its class, a registered class whose
+    constructor the factory cannot call, a phase method with another signature than UVM's,
+    deprecated UVM API.
+  - `hexk` (opt-in): the checkable rules of the HEXK SystemVerilog/UVM Style Guide, from
+    factory use and phase methods to naming, include guards, time units and layout.
+  - Configured per project in `.dvicode/lint.json` (validated and completed in the editor);
+    waivers in the code as the guide writes them (`// LNG-10 waived: <reason>`); quick fixes,
+    Waive and Turn off in this file actions; `dvicode.lint.enable` and `dvicode.lint.rulesets`.
+  - The command: `dvicode lint` with text, JSON, SARIF, JUnit and GitHub output, baselines,
+    `--changed-since`, exit codes for CI; also released as archives per platform, Python
+    wheels (`pip install dvicode`) and a container image. See docs/lint.md.
+
 ## 0.7.0 (preview)
 
 - **Clickable simulator logs**: in `*.log` files, `transcript` and terminals, source locations

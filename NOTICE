@@ -4,3 +4,9 @@ Copyright (c) 2026 HEXK
 This product includes software developed by HEXK (https://github.com/hexkDotCom).
 
 Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+DVICode Lint uses the rule IDs and levels of the HEXK SystemVerilog/UVM Style Guide, version
+0.6 (https://github.com/hexkDotCom/sv-uvm-style-guide), and its rule pages adapt descriptions
+from it. Copyright 2026 HEXK. The guide's text is licensed under the Creative Commons
+Attribution 4.0 International License (https://creativecommons.org/licenses/by/4.0/); it has
+been adapted (shortened and reworded) here.

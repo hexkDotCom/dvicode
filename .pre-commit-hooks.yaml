@@ -1,0 +1,11 @@
+# pre-commit hooks of DVICode (https://pre-commit.com). They need the `dvicode` command on PATH
+# (`pip install dvicode`, or a release archive). The whole project is compiled; only the files
+# being committed are reported.
+- id: dvicode-lint
+  name: DVICode Lint
+  description: Lint SystemVerilog/UVM code with DVICode (rules from .dvicode/lint.json)
+  entry: dvicode lint .
+  language: system
+  files: \.(sv|svh|svi|svp|sva|v|vh)$
+  pass_filenames: true
+  require_serial: true

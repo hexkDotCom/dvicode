@@ -16,6 +16,14 @@ currently in preview.
 
 ## Features
 
+- **DVICode Lint**: rules about meaning, not only syntax: a `randomize()` whose result is
+  thrown away, a UVM registration macro that registers another class, a constructor the
+  factory cannot call, deprecated UVM API (the `recommended` rules, on by default); and, when
+  you choose them, the checkable rules of the
+  [HEXK SystemVerilog/UVM Style Guide](https://github.com/hexkDotCom/sv-uvm-style-guide).
+  Findings show with the compile problems, with fixes and one-click waivers; the same engine
+  runs in CI as `dvicode lint` (SARIF, JUnit, GitHub annotations, baselines, `pip install
+  dvicode`). See [the lint guide](docs/lint.md) and [the rules](docs/lint/README.md).
 - **Errors as you type**: undeclared names, unknown types, members and ports, missing
   includes and macros, syntax mistakes. Tested to report no problems on UVM 1.2, UVM 1.1d and
   the UBUS example, and no errors on OpenTitan, Ibex, core-v-verif, CVA6 and PULP AXI with

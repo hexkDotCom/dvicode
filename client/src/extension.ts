@@ -503,6 +503,46 @@ async function selectLintReason(uri: string, line: number): Promise<void> {
   ed.revealRange(sel);
 }
 
+/**
+ * Writes `.dvicode/lint.json` in a workspace folder with the rulesets chosen, and opens it. Through
+ * the workspace file system, so that it works in remote windows too.
+ */
+async function createLintConfig(): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const folder = folders.length > 1 ? await vscode.window.showWorkspaceFolderPick({ placeHolder: 'Folder of the project to lint' }) : folders[0];
+  if (!folder) {
+    return;
+  }
+  const uri = vscode.Uri.joinPath(folder.uri, '.dvicode', 'lint.json');
+  try {
+    await vscode.workspace.fs.stat(uri);
+    await vscode.window.showTextDocument(uri);
+    void vscode.window.showInformationMessage('This project already has a lint configuration.');
+    return;
+  } catch {
+    // None yet.
+  }
+  const pick = await vscode.window.showQuickPick(
+    [
+      { label: 'recommended', description: 'Provable correctness rules (the default)', sets: ['recommended'] },
+      { label: 'hexk', description: 'The HEXK SystemVerilog/UVM Style Guide (includes recommended)', sets: ['hexk'] },
+    ],
+    { placeHolder: 'Rulesets for this project' },
+  );
+  if (!pick) {
+    return;
+  }
+  const config = {
+    $schema: 'https://raw.githubusercontent.com/hexkDotCom/dvicode/main/client/schemas/lint.schema.json',
+    comment: 'DVICode Lint configuration: https://github.com/hexkDotCom/dvicode/blob/main/docs/lint.md',
+    rulesets: pick.sets,
+    rules: {},
+    exclude: [],
+  };
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(config, null, 2) + '\n', 'utf8'));
+  await vscode.window.showTextDocument(uri);
+}
+
 /** The lint rules of the engine, as a Markdown preview. */
 async function showLintRules(): Promise<void> {
   if (!client) {
@@ -691,6 +731,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     vscode.commands.registerCommand('dvicode.showStatus', showStatus),
     vscode.commands.registerCommand('dvicode.lint.showRules', showLintRules),
     vscode.commands.registerCommand('dvicode.lint.selectReason', selectLintReason),
+    vscode.commands.registerCommand('dvicode.lint.createConfig', createLintConfig),
     vscode.commands.registerCommand('dvicode.selectBuildConfig', selectBuildConfig),
     vscode.commands.registerCommand('dvicode.expandMacro', () => expandMacro(false)),
     vscode.commands.registerCommand('dvicode.expandMacroAll', () => expandMacro(true)),

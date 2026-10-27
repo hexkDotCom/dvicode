@@ -11,6 +11,12 @@
 #
 # Every package contains the engine for its own platform (local use) and the static Linux
 # x64 engine (deployed to WSL and SSH hosts).
+#
+# The same engines are also released as the `dvicode` command (DVICode Lint and check, for CI
+# and other editors): an archive per platform with SHA256SUMS, and Python wheels
+# (`pip install dvicode`), attested like the packages. Run the workflow by hand with
+# `pypi_tag` to publish a release's wheels to PyPI (trusted publishing), and with
+# `container_tag` to push its Linux engine as ghcr.io/hexkdotcom/dvicode.
 
 name: Release
 
@@ -23,6 +29,14 @@ on:
         description: Publish the packages of this release to Open VSX (a tag such as v0.3.2; empty to build packages only)
         type: string
         default: ''
+      pypi_tag:
+        description: Publish the Python wheels of this release to PyPI (a tag such as v0.8.0)
+        type: string
+        default: ''
+      container_tag:
+        description: Push the container image of this release to ghcr.io (a tag such as v0.8.0)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -30,7 +44,7 @@ permissions:
 jobs:
   engine:
     name: Engine ${{ matrix.platform }}
-    if: inputs.tag == ''
+    if: inputs.tag == '' && inputs.pypi_tag == '' && inputs.container_tag == ''
     strategy:
       fail-fast: false
       matrix:
@@ -163,10 +177,47 @@ jobs:
             fi
           done
           ls -l dist
+      - name: The dvicode command, an archive per platform, and Python wheels
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./client/package.json').version")
+          mkdir -p cli wheels
+          declare -A rust_target=(
+            [linux-x64]=x86_64-unknown-linux-musl [linux-arm64]=aarch64-unknown-linux-musl
+            [win32-x64]=x86_64-pc-windows-msvc [darwin-arm64]=aarch64-apple-darwin
+            [darwin-x64]=x86_64-apple-darwin
+          )
+          for platform in linux-x64 linux-arm64 win32-x64 darwin-arm64 darwin-x64; do
+            d="cli/dvicode-$version-$platform"
+            mkdir -p "$d"
+            if [ "$platform" = win32-x64 ]; then exe=dvicode.exe; else exe=dvicode; fi
+            install -m 755 engines/engine-$platform/* "$d/$exe"
+            cp LICENSE NOTICE "$d/"
+            cp docs/lint-cli-readme.md "$d/README.md"
+            python3 scripts/third_party_notices.py --targets "${rust_target[$platform]}" --out "$d/THIRD_PARTY_NOTICES.md"
+            if [ "$platform" = win32-x64 ]; then
+              (cd cli && zip -qr "dvicode-$version-$platform.zip" "dvicode-$version-$platform")
+            else
+              tar -C cli -czf "cli/dvicode-$version-$platform.tar.gz" "dvicode-$version-$platform"
+            fi
+            rm -rf "$d"
+          done
+          (cd cli && sha256sum dvicode-* > SHA256SUMS)
+          python3 scripts/pypi/build_wheels.py --engines engines --version "$version" --out wheels --readme docs/lint-cli-readme.md
+          ls -l cli wheels
+          # The Linux wheel runs here: the command answers.
+          python3 -m venv /tmp/w && /tmp/w/bin/pip install -q wheels/*manylinux*x86_64*.whl && /tmp/w/bin/dvicode lint --list-rules > /dev/null
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vsix
           path: dist/*.vsix
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli
+          path: |
+            cli/*
+            wheels/*.whl
           if-no-files-found: error
 
   release:
@@ -185,16 +236,23 @@ jobs:
         with:
           name: vsix
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli
+          path: dist
       - name: Provenance
         # The packages say which workflow built them, from which tag; publishing to Open VSX
-        # checks that before it publishes them.
+        # and PyPI checks that before it publishes them.
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.vsix
+          subject-path: |
+            dist/*.vsix
+            dist/cli/dvicode-*
+            dist/wheels/*.whl
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.vsix -R "$GITHUB_REPOSITORY" --title "DVICode $GITHUB_REF_NAME" --generate-notes --prerelease
+        run: gh release create "$GITHUB_REF_NAME" dist/*.vsix dist/cli/* dist/wheels/*.whl -R "$GITHUB_REPOSITORY" --title "DVICode $GITHUB_REF_NAME" --generate-notes --prerelease
 
   open-vsx:
     name: Publish to Open VSX
@@ -252,3 +310,73 @@ jobs:
           for f in dist/*.vsix; do
             scripts/ovsx/node_modules/.bin/ovsx publish "$f" --trusted-publishing --skip-duplicate
           done
+
+  pypi:
+    name: Publish the wheels to PyPI
+    if: github.event_name == 'workflow_dispatch' && inputs.pypi_tag != ''
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI is registered to trust this workflow file in this environment and
+    # exchanges the job's OIDC ID token for a short-lived upload token. No token is stored.
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    steps:
+      - name: The release's wheels, as the tag's run built them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.pypi_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p '*.whl' -D wheels
+          ls -l wheels
+          test "$(ls wheels | wc -l)" = 5 || { echo "expected the five platform wheels"; exit 1; }
+          for f in wheels/*.whl; do
+            gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$TAG" --deny-self-hosted-runners > /dev/null \
+              || { echo "no attestation of $f"; exit 1; }
+          done
+      - name: Publish
+        run: |
+          set -euo pipefail
+          # The OIDC token for PyPI, exchanged for an upload token (PyPI's trusted publishing).
+          oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=pypi" | jq -r .value)
+          token=$(curl -sSf -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"$oidc\"}" | jq -r .token)
+          python3 -m pip install -q twine==6.1.0
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$token" python3 -m twine upload --non-interactive wheels/*.whl
+
+  container:
+    name: Push the container image
+    if: github.event_name == 'workflow_dispatch' && inputs.container_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: packaging/docker
+          persist-credentials: false
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.container_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          version=${TAG#v}
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "dvicode-$version-linux-x64.tar.gz" -D .
+          gh attestation verify "dvicode-$version-linux-x64.tar.gz" -R "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "refs/tags/$TAG" > /dev/null
+          tar -xzf "dvicode-$version-linux-x64.tar.gz"
+          cp "dvicode-$version-linux-x64/dvicode" "dvicode-$version-linux-x64"/{LICENSE,NOTICE,THIRD_PARTY_NOTICES.md} packaging/docker/
+          image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr A-Z a-z)/dvicode
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image:$version" -t "$image:latest" packaging/docker
+          docker run --rm "$image:$version" lint --list-rules > /dev/null
+          docker push "$image:$version"
+          docker push "$image:latest"

@@ -458,6 +458,11 @@
         "category": "DVICode"
       },
       {
+        "command": "dvicode.lint.createConfig",
+        "title": "Create Lint Configuration",
+        "category": "DVICode"
+      },
+      {
         "command": "dvicode.restartServer",
         "title": "Restart Language Server",
         "category": "DVICode"
