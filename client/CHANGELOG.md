@@ -16,6 +16,8 @@
   - The command: `dvicode lint` with text, JSON, SARIF, JUnit and GitHub output, baselines,
     `--changed-since`, exit codes for CI; also released as archives per platform, Python
     wheels (`pip install dvicode`) and a container image. See docs/lint.md.
+- Preprocessor: a name alone after `` `endif `` or `` `else `` on its line (`` `endif FOO_SV ``)
+  is ignored with a warning instead of being read as code.
 
 ## 0.7.0 (preview)
 

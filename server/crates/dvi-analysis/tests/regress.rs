@@ -4527,3 +4527,22 @@ fn general_round_five_cases() {
     let Some(lsp_types::DocumentChanges::Edits(docs)) = edit.document_changes else { panic!() };
     assert_eq!(docs[0].edits.len(), 1, "only D::f");
 }
+
+/// `` `endif NAME `` and `` `else NAME ``: the name is skipped with a warning; code after
+/// `` `endif `` on the same line stays code.
+#[test]
+fn a_name_after_endif_or_else_is_ignored_with_a_warning() {
+    let guarded = "`ifndef T_SV\n`define T_SV\n`ifdef FAST\nmodule t; endmodule\n`else FAST\nmodule t; wire w; endmodule\n`endif FAST\n`endif T_SV\n";
+    let code_after = "module c;\n`ifdef NOPE wire x; `endif wire y;\n  assign y = 1'b0;\nendmodule\n";
+    let (a, _root) = project("endif-name", &[("t.sv", guarded), ("c.sv", code_after)]);
+    let mut got = problems(&a);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "t.sv: `else takes no argument: FAST is ignored (write it as a comment: `else // FAST)",
+            "t.sv: `endif takes no argument: FAST is ignored (write it as a comment: `endif // FAST)",
+            "t.sv: `endif takes no argument: T_SV is ignored (write it as a comment: `endif // T_SV)",
+        ]
+    );
+}

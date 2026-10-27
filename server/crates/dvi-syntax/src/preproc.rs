@@ -518,6 +518,26 @@ impl<'a> Pp<'a> {
         Some(t)
     }
 
+    /// `` `endif NAME `` and `` `else NAME ``: a name alone after the directive, up to the end of
+    /// the line, is not code (the standard has no such argument, but much code labels its
+    /// conditionals so, and simulators accept it). It is skipped with a warning; anything else
+    /// after the directive stays code.
+    fn skip_trailing_name(&mut self, dir: &Token) {
+        let Some(f) = self.frames.last() else { return };
+        let ends_line = f.toks.get(f.pos + 1).is_none_or(|n| n.nl_before() || n.kind == TokKind::Eof);
+        let is_name = self.peek_same_line().is_some_and(|t| t.kind == TokKind::Ident);
+        if !(is_name && ends_line) {
+            return;
+        }
+        let Some(name) = self.take_same_line() else { return };
+        let span = self.real_span(&name);
+        self.res.diags.push(Diag::warning(
+            span,
+            "TEXT_AFTER_DIRECTIVE",
+            format!("`{} takes no argument: {} is ignored (write it as a comment: `{} // {})", dir.text, name.text, dir.text, name.text),
+        ));
+    }
+
     fn rest_of_line(&mut self) -> Vec<Token> {
         let mut v = Vec::new();
         while let Some(t) = self.take_same_line() {
@@ -602,6 +622,7 @@ impl<'a> Pp<'a> {
                     None => self.res.diags.push(Diag::error(tok.span, "UNMATCHED_DIRECTIVE", "`else without `ifdef")),
                 }
                 self.note_transition(was, &tok);
+                self.skip_trailing_name(&tok);
             }
             "endif" => {
                 let was = self.active();
@@ -609,6 +630,7 @@ impl<'a> Pp<'a> {
                     self.res.diags.push(Diag::error(tok.span, "UNMATCHED_DIRECTIVE", "`endif without `ifdef"));
                 }
                 self.note_transition(was, &tok);
+                self.skip_trailing_name(&tok);
             }
             _ if !self.active() => {}
             "define" => self.define(tok),
