@@ -70,6 +70,8 @@ impl LintConfigs {
         let d = Defaults { enabled: true, from_setting: s.rulesets.is_some(), rulesets, ..Defaults::default() };
         let c = Arc::new(ConfigSet::new(root, d, None));
         *cur = Some(c.clone());
+        // The baselines of another project (or of other settings) are not kept.
+        self.baselines.lock().unwrap().clear();
         Some(c)
     }
 
@@ -82,12 +84,18 @@ impl LintConfigs {
     }
 
     /// The baseline at `path`, read again when the file changed (wherever it is, watched or
-    /// not).
+    /// not). A change also has the configurations read again, so that what they say about
+    /// their baseline (missing, unreadable) is current.
     pub fn baseline(&self, path: &Path) -> Option<Arc<Baseline>> {
         let stamp = dvi_project::fsx::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
-        if let Some((s, b)) = self.baselines.lock().unwrap().get(path) {
-            if *s == stamp {
-                return b.clone();
+        let changed = match self.baselines.lock().unwrap().get(path) {
+            Some((s, b)) if *s == stamp => return b.clone(),
+            Some(_) => true,
+            None => false,
+        };
+        if changed {
+            if let Some(c) = self.set.lock().unwrap().as_ref() {
+                c.invalidate();
             }
         }
         let b = dvi_project::fsx::read(path).ok().and_then(|t| String::from_utf8(t).ok()).and_then(|t| Baseline::read(&t).ok()).map(Arc::new);
@@ -101,12 +109,46 @@ pub fn is_config(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "json") && path.parent().and_then(Path::file_name).is_some_and(|n| n == ".dvicode")
 }
 
-/// What linting a file gave, as diagnostics (empty when it is not linted): at most `room`
-/// findings, and a notice when there are more.
-pub fn file_diagnostics(a: &Analysis, configs: &LintConfigs, set: &ConfigSet, f: FileId, room: usize) -> Vec<Diagnostic> {
+/// What linting a file gave, as diagnostics: the findings shown, how many more there are, and
+/// notices about lint itself.
+#[derive(Default)]
+pub struct FileDiags {
+    pub shown: Vec<Diagnostic>,
+    pub hidden: usize,
+    pub notes: Vec<Diagnostic>,
+}
+
+impl FileDiags {
+    /// Keeps at most `room` findings; returns how many it hid.
+    pub fn cut(&mut self, room: usize) -> usize {
+        let n = self.shown.len().saturating_sub(room);
+        self.shown.truncate(room);
+        self.hidden += n;
+        n
+    }
+
+    /// The diagnostics, with a notice of the hidden findings (`limit`: the problem limit hid
+    /// some, not only the limit per file).
+    pub fn into_vec(self, limit: bool) -> Vec<Diagnostic> {
+        let mut out = self.shown;
+        if self.hidden > 0 {
+            out.push(notice(if limit {
+                format!("Lint: {} findings in this file are not shown (the problem limit, dvicode.maxProblems, is reached)", self.hidden)
+            } else {
+                format!("Lint: {} more findings in this file are not shown", self.hidden)
+            }));
+        }
+        out.extend(self.notes);
+        out
+    }
+}
+
+/// What linting a file gave (nothing when it is not linted): at most `room` findings, those
+/// the baseline does not list first.
+pub fn file_diagnostics(a: &Analysis, configs: &LintConfigs, set: &ConfigSet, f: FileId, room: usize) -> FileDiags {
     let cfg = a.lint_config(set, &DiskEnv, f);
     if !cfg.owned.is_owned() {
-        return Vec::new();
+        return FileDiags::default();
     }
     let lint: FileLint = a.lint_file(f, &cfg, None);
     let open: Vec<&Finding> = lint.findings.iter().filter(|x| x.suppressed.is_none()).collect();
@@ -118,25 +160,24 @@ pub fn file_diagnostics(a: &Analysis, configs: &LintConfigs, set: &ConfigSet, f:
             listed = b.matched(&fps);
         }
     }
-    let mut out: Vec<Diagnostic> = open
+    // Only the findings shown become diagnostics.
+    let mut order: Vec<usize> = (0..open.len()).collect();
+    order.sort_by_key(|i| listed[*i]);
+    let room = room.min(MAX_PER_FILE);
+    let shown = order
         .iter()
-        .zip(listed)
-        .filter_map(|(x, listed)| {
-            let mut d = to_lsp(a, x)?;
-            if listed {
+        .take(room)
+        .filter_map(|&i| {
+            let mut d = to_lsp(a, open[i])?;
+            if listed[i] {
                 d.severity = Some(DiagnosticSeverity::HINT);
             }
             Some(d)
         })
         .collect();
-    let room = room.min(MAX_PER_FILE);
-    let more = out.len().saturating_sub(room);
-    out.truncate(room);
-    if more > 0 {
-        out.push(notice(format!("Lint: {more} more findings in this file are not shown")));
-    }
+    let mut out = FileDiags { shown, hidden: open.len().saturating_sub(room), ..Default::default() };
     if let Some((rule, why)) = lint.incomplete.first() {
-        out.push(notice(format!("Lint did not finish checking this file ({rule}: {why}); some findings may be missing")));
+        out.notes.push(notice(format!("Lint did not finish checking this file ({rule}: {why}); some findings may be missing")));
     }
     out
 }
@@ -223,12 +264,12 @@ pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u
         if meta.id.starts_with("waiver-") || meta.id.starts_with("suppression-") {
             continue;
         }
-        // A waiver on its own line above the finding's line, indented like it: only when the
-        // finding's statement starts the line (else the waiver would cover what is before it).
+        // A waiver on its own line above the finding's line, indented like it: only when a
+        // waiver there covers the finding (not inside a `define, nor when the line starts in
+        // the middle of another statement).
         let line = li.line_of(x.span.start);
-        let ls = li.line_start(line);
-        let starts_line = text.get(ls as usize..x.span.start as usize).is_some_and(|s| s.trim().is_empty());
-        if starts_line && !waived.contains(&(x.rule, line)) {
+        let place = lint.unit.and_then(|u| a.lint_waiver_place(f, u, x.span.start));
+        if let Some(ls) = place.filter(|_| !waived.contains(&(x.rule, line))) {
             waived.push((x.rule, line));
             let indent: String = text[ls as usize..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
             let id = meta.guide.first().copied().unwrap_or(meta.id);

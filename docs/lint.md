@@ -24,8 +24,9 @@ Findings appear in the Problems view with the source `dvicode-lint`, next to the
 problems of the same file. Each one links to its rule's page. The quick fixes (Ctrl+.) offer:
 
 - the rule's fix, where it has a safe or suggested one;
-- **Waive** (only where the finding's statement starts its line): inserts
-  `// <ID> waived: <reason>` above the line and selects `<reason>` for you to type;
+- **Waive** (only where a waiver above the line covers the finding, so not inside a
+  `` `define ``): inserts `// <ID> waived: <reason>` above the line and selects `<reason>`
+  for you to type;
 - **Turn off in this file**: inserts `// dvicode-lint: disable-file=<rule> <reason>`.
 
 Settings:
@@ -35,7 +36,13 @@ Settings:
 | `dvicode.lint.enable` | `true` | Show lint findings at all. |
 | `dvicode.lint.rulesets` | `["recommended"]` | The rulesets used where no `.dvicode/lint.json` chooses them. |
 
-**DVICode: Show Lint Rules** lists the rules of the running engine.
+**DVICode: Show Lint Rules** lists the rules of the running engine. **DVICode: Create Lint
+Configuration** writes `.dvicode/lint.json` in the first workspace folder, the project the
+engine works on.
+
+The editor reads `lint.json` and the baseline from disk: a change applies when the file is
+saved. A baseline outside the `.dvicode` folder is read again at the next edit, or at
+**DVICode: Rebuild Project**.
 
 ## The command
 

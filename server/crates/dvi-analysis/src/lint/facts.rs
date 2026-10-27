@@ -160,8 +160,7 @@ impl FactCache {
 fn file_facts(a: &Analysis, unit: UnitId, file: FileId) -> FileFacts {
     let u = a.unit(unit);
     let raw = a.file_tokens(file).unwrap_or_default();
-    let mut off: Vec<dvi_syntax::Span> = u.inactive.iter().filter(|s| s.file == file).copied().collect();
-    off.sort_by_key(|s| s.start);
+    let off = inactive(a, unit, file);
     let mut k = 0;
     let tokens: Vec<Token> = raw
         .iter()
@@ -220,10 +219,31 @@ fn file_facts(a: &Analysis, unit: UnitId, file: FileId) -> FileFacts {
     // Included more than once, and not guarded (a guarded header's later copies are empty).
     let repeated = u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count() > 1 && !guarded(&raw);
     let syntax_errors = u.parsed.diags.iter().any(|d| d.code == "SYNTAX_ERROR" && d.span.file == file);
-    let encrypted = raw.iter().enumerate().any(|(i, t)| {
-        t.kind == TokKind::Directive && (t.text == "protected" || t.text == "pragma" && raw.get(i + 1).is_some_and(|n| n.text == "protect"))
+    let encrypted = tokens.iter().enumerate().any(|(i, t)| {
+        t.kind == TokKind::Directive && (t.text == "protected" || t.text == "pragma" && tokens.get(i + 1).is_some_and(|n| n.text == "protect"))
     }) || u.parsed.decls.iter().any(|d| d.span.file == file && d.has(dflags::ENCRYPTED));
     FileFacts { file, tokens, bodies, waivers, defines, comments, repeated, syntax_errors, encrypted }
+}
+
+/// What `ifdef` leaves out of `file` in `unit`, in order: what is inactive in every inclusion of
+/// the file (the later inclusions of a guarded header are empty, its first is not).
+pub fn inactive(a: &Analysis, unit: UnitId, file: FileId) -> Vec<dvi_syntax::Span> {
+    let u = a.unit(unit);
+    let times = u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count().max(1) as i32;
+    // Each inclusion's ranges do not overlap: count how many inclusions leave each place out.
+    let mut ev: Vec<(u32, i32)> = u.inactive.iter().filter(|s| s.file == file && s.start < s.end).flat_map(|s| [(s.start, 1), (s.end, -1)]).collect();
+    ev.sort_unstable();
+    let (mut out, mut depth, mut from) = (Vec::new(), 0, 0);
+    for (at, d) in ev {
+        let was = depth >= times;
+        depth += d;
+        if !was && depth >= times {
+            from = at;
+        } else if was && depth < times && from < at {
+            out.push(dvi_syntax::Span::new(file, from, at));
+        }
+    }
+    out
 }
 
 /// Whether a file's text is wrapped in an include guard: `ifndef G / `define G first, `endif last.

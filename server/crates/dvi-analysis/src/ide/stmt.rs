@@ -395,12 +395,15 @@ impl Walker<'_> {
                 s.push(Simple::Assert(cond.0, cond.1));
             }
         }
-        if t.get(after)?.is_punct(";") {
-            self.mark(after, after + 1, f);
-            return Some(after + 1);
-        }
         let mut end = after;
-        if !t.get(after)?.is_kw("else") {
+        if t.get(after)?.is_punct(";") {
+            // A null pass action, maybe with a fail action: `assert (c) ; else $error(...);`.
+            self.mark(after, after + 1, f);
+            if !t.get(after + 1).is_some_and(|x| x.is_kw("else")) {
+                return Some(after + 1);
+            }
+            end = after + 1;
+        } else if !t.get(after)?.is_kw("else") {
             let ft = self.frame(f, FrameKind::If { cond, negated: false });
             end = self.stmt(after, ft)?;
         }

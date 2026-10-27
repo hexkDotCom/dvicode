@@ -111,10 +111,10 @@ fn squeeze(g: &str) -> String {
 /// The guard of a file: its name when `ifndef G` / `define G` open the file and the `endif`
 /// that closes that `ifndef` is the file's last token.
 fn guard_of(t: &[Token]) -> Option<String> {
-    let t: Vec<&Token> = t.iter().filter(|x| x.kind != TokKind::Eof).collect();
-    if !guarded(&t.iter().map(|x| (*x).clone()).collect::<Vec<_>>()) {
+    if !guarded(t) {
         return None;
     }
+    let t: Vec<&Token> = t.iter().filter(|x| x.kind != TokKind::Eof).collect();
     // The `endif` matching the first `ifndef`.
     let mut depth = 0;
     for (k, x) in t.iter().enumerate() {
@@ -319,7 +319,11 @@ impl Rule for TimeunitFirst {
                         cur = if steps > 64 { None } else { u.includes.get(c).and_then(|x| x.from).map(|x| x as usize) };
                     }
                 }
-                uses = files.iter().any(|f| cx.a.file_tokens(*f).is_some_and(|ft| (0..ft.len()).any(|k| uses_time(&ft, k))));
+                // Their code as this unit reads it (not what `ifdef` leaves out).
+                uses = files.iter().any(|f| {
+                    let ff = cx.a.lint_facts.file(cx.a, cx.unit, *f);
+                    (0..ff.tokens.len()).any(|k| !ff.in_define(k) && uses_time(&ff.tokens, k))
+                });
             }
             if !uses {
                 continue;

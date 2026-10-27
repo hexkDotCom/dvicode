@@ -488,10 +488,12 @@ interface LintRule {
 
 /**
  * After a lint code action inserted a waiver or a suppression: selects its `<reason>`
- * placeholder on `line` so that typing replaces it.
+ * placeholder on `line` so that typing replaces it. `uri` is the server's (mapped back here for
+ * a remote project); nothing happens when no editor shows that document.
  */
 async function selectLintReason(uri: string, line: number): Promise<void> {
-  const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === vscode.Uri.parse(uri).toString()) ?? vscode.window.activeTextEditor;
+  const want = (launch ? launch.mapper.toClient(uri) : vscode.Uri.parse(uri)).toString();
+  const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === want);
   if (!ed || line >= ed.document.lineCount) {
     return;
   }
@@ -506,13 +508,14 @@ async function selectLintReason(uri: string, line: number): Promise<void> {
 }
 
 /**
- * Writes `.dvicode/lint.json` in a workspace folder with the rulesets chosen, and opens it. Through
- * the workspace file system, so that it works in remote windows too.
+ * Writes `.dvicode/lint.json` in the project's folder (the first workspace folder, the one the
+ * engine works on) with the rulesets chosen, and opens it. Through the workspace file system, so
+ * that it works in remote windows too.
  */
 async function createLintConfig(): Promise<void> {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  const folder = folders.length > 1 ? await vscode.window.showWorkspaceFolderPick({ placeHolder: 'Folder of the project to lint' }) : folders[0];
+  const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
+    void vscode.window.showInformationMessage('Open the project folder first: the lint configuration goes in its .dvicode folder.');
     return;
   }
   const uri = vscode.Uri.joinPath(folder.uri, '.dvicode', 'lint.json');

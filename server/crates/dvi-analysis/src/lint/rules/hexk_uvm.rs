@@ -120,14 +120,24 @@ enum Item {
 /// Classifies `t` (one top-level statement with its `;`).
 fn item(t: &[Token]) -> Item {
     let Some(first) = t.first() else { return Item::Decl };
+    // A user type is a name, maybe scoped (`pkg::item_t`), then the variable's name or a
+    // parameter list; `pkg::f();` is a call.
+    let user_type = first.kind == TokKind::Ident && {
+        let mut j = 1;
+        while t.get(j).is_some_and(|x| x.is_punct("::")) && t.get(j + 1).is_some_and(|x| x.kind == TokKind::Ident) {
+            j += 2;
+        }
+        t.get(j).is_some_and(|x| x.kind == TokKind::Ident || x.is_punct("#"))
+    };
     let typed = first.kind == TokKind::Keyword && matches!(first.text.as_str(), "int" | "bit" | "logic" | "reg" | "byte" | "shortint" | "longint" | "integer" | "real" | "time" | "string" | "event" | "chandle" | "automatic" | "static" | "const" | "var")
-        || first.kind == TokKind::Ident && t.get(1).is_some_and(|x| x.kind == TokKind::Ident || x.is_punct("::") || x.is_punct("#"));
+        || user_type;
     if !typed {
         return Item::Other;
     }
-    // A call in the initializer (a parameterized type's `#(...)` is not one).
+    // A call in the initializer: a `(` right after a name or `new` (not a parameterized type's
+    // `#(...)`, a cast's `'(...)` or parentheses that group).
     match t.iter().position(|x| x.is_punct("=")) {
-        Some(eq) if t[eq..].iter().any(|x| x.is_punct("(")) => Item::DeclWithCall,
+        Some(eq) if t[eq..].windows(2).any(|w| w[1].is_punct("(") && (matches!(w[0].kind, TokKind::Ident | TokKind::SysIdent) || w[0].is_kw("new"))) => Item::DeclWithCall,
         _ => Item::Decl,
     }
 }
@@ -390,7 +400,8 @@ impl Rule for MessageIdGetName {
         let a = cx.a;
         let u = a.unit(cx.unit).clone();
         let uvm = a.lint_facts.uvm_files(a);
-        let t = cx.facts.tokens.clone();
+        let facts = cx.facts.clone();
+        let t = &facts.tokens;
         for m in &u.macro_uses {
             let report = matches!(m.name.as_str(), "uvm_info" | "uvm_warning" | "uvm_error" | "uvm_fatal" | "uvm_info_context" | "uvm_warning_context" | "uvm_error_context" | "uvm_fatal_context");
             if m.name_span.file != cx.file || !report || !m.def.as_ref().is_some_and(|d| uvm.contains(&d.name_span.file)) {
@@ -419,7 +430,8 @@ impl Rule for ObjectionWithoutDescription {
         &OBJECTION
     }
     fn check(&self, cx: &mut Cx) {
-        let t = cx.facts.tokens.clone();
+        let facts = cx.facts.clone();
+        let t = &facts.tokens;
         for (k, _, _, class) in library_calls(cx, &["raise_objection", "drop_objection"]) {
             if !class.as_deref().is_some_and(|c| c == "uvm_phase" || c == "uvm_objection") {
                 continue;
@@ -448,7 +460,8 @@ impl Rule for DefaultSequence {
         &DEFAULT_SEQUENCE
     }
     fn check(&self, cx: &mut Cx) {
-        let t = cx.facts.tokens.clone();
+        let facts = cx.facts.clone();
+        let t = &facts.tokens;
         for (k, _, _, class) in library_calls(cx, &["set"]) {
             let (pos, formal) = match class.as_deref() {
                 Some("uvm_config_db") => (2, "field_name"),
@@ -505,7 +518,8 @@ impl Rule for VirtualOnOverride {
     fn check(&self, cx: &mut Cx) {
         let a = cx.a;
         let u = a.unit(cx.unit).clone();
-        let t = cx.facts.tokens.clone();
+        let facts = cx.facts.clone();
+        let t = &facts.tokens;
         for (i, d) in u.parsed.decls.iter().enumerate() {
             if !matches!(d.kind, DeclKind::Function | DeclKind::Task) || d.name_span.file != cx.file || !d.has(dflags::VIRTUAL) || d.has(dflags::PURE) || d.has(dflags::FROM_MACRO) || d.name == "new" {
                 continue;
@@ -531,7 +545,12 @@ impl Rule for VirtualOnOverride {
                 }
             }
             let Some(v) = v else { continue };
-            let end = t.get(v + 1).map_or(t[v].span.end, |n| n.span.start);
+            // With the blanks after it, up to the next token; a comment in between stays (only
+            // the spaces right after `virtual` go).
+            let text = a.file_text(cx.file).unwrap_or_default();
+            let next = t.get(v + 1).map_or(t[v].span.end, |n| n.span.start);
+            let gap = text.get(t[v].span.end as usize..next as usize).unwrap_or("");
+            let end = if gap.trim().is_empty() { next } else { t[v].span.end + (gap.len() - gap.trim_start_matches([' ', '\t']).len()) as u32 };
             let fix = Fix { title: "Remove `virtual`".into(), edits: vec![(Span::new(cx.file, t[v].span.start, end), String::new())], safe: true };
             cx.report_fix(None, t[v].span, format!("{} overrides UVM's virtual {}: leave out `virtual`", d.name, d.name), Vec::new(), vec![fix]);
         }
@@ -582,7 +601,8 @@ impl Rule for CreateNameChars {
         &CREATE_CHARS
     }
     fn check(&self, cx: &mut Cx) {
-        let t = cx.facts.tokens.clone();
+        let facts = cx.facts.clone();
+        let t = &facts.tokens;
         for (_, args) in factory_creates(cx) {
             let Some(Some((s, e))) = argument(&t, &args, 0, "name") else { continue };
             if e != s + 1 {

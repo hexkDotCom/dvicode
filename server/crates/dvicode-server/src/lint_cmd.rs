@@ -368,8 +368,9 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         let path = a.path(l.file);
         let rel = rel_of(&path);
         // One finding per place, rule and message, with the contexts it holds in; it is
-        // suppressed only when it is in every context.
-        let mut merged: Vec<(dvi_analysis::lint::Finding, Vec<Value>)> = Vec::new();
+        // suppressed only when it is in every context. Each keeps the unit it was first found in
+        // (its fingerprint names what encloses it there).
+        let mut merged: Vec<(dvi_analysis::lint::Finding, Vec<Value>, Option<dvi_analysis::UnitId>)> = Vec::new();
         let mut index: FxHashMap<(&'static str, u32, u32, &str), usize> = FxHashMap::default();
         let mut unit = None;
         for r in &l.results {
@@ -381,7 +382,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             for x in &r.findings {
                 match index.get(&(x.rule, x.span.start, x.span.end, x.message.as_str())) {
                     Some(&i) => {
-                        let (y, ctxs) = &mut merged[i];
+                        let (y, ctxs, _) = &mut merged[i];
                         ctxs.extend(ctx.clone());
                         if x.suppressed.is_none() {
                             y.suppressed = None;
@@ -389,7 +390,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                     }
                     None => {
                         index.insert((x.rule, x.span.start, x.span.end, x.message.as_str()), merged.len());
-                        merged.push((x.clone(), ctx.clone().into_iter().collect()));
+                        merged.push((x.clone(), ctx.clone().into_iter().collect(), r.unit));
                     }
                 }
             }
@@ -399,13 +400,14 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             for (rule, reason) in &r.incomplete {
                 incomplete.push(json!({ "path": rel, "rule": rule, "reason": reason }));
             }
-            for (rule, reason, at) in &r.unknown_places {
+            // At most the 200 that --stats prints.
+            for (rule, reason, at) in r.unknown_places.iter().take(200usize.saturating_sub(unknown_places.len())) {
                 let (l, c) = a.to_range(*at).map_or((0, 0), |r| (r.start.line + 1, r.start.character + 1));
                 unknown_places.push(format!("{}:{l}:{c}: {rule}: {reason}", path.display()));
             }
         }
         let Some(unit) = unit else { continue };
-        let fps: Vec<Fingerprint> = merged.iter().map(|(x, _)| a.fingerprint(unit, x, &root)).collect();
+        let fps: Vec<Fingerprint> = merged.iter().map(|(x, _, u)| a.fingerprint(u.unwrap_or(unit), x, &root)).collect();
         // The baseline: what is not waived in the code.
         let open: Vec<usize> = (0..merged.len()).filter(|i| merged[*i].0.suppressed.is_none()).collect();
         let open_fps: Vec<Fingerprint> = open.iter().map(|i| fps[*i].clone()).collect();
@@ -422,7 +424,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                 }
             }
         }
-        for (i, (x, ctxs)) in merged.into_iter().enumerate() {
+        for (i, (x, ctxs, _)) in merged.into_iter().enumerate() {
             let range = a.to_range(x.span);
             if let (Some(c), Some(r)) = (&changed, &range) {
                 if !crate::changed::touches(c, &path, r.start.line + 1, r.end.line + 1) {
@@ -623,7 +625,17 @@ pub fn schema() -> Value {
     for (g, _) in dvi_analysis::lint::guide_ids::GUIDE_IDS {
         let checked: Vec<&str> = metas.iter().filter(|m| m.guide.contains(g)).map(|m| m.id).collect();
         let d = if checked.is_empty() { format!("Style guide rule {g} (no lint rule checks it yet)") } else { format!("Style guide rule {g}: sets {}", checked.join(", ")) };
-        rule_props.insert((*g).into(), json!({ "description": d, "allOf": [{ "$ref": "#/definitions/setting" }] }));
+        // The parameters of the rules it sets, in the range every one of them accepts (as the
+        // configuration reader checks them).
+        let mut obj = serde_json::Map::new();
+        obj.insert("level".into(), level.clone());
+        obj.insert("comment".into(), json!({ "type": "string" }));
+        for p in metas.iter().filter(|m| m.guide.contains(g)).flat_map(|m| m.params) {
+            let all = metas.iter().filter(|m| m.guide.contains(g)).flat_map(|m| m.params).filter(|q| q.name == p.name);
+            let (min, max) = all.fold((i64::MIN, i64::MAX), |(lo, hi), q| (lo.max(q.min), hi.min(q.max)));
+            obj.entry(p.name).or_insert_with(|| json!({ "type": "integer", "minimum": min, "maximum": max, "description": p.doc }));
+        }
+        rule_props.insert((*g).into(), json!({ "description": d, "oneOf": [level.clone(), { "type": "object", "properties": obj, "additionalProperties": false }] }));
     }
     let rulesets: Vec<&str> = Ruleset::ALL.iter().map(|r| r.name()).collect();
     let rules = json!({ "type": "object", "properties": rule_props, "additionalProperties": false, "description": "Rule IDs or style guide rule IDs, with a level or { \"level\", \"comment\", parameters }" });

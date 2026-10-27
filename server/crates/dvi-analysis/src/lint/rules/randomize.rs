@@ -332,11 +332,12 @@ fn callee_is_builtin(cx: &Cx, at: Span, prefix: Prefix) -> Option<bool> {
         Prefix::None | Prefix::Handle => {}
     }
     if prefix == Prefix::None {
-        // A user function named `randomize` in scope would be called instead.
+        // A project's declaration named `randomize` in scope (a function, a task, a variable)
+        // is what the name means there.
         let scope = a.scope_at(cx.unit, cx.file, at.start);
         return Some(match a.lookup(cx.unit, scope, "randomize") {
-            // The built-in declaration (the engine's `std` package), or no function at all.
-            Some(d) => a.decl(d).kind != DeclKind::Function || a.vfs.is_builtin(a.decl(d).name_span.file),
+            // The built-in declaration (the engine's `std` package).
+            Some(d) => a.vfs.is_builtin(a.decl(d).name_span.file),
             None => true,
         });
     }

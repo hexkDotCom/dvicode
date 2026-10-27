@@ -69,8 +69,11 @@ impl Baseline {
         let mut b = Baseline::default();
         for e in &f.findings {
             let x = b.files.entry(e.fp.path.clone()).or_default();
-            *x.exact.entry(e.fp.clone()).or_default() += e.count;
-            *x.loose.entry(loose(&e.fp)).or_default() += e.count;
+            // Saturating: a file may list the same finding twice, with any counts.
+            let c = x.exact.entry(e.fp.clone()).or_default();
+            *c = c.saturating_add(e.count);
+            let c = x.loose.entry(loose(&e.fp)).or_default();
+            *c = c.saturating_add(e.count);
         }
         b
     }
@@ -78,11 +81,32 @@ impl Baseline {
     /// Like [`Baseline::take`] for the findings of one file, leaving the baseline as it is (the
     /// editor matches each file on its own).
     pub fn matched(&self, fps: &[Fingerprint]) -> Vec<bool> {
-        let Some(path) = fps.first().map(|f| f.path.clone()) else { return Vec::new() };
-        let Some(x) = self.files.get(&path) else { return vec![false; fps.len()] };
-        let mut one = Baseline::default();
-        one.files.insert(path, x.clone());
-        one.take(fps)
+        let mut out = vec![false; fps.len()];
+        // What these findings have used of the baseline's counts (it stays as it is).
+        let looses: Vec<Fingerprint> = fps.iter().map(loose).collect();
+        let mut used: FxHashMap<&Fingerprint, u32> = FxHashMap::default();
+        let mut used_loose: FxHashMap<&Fingerprint, u32> = FxHashMap::default();
+        for (i, fp) in fps.iter().enumerate() {
+            let Some(x) = self.files.get(&fp.path) else { continue };
+            let u = used.entry(fp).or_default();
+            if x.exact.get(fp).is_some_and(|n| *n > *u) {
+                *u += 1;
+                *used_loose.entry(&looses[i]).or_default() += 1;
+                out[i] = true;
+            }
+        }
+        for (i, fp) in fps.iter().enumerate() {
+            if out[i] {
+                continue;
+            }
+            let Some(x) = self.files.get(&fp.path) else { continue };
+            let u = used_loose.entry(&looses[i]).or_default();
+            if x.loose.get(&looses[i]).is_some_and(|n| *n > *u) {
+                *u += 1;
+                out[i] = true;
+            }
+        }
+        out
     }
 
     /// Reads a baseline file; `Err` says what is wrong with it.
@@ -134,12 +158,28 @@ pub fn file_of(fps: Vec<Fingerprint>, tool: &str) -> BaselineFile {
     BaselineFile { version: FORMAT_VERSION, fingerprint: FINGERPRINT_VERSION, tool: tool.to_string(), findings }
 }
 
+/// `path` relative to `root`, with `..` for a file outside it (a folder `include` names), so
+/// that the baseline does not depend on where the checkout is; absolute only on another drive.
+fn rel_path(root: &Path, path: &Path) -> String {
+    if let Ok(r) = path.strip_prefix(root) {
+        return r.to_string_lossy().into_owned();
+    }
+    let (r, p): (Vec<_>, Vec<_>) = (root.components().collect(), path.components().collect());
+    let common = r.iter().zip(&p).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return path.to_string_lossy().into_owned();
+    }
+    let mut out: Vec<String> = std::iter::repeat("..".to_string()).take(r.len() - common).collect();
+    out.extend(p[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    out.join("/")
+}
+
 impl Analysis {
     /// The fingerprint of a finding of `unit`'s view of its file; `root`: the project root.
     pub fn fingerprint(&self, unit: crate::world::UnitId, x: &Finding, root: &Path) -> Fingerprint {
         let f = x.span.file;
         let path = self.path(f);
-        let path = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let path = rel_path(root, &path).replace('\\', "/");
         let scope = self.scope_at(unit, f, x.span.start);
         let u = self.unit(unit);
         let symbol = if scope == dvi_syntax::ast::ParsedUnit::ROOT {
@@ -226,6 +266,37 @@ mod tests {
 
     fn fp(text: &str, around: &str) -> Fingerprint {
         Fingerprint { rule: "r".into(), subcheck: String::new(), path: "a.sv".into(), symbol: "p::c::f".into(), text: text.into(), around: around.into() }
+    }
+
+    #[test]
+    fn matched_is_take_without_taking() {
+        // Exact first, then loose; equal findings by count.
+        let f = file_of(vec![fp("x ;", "1"), fp("x ;", "2"), fp("y ;", "3")], "t");
+        let b = Baseline::from_file(&f);
+        let fps = [fp("x ;", "2"), fp("x ;", "9"), fp("x ;", "9"), fp("y ;", "3"), fp("z ;", "3")];
+        let want = b.clone().take(&fps);
+        assert_eq!(b.matched(&fps), want);
+        assert_eq!(want, [true, true, false, true, false]);
+        // Nothing was taken.
+        assert_eq!(b.matched(&fps), want);
+    }
+
+    #[test]
+    fn counts_saturate() {
+        let mut f = file_of(vec![fp("x ;", "1")], "t");
+        f.findings[0].count = u32::MAX;
+        f.findings.push(Entry { fp: fp("x ;", "1"), count: 1 });
+        let b = Baseline::from_file(&f);
+        assert_eq!(b.matched(&[fp("x ;", "1")]), [true]);
+    }
+
+    #[test]
+    fn paths_outside_the_root_are_relative() {
+        let root = if cfg!(windows) { Path::new("C:\\w\\proj") } else { Path::new("/w/proj") };
+        let p = root.join("a").join("b.sv");
+        assert_eq!(rel_path(root, &p).replace('\\', "/"), "a/b.sv");
+        let p = root.parent().unwrap().join("shared").join("c.sv");
+        assert_eq!(rel_path(root, &p), "../shared/c.sv");
     }
 
     #[test]

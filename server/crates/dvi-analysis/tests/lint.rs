@@ -577,3 +577,164 @@ endmodule
         ]
     );
 }
+
+/// Cases from the review of the lint rules: guarded headers included twice, a null pass action,
+/// user declarations named `randomize`, inactive protected code, overrides through a project
+/// class, coverage defaults written another way, and the super-call classifier.
+#[test]
+fn rule_review_cases() {
+    let item = r#"`ifndef ITEM_SVH
+`define ITEM_SVH
+class item;
+  rand int x;
+  function void f(); randomize(); endfunction
+endclass
+`endif
+"#;
+    let tb = r#"`include "uvm_macros.svh"
+`include "item.svh"
+`include "item.svh"
+package p;
+  import uvm_pkg::*;
+  function void g();
+    assert (std::randomize()) ; else $error("failed");
+    std::randomize();
+  endfunction
+  class base_env extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); super.build_phase(phase); endfunction
+  endclass
+  class derived_env extends base_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    task build_phase(uvm_phase phase); endtask
+  endclass
+endpackage
+module user_task;
+  task randomize(); endtask
+  initial randomize();
+endmodule
+module user_var;
+  bit randomize;
+  initial assert (randomize);
+endmodule
+`ifdef USE_ENCRYPTED
+`pragma protect begin_protected
+`pragma protect end_protected
+`endif
+"#;
+    let (a, root) = project("review3", &[("item.svh", item), ("tb.sv", tb)]);
+    let want = ["randomize-result-discarded", "randomize-in-assert", "uvm-override-signature"];
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| want.iter().any(|w| s.contains(&format!(" {w}")))).collect();
+    assert_eq!(
+        got,
+        [
+            "item.svh:5 randomize-result-discarded",
+            "tb.sv:7 randomize-in-assert",
+            "tb.sv:8 randomize-result-discarded",
+            "tb.sv:16 uvm-override-signature/kind",
+        ]
+    );
+    // Protected code that `ifdef leaves out does not make the file incomplete.
+    let set = ConfigSet::new(&root, Defaults { rulesets: vec![Ruleset::Recommended], ..Defaults::default() }, None);
+    let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with("tb.sv")).unwrap();
+    let r = a.lint_file(f, &a.lint_config(&set, &DiskEnv, f), None);
+    assert!(r.incomplete.is_empty(), "{:?}", r.incomplete);
+
+    let hexk = r#"`include "uvm_macros.svh"
+package q;
+  import uvm_pkg::*;
+  class helpers;
+    static function void prepare(); endfunction
+  endclass
+  class e1 extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      int n = (1 + 2);
+      super.build_phase(phase);
+    endfunction
+    function void connect_phase(uvm_phase phase);
+      helpers::prepare();
+      super.connect_phase(phase);
+    endfunction
+  endclass
+endpackage
+module m;
+  bit [1:0] a, b;
+  covergroup cg;
+    option.weight = 32'd1;
+    option.goal = 'd100;
+    cp_lone: coverpoint a { option.weight = 0; }
+    cp_a: coverpoint a { option.weight = 0; }
+    cp_b: coverpoint b;
+    x: cross cp_a, cp_b;
+  endgroup
+endmodule
+"#;
+    let (a, root) = project("review4", &[("hx.sv", hexk)]);
+    let want = ["missing-super-phase-call", "coverage-weight-goal"];
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| want.iter().any(|w| s.contains(&format!(" {w}")))).collect();
+    assert_eq!(got, ["hx.sv:13 missing-super-phase-call", "hx.sv:24 coverage-weight-goal"]);
+}
+
+/// `timeunit-first` reads included files as the unit does: a delay that `ifdef leaves out is
+/// not one.
+#[test]
+fn timeunit_first_ignores_inactive_included_code() {
+    let model = r#"`ifdef OPTIONAL_MODEL
+class model;
+  task wait_ready(); #10ns; endtask
+endclass
+`else
+typedef int word_t;
+`endif
+"#;
+    let tb = r#"package p;
+  `include "model.svh"
+endpackage
+"#;
+    let (a, root) = project("tu-inactive", &[("model.svh", model), ("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.contains(" timeunit-first")).collect();
+    assert!(got.is_empty(), "{got:?}");
+}
+
+/// Where the editor puts a waiver: above the line, only when a waiver there covers the finding.
+#[test]
+fn waiver_places() {
+    let src = "module m;\n  `define LONG(x) \\\n    x + x\n  function void build_phase(int phase);\n  endfunction\n    int very_long_name_here;\nendmodule\n";
+    let (a, root) = project("wplace", &[("w.sv", src)]);
+    let _ = root;
+    let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with("w.sv")).unwrap();
+    let unit = a.context_unit(f).unwrap();
+    let at = |s: &str| src.find(s).unwrap() as u32;
+    let line_start = |s: &str| src[..src.find(s).unwrap()].rfind('\n').map_or(0, |i| i + 1) as u32;
+    // On a macro's continued line: none (a comment there would end the macro).
+    assert_eq!(a.lint_waiver_place(f, unit, at("x + x")), None);
+    // On a declaration's name: above the declaration.
+    assert_eq!(a.lint_waiver_place(f, unit, at("build_phase")), Some(line_start("function void")));
+    // At the start of an indented line (as text rules report): above it.
+    assert_eq!(a.lint_waiver_place(f, unit, line_start("    int very")), Some(line_start("    int very")));
+    // On a closer: none (a waiver before `endfunction` covers nothing).
+    assert_eq!(a.lint_waiver_place(f, unit, at("endfunction")), None);
+}
+
+/// Removing a repeated `virtual` keeps a comment after it.
+#[test]
+fn remove_virtual_keeps_comments() {
+    let tb = "`include \"uvm_macros.svh\"\npackage p;\n  import uvm_pkg::*;\n  class e extends uvm_env;\n    function new(string name, uvm_component parent); super.new(name, parent); endfunction\n    virtual // dvicode-lint: disable=trailing-whitespace legacy\n    function void build_phase(uvm_phase phase); super.build_phase(phase); endfunction\n    virtual  function void connect_phase(uvm_phase phase); super.connect_phase(phase); endfunction\n  endclass\nendpackage\n";
+    let (a, root) = project("virt", &[("tb.sv", tb)]);
+    let set = ConfigSet::new(&root, Defaults { rulesets: vec![Ruleset::Hexk], ..Defaults::default() }, None);
+    let f = a.project_files().into_iter().find(|f| a.path(*f).ends_with("tb.sv")).unwrap();
+    let r = a.lint_file(f, &a.lint_config(&set, &DiskEnv, f), None);
+    let fixed: Vec<String> = r
+        .findings
+        .iter()
+        .filter(|x| x.rule == "virtual-on-override")
+        .map(|x| {
+            let (s, t) = &x.fixes[0].edits[0];
+            format!("{}{t}{}", &tb[..s.start as usize], &tb[s.end as usize..])
+        })
+        .collect();
+    assert_eq!(fixed.len(), 2);
+    assert!(fixed[0].contains("    // dvicode-lint: disable=trailing-whitespace legacy\n    function void build_phase"), "{}", fixed[0]);
+    assert!(fixed[1].contains("    function void connect_phase"), "{}", fixed[1]);
+}

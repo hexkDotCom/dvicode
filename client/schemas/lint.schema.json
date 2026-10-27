@@ -49,1524 +49,3816 @@
       "description": "Rule IDs or style guide rule IDs, with a level or { \"level\", \"comment\", parameters }",
       "properties": {
         "CFG-1": {
-          "allOf": [
+          "description": "Style guide rule CFG-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-1 (no lint rule checks it yet)"
+          ]
         },
         "CFG-10": {
-          "allOf": [
+          "description": "Style guide rule CFG-10 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-10 (no lint rule checks it yet)"
+          ]
         },
         "CFG-2": {
-          "allOf": [
+          "description": "Style guide rule CFG-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-2 (no lint rule checks it yet)"
+          ]
         },
         "CFG-3": {
-          "allOf": [
+          "description": "Style guide rule CFG-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-3 (no lint rule checks it yet)"
+          ]
         },
         "CFG-4": {
-          "allOf": [
+          "description": "Style guide rule CFG-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-4 (no lint rule checks it yet)"
+          ]
         },
         "CFG-5": {
-          "allOf": [
+          "description": "Style guide rule CFG-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-5 (no lint rule checks it yet)"
+          ]
         },
         "CFG-6": {
-          "allOf": [
+          "description": "Style guide rule CFG-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-6 (no lint rule checks it yet)"
+          ]
         },
         "CFG-7": {
-          "allOf": [
+          "description": "Style guide rule CFG-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-7 (no lint rule checks it yet)"
+          ]
         },
         "CFG-8": {
-          "allOf": [
+          "description": "Style guide rule CFG-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-8 (no lint rule checks it yet)"
+          ]
         },
         "CFG-9": {
-          "allOf": [
+          "description": "Style guide rule CFG-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CFG-9 (no lint rule checks it yet)"
+          ]
         },
         "CHK-1": {
-          "allOf": [
+          "description": "Style guide rule CHK-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-1 (no lint rule checks it yet)"
+          ]
         },
         "CHK-2": {
-          "allOf": [
+          "description": "Style guide rule CHK-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-2 (no lint rule checks it yet)"
+          ]
         },
         "CHK-3": {
-          "allOf": [
+          "description": "Style guide rule CHK-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-3 (no lint rule checks it yet)"
+          ]
         },
         "CHK-4": {
-          "allOf": [
+          "description": "Style guide rule CHK-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-4 (no lint rule checks it yet)"
+          ]
         },
         "CHK-5": {
-          "allOf": [
+          "description": "Style guide rule CHK-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-5 (no lint rule checks it yet)"
+          ]
         },
         "CHK-6": {
-          "allOf": [
+          "description": "Style guide rule CHK-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-6 (no lint rule checks it yet)"
+          ]
         },
         "CHK-7": {
-          "allOf": [
+          "description": "Style guide rule CHK-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CHK-7 (no lint rule checks it yet)"
+          ]
         },
         "CLS-1": {
-          "allOf": [
+          "description": "Style guide rule CLS-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-1 (no lint rule checks it yet)"
+          ]
         },
         "CLS-2": {
-          "allOf": [
+          "description": "Style guide rule CLS-2: sets extern-method",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-2: sets extern-method"
+          ]
         },
         "CLS-3": {
-          "allOf": [
+          "description": "Style guide rule CLS-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-3 (no lint rule checks it yet)"
+          ]
         },
         "CLS-4": {
-          "allOf": [
+          "description": "Style guide rule CLS-4: sets virtual-on-override",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-4: sets virtual-on-override"
+          ]
         },
         "CLS-5": {
-          "allOf": [
+          "description": "Style guide rule CLS-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-5 (no lint rule checks it yet)"
+          ]
         },
         "CLS-6": {
-          "allOf": [
+          "description": "Style guide rule CLS-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-6 (no lint rule checks it yet)"
+          ]
         },
         "CLS-7": {
-          "allOf": [
+          "description": "Style guide rule CLS-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-7 (no lint rule checks it yet)"
+          ]
         },
         "CLS-8": {
-          "allOf": [
+          "description": "Style guide rule CLS-8: sets factory-incompatible-constructor",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CLS-8: sets factory-incompatible-constructor"
+          ]
         },
         "CMP-1": {
-          "allOf": [
+          "description": "Style guide rule CMP-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-1 (no lint rule checks it yet)"
+          ]
         },
         "CMP-10": {
-          "allOf": [
+          "description": "Style guide rule CMP-10 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-10 (no lint rule checks it yet)"
+          ]
         },
         "CMP-11": {
-          "allOf": [
+          "description": "Style guide rule CMP-11 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-11 (no lint rule checks it yet)"
+          ]
         },
         "CMP-12": {
-          "allOf": [
+          "description": "Style guide rule CMP-12 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-12 (no lint rule checks it yet)"
+          ]
         },
         "CMP-13": {
-          "allOf": [
+          "description": "Style guide rule CMP-13 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-13 (no lint rule checks it yet)"
+          ]
         },
         "CMP-14": {
-          "allOf": [
+          "description": "Style guide rule CMP-14 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-14 (no lint rule checks it yet)"
+          ]
         },
         "CMP-2": {
-          "allOf": [
+          "description": "Style guide rule CMP-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-2 (no lint rule checks it yet)"
+          ]
         },
         "CMP-3": {
-          "allOf": [
+          "description": "Style guide rule CMP-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-3 (no lint rule checks it yet)"
+          ]
         },
         "CMP-4": {
-          "allOf": [
+          "description": "Style guide rule CMP-4: sets missing-super-phase-call",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-4: sets missing-super-phase-call"
+          ]
         },
         "CMP-5": {
-          "allOf": [
+          "description": "Style guide rule CMP-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-5 (no lint rule checks it yet)"
+          ]
         },
         "CMP-6": {
-          "allOf": [
+          "description": "Style guide rule CMP-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-6 (no lint rule checks it yet)"
+          ]
         },
         "CMP-7": {
-          "allOf": [
+          "description": "Style guide rule CMP-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-7 (no lint rule checks it yet)"
+          ]
         },
         "CMP-8": {
-          "allOf": [
+          "description": "Style guide rule CMP-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-8 (no lint rule checks it yet)"
+          ]
         },
         "CMP-9": {
-          "allOf": [
+          "description": "Style guide rule CMP-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule CMP-9 (no lint rule checks it yet)"
+          ]
         },
         "COV-1": {
-          "allOf": [
+          "description": "Style guide rule COV-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-1 (no lint rule checks it yet)"
+          ]
         },
         "COV-2": {
-          "allOf": [
+          "description": "Style guide rule COV-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-2 (no lint rule checks it yet)"
+          ]
         },
         "COV-3": {
-          "allOf": [
+          "description": "Style guide rule COV-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-3 (no lint rule checks it yet)"
+          ]
         },
         "COV-4": {
-          "allOf": [
+          "description": "Style guide rule COV-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-4 (no lint rule checks it yet)"
+          ]
         },
         "COV-5": {
-          "allOf": [
+          "description": "Style guide rule COV-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-5 (no lint rule checks it yet)"
+          ]
         },
         "COV-6": {
-          "allOf": [
+          "description": "Style guide rule COV-6: sets illegal-bins",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-6: sets illegal-bins"
+          ]
         },
         "COV-7": {
-          "allOf": [
+          "description": "Style guide rule COV-7: sets coverage-weight-goal",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-7: sets coverage-weight-goal"
+          ]
         },
         "COV-8": {
-          "allOf": [
+          "description": "Style guide rule COV-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-8 (no lint rule checks it yet)"
+          ]
         },
         "COV-9": {
-          "allOf": [
+          "description": "Style guide rule COV-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule COV-9 (no lint rule checks it yet)"
+          ]
         },
         "DOC-1": {
-          "allOf": [
+          "description": "Style guide rule DOC-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-1 (no lint rule checks it yet)"
+          ]
         },
         "DOC-2": {
-          "allOf": [
+          "description": "Style guide rule DOC-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-2 (no lint rule checks it yet)"
+          ]
         },
         "DOC-3": {
-          "allOf": [
+          "description": "Style guide rule DOC-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-3 (no lint rule checks it yet)"
+          ]
         },
         "DOC-4": {
-          "allOf": [
+          "description": "Style guide rule DOC-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-4 (no lint rule checks it yet)"
+          ]
         },
         "DOC-5": {
-          "allOf": [
+          "description": "Style guide rule DOC-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-5 (no lint rule checks it yet)"
+          ]
         },
         "DOC-6": {
-          "allOf": [
+          "description": "Style guide rule DOC-6: sets todo-format",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-6: sets todo-format"
+          ]
         },
         "DOC-7": {
-          "allOf": [
+          "description": "Style guide rule DOC-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-7 (no lint rule checks it yet)"
+          ]
         },
         "DOC-8": {
-          "allOf": [
+          "description": "Style guide rule DOC-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule DOC-8 (no lint rule checks it yet)"
+          ]
         },
         "FAC-1": {
-          "allOf": [
+          "description": "Style guide rule FAC-1: sets component-created-with-new",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-1: sets component-created-with-new"
+          ]
         },
         "FAC-10": {
-          "allOf": [
+          "description": "Style guide rule FAC-10 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-10 (no lint rule checks it yet)"
+          ]
         },
         "FAC-11": {
-          "allOf": [
+          "description": "Style guide rule FAC-11: sets uvm-deprecated-api, uvm-internal-member",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-11: sets uvm-deprecated-api, uvm-internal-member"
+          ]
         },
         "FAC-2": {
-          "allOf": [
+          "description": "Style guide rule FAC-2: sets uvm-registration-mismatch, uvm-class-not-registered",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-2: sets uvm-registration-mismatch, uvm-class-not-registered"
+          ]
         },
         "FAC-3": {
-          "allOf": [
+          "description": "Style guide rule FAC-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-3 (no lint rule checks it yet)"
+          ]
         },
         "FAC-4": {
-          "allOf": [
+          "description": "Style guide rule FAC-4: sets field-macros-in-component",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-4: sets field-macros-in-component"
+          ]
         },
         "FAC-5": {
-          "allOf": [
+          "description": "Style guide rule FAC-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-5 (no lint rule checks it yet)"
+          ]
         },
         "FAC-6": {
-          "allOf": [
+          "description": "Style guide rule FAC-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-6 (no lint rule checks it yet)"
+          ]
         },
         "FAC-7": {
-          "allOf": [
+          "description": "Style guide rule FAC-7: sets uvm-do-macros",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-7: sets uvm-do-macros"
+          ]
         },
         "FAC-8": {
-          "allOf": [
+          "description": "Style guide rule FAC-8: sets p-sequencer",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-8: sets p-sequencer"
+          ]
         },
         "FAC-9": {
-          "allOf": [
+          "description": "Style guide rule FAC-9: sets direct-report-call",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FAC-9: sets direct-report-call"
+          ]
         },
         "FIL-1": {
-          "allOf": [
+          "description": "Style guide rule FIL-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-1 (no lint rule checks it yet)"
+          ]
         },
         "FIL-10": {
-          "allOf": [
+          "description": "Style guide rule FIL-10 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-10 (no lint rule checks it yet)"
+          ]
         },
         "FIL-2": {
-          "allOf": [
+          "description": "Style guide rule FIL-2: sets file-extension",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-2: sets file-extension"
+          ]
         },
         "FIL-3": {
-          "allOf": [
+          "description": "Style guide rule FIL-3: sets class-outside-package",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-3: sets class-outside-package"
+          ]
         },
         "FIL-4": {
-          "allOf": [
+          "description": "Style guide rule FIL-4: sets compilation-unit-import",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-4: sets compilation-unit-import"
+          ]
         },
         "FIL-5": {
-          "allOf": [
+          "description": "Style guide rule FIL-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-5 (no lint rule checks it yet)"
+          ]
         },
         "FIL-6": {
-          "allOf": [
+          "description": "Style guide rule FIL-6: sets include-guard",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-6: sets include-guard"
+          ]
         },
         "FIL-7": {
-          "allOf": [
+          "description": "Style guide rule FIL-7: sets delay-without-unit, timeunit-first, timescale",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-7: sets delay-without-unit, timeunit-first, timescale"
+          ]
         },
         "FIL-8": {
-          "allOf": [
+          "description": "Style guide rule FIL-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-8 (no lint rule checks it yet)"
+          ]
         },
         "FIL-9": {
-          "allOf": [
+          "description": "Style guide rule FIL-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FIL-9 (no lint rule checks it yet)"
+          ]
         },
         "FMT-1": {
-          "allOf": [
+          "description": "Style guide rule FMT-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-1 (no lint rule checks it yet)"
+          ]
         },
         "FMT-10": {
-          "allOf": [
+          "description": "Style guide rule FMT-10 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-10 (no lint rule checks it yet)"
+          ]
         },
         "FMT-11": {
-          "allOf": [
+          "description": "Style guide rule FMT-11 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-11 (no lint rule checks it yet)"
+          ]
         },
         "FMT-12": {
-          "allOf": [
+          "description": "Style guide rule FMT-12 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-12 (no lint rule checks it yet)"
+          ]
         },
         "FMT-13": {
-          "allOf": [
+          "description": "Style guide rule FMT-13: sets formatter-drift",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-13: sets formatter-drift"
+          ]
         },
         "FMT-2": {
-          "allOf": [
+          "description": "Style guide rule FMT-2: sets trailing-whitespace, ascii-only, final-newline",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-2: sets trailing-whitespace, ascii-only, final-newline"
+          ]
         },
         "FMT-3": {
-          "allOf": [
+          "description": "Style guide rule FMT-3: sets line-length",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                },
+                "max": {
+                  "description": "the longest line allowed, in characters",
+                  "maximum": 1000,
+                  "minimum": 40,
+                  "type": "integer"
+                },
+                "tab-width": {
+                  "description": "the columns a tab counts for",
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-3: sets line-length"
+          ]
         },
         "FMT-4": {
-          "allOf": [
+          "description": "Style guide rule FMT-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-4 (no lint rule checks it yet)"
+          ]
         },
         "FMT-5": {
-          "allOf": [
+          "description": "Style guide rule FMT-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-5 (no lint rule checks it yet)"
+          ]
         },
         "FMT-6": {
-          "allOf": [
+          "description": "Style guide rule FMT-6: sets end-label",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-6: sets end-label"
+          ]
         },
         "FMT-7": {
-          "allOf": [
+          "description": "Style guide rule FMT-7: sets end-comment",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-7: sets end-comment"
+          ]
         },
         "FMT-8": {
-          "allOf": [
+          "description": "Style guide rule FMT-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-8 (no lint rule checks it yet)"
+          ]
         },
         "FMT-9": {
-          "allOf": [
+          "description": "Style guide rule FMT-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule FMT-9 (no lint rule checks it yet)"
+          ]
         },
         "IFC-1": {
-          "allOf": [
+          "description": "Style guide rule IFC-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-1 (no lint rule checks it yet)"
+          ]
         },
         "IFC-2": {
-          "allOf": [
+          "description": "Style guide rule IFC-2: sets program-block",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-2: sets program-block"
+          ]
         },
         "IFC-3": {
-          "allOf": [
+          "description": "Style guide rule IFC-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-3 (no lint rule checks it yet)"
+          ]
         },
         "IFC-4": {
-          "allOf": [
+          "description": "Style guide rule IFC-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-4 (no lint rule checks it yet)"
+          ]
         },
         "IFC-5": {
-          "allOf": [
+          "description": "Style guide rule IFC-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-5 (no lint rule checks it yet)"
+          ]
         },
         "IFC-6": {
-          "allOf": [
+          "description": "Style guide rule IFC-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-6 (no lint rule checks it yet)"
+          ]
         },
         "IFC-7": {
-          "allOf": [
+          "description": "Style guide rule IFC-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-7 (no lint rule checks it yet)"
+          ]
         },
         "IFC-8": {
-          "allOf": [
+          "description": "Style guide rule IFC-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-8 (no lint rule checks it yet)"
+          ]
         },
         "IFC-9": {
-          "allOf": [
+          "description": "Style guide rule IFC-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule IFC-9 (no lint rule checks it yet)"
+          ]
         },
         "LNG-1": {
-          "allOf": [
+          "description": "Style guide rule LNG-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-1 (no lint rule checks it yet)"
+          ]
         },
         "LNG-10": {
-          "allOf": [
+          "description": "Style guide rule LNG-10: sets randomize-result-discarded, randomize-in-assert, randomize-void-cast",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-10: sets randomize-result-discarded, randomize-in-assert, randomize-void-cast"
+          ]
         },
         "LNG-11": {
-          "allOf": [
+          "description": "Style guide rule LNG-11 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-11 (no lint rule checks it yet)"
+          ]
         },
         "LNG-12": {
-          "allOf": [
+          "description": "Style guide rule LNG-12 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-12 (no lint rule checks it yet)"
+          ]
         },
         "LNG-13": {
-          "allOf": [
+          "description": "Style guide rule LNG-13: sets constraint-name",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-13: sets constraint-name"
+          ]
         },
         "LNG-14": {
-          "allOf": [
+          "description": "Style guide rule LNG-14 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-14 (no lint rule checks it yet)"
+          ]
         },
         "LNG-15": {
-          "allOf": [
+          "description": "Style guide rule LNG-15 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-15 (no lint rule checks it yet)"
+          ]
         },
         "LNG-16": {
-          "allOf": [
+          "description": "Style guide rule LNG-16 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-16 (no lint rule checks it yet)"
+          ]
         },
         "LNG-17": {
-          "allOf": [
+          "description": "Style guide rule LNG-17 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-17 (no lint rule checks it yet)"
+          ]
         },
         "LNG-2": {
-          "allOf": [
+          "description": "Style guide rule LNG-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-2 (no lint rule checks it yet)"
+          ]
         },
         "LNG-20": {
-          "allOf": [
+          "description": "Style guide rule LNG-20: sets cast-as-task",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-20: sets cast-as-task"
+          ]
         },
         "LNG-21": {
-          "allOf": [
+          "description": "Style guide rule LNG-21 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-21 (no lint rule checks it yet)"
+          ]
         },
         "LNG-3": {
-          "allOf": [
+          "description": "Style guide rule LNG-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-3 (no lint rule checks it yet)"
+          ]
         },
         "LNG-30": {
-          "allOf": [
+          "description": "Style guide rule LNG-30 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-30 (no lint rule checks it yet)"
+          ]
         },
         "LNG-31": {
-          "allOf": [
+          "description": "Style guide rule LNG-31 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-31 (no lint rule checks it yet)"
+          ]
         },
         "LNG-32": {
-          "allOf": [
+          "description": "Style guide rule LNG-32 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-32 (no lint rule checks it yet)"
+          ]
         },
         "LNG-4": {
-          "allOf": [
+          "description": "Style guide rule LNG-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-4 (no lint rule checks it yet)"
+          ]
         },
         "LNG-5": {
-          "allOf": [
+          "description": "Style guide rule LNG-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule LNG-5 (no lint rule checks it yet)"
+          ]
         },
         "MSG-1": {
-          "allOf": [
+          "description": "Style guide rule MSG-1: sets display-in-uvm-class",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-1: sets display-in-uvm-class"
+          ]
         },
         "MSG-2": {
-          "allOf": [
+          "description": "Style guide rule MSG-2: sets message-id-get-name",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-2: sets message-id-get-name"
+          ]
         },
         "MSG-3": {
-          "allOf": [
+          "description": "Style guide rule MSG-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-3 (no lint rule checks it yet)"
+          ]
         },
         "MSG-4": {
-          "allOf": [
+          "description": "Style guide rule MSG-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-4 (no lint rule checks it yet)"
+          ]
         },
         "MSG-5": {
-          "allOf": [
+          "description": "Style guide rule MSG-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-5 (no lint rule checks it yet)"
+          ]
         },
         "MSG-6": {
-          "allOf": [
+          "description": "Style guide rule MSG-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-6 (no lint rule checks it yet)"
+          ]
         },
         "MSG-7": {
-          "allOf": [
+          "description": "Style guide rule MSG-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-7 (no lint rule checks it yet)"
+          ]
         },
         "MSG-8": {
-          "allOf": [
+          "description": "Style guide rule MSG-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-8 (no lint rule checks it yet)"
+          ]
         },
         "MSG-9": {
-          "allOf": [
+          "description": "Style guide rule MSG-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule MSG-9 (no lint rule checks it yet)"
+          ]
         },
         "NAM-1": {
-          "allOf": [
+          "description": "Style guide rule NAM-1: sets naming-case",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-1: sets naming-case"
+          ]
         },
         "NAM-2": {
-          "allOf": [
+          "description": "Style guide rule NAM-2: sets naming-case",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-2: sets naming-case"
+          ]
         },
         "NAM-3": {
-          "allOf": [
+          "description": "Style guide rule NAM-3: sets naming-prefix",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-3: sets naming-prefix"
+          ]
         },
         "NAM-4": {
-          "allOf": [
+          "description": "Style guide rule NAM-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-4 (no lint rule checks it yet)"
+          ]
         },
         "NAM-5": {
-          "allOf": [
+          "description": "Style guide rule NAM-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-5 (no lint rule checks it yet)"
+          ]
         },
         "NAM-6": {
-          "allOf": [
+          "description": "Style guide rule NAM-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-6 (no lint rule checks it yet)"
+          ]
         },
         "NAM-7": {
-          "allOf": [
+          "description": "Style guide rule NAM-7: sets create-name-chars",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-7: sets create-name-chars"
+          ]
         },
         "NAM-8": {
-          "allOf": [
+          "description": "Style guide rule NAM-8: sets create-name-matches",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-8: sets create-name-matches"
+          ]
         },
         "NAM-9": {
-          "allOf": [
+          "description": "Style guide rule NAM-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule NAM-9 (no lint rule checks it yet)"
+          ]
         },
         "OBJ-1": {
-          "allOf": [
+          "description": "Style guide rule OBJ-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-1 (no lint rule checks it yet)"
+          ]
         },
         "OBJ-2": {
-          "allOf": [
+          "description": "Style guide rule OBJ-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-2 (no lint rule checks it yet)"
+          ]
         },
         "OBJ-3": {
-          "allOf": [
+          "description": "Style guide rule OBJ-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-3 (no lint rule checks it yet)"
+          ]
         },
         "OBJ-4": {
-          "allOf": [
+          "description": "Style guide rule OBJ-4: sets objection-without-description",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-4: sets objection-without-description"
+          ]
         },
         "OBJ-5": {
-          "allOf": [
+          "description": "Style guide rule OBJ-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-5 (no lint rule checks it yet)"
+          ]
         },
         "OBJ-6": {
-          "allOf": [
+          "description": "Style guide rule OBJ-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-6 (no lint rule checks it yet)"
+          ]
         },
         "OBJ-7": {
-          "allOf": [
+          "description": "Style guide rule OBJ-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule OBJ-7 (no lint rule checks it yet)"
+          ]
         },
         "REG-1": {
-          "allOf": [
+          "description": "Style guide rule REG-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-1 (no lint rule checks it yet)"
+          ]
         },
         "REG-2": {
-          "allOf": [
+          "description": "Style guide rule REG-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-2 (no lint rule checks it yet)"
+          ]
         },
         "REG-3": {
-          "allOf": [
+          "description": "Style guide rule REG-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-3 (no lint rule checks it yet)"
+          ]
         },
         "REG-4": {
-          "allOf": [
+          "description": "Style guide rule REG-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-4 (no lint rule checks it yet)"
+          ]
         },
         "REG-5": {
-          "allOf": [
+          "description": "Style guide rule REG-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-5 (no lint rule checks it yet)"
+          ]
         },
         "REG-6": {
-          "allOf": [
+          "description": "Style guide rule REG-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-6 (no lint rule checks it yet)"
+          ]
         },
         "REG-7": {
-          "allOf": [
+          "description": "Style guide rule REG-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REG-7 (no lint rule checks it yet)"
+          ]
         },
         "REU-1": {
-          "allOf": [
+          "description": "Style guide rule REU-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REU-1 (no lint rule checks it yet)"
+          ]
         },
         "REU-2": {
-          "allOf": [
+          "description": "Style guide rule REU-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REU-2 (no lint rule checks it yet)"
+          ]
         },
         "REU-3": {
-          "allOf": [
+          "description": "Style guide rule REU-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REU-3 (no lint rule checks it yet)"
+          ]
         },
         "REU-4": {
-          "allOf": [
+          "description": "Style guide rule REU-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REU-4 (no lint rule checks it yet)"
+          ]
         },
         "REU-5": {
-          "allOf": [
+          "description": "Style guide rule REU-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REU-5 (no lint rule checks it yet)"
+          ]
         },
         "REU-6": {
-          "allOf": [
+          "description": "Style guide rule REU-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule REU-6 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-1": {
-          "allOf": [
+          "description": "Style guide rule SEQ-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-1 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-10": {
-          "allOf": [
+          "description": "Style guide rule SEQ-10 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-10 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-11": {
-          "allOf": [
+          "description": "Style guide rule SEQ-11: sets default-sequence",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-11: sets default-sequence"
+          ]
         },
         "SEQ-12": {
-          "allOf": [
+          "description": "Style guide rule SEQ-12 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-12 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-13": {
-          "allOf": [
+          "description": "Style guide rule SEQ-13 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-13 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-14": {
-          "allOf": [
+          "description": "Style guide rule SEQ-14: sets pre-do-override",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-14: sets pre-do-override"
+          ]
         },
         "SEQ-15": {
-          "allOf": [
+          "description": "Style guide rule SEQ-15 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-15 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-2": {
-          "allOf": [
+          "description": "Style guide rule SEQ-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-2 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-3": {
-          "allOf": [
+          "description": "Style guide rule SEQ-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-3 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-4": {
-          "allOf": [
+          "description": "Style guide rule SEQ-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-4 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-5": {
-          "allOf": [
+          "description": "Style guide rule SEQ-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-5 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-6": {
-          "allOf": [
+          "description": "Style guide rule SEQ-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-6 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-7": {
-          "allOf": [
+          "description": "Style guide rule SEQ-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-7 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-8": {
-          "allOf": [
+          "description": "Style guide rule SEQ-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-8 (no lint rule checks it yet)"
+          ]
         },
         "SEQ-9": {
-          "allOf": [
+          "description": "Style guide rule SEQ-9 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule SEQ-9 (no lint rule checks it yet)"
+          ]
         },
         "TLM-1": {
-          "allOf": [
+          "description": "Style guide rule TLM-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TLM-1 (no lint rule checks it yet)"
+          ]
         },
         "TLM-2": {
-          "allOf": [
+          "description": "Style guide rule TLM-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TLM-2 (no lint rule checks it yet)"
+          ]
         },
         "TLM-3": {
-          "allOf": [
+          "description": "Style guide rule TLM-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TLM-3 (no lint rule checks it yet)"
+          ]
         },
         "TLM-4": {
-          "allOf": [
+          "description": "Style guide rule TLM-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TLM-4 (no lint rule checks it yet)"
+          ]
         },
         "TLM-5": {
-          "allOf": [
+          "description": "Style guide rule TLM-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TLM-5 (no lint rule checks it yet)"
+          ]
         },
         "TLM-6": {
-          "allOf": [
+          "description": "Style guide rule TLM-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TLM-6 (no lint rule checks it yet)"
+          ]
         },
         "TRN-1": {
-          "allOf": [
+          "description": "Style guide rule TRN-1: sets extends-uvm-transaction",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TRN-1: sets extends-uvm-transaction"
+          ]
         },
         "TRN-2": {
-          "allOf": [
+          "description": "Style guide rule TRN-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TRN-2 (no lint rule checks it yet)"
+          ]
         },
         "TRN-3": {
-          "allOf": [
+          "description": "Style guide rule TRN-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TRN-3 (no lint rule checks it yet)"
+          ]
         },
         "TRN-4": {
-          "allOf": [
+          "description": "Style guide rule TRN-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TRN-4 (no lint rule checks it yet)"
+          ]
         },
         "TRN-5": {
-          "allOf": [
+          "description": "Style guide rule TRN-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TRN-5 (no lint rule checks it yet)"
+          ]
         },
         "TRN-6": {
-          "allOf": [
+          "description": "Style guide rule TRN-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TRN-6 (no lint rule checks it yet)"
+          ]
         },
         "TST-1": {
-          "allOf": [
+          "description": "Style guide rule TST-1 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-1 (no lint rule checks it yet)"
+          ]
         },
         "TST-2": {
-          "allOf": [
+          "description": "Style guide rule TST-2 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-2 (no lint rule checks it yet)"
+          ]
         },
         "TST-3": {
-          "allOf": [
+          "description": "Style guide rule TST-3 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-3 (no lint rule checks it yet)"
+          ]
         },
         "TST-4": {
-          "allOf": [
+          "description": "Style guide rule TST-4 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-4 (no lint rule checks it yet)"
+          ]
         },
         "TST-5": {
-          "allOf": [
+          "description": "Style guide rule TST-5 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-5 (no lint rule checks it yet)"
+          ]
         },
         "TST-6": {
-          "allOf": [
+          "description": "Style guide rule TST-6 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-6 (no lint rule checks it yet)"
+          ]
         },
         "TST-7": {
-          "allOf": [
+          "description": "Style guide rule TST-7 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-7 (no lint rule checks it yet)"
+          ]
         },
         "TST-8": {
-          "allOf": [
+          "description": "Style guide rule TST-8 (no lint rule checks it yet)",
+          "oneOf": [
             {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
             }
-          ],
-          "description": "Style guide rule TST-8 (no lint rule checks it yet)"
+          ]
         },
         "ascii-only": {
           "markdownDescription": "A line holds a character outside ASCII.\n\nSystemVerilog tools differ in how they read other encodings; a stray non-breaking space or typographic quote breaks some of them and is invisible in review.",

@@ -19,7 +19,8 @@ pub fn since(root: &Path, rev: &str, exact: bool) -> Result<FxHashMap<PathBuf, C
     let top = git(root, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.trim());
     let base = if exact { rev.to_string() } else { git(root, &["merge-base", rev, "HEAD"])?.trim().to_string() };
-    let diff = git(root, &["diff", "--unified=0", "--no-color", "--no-ext-diff", "-M", &base, "--"])?;
+    // Fixed prefixes (`diff.mnemonicPrefix` and `diff.noprefix` change them); no textconv.
+    let diff = git(root, &["diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "-M", &base, "--"])?;
     let mut out = parse_diff(&diff, &top);
     // NUL-separated: names as they are, unquoted.
     for f in git(root, &["ls-files", "-z", "--others", "--exclude-standard", "--full-name"])?.split('\0').filter(|l| !l.is_empty()) {

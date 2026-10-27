@@ -78,7 +78,7 @@ pub fn scan(a: &Analysis, file: FileId, tokens: &[Token], comments: &[Comment]) 
         .into_iter()
         .map(|(mut w, next)| {
             if w.kind == WaiverKind::Guide {
-                w.covers = coverage(tokens, next);
+                w.covers = coverage(tokens, next).map(|(s, e)| (from_line_start(&text, s), e));
             }
             w
         })
@@ -121,6 +121,35 @@ pub fn scan(a: &Analysis, file: FileId, tokens: &[Token], comments: &[Comment]) 
     Waivers { items, regions, unmatched }
 }
 
+/// `at`, or the start of its line when only blanks are before it there: a waiver covers the
+/// indentation of its statement too (text rules report whole lines).
+fn from_line_start(text: &str, at: u32) -> u32 {
+    let ls = text[..at as usize].rfind('\n').map_or(0, |i| i + 1);
+    if text[ls..at as usize].trim().is_empty() {
+        ls as u32
+    } else {
+        at
+    }
+}
+
+/// Where a guide waiver for a finding at `at` goes: the start of the finding's line, when a
+/// waiver inserted there would cover the finding. `None` when it would not, or when a comment
+/// there would change the code (inside a `` `define ``, after a line continuation).
+pub fn waiver_place(text: &str, facts: &super::facts::FileFacts, at: u32) -> Option<u32> {
+    let ls = text.get(..at as usize)?.rfind('\n').map_or(0, |i| i + 1);
+    if ls > 0 && text[..ls - 1].trim_end_matches([' ', '\t', '\r']).ends_with('\\') {
+        return None;
+    }
+    let t = &facts.tokens;
+    let k = t.partition_point(|x| x.span.start < ls as u32);
+    let x = t.get(k)?;
+    if !text.get(ls..x.span.start as usize)?.trim().is_empty() || facts.in_define(k) {
+        return None;
+    }
+    let (s, e) = coverage(t, k)?;
+    (from_line_start(text, s) <= at && at < e).then_some(ls as u32)
+}
+
 /// A comment of the file (in active code).
 #[derive(Clone, Copy, Debug)]
 pub struct Comment {
@@ -137,8 +166,7 @@ pub struct Comment {
 /// parts of a gap that `ifdef` leaves out are skipped.
 pub fn comments(a: &Analysis, unit: UnitId, file: FileId, tokens: &[Token]) -> Vec<Comment> {
     let Some(text) = a.file_text(file) else { return Vec::new() };
-    let mut inactive: Vec<Span> = a.unit(unit).inactive.iter().filter(|s| s.file == file).copied().collect();
-    inactive.sort_by_key(|s| s.start);
+    let inactive = super::facts::inactive(a, unit, file);
     let mut out = Vec::new();
     let mut prev_end = 0usize;
     let mut k = 0usize;

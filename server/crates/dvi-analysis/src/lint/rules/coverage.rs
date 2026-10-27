@@ -23,9 +23,36 @@ static META: RuleMeta = RuleMeta {
 /// Where an `option` assignment is.
 #[derive(PartialEq)]
 enum Place {
-    Coverpoint,
+    /// With the coverpoint's name (its label, else the variable it covers).
+    Coverpoint(Option<String>),
     Cross,
     Covergroup,
+}
+
+/// The value of an integer literal (`100`, `32'd100`, `'h64`, `8'b0110_0100`); `None` for one
+/// with x or z digits, a real, or one too large.
+fn int_value(text: &str) -> Option<u64> {
+    let (radix, digits) = match text.find('\'') {
+        Some(q) => {
+            let rest = text[q + 1..].trim_start_matches(['s', 'S']);
+            let radix = match rest.chars().next()?.to_ascii_lowercase() {
+                'd' => 10,
+                'h' => 16,
+                'o' => 8,
+                'b' => 2,
+                _ => return None,
+            };
+            (radix, rest.get(1..)?)
+        }
+        None => (10, text),
+    };
+    let d: String = digits.chars().filter(|c| *c != '_' && !c.is_whitespace()).collect();
+    u64::from_str_radix(&d, radix).ok()
+}
+
+/// Whether a `cross` of the covergroup `t[lo..hi]` names the coverpoint `name`.
+fn crossed(t: &[Token], lo: usize, hi: usize, name: &str) -> bool {
+    (lo..hi).filter(|&j| t[j].is_kw("cross")).any(|j| t[j + 1..hi].iter().take_while(|x| !x.is_punct(";") && !x.is_punct("{")).any(|x| x.kind == TokKind::Ident && x.text == name))
 }
 
 /// The place of the `option` at `t[k]`, which is inside the covergroup `t[lo..k]` starts: the
@@ -63,7 +90,9 @@ fn place(t: &[Token], lo: usize, k: usize) -> Place {
                         break;
                     }
                     if y.is_kw("coverpoint") {
-                        return Place::Coverpoint;
+                        let label = (p >= 2 && t[p - 1].is_punct(":") && t[p - 2].kind == TokKind::Ident).then(|| t[p - 2].text.to_string());
+                        let var = t.get(p + 1).filter(|x| x.kind == TokKind::Ident && t.get(p + 2).is_some_and(|n| n.is_punct("{") || n.is_kw("iff"))).map(|x| x.text.to_string());
+                        return Place::Coverpoint(label.or(var));
                     }
                     if y.is_kw("cross") {
                         return Place::Cross;
@@ -102,9 +131,9 @@ impl Rule for WeightGoal {
             }
             let what = t[k + 2].text.clone();
             let value: Vec<&Token> = t[k + 4..].iter().take_while(|x| !x.is_punct(";")).collect();
-            let literal = |n: &str| value.len() == 1 && value[0].kind == TokKind::Number && value[0].text == n;
+            let literal = |n: u64| value.len() == 1 && value[0].kind == TokKind::Number && int_value(&value[0].text) == Some(n);
             // Writing the default (weight 1, goal 100) changes nothing.
-            if what == "weight" && literal("1") || what == "goal" && literal("100") {
+            if what == "weight" && literal(1) || what == "goal" && literal(100) {
                 continue;
             }
             let is_zero = value.len() == 1 && value[0].kind == TokKind::Number && zero(&value[0].text) == Some(true);
@@ -117,7 +146,7 @@ impl Rule for WeightGoal {
                 };
                 let ty = a.type_of(r).map(|ty| if a.decl(ty).kind == DeclKind::Typedef { a.follow_typedef(ty).unwrap_or(ty) } else { ty });
                 match (a.decl(r).kind, ty.map(|ty| a.decl(ty).kind)) {
-                    (DeclKind::Coverpoint, _) => Place::Coverpoint,
+                    (DeclKind::Coverpoint, _) => Place::Coverpoint(Some(a.decl(r).name.to_string())),
                     (DeclKind::Cross, _) => Place::Cross,
                     (_, Some(DeclKind::Covergroup)) | (DeclKind::Covergroup, _) => Place::Covergroup,
                     _ => continue,
@@ -127,9 +156,18 @@ impl Rule for WeightGoal {
                 let Some(&(lo, _)) = groups.iter().find(|(lo, hi)| *lo <= k && k < *hi) else { continue };
                 place(t, lo, k)
             };
-            // COV-7's exception: weight 0 on a coverpoint that only builds a cross.
-            if what == "weight" && is_zero && place == Place::Coverpoint {
-                continue;
+            // COV-7's exception: weight 0 on a coverpoint that only builds a cross (one of
+            // this file's covergroups crosses it).
+            if what == "weight" && is_zero {
+                if let Place::Coverpoint(name) = &place {
+                    let Some(name) = name else {
+                        cx.unknown_at("coverpoint without a name", t[k].span);
+                        continue;
+                    };
+                    if groups.iter().any(|(lo, hi)| crossed(t, *lo, *hi, name)) {
+                        continue;
+                    }
+                }
             }
             let span = Span::new(cx.file, t[k].span.start, t[k + 2].span.end);
             cx.report(None, span, format!("option.{what} is set: keep the default ({})", if what == "goal" { "100" } else { "1" }), Vec::new());

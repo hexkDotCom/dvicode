@@ -2323,3 +2323,31 @@ fn lint_code_actions_fix_waive_and_turn_off() {
     assert!(acts.to_string().contains("dvicode.lint.selectReason"), "{acts}");
     c.shutdown();
 }
+
+/// The problem limit: an open file's lint findings do not use it up (the compile problems of a
+/// closed file still show), and the notice of a cut file counts every finding not shown.
+#[test]
+fn lint_and_the_problem_limit() {
+    let lint_only = "package l;\n  class c;\n    rand int a;\n    function void f(); randomize(); endfunction\n  endclass\nendpackage\n";
+    let broken = "module e;\n  initial undeclared_y = 1;\nendmodule\n";
+    let mut many = String::from("package m;\n  class c;\n    rand int a;\n    function void f();\n");
+    for _ in 0..600 {
+        many.push_str("      randomize();\n");
+    }
+    many.push_str("    endfunction\n  endclass\nendpackage\n");
+    let root = project("lint-limit", &[("l.sv", lint_only), ("e.sv", broken), ("m.sv", &many)]);
+    let (mut c, _) = Client::start(&root, json!({ "maxProblems": 10 }));
+    let l = uri(&root, "l.sv");
+    c.open(&l, 1, lint_only);
+    c.wait_problems(&l, |p| p.version == Some(1) && p.diagnostics.len() == 1);
+    let e = uri(&root, "e.sv");
+    let p = c.wait_problems(&e, |p| !p.diagnostics.is_empty());
+    assert_eq!(sources(&p), [("dvicode".to_string(), "UNDECLARED_IDENTIFIER".to_string())]);
+    // 600 findings, 9 shown (the compile problem took one place): one notice for the other 591.
+    let m = uri(&root, "m.sv");
+    let p = c.wait_problems(&m, |p| p.diagnostics.iter().any(|d| d.message.contains("not shown")));
+    let notices: Vec<&str> = p.diagnostics.iter().filter(|d| d.message.contains("not shown")).map(|d| d.message.as_str()).collect();
+    assert_eq!(notices, ["Lint: 591 findings in this file are not shown (the problem limit, dvicode.maxProblems, is reached)"], "{:?}", sources(&p));
+    assert_eq!(p.diagnostics.len(), 10);
+    c.shutdown();
+}

@@ -279,6 +279,12 @@ impl Analysis {
         set.for_file(env, &self.path(file), outside)
     }
 
+    /// Where a guide waiver for a finding of `file` at `at` goes (see [`waivers::waiver_place`]).
+    pub fn lint_waiver_place(&self, file: FileId, unit: UnitId, at: u32) -> Option<u32> {
+        let text = self.file_text(file)?;
+        waivers::waiver_place(&text, &self.lint_facts.file(self, unit, file), at)
+    }
+
     /// Lints `file` with its resolved configuration, in `unit` (else the file's context unit).
     pub fn lint_file(&self, file: FileId, cfg: &config::FileConfig, unit: Option<UnitId>) -> FileLint {
         let mut out = FileLint { owned: cfg.owned.is_owned(), ..Default::default() };

@@ -57,13 +57,20 @@ impl Rule for OverrideSignature {
                 cx.unknown_at("macro", d.name_span);
                 continue;
             }
-            // The declaration it overrides, when it is UVM's own.
-            let Some(base) = a.class_base(class) else { continue };
-            let Some(theirs) = a.class_member(base, &d.name, 0) else { continue };
-            let Some(owner) = crate::lint::facts::member_class(a, theirs) else { continue };
-            if !a.in_uvm_library(owner) {
-                continue;
-            }
+            // The UVM declaration it overrides, through the project's own overrides between.
+            let uvm_origin = || {
+                let mut cur = a.class_base(class)?;
+                for _ in 0..64 {
+                    let m = a.class_member(cur, &d.name, 0)?;
+                    let owner = crate::lint::facts::member_class(a, m)?;
+                    if a.in_uvm_library(owner) {
+                        return Some(m);
+                    }
+                    cur = a.class_base(owner)?;
+                }
+                None
+            };
+            let Some(theirs) = uvm_origin() else { continue };
             let mine = DeclRef { unit: cx.unit, decl: i as DeclId };
             let td = a.decl(theirs);
             let related = vec![(td.name_span, format!("UVM declares {} {}", if td.kind == DeclKind::Task { "task" } else { "function" }, td.name))];

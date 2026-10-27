@@ -1277,11 +1277,13 @@ impl Server {
             // Files whose lint findings are added after every file's compile problems.
             let mut later: Vec<(FileId, Url, Vec<Diagnostic>)> = Vec::new();
             // Lint findings of a file, in the room its compile problems leave of the file's limit.
-            let lint_of = |f: FileId, compile: usize| -> Vec<Diagnostic> {
-                let Some(set) = &lint else { return Vec::new() };
+            let lint_of = |f: FileId, compile: usize| -> lint_pub::FileDiags {
+                let Some(set) = &lint else { return lint_pub::FileDiags::default() };
                 let room = dvi_analysis::ide::diagnostics::MAX_DIAGS_PER_FILE.saturating_sub(compile);
-                crash::catch("lint", None, || lint_pub::file_diagnostics(&a, &lint_configs, set, f, room))
-                    .unwrap_or_else(|| vec![lint_pub::notice("Lint failed on this file (see the DVICode log)".into())])
+                crash::catch("lint", None, || lint_pub::file_diagnostics(&a, &lint_configs, set, f, room)).unwrap_or_else(|| lint_pub::FileDiags {
+                    notes: vec![lint_pub::notice("Lint failed on this file (see the DVICode log)".into())],
+                    ..Default::default()
+                })
             };
             for f in files {
                 if a.vfs.is_builtin(f) {
@@ -1311,9 +1313,12 @@ impl Server {
                     continue;
                 };
                 let mut lsp: Vec<Diagnostic> = diags.iter().filter_map(|d| util::to_lsp_diag(&a, d)).collect();
+                // What counts against the limit: an open file's lint findings do not (it is
+                // never cut, and must not cut the compile problems of the files after it).
+                let mut counted = lsp.len();
                 if open.contains(&f) {
                     let n = lsp.len();
-                    lsp.extend(lint_of(f, n));
+                    lsp.extend(lint_of(f, n).into_vec(false));
                 } else {
                     if limit > 0 {
                         if total >= limit {
@@ -1325,8 +1330,9 @@ impl Server {
                     if lint.is_some() {
                         later.push((f, uri.clone(), lsp.clone()));
                     }
+                    counted = lsp.len();
                 }
-                total += lsp.len();
+                total += counted;
                 if send_problems(&published, &sender, &a, generation, f, uri.clone(), lsp) {
                     now.insert(uri);
                 }
@@ -1337,20 +1343,22 @@ impl Server {
                     continue;
                 }
                 let mut extra = lint_of(f, compile.len());
-                if limit > 0 && extra.len() > limit.saturating_sub(total) {
-                    let room = limit.saturating_sub(total);
-                    let cut = extra.len() - room;
-                    extra.truncate(room);
+                let mut by_limit = false;
+                if limit > 0 && extra.cut(limit.saturating_sub(total)) > 0 {
                     // Said once, in the file whose findings the limit cut first.
-                    if !cut_said {
+                    if cut_said {
+                        extra.hidden = 0;
+                        extra.notes.clear();
+                    } else {
                         cut_said = true;
-                        extra.push(lint_pub::notice(format!("Lint: {cut} findings in this file are not shown (the problem limit, dvicode.maxProblems, is reached)")));
+                        by_limit = true;
                     }
                 }
+                total += extra.shown.len();
+                let extra = extra.into_vec(by_limit);
                 if extra.is_empty() {
                     continue;
                 }
-                total += extra.len();
                 let mut lsp = compile;
                 lsp.extend(extra);
                 send_problems(&published, &sender, &a, generation, f, uri, lsp);
@@ -1391,6 +1399,11 @@ impl Server {
                     let p = PublishDiagnosticsParams { uri: u, diagnostics: Vec::new(), version: None };
                     let _ = sender.send(Message::Notification(Notification::new("textDocument/publishDiagnostics".into(), p)));
                 }
+                // Forget the files that show nothing and no newer job covers (closed, deleted,
+                // renamed): an older job still running finds no entry, so it publishes nothing
+                // for them either.
+                let PubState { latest, published, .. } = &mut *st;
+                latest.retain(|u, g| *g > generation || published.contains_key(u));
             }
             if let Some(h) = &hooks.problem_check {
                 h(false);
@@ -1531,10 +1544,13 @@ impl Server {
                 let mut lint_config = false;
                 for c in p.changes {
                     let Some(path) = path_of(&c.uri) else { continue };
-                    // Read by the problem checks, not by the build.
+                    // Read by the problem checks, not by the build (unless the build names it
+                    // too: an argument file may have any name).
                     if lint_pub::is_config(&path) {
                         lint_config = true;
-                        continue;
+                        if !self.is_build_input(&path) {
+                            continue;
+                        }
                     }
                     if self.building && !is_log(&path) {
                         self.changed_while_building.insert(path.clone());
@@ -2348,6 +2364,7 @@ impl Server {
                 // Rebuild Project reads every file again: some may have changed where no
                 // watcher reports it (outside the workspace, or on a remote host).
                 self.vfs.clear_disk_cache();
+                self.lint_configs.invalidate();
                 self.start_build();
                 self.send(Message::Response(ok_response(req.id, Value::Null)));
             }
