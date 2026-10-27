@@ -62,7 +62,14 @@ fn main() {
         .stack_size(16 << 20)
         .thread_name(|i| format!("dvicode-worker-{i}"))
         .build_global();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Arguments that are not UTF-8 (a path on Linux) are refused, not a panic.
+    let args: Vec<String> = match std::env::args_os().skip(1).map(|a| a.into_string()).collect::<Result<_, _>>() {
+        Ok(a) => a,
+        Err(a) => {
+            eprintln!("dvicode: an argument is not UTF-8 text: {}", a.to_string_lossy());
+            std::process::exit(2);
+        }
+    };
     let mut log_level = log::LevelFilter::Info;
     let mut log_file: Option<String> = None;
     let mut listen: Option<String> = None;

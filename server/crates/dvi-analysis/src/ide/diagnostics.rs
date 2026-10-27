@@ -4,7 +4,7 @@ use dvi_syntax::SourceProvider;
 use crate::resolve::{CLASS_BUILTINS, COVERGROUP_BUILTINS};
 use crate::world::{Analysis, DeclRef, UnitId};
 use dvi_syntax::ast::{dflags, DeclId, DeclKind, ParsedUnit, RefKind, Sep};
-use dvi_syntax::{Diag, FileId, Span};
+use dvi_syntax::{Diag, FileId, Severity, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
@@ -74,6 +74,20 @@ pub const MAX_SYNTAX_PER_FILE: usize = 50;
 
 impl Analysis {
     pub fn file_diagnostics(&self, file: FileId) -> Vec<Diag> {
+        let mut out = self.diagnostics_of(file, false);
+        out.truncate(MAX_DIAGS_PER_FILE);
+        out
+    }
+
+    /// The errors of `file`, all of them (not the editor's first [`MAX_DIAGS_PER_FILE`]
+    /// problems); `all_contexts`: a header in every unit that compiles it, not only its first.
+    pub fn file_errors(&self, file: FileId, all_contexts: bool) -> Vec<Diag> {
+        let mut out = self.diagnostics_of(file, all_contexts);
+        out.retain(|d| d.severity == Severity::Error);
+        out
+    }
+
+    fn diagnostics_of(&self, file: FileId, all_contexts: bool) -> Vec<Diag> {
         let mut out: Vec<Diag> = Vec::new();
         // By place and a hash of the message (not a second copy of every message).
         let mut seen: FxHashSet<(u32, u32, u64)> = FxHashSet::default();
@@ -88,7 +102,7 @@ impl Analysis {
                 out.push(d);
             }
         };
-        let units = self.editor_units(file);
+        let units = if all_contexts { self.units_for(file) } else { self.editor_units(file) };
         for &uid in &units {
             let u = self.unit(uid);
             for d in u.pp_diags.iter().chain(u.parsed.diags.iter()) {
@@ -100,7 +114,7 @@ impl Analysis {
                 push(d, &mut out);
             }
             // Analyse a header once, in its first unit.
-            if u.root != file {
+            if u.root != file && !all_contexts {
                 break;
             }
         }
@@ -137,7 +151,6 @@ impl Analysis {
                 true
             }
         });
-        out.truncate(MAX_DIAGS_PER_FILE);
         out
     }
 

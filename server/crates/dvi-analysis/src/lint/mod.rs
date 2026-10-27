@@ -19,6 +19,20 @@ pub mod rules;
 pub mod waivers;
 
 use crate::select::ContextKey;
+
+/// The largest configuration, baseline or formatter file read.
+pub const MAX_CONTROL_FILE: u64 = 256 << 20;
+
+/// Reads a configuration, baseline or formatter file: a regular file (not a device, a FIFO or
+/// a folder, wherever a link points) of at most [`MAX_CONTROL_FILE`] bytes.
+pub fn read_control_file(path: &std::path::Path) -> Option<Vec<u8>> {
+    let m = dvi_project::fsx::metadata(path).ok()?;
+    if !m.is_file() || m.len() > MAX_CONTROL_FILE {
+        return None;
+    }
+    let b = dvi_project::fsx::read(path).ok()?;
+    (b.len() as u64 <= MAX_CONTROL_FILE).then_some(b)
+}
 use crate::world::{Analysis, UnitId};
 use dvi_syntax::{FileId, Severity, Span};
 use rustc_hash::FxHashMap;

@@ -56,16 +56,26 @@ impl Item {
     }
 }
 
+/// `s` with its control characters written as `\u{..}` escapes: text from the project (a file
+/// name, a message quoting the code) cannot move the cursor, recolour or retitle a terminal, or
+/// start a GitHub workflow command on a line of its own.
+pub fn plain(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(s.chars().map(|c| if c.is_control() { c.escape_unicode().to_string() } else { c.to_string() }).collect())
+}
+
 pub fn text(items: &[Item], show_kept: bool) -> String {
     let mut s = String::new();
     for x in items.iter().filter(|x| x.counts() || show_kept) {
         let (line, col) = x.line_col();
         let kept = match &x.kept {
             Kept::No => String::new(),
-            Kept::InSource(w) => format!(" (suppressed: {w})"),
+            Kept::InSource(w) => format!(" (suppressed: {})", plain(w)),
             Kept::Baseline => " (in the baseline)".into(),
         };
-        s.push_str(&format!("{}:{line}:{col}: {}: {} [{}]{kept}\n", x.path, x.level.as_str(), x.message, x.tag()));
+        s.push_str(&format!("{}:{line}:{col}: {}: {} [{}]{kept}\n", plain(&x.path), x.level.as_str(), plain(&x.message), x.tag()));
     }
     s
 }
@@ -201,7 +211,7 @@ fn xml(s: &str) -> String {
             '"' => o.push_str("&quot;"),
             '\'' => o.push_str("&apos;"),
             // Characters XML 1.0 cannot hold.
-            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => o.push_str(&format!("&#x{:x};", 0xFFFD)),
+            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') || matches!(c, '\u{FFFE}' | '\u{FFFF}') => o.push_str(&format!("&#x{:x};", 0xFFFD)),
             c => o.push(c),
         }
     }
@@ -214,14 +224,20 @@ pub fn junit(items: &[Item], files: &[String], fail_on: Option<Level>) -> String
     let mut s = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     let metas: Vec<_> = rules::all().iter().map(|r| r.meta()).collect();
     let failing = |x: &&Item| x.counts() && fail_on.is_some_and(|f| x.level >= f);
-    let total_fail: usize = metas.iter().map(|m| files.iter().filter(|f| items.iter().filter(failing).any(|x| x.rule == m.id && &x.rel == *f)).count()).sum();
+    // The failing findings by rule and file, found once.
+    let mut by: rustc_hash::FxHashMap<(&str, &str), Vec<&Item>> = rustc_hash::FxHashMap::default();
+    for x in items.iter().filter(failing) {
+        by.entry((x.rule, x.rel.as_str())).or_default().push(x);
+    }
+    let fails_of = |id: &str| files.iter().filter(|f| by.contains_key(&(id, f.as_str()))).count();
+    let total_fail: usize = metas.iter().map(|m| fails_of(m.id)).sum();
     s.push_str(&format!("<testsuites name=\"DVICode Lint\" tests=\"{}\" failures=\"{total_fail}\">\n", metas.len() * files.len()));
+    let none = Vec::new();
     for m in &metas {
-        let mine: Vec<&Item> = items.iter().filter(failing).filter(|x| x.rule == m.id).collect();
-        let fails = files.iter().filter(|f| mine.iter().any(|x| &x.rel == *f)).count();
+        let fails = fails_of(m.id);
         s.push_str(&format!("  <testsuite name=\"{}\" tests=\"{}\" failures=\"{fails}\">\n", xml(m.id), files.len()));
         for f in files {
-            let here: Vec<&&Item> = mine.iter().filter(|x| &x.rel == f).collect();
+            let here = by.get(&(m.id, f.as_str())).unwrap_or(&none);
             if here.is_empty() {
                 s.push_str(&format!("    <testcase classname=\"{}\" name=\"{}\"/>\n", xml(m.id), xml(f)));
             } else {
@@ -258,8 +274,11 @@ fn gh_prop(s: &str) -> String {
     gh_data(s).replace(':', "%3A").replace(',', "%2C")
 }
 
-/// At most this many annotations per level (GitHub shows few of them on a step).
-pub const GITHUB_MAX: usize = 50;
+/// At most this many annotations per level: what GitHub shows of a step.
+pub const GITHUB_MAX: usize = 10;
+
+/// The longest annotation message written (GitHub refuses very long ones).
+const GITHUB_MESSAGE_MAX: usize = 4000;
 
 /// GitHub workflow annotations (`::warning file=...::message`), the counted findings only.
 /// GitHub reads `file` from the repository root: the path relative to `base` (the working
@@ -287,7 +306,15 @@ pub fn github(items: &[Item], base: Option<&std::path::Path>) -> String {
         if let Some(r) = x.range {
             props.push_str(&format!(",line={},col={},endLine={},endColumn={}", r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1));
         }
-        s.push_str(&format!("::{cmd} {props}::{}\n", gh_data(&x.message)));
+        let mut m = x.message.as_str();
+        if m.len() > GITHUB_MESSAGE_MAX {
+            let mut end = GITHUB_MESSAGE_MAX;
+            while !m.is_char_boundary(end) {
+                end -= 1;
+            }
+            m = &m[..end];
+        }
+        s.push_str(&format!("::{cmd} {props}::{}\n", gh_data(m)));
     }
     for (k, name) in ["errors", "warnings", "notices"].iter().enumerate() {
         if left[k] > 0 {
@@ -329,6 +356,21 @@ mod tests {
         let out = github(&many, None);
         assert_eq!(out.lines().filter(|l| l.starts_with("::error")).count(), GITHUB_MAX);
         assert!(out.contains("3 more errors"));
+        // A very long message is cut at a character boundary.
+        let long = "é".repeat(5000);
+        let out = github(&[item("randomize-result-discarded", Level::Warning, "a.sv", &long)], None);
+        assert!(out.len() < 4200, "{}", out.len());
+    }
+
+    #[test]
+    fn plain_escapes_control_characters() {
+        assert_eq!(plain("a.sv"), "a.sv");
+        assert_eq!(plain("x\u{1b}]52;c;Zg==\u{7}\n::warning::y"), "x\\u{1b}]52;c;Zg==\\u{7}\\u{a}::warning::y");
+    }
+
+    #[test]
+    fn xml_drops_what_xml_cannot_hold() {
+        assert_eq!(xml("a\u{FFFE}b\u{1}c\td"), "a&#xfffd;b&#xfffd;c\td");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::lint::facts::UvmRole;
 use crate::lint::{Cx, Fix, Level, Rule, RuleMeta, Ruleset};
 use crate::world::{DeclRef, Unit};
 use dvi_syntax::preproc::MacroUse;
-use dvi_syntax::ast::{DeclId, DeclKind};
+use dvi_syntax::ast::DeclKind;
 use dvi_syntax::{Span, TokKind};
 
 pub struct RegistrationMismatch;
@@ -42,9 +42,8 @@ pub(super) struct Registration<'u> {
 pub(super) fn registrations<'u>(cx: &mut Cx, u: &'u Unit) -> Vec<Registration<'u>> {
     let a = cx.a;
     let uvm = a.lint_facts.uvm_files(a);
-    // The classes written in this file, smallest last: a call belongs to the innermost.
-    let mut classes: Vec<DeclId> = u.parsed.decls.iter().enumerate().filter(|(_, d)| d.kind == DeclKind::Class && d.span.file == cx.file).map(|(i, _)| i as DeclId).collect();
-    classes.sort_by_key(|c| std::cmp::Reverse(u.parsed.decl(*c).span.end - u.parsed.decl(*c).span.start));
+    // A call belongs to the innermost class around it.
+    let facts = cx.facts.clone();
     let mut out = Vec::new();
     for m in &u.macro_uses {
         if m.name_span.file != cx.file || !cx.step(1) {
@@ -55,12 +54,7 @@ pub(super) fn registrations<'u>(cx: &mut Cx, u: &'u Unit) -> Vec<Registration<'u
         if !m.def.as_ref().is_some_and(|d| uvm.contains(&d.name_span.file)) {
             continue;
         }
-        let Some(&cid) = classes.iter().rev().find(|c| {
-            let d = u.parsed.decl(**c);
-            d.span.start <= m.name_span.start && m.name_span.end <= d.span.end
-        }) else {
-            continue;
-        };
+        let Some(cid) = facts.classes.innermost(m.name_span) else { continue };
         out.push(Registration { class: DeclRef { unit: cx.unit, decl: cid }, call: m, form: f });
     }
     out

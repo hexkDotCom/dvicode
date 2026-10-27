@@ -18,9 +18,16 @@ pub enum Changed {
 pub fn since(root: &Path, rev: &str, exact: bool) -> Result<FxHashMap<PathBuf, Changed>, String> {
     let top = git(root, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.trim());
+    // The revision as a commit ID: whatever is given is never taken for an option.
+    let rev = git(root, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{rev}^{{commit}}")]).map_err(|_| format!("{rev} is not a commit"))?;
+    let rev = rev.trim();
     let base = if exact { rev.to_string() } else { git(root, &["merge-base", rev, "HEAD"])?.trim().to_string() };
-    // Fixed prefixes (`diff.mnemonicPrefix` and `diff.noprefix` change them); no textconv.
-    let diff = git(root, &["diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "-M", &base, "--"])?;
+    // Paths from the top with fixed prefixes (`diff.mnemonicPrefix`, `diff.noprefix` and
+    // `diff.relative` change them), no textconv, and the files changed inside submodules.
+    let diff = git(
+        root,
+        &["diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=diff", "-M", &base, "--"],
+    )?;
     let mut out = parse_diff(&diff, &top);
     // NUL-separated: names as they are, unquoted.
     for f in git(root, &["ls-files", "-z", "--others", "--exclude-standard", "--full-name"])?.split('\0').filter(|l| !l.is_empty()) {
@@ -30,7 +37,8 @@ pub fn since(root: &Path, rev: &str, exact: bool) -> Result<FxHashMap<PathBuf, C
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output().map_err(|e| format!("cannot run git: {e}"))?;
+    // The repository's own configuration must not run a program (a file-system monitor).
+    let o = Command::new("git").arg("-C").arg(dir).args(["-c", "core.fsmonitor=false"]).args(args).output().map_err(|e| format!("cannot run git: {e}"))?;
     if !o.status.success() {
         return Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim()));
     }
@@ -42,7 +50,22 @@ pub fn parse_diff(diff: &str, top: &Path) -> FxHashMap<PathBuf, Changed> {
     let mut out: FxHashMap<PathBuf, Changed> = FxHashMap::default();
     let mut cur: Option<PathBuf> = None;
     let mut whole = false;
+    // The old and new lines left in the current hunk: a hunk's own lines may start with
+    // `+++ ` or `diff --git ` too.
+    let (mut old_left, mut new_left) = (0u32, 0u32);
     for line in diff.lines() {
+        if old_left > 0 || new_left > 0 {
+            match line.as_bytes().first() {
+                Some(b'-') => old_left = old_left.saturating_sub(1),
+                Some(b'+') => new_left = new_left.saturating_sub(1),
+                Some(b'\\') => {}
+                _ => {
+                    old_left = old_left.saturating_sub(1);
+                    new_left = new_left.saturating_sub(1);
+                }
+            }
+            continue;
+        }
         if line.starts_with("diff --git ") {
             cur = None;
             whole = false;
@@ -59,16 +82,27 @@ pub fn parse_diff(diff: &str, top: &Path) -> FxHashMap<PathBuf, Changed> {
             let path = top.join(p);
             out.insert(path.clone(), if whole { Changed::Whole } else { Changed::Lines(Vec::new()) });
             cur = Some(path);
+        } else if let Some(b) = line.strip_prefix("Binary files ").and_then(|l| l.strip_suffix(" differ")) {
+            // No lines to tell: the whole file (`-diff` in .gitattributes, or a binary file).
+            if let Some(i) = b.rfind(" and ") {
+                let p = unquote(&b[i + 5..]);
+                if p != "/dev/null" {
+                    out.insert(top.join(p.strip_prefix("b/").unwrap_or(&p)), Changed::Whole);
+                }
+            }
         } else if line.starts_with("rename to ") && whole {
             // A rename without content changes has no `+++` line.
             let p = unquote(line["rename to ".len()..].trim_end_matches('\t'));
             out.insert(top.join(p), Changed::Whole);
         } else if let (Some(h), Some(path)) = (line.strip_prefix("@@ "), cur.as_ref()) {
             // `@@ -a[,b] +c[,d] @@`: lines c..c+d-1 are new; d = 0 is a deletion after line c.
-            let Some(plus) = h.split_whitespace().find(|w| w.starts_with('+')) else { continue };
-            let mut it = plus[1..].split(',');
-            let c: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-            let d: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            let count = |sign: char| -> (u32, u32) {
+                let Some(w) = h.split_whitespace().find(|w| w.starts_with(sign)) else { return (0, 0) };
+                let mut it = w[1..].split(',');
+                (it.next().and_then(|x| x.parse().ok()).unwrap_or(0), it.next().and_then(|x| x.parse().ok()).unwrap_or(1))
+            };
+            let (c, d) = count('+');
+            (old_left, new_left) = (count('-').1, d);
             // A deletion after line c changes the line that now follows it.
             let range = if d == 0 { (c + 1, c + 1) } else { (c, c + d - 1) };
             if let Some(Changed::Lines(v)) = out.get_mut(path) {
@@ -98,6 +132,11 @@ fn unquote(p: &str) -> String {
             out.push(match c {
                 b'n' => b'\n',
                 b't' => b'\t',
+                b'r' => b'\r',
+                b'a' => 7,
+                b'b' => 8,
+                b'f' => 12,
+                b'v' => 11,
                 other => other,
             });
             i += 2;
@@ -133,7 +172,7 @@ mod tests {
 
     #[test]
     fn diff_lines() {
-        let d = "diff --git a/a.sv b/a.sv\nindex 1..2 100644\n--- a/a.sv\n+++ b/a.sv\n@@ -3 +3 @@\n-x\n+y\n@@ -10,2 +10,0 @@\n-p\n-q\n@@ -20,0 +19,3 @@\n+r\n\
+        let d = "diff --git a/a.sv b/a.sv\nindex 1..2 100644\n--- a/a.sv\n+++ b/a.sv\n@@ -3 +3 @@\n-x\n+y\n@@ -10,2 +10,0 @@\n-p\n-q\n@@ -20,0 +19,3 @@\n+r\n+s\n+t\n\
 diff --git a/n.sv b/n.sv\nnew file mode 100644\n--- /dev/null\n+++ b/n.sv\n@@ -0,0 +1,2 @@\n+a\n+b\n\
 diff --git a/o.sv b/m.sv\nsimilarity index 100%\nrename from o.sv\nrename to m.sv\n";
         let top = Path::new("/r");
@@ -150,5 +189,11 @@ diff --git \"a/q\\303\\251.sv\" \"b/q\\303\\251.sv\"\n--- \"a/q\\303\\251.sv\"\n
         assert!(!touches(&c, &top.join("a.sv"), 5, 9));
         assert!(!touches(&c, &top.join("b.sv"), 1, 1));
         assert_eq!(unquote("\"sp ace\\303\\251.sv\""), "sp aceé.sv");
+        // An added line that reads like a header, inside a hunk; a binary diff.
+        let h = parse_diff("diff --git a/a.sv b/a.sv\n--- a/a.sv\n+++ b/a.sv\n@@ -1,0 +2 @@\n+++ i;\n@@ -5,0 +7 @@\n+x\n\
+diff --git a/b.sv b/b.sv\nindex 1..2 100644\nBinary files a/b.sv and b/b.sv differ\n", top);
+        assert_eq!(h[&top.join("a.sv")], Changed::Lines(vec![(2, 2), (7, 7)]));
+        assert_eq!(h[&top.join("b.sv")], Changed::Whole);
+        assert_eq!(h.len(), 2, "{h:?}");
     }
 }

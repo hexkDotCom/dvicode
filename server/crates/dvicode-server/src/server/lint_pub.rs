@@ -98,7 +98,7 @@ impl LintConfigs {
                 c.invalidate();
             }
         }
-        let b = dvi_project::fsx::read(path).ok().and_then(|t| String::from_utf8(t).ok()).and_then(|t| Baseline::read(&t).ok()).map(Arc::new);
+        let b = dvi_analysis::lint::read_control_file(path).and_then(|t| String::from_utf8(t).ok()).and_then(|t| Baseline::read(&t).ok()).map(Arc::new);
         self.baselines.lock().unwrap().insert(path.to_path_buf(), (stamp, b.clone()));
         b
     }

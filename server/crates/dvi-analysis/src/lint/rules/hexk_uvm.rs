@@ -71,7 +71,7 @@ impl Rule for ClassNotRegistered {
             cx.unknown("repeated inclusion");
             return;
         }
-        let registered: Vec<DeclId> = registrations(cx, &u).iter().map(|r| r.class.decl).collect();
+        let registered: rustc_hash::FxHashSet<DeclId> = registrations(cx, &u).iter().map(|r| r.class.decl).collect();
         let uvm = a.lint_facts.uvm_files(a);
         for (i, d) in u.parsed.decls.iter().enumerate() {
             if d.kind != DeclKind::Class || d.name_span.file != cx.file || d.has(dflags::FROM_MACRO) || d.has(dflags::VIRTUAL) || !cx.step(1) {

@@ -40,7 +40,7 @@ pub fn options_for(file: &Path) -> Option<Options> {
     let mut o = Options { indent_size: 2, use_tabs: false, ..Options::default() };
     let Some(p) = format_json(file) else { return Some(o) };
     // An unreadable or invalid file is ignored, as the editor's formatter ignores it.
-    let Some(v) = dvi_project::fsx::read(&p).ok().and_then(|t| serde_json::from_slice::<Value>(&t).ok()) else { return Some(o) };
+    let Some(v) = crate::lint::read_control_file(&p).and_then(|t| serde_json::from_slice::<Value>(&t).ok()) else { return Some(o) };
     let Some(m) = v.as_object() else { return Some(o) };
     for (k, x) in m {
         match k.as_str() {

@@ -69,9 +69,18 @@ dvicode lint --print-config FILE [<dir>]
   (`--build FILE`, or `--build auto` to configure from the folder), else
   `.dvicode/default.build`, else auto-configuration.
 - `PATH...` limits what is **reported** to these files or folders. The project is still
-  compiled whole, so headers are read in the context of their package.
-- `--all-contexts` lints each file in every compile context that compiles it. By default, a
-  file is linted in its first context.
+  compiled whole, so headers are read in the context of their package. Each path must exist
+  and hold files of the project.
+- `--all-contexts` lints each file in every compile context that compiles it, and counts the
+  compile errors of headers in every context too. By default, a file is linted in its first
+  context.
+- Compile errors fail the run (status 1); the first 100 are printed on stderr, and the JSON
+  output lists them under `compile.first`.
+- `--output`, `--output-sarif` and `--write-baseline` refuse a symbolic link, so that a
+  project cannot point them elsewhere.
+- On Windows, a network path (`\\host\share\...`) in the project is read only when its host is
+  the host of the folder or build file given, or is listed in `DVICODE_ALLOWED_UNC_HOSTS`
+  (comma-separated): reading one makes Windows sign in to that host.
 - `--print-config FILE` shows the configuration of one file: where each value comes from, and
   whether the file is linted at all.
 
@@ -81,7 +90,7 @@ Exit status, the first that applies:
 |---|---|
 | 3 | internal failure (also: the output cannot be written) |
 | 2 | usage or configuration error, an unreadable build file, nothing to lint |
-| 4 | analysis incomplete (syntax errors, encrypted code, a budget) unless `--allow-incomplete` |
+| 4 | analysis incomplete (syntax errors, encrypted code, a budget, auto-configuration stopped at its limit of 50,000 source files) unless `--allow-incomplete`; also when `--write-baseline` is refused for that reason |
 | 1 | findings at or above `--fail-on` (default `warning`), or compile errors (unless `--no-fail-on-compile-errors`) |
 | 0 | otherwise |
 

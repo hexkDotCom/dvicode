@@ -135,17 +135,12 @@ impl Rule for ExtendsUvmTransaction {
 fn library_calls<'u>(cx: &Cx, u: &'u crate::world::Unit, want: &dyn Fn(&str) -> bool) -> Vec<(&'u dvi_syntax::preproc::MacroUse, Option<DeclRef>)> {
     let a = cx.a;
     let uvm = a.lint_facts.uvm_files(a);
-    let mut classes: Vec<DeclId> = u.parsed.decls.iter().enumerate().filter(|(_, d)| d.kind == DeclKind::Class && d.span.file == cx.file).map(|(i, _)| i as DeclId).collect();
-    classes.sort_by_key(|c| std::cmp::Reverse(u.parsed.decl(*c).span.end - u.parsed.decl(*c).span.start));
+    let facts = cx.facts.clone();
     u.macro_uses
         .iter()
         .filter(|m| m.name_span.file == cx.file && want(&m.name) && m.def.as_ref().is_some_and(|d| uvm.contains(&d.name_span.file)))
         .map(|m| {
-            let c = classes.iter().rev().find(|c| {
-                let d = u.parsed.decl(**c);
-                d.span.start <= m.name_span.start && m.name_span.end <= d.span.end
-            });
-            (m, c.map(|c| DeclRef { unit: cx.unit, decl: *c }))
+            (m, facts.classes.innermost(m.name_span).map(|c| DeclRef { unit: cx.unit, decl: c }))
         })
         .collect()
 }

@@ -11,7 +11,7 @@ use crate::lint_out::{self, Item, Kept};
 use dvi_analysis::lint::baseline::{self, Baseline, Fingerprint};
 use dvi_analysis::lint::{rules, FileLint, Level, Ruleset};
 use dvi_analysis::{Analysis, UnitKind, Vfs};
-use dvi_syntax::{FileId, Severity};
+use dvi_syntax::FileId;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
@@ -89,9 +89,10 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         changed_exact: false,
     };
     let mut i = 0;
+    // A value is never another option (`--output --stats` is a missing value).
     let value = |i: &mut usize, name: &str| -> Result<String, String> {
         *i += 1;
-        args.get(*i).cloned().ok_or_else(|| format!("{name} needs a value"))
+        args.get(*i).filter(|v| !v.starts_with("--")).cloned().ok_or_else(|| format!("{name} needs a value"))
     };
     while i < args.len() {
         let a = args[i].as_str();
@@ -201,6 +202,13 @@ pub fn run(args: &[String]) -> i32 {
             }
         };
     }
+    // Files written are never reached through a symbolic link (one a project could plant).
+    for p in [&o.output, &o.output_sarif, &o.write_baseline].into_iter().flatten() {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            eprintln!("lint: {} is a symbolic link: give the file itself", p.display());
+            return 2;
+        }
+    }
     let defaults = Defaults { cli_rulesets: o.rulesets.clone(), cli_rules: o.rules.clone(), ..Defaults::default() };
     if let Some(c) = &o.config {
         if !c.is_file() {
@@ -226,7 +234,15 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("{USAGE}");
         return 2;
     };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lint_project(&o, &dir, defaults))) {
+    // `--jobs` bounds the whole run: the build and the compile checks too.
+    let pool = match rayon::ThreadPoolBuilder::new().num_threads(o.jobs).build() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("lint: cannot start {} threads: {e}", o.jobs);
+            return 3;
+        }
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.install(|| lint_project(&o, &dir, defaults)))) {
         Ok(code) => code,
         Err(_) => {
             eprintln!("lint: internal error (see the message above)");
@@ -271,12 +287,22 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     let mut files = a.project_files();
     files.retain(|f| !a.vfs.is_builtin(*f));
     files.sort_by_key(|f| a.path(*f));
+    // Each path given must exist and name project files; compared as canonical paths (the
+    // build may spell them otherwise, or through a link).
     let filters: Vec<PathBuf> = o.paths.iter().map(|p| crate::check::canonical_path(p)).collect();
     if !filters.is_empty() {
-        files.retain(|f| {
-            let p = a.path(*f);
-            filters.iter().any(|x| p.starts_with(x))
-        });
+        if let Some(p) = o.paths.iter().find(|p| !p.exists()) {
+            eprintln!("lint: {} does not exist", p.display());
+            return 2;
+        }
+        let canon: Vec<PathBuf> = files.iter().map(|f| crate::check::canonical_path(&a.path(*f))).collect();
+        if let Some((p, _)) = o.paths.iter().zip(&filters).find(|(_, x)| !canon.iter().any(|c| c.starts_with(x))) {
+            eprintln!("lint: {} holds no file of the project", p.display());
+            return 2;
+        }
+        let keep: Vec<bool> = canon.iter().map(|c| filters.iter().any(|x| c.starts_with(x))).collect();
+        let mut k = keep.into_iter();
+        files.retain(|_| k.next().unwrap_or(false));
     }
     // Configurations first: a broken configuration lints nothing.
     let configs: Vec<FileConfig> = files.iter().map(|f| a.lint_config(&set, &DiskEnv, *f)).collect();
@@ -284,8 +310,10 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     for c in set.loaded() {
         for p in c.problems.iter().chain(set.reason_notes(&DiskEnv, &c).iter()) {
             let (line, col) = line_col(&c.text, p.start);
-            eprintln!("{}:{}:{}: {}: {}", p.path.display(), line + 1, col + 1, if p.warning { "warning" } else { "error" }, p.message);
-            config_problems += usize::from(!p.warning);
+            // A baseline that cannot be read is what `--write-baseline` writes again.
+            let warning = p.warning || o.write_baseline.is_some() && p.message.starts_with("The baseline ");
+            eprintln!("{}:{}:{}: {}: {}", lint_out::plain(&p.path.display().to_string()), line + 1, col + 1, if warning { "warning" } else { "error" }, lint_out::plain(&p.message));
+            config_problems += usize::from(!warning);
         }
     }
     if config_problems > 0 {
@@ -303,10 +331,26 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     // Computed once before the files are checked in parallel: it runs parallel work itself, which
     // workers all waiting for it could not run.
     let _ = a.hidden_uses();
-    let compile_errors: usize = a.project_files().par_iter().map(|f| a.file_diagnostics(*f).iter().filter(|d| d.severity == Severity::Error).count()).sum();
+    // Every error (not the editor's first problems of a file), in every context with
+    // --all-contexts; the first ones are printed, so that a failing run says why.
+    let errors: Vec<(FileId, Vec<dvi_syntax::Diag>)> = a.project_files().par_iter().map(|f| (*f, a.file_errors(*f, o.all_contexts))).filter(|(_, e)| !e.is_empty()).collect();
+    let compile_errors: usize = errors.iter().map(|(_, e)| e.len()).sum();
+    let mut compile_list: Vec<Value> = Vec::new();
+    for (f, e) in &errors {
+        for d in e {
+            if compile_list.len() == 100 {
+                break;
+            }
+            let (l, c) = a.to_range(d.span).map_or((0, 0), |r| (r.start.line + 1, r.start.character + 1));
+            eprintln!("{}:{l}:{c}: error: {}", lint_out::plain(&a.path(*f).display().to_string()), lint_out::plain(&d.message));
+            compile_list.push(json!({ "path": a.path(*f).display().to_string(), "line": l, "column": c, "code": d.code, "message": d.message }));
+        }
+    }
+    if compile_errors > compile_list.len() {
+        eprintln!("lint: {} more compile errors", compile_errors - compile_list.len());
+    }
     let t1 = std::time::Instant::now();
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(o.jobs).build().expect("thread pool");
-    let linted: Vec<Linted> = pool.install(|| {
+    let linted: Vec<Linted> = {
         owned
             .par_iter()
             .map(|(f, cfg)| {
@@ -329,7 +373,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                 Linted { file: *f, results }
             })
             .collect()
-    });
+    };
     let lint_ms = t1.elapsed().as_millis();
     let rel_of = |p: &Path| p.strip_prefix(&root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| p.to_string_lossy().to_string());
     // What changed, when only that is reported.
@@ -346,7 +390,8 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     // Baselines: the one given, else each file's (from its configuration).
     let mut baselines: FxHashMap<PathBuf, Option<Baseline>> = FxHashMap::default();
     if let Some(b) = &o.baseline {
-        match std::fs::read_to_string(b).map_err(|e| e.to_string()).and_then(|t| Baseline::read(&t)) {
+        let text = dvi_analysis::lint::read_control_file(b).ok_or_else(|| "cannot read it (a regular file of at most 256 MB)".to_string()).and_then(|t| String::from_utf8(t).map_err(|_| "not UTF-8".to_string()));
+        match text.and_then(|t| Baseline::read(&t)) {
             Ok(x) => {
                 baselines.insert(PathBuf::new(), Some(x));
             }
@@ -417,7 +462,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         let base_key = if o.baseline.is_some() { Some(PathBuf::new()) } else { cfg.baseline.clone() };
         let mut in_base = vec![false; merged.len()];
         if let Some(k) = base_key {
-            let b = baselines.entry(k.clone()).or_insert_with(|| std::fs::read_to_string(&k).ok().and_then(|t| Baseline::read(&t).ok()));
+            let b = baselines.entry(k.clone()).or_insert_with(|| dvi_analysis::lint::read_control_file(&k).and_then(|t| String::from_utf8(t).ok()).and_then(|t| Baseline::read(&t).ok()));
             if let Some(b) = b {
                 for (j, hit) in b.take(&open_fps).into_iter().enumerate() {
                     in_base[open[j]] = hit;
@@ -425,6 +470,12 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             }
         }
         for (i, (x, ctxs, _)) in merged.into_iter().enumerate() {
+            // Numbered before the changed-lines filter: a finding's fingerprint does not
+            // depend on what is reported.
+            let fp = &fps[i];
+            let core = fnv(format!("{}|{}|{}|{}|{}", fp.rule, fp.subcheck, fp.path, fp.symbol, fp.text).as_bytes());
+            let nth = seen_core.entry(core).or_default();
+            *nth += 1;
             let range = a.to_range(x.span);
             if let (Some(c), Some(r)) = (&changed, &range) {
                 if !crate::changed::touches(c, &path, r.start.line + 1, r.end.line + 1) {
@@ -437,27 +488,27 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                 (None, true) => Kept::Baseline,
                 (None, false) => Kept::No,
             };
-            let fp = &fps[i];
-            let core = fnv(format!("{}|{}|{}|{}|{}", fp.rule, fp.subcheck, fp.path, fp.symbol, fp.text).as_bytes());
-            let nth = seen_core.entry(core).or_default();
-            *nth += 1;
             let fingerprint = format!("{core:016x}:{nth}");
             let context_fingerprint = fp.around.clone();
             let outside = path.strip_prefix(&root).is_err();
             items.push(Item { rule: x.rule, subcheck: x.subcheck, level: x.level, message: x.message, path: path.display().to_string(), rel: rel.clone(), range, related, contexts: ctxs, kept, fingerprint, context_fingerprint, outside });
         }
     }
+    if a.setup.config.invocations.iter().any(|i| i.truncated) {
+        incomplete.push(json!({ "path": "", "rule": "build", "reason": "auto-configuration stopped at its limit of source files: describe the project with a build file" }));
+    }
     let complete = incomplete.is_empty();
     let internal = incomplete.iter().any(|i| i["reason"] == "internal error");
-    if let Some(out) = &o.write_baseline {
-        if !complete {
-            eprintln!("lint: the baseline is not written: the analysis is incomplete (see --stats)");
-            return 4;
-        }
+    // An incomplete run writes no baseline (and fails, below), but still reports.
+    let mut refused = false;
+    if let Some(out) = o.write_baseline.as_ref().filter(|_| !complete) {
+        eprintln!("lint: the baseline {} is not written: the analysis is incomplete (see --stats)", out.display());
+        refused = true;
+    }
+    if let Some(out) = o.write_baseline.as_ref().filter(|_| complete) {
         let file = baseline::file_of(new_baseline, &format!("dvicode {}", env!("CARGO_PKG_VERSION")));
         let text = serde_json::to_string_pretty(&file).unwrap_or_default() + "\n";
-        let tmp = out.with_extension("tmp");
-        if let Err(e) = make_parent(out).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, out)) {
+        if let Err(e) = make_parent(out).and_then(|_| write_replacing(out, text.as_bytes())) {
             eprintln!("lint: cannot write the baseline {}: {e}", out.display());
             return 3;
         }
@@ -500,7 +551,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                 "config": { "hash": format!("{:016x}", set.hash()) },
                 "complete": complete,
                 "files": { "owned": owned.len(), "linted": linted_files.len() },
-                "compile": { "errors": compile_errors, "buildInputsNotRead": input_failures },
+                "compile": { "errors": compile_errors, "buildInputsNotRead": input_failures, "first": compile_list },
                 "unknown": unknown_v.iter().map(|(k, n)| (k.clone(), json!(n))).collect::<serde_json::Map<String, Value>>(),
                 "incomplete": incomplete,
                 "findings": lint_out::json_items(&items),
@@ -538,13 +589,35 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         eprintln!("lint: internal error while linting some files (see the messages above)");
         return 3;
     }
-    if !complete && !o.allow_incomplete {
+    if refused || !complete && !o.allow_incomplete {
         return 4;
     }
     if shown_fail || o.fail_on_compile && (compile_errors > 0 || input_failures > 0) {
         return 1;
     }
     0
+}
+
+/// Writes `path` whole or not at all: into a new file beside it (never one that exists), then
+/// renamed over it.
+fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    for n in 0..100u32 {
+        let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
+        let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let done = f.write_all(bytes).and_then(|_| f.sync_all());
+        drop(f);
+        let done = done.and_then(|_| std::fs::rename(&tmp, path));
+        if done.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return done;
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free temporary name"))
 }
 
 fn sarif_text(items: &[Item], root: &Path, complete: bool) -> String {
@@ -993,5 +1066,42 @@ mod tests {
         let shipped = std::fs::read_to_string(&p).expect("client/schemas/lint.schema.json").replace("\r\n", "\n");
         let now = serde_json::to_string_pretty(&super::schema()).unwrap() + "\n";
         assert!(shipped == now, "client/schemas/lint.schema.json is out of date: run `dvicode-server lint --schema --output client/schemas/lint.schema.json`");
+    }
+    /// From the CLI review: option values, file arguments, compile errors past the editor's
+    /// limit, a broken configured baseline written again, and the temporary file.
+    #[test]
+    fn cli_review_cases() {
+        let root = project("clirev", &[("p.sv", SRC)]);
+        // A value is never the next option.
+        assert_eq!(super::parse(&["x".into(), "--output".into(), "--stats".into()]).err().as_deref(), Some("--output needs a value"));
+        // Paths given must exist and hold project files.
+        assert_eq!(lint(&root, &["p.sv", "missing.sv"]).0, 2);
+        std::fs::write(root.join("other.txt"), "x").unwrap();
+        assert_eq!(lint(&root, &[root.join("other.txt").to_str().unwrap()]).0, 2);
+        assert_eq!(lint(&root, &[root.join("p.sv").to_str().unwrap(), "--fail-on", "never"]).0, 0);
+        // A configured baseline of another version is written again, not refused.
+        std::fs::write(root.join(".dvicode/b.json"), r#"{"version":2,"fingerprint":1,"findings":[]}"#).unwrap();
+        std::fs::write(root.join(".dvicode/lint.json"), r#"{ "baseline": ".dvicode/b.json" }"#).unwrap();
+        assert_eq!(lint(&root, &["--fail-on", "never"]).0, 2);
+        std::fs::write(root.join(".dvicode/b.tmp"), "keep").unwrap();
+        let b = root.join(".dvicode/b.json");
+        assert_eq!(lint(&root, &["--write-baseline", b.to_str().unwrap(), "--fail-on", "never"]).0, 0);
+        assert!(std::fs::read_to_string(&b).unwrap().contains("randomize-result-discarded"));
+        // A file of that name beside it is left alone.
+        assert_eq!(std::fs::read_to_string(root.join(".dvicode/b.tmp")).unwrap(), "keep");
+        assert_eq!(lint(&root, &[]).0, 0);
+
+        // The only compile error after 500 warnings still fails the run, and is printed.
+        let mut m = String::from("module m;\n");
+        for i in 0..520 {
+            m.push_str(&format!("  unknown_module u{i}();\n"));
+        }
+        m.push_str("  assign x = undeclared_y;\nendmodule\n");
+        let root = project("clirev2", &[("m.sv", &m)]);
+        let (code, out) = lint(&root, &["--format", "json"]);
+        assert_eq!(code, 1, "{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["compile"]["errors"].as_u64().unwrap() >= 1, "{v}");
+        assert!(v["compile"]["first"][0]["message"].as_str().unwrap().contains("undeclared_y"), "{v}");
     }
 }

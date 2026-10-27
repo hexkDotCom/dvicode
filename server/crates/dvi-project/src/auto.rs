@@ -112,7 +112,13 @@ impl GitIgnore {
 }
 
 /// The project's sources; counts them on `progress`, and stops early when it is cancelled.
+#[cfg(test)]
 pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
+    collect(root, progress).0
+}
+
+/// The sources under `root`, and whether the search stopped at [`MAX_FILES`].
+fn collect(root: &Path, progress: &Progress) -> (Vec<PathBuf>, bool) {
     log::debug!("auto-configuration: scanning {} for sources", root.display());
     let ignore = GitIgnore::load(root);
     let rel = |p: &Path| p.strip_prefix(root).map(|r| r.to_path_buf()).unwrap_or_default();
@@ -121,7 +127,7 @@ pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
     let mut dirs = 0usize;
     while let Some(dir) = stack.pop() {
         if progress.is_cancelled() {
-            return out;
+            return (out, false);
         }
         dirs += 1;
         let rd = match fsx::read_dir(&dir) {
@@ -163,15 +169,15 @@ pub fn collect_sources_with(root: &Path, progress: &Progress) -> Vec<PathBuf> {
                 out.push(p);
                 progress.step();
                 if out.len() >= MAX_FILES {
-                    log::info!("auto-configuration: stopped after {MAX_FILES} source files; describe large projects with a build file");
-                    return out;
+                    log::warn!("auto-configuration: stopped after {MAX_FILES} source files; describe large projects with a build file");
+                    return (out, true);
                 }
             }
         }
     }
     log::debug!("auto-configuration: {} source files in {dirs} folders", out.len());
     out.sort();
-    out
+    (out, false)
 }
 
 struct FileFacts {
@@ -337,7 +343,7 @@ pub fn auto_config(root: &Path, env: &FxHashMap<String, String>) -> Invocation {
 /// throws away) when it is cancelled.
 pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: &Progress) -> Invocation {
     progress.begin(Phase::Scanning, 0);
-    let files = collect_sources_with(root, progress);
+    let (files, truncated) = collect(root, progress);
     progress.begin(Phase::Examining, files.len());
     // In parallel: on network and WSL drives most of the time is waiting for the reads.
     let facts: Vec<(PathBuf, FileFacts)> = files
@@ -518,7 +524,7 @@ pub fn auto_config_with(root: &Path, env: &FxHashMap<String, String>, progress: 
     if log::log_enabled!(log::Level::Debug) {
         log_summary(&facts, &tops, &included, &order);
     }
-    let mut inv = Invocation { mode: "default".into(), auto: true, ..Default::default() };
+    let mut inv = Invocation { mode: "default".into(), auto: true, truncated, ..Default::default() };
     // UVM used but not part of the project.
     let uses_uvm = top_uses.values().any(|u| u.contains("uvm_pkg")) || included.contains("uvm_macros.svh");
     if !uses_uvm {

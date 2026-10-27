@@ -16,6 +16,8 @@ pub struct FactCache {
     files: Mutex<FxHashMap<(UnitId, FileId), Arc<FileFacts>>>,
     classes: Mutex<FxHashMap<(UnitId, DeclId), Arc<ClassFacts>>>,
     uvm_files: Mutex<Option<Arc<FxHashSet<FileId>>>>,
+    /// Each unit's macro calls by file: (start, end) by start, with the largest end so far.
+    macro_calls: Mutex<FxHashMap<UnitId, Arc<FxHashMap<FileId, Vec<(u32, u32, u32)>>>>>,
     /// Files whose path is in the project folder but whose real place is not (a link), and the
     /// project folder's real place.
     linked: Mutex<(Option<Option<std::path::PathBuf>>, FxHashMap<FileId, bool>)>,
@@ -40,6 +42,47 @@ pub struct FileFacts {
     pub syntax_errors: bool,
     /// The file holds encrypted code.
     pub encrypted: bool,
+    /// The classes written in the file.
+    pub classes: ClassIndex,
+}
+
+/// The classes of a file, by start, each with the class around it: finds the innermost class
+/// around a place without scanning them all.
+#[derive(Default)]
+pub struct ClassIndex {
+    /// (start, end, class, index of the class around it).
+    items: Vec<(u32, u32, DeclId, Option<usize>)>,
+}
+
+impl ClassIndex {
+    fn new(u: &crate::world::Unit, file: FileId) -> ClassIndex {
+        let mut items: Vec<(u32, u32, DeclId, Option<usize>)> =
+            u.parsed.decls.iter().enumerate().filter(|(_, d)| d.kind == DeclKind::Class && d.span.file == file).map(|(i, d)| (d.span.start, d.span.end, i as DeclId, None)).collect();
+        items.sort_by_key(|c| (c.0, std::cmp::Reverse(c.1)));
+        let mut open: Vec<usize> = Vec::new();
+        for i in 0..items.len() {
+            while open.last().is_some_and(|&j| items[j].1 <= items[i].0) {
+                open.pop();
+            }
+            items[i].3 = open.last().copied();
+            open.push(i);
+        }
+        ClassIndex { items }
+    }
+
+    /// The innermost class around `s`.
+    pub fn innermost(&self, s: dvi_syntax::Span) -> Option<DeclId> {
+        // The last class to start before it, then the classes around that one.
+        let mut cur = self.items.partition_point(|c| c.0 <= s.start).checked_sub(1);
+        while let Some(i) = cur {
+            let c = &self.items[i];
+            if s.end <= c.1 {
+                return Some(c.2);
+            }
+            cur = c.3;
+        }
+        None
+    }
 }
 
 /// A procedural body: a function, a task, or an `initial`/`always*`/`final` process.
@@ -95,6 +138,27 @@ impl FactCache {
         }
         let f = Arc::new(file_facts(a, unit, file));
         self.files.lock().unwrap().entry((unit, file)).or_insert(f).clone()
+    }
+
+    /// `unit`'s macro calls, by file and start (see [`in_macro_call`]).
+    fn macro_calls(&self, a: &Analysis, unit: UnitId) -> Arc<FxHashMap<FileId, Vec<(u32, u32, u32)>>> {
+        if let Some(m) = self.macro_calls.lock().unwrap().get(&unit) {
+            return m.clone();
+        }
+        let mut by: FxHashMap<FileId, Vec<(u32, u32, u32)>> = FxHashMap::default();
+        for m in &a.unit(unit).macro_uses {
+            by.entry(m.call_span.file).or_default().push((m.call_span.start, m.call_span.end, 0));
+        }
+        for v in by.values_mut() {
+            v.sort_unstable();
+            let mut reach = 0;
+            for c in v.iter_mut() {
+                reach = reach.max(c.1);
+                c.2 = reach;
+            }
+        }
+        let m = Arc::new(by);
+        self.macro_calls.lock().unwrap().entry(unit).or_insert(m).clone()
     }
 
     pub fn class(&self, a: &Analysis, c: DeclRef) -> Arc<ClassFacts> {
@@ -222,7 +286,8 @@ fn file_facts(a: &Analysis, unit: UnitId, file: FileId) -> FileFacts {
     let encrypted = tokens.iter().enumerate().any(|(i, t)| {
         t.kind == TokKind::Directive && (t.text == "protected" || t.text == "pragma" && tokens.get(i + 1).is_some_and(|n| n.text == "protect"))
     }) || u.parsed.decls.iter().any(|d| d.span.file == file && d.has(dflags::ENCRYPTED));
-    FileFacts { file, tokens, bodies, waivers, defines, comments, repeated, syntax_errors, encrypted }
+    let classes = ClassIndex::new(u, file);
+    FileFacts { file, tokens, bodies, waivers, defines, comments, repeated, syntax_errors, encrypted, classes }
 }
 
 /// What `ifdef` leaves out of `file` in `unit`, in order: what is inactive in every inclusion of
@@ -309,7 +374,11 @@ fn class_facts(a: &Analysis, c: DeclRef) -> ClassFacts {
 /// Whether the declaration at `name` is made by a macro: its name is written as an argument of
 /// a macro call (`` `MY_PHASE(build_phase) ``), so its header is the macro's.
 pub fn in_macro_call(a: &Analysis, unit: UnitId, name: dvi_syntax::Span) -> bool {
-    a.unit(unit).macro_uses.iter().any(|m| m.call_span.file == name.file && m.call_span.start <= name.start && name.end <= m.call_span.end)
+    let calls = a.lint_facts.macro_calls(a, unit);
+    let Some(v) = calls.get(&name.file) else { return false };
+    // Some call starting at or before it reaches past its end.
+    let i = v.partition_point(|c| c.0 <= name.start);
+    i > 0 && v[i - 1].2 >= name.end
 }
 
 /// The class a member is declared in (its parent, or the class of an out-of-block method).

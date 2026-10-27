@@ -203,7 +203,9 @@ impl Analysis {
             names.reverse();
             names.join("::")
         };
-        let toks = self.file_tokens(f).unwrap_or_default();
+        // The unit's tokens of the file, cached for the snapshot (not lexed per finding).
+        let facts = self.lint_facts.file(self, unit, f);
+        let toks = &facts.tokens;
         let lo = toks.partition_point(|t| t.span.start < x.span.start);
         let hi = toks.partition_point(|t| t.span.start < x.span.end);
         let mut text: String = toks[lo..hi].iter().filter(|t| t.kind != TokKind::Eof).map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");

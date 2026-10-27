@@ -818,7 +818,7 @@ pub struct DiskEnv;
 
 impl ConfigEnv for DiskEnv {
     fn read(&self, path: &Path) -> Option<String> {
-        dvi_project::fsx::read(path).ok().and_then(|b| String::from_utf8(b).ok())
+        super::read_control_file(path).and_then(|b| String::from_utf8(b).ok())
     }
 
     fn is_file(&self, path: &Path) -> bool {

@@ -279,13 +279,20 @@ pub fn run(args: &[String]) -> i32 {
 pub fn is_input_failure(p: &dvi_project::BuildProblem) -> bool {
     let m = &p.message;
     let structural = m.contains(" needs ") || m.contains("includes itself") || m.contains("reads itself") || m.contains("nested too deeply");
-    structural || m.contains(" not found") || m.contains("matches nothing") || m.starts_with("No files match") || m.starts_with("Cannot read")
+    // A path with an unset environment variable, a value too large to set, a host not allowed.
+    let unread = m.contains(" is not set") || m.ends_with("it is not read");
+    structural || unread || m.contains(" not found") || m.contains("matches nothing") || m.starts_with("No files match") || m.starts_with("Cannot read")
 }
 
 /// Reads the project in `dir` as `check` and `lint` do: the build file (`auto` to configure
 /// from the folder), else the folder's own. `Err` is the exit status when there is nothing
 /// to check (the message is printed).
 pub fn load_setup(cmd: &str, dir: &Path, build: Option<&Path>, env: FxHashMap<String, String>) -> Result<(ProjectSetup, u128), i32> {
+    // Network paths (Windows): reading one signs in to its host, so a project may reach only
+    // the hosts of the folder and build file given and those DVICODE_ALLOWED_UNC_HOSTS lists.
+    let mut hosts: Vec<String> = std::env::var("DVICODE_ALLOWED_UNC_HOSTS").unwrap_or_default().split(',').map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect();
+    hosts.extend([Some(dir), build].into_iter().flatten().filter_map(|p| dvi_project::netpath::host(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))));
+    dvi_project::netpath::set_allowed_hosts(Some(hosts));
     let root = canonical(dir);
     if !root.is_dir() {
         eprintln!("{cmd}: {} is not a folder", dir.display());

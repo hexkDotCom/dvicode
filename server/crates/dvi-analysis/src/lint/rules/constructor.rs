@@ -30,6 +30,15 @@ impl Rule for IncompatibleConstructor {
         let a = cx.a;
         let facts = cx.facts.clone();
         let u = a.unit(cx.unit).clone();
+        // UVM's own constructor macros in this file, by place: they write a constructor the
+        // factory can call.
+        let uvm = a.lint_facts.uvm_files(a);
+        let uvm_new: Vec<dvi_syntax::Span> = u
+            .macro_uses
+            .iter()
+            .filter(|m| matches!(m.name.as_str(), "uvm_object_new" | "uvm_component_new") && m.name_span.file == cx.file && m.def.as_ref().is_some_and(|x| uvm.contains(&x.name_span.file)))
+            .map(|m| m.name_span)
+            .collect();
         for Registration { class, call, form } in registrations(cx, &u) {
             // An abstract class is never constructed by the factory.
             if form.abstract_ {
@@ -51,16 +60,8 @@ impl Rule for IncompatibleConstructor {
                 }
             }
             let role = form.component;
-            // UVM's own constructor macros write a constructor the factory can call.
             let d = a.decl(class);
-            let uvm = a.lint_facts.uvm_files(a);
-            if u.macro_uses.iter().any(|m| {
-                matches!(m.name.as_str(), "uvm_object_new" | "uvm_component_new")
-                    && m.name_span.file == d.span.file
-                    && d.span.start <= m.name_span.start
-                    && m.name_span.end <= d.span.end
-                    && m.def.as_ref().is_some_and(|x| uvm.contains(&x.name_span.file))
-            }) {
+            if d.span.file == cx.file && uvm_new.iter().any(|m| d.span.start <= m.start && m.end <= d.span.end) {
                 continue;
             }
             let cname = a.decl(class).name.clone();

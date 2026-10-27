@@ -267,6 +267,7 @@ impl Parser<'_> {
     fn object(&mut self, depth: usize) -> Result<Value, Error> {
         self.i += 1;
         let mut out: Vec<Member> = Vec::new();
+        let mut keys: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
         self.ws();
         if self.s.get(self.i) == Some(&b'}') {
             self.i += 1;
@@ -280,7 +281,7 @@ impl Parser<'_> {
             let key_start = self.i as u32;
             let key = self.string()?;
             let key_end = self.i as u32;
-            if out.iter().any(|m| m.key == key) {
+            if !keys.insert(key.clone()) {
                 return Err(Error { at: key_start, message: format!("\"{key}\" is given twice") });
             }
             self.ws();
@@ -313,6 +314,20 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wide object is read in linear time, and a key given twice is still an error.
+    #[test]
+    fn wide_objects() {
+        let mut t = String::from("{");
+        for i in 0..200_000 {
+            t.push_str(&format!("\"k{i}\": {i},"));
+        }
+        t.push_str("\"k7\": 1}");
+        let at = std::time::Instant::now();
+        let e = parse(&t).err().expect("a key given twice");
+        assert!(e.message.contains("\"k7\" is given twice"), "{}", e.message);
+        assert!(at.elapsed().as_secs() < 5);
+    }
 
     #[test]
     fn values_and_positions() {

@@ -74,11 +74,13 @@ pub fn scan(a: &Analysis, file: FileId, tokens: &[Token], comments: &[Comment]) 
             items.push((w, c.next));
         }
     }
+    // Waivers stacked before one statement share its walk.
+    let mut seen: rustc_hash::FxHashMap<usize, Option<(u32, u32)>> = rustc_hash::FxHashMap::default();
     let items: Vec<Waiver> = items
         .into_iter()
         .map(|(mut w, next)| {
             if w.kind == WaiverKind::Guide {
-                w.covers = coverage(tokens, next).map(|(s, e)| (from_line_start(&text, s), e));
+                w.covers = *seen.entry(next).or_insert_with(|| coverage(tokens, next).map(|(s, e)| (from_line_start(&text, s), e)));
             }
             w
         })
@@ -86,23 +88,19 @@ pub fn scan(a: &Analysis, file: FileId, tokens: &[Token], comments: &[Comment]) 
     // Suppressed regions, each ID on its own: `disable=a,b` then `enable=a` leaves `b` off.
     let mut regions = Vec::new();
     let mut unmatched = Vec::new();
-    let mut open: Vec<(String, u32, usize)> = Vec::new();
+    // By ID (a comment may name many): where each open region starts, and its comment.
+    let mut open: rustc_hash::FxHashMap<String, (u32, usize)> = rustc_hash::FxHashMap::default();
     for (i, w) in items.iter().enumerate() {
         match w.kind {
             WaiverKind::Disable => {
                 for id in &w.ids {
-                    if !open.iter().any(|(o, _, _)| o == id) {
-                        open.push((id.clone(), w.span.end, i));
-                    }
+                    open.entry(id.clone()).or_insert((w.span.end, i));
                 }
             }
             WaiverKind::Enable => {
                 for id in &w.ids {
-                    match open.iter().position(|(o, _, _)| o == id) {
-                        Some(k) => {
-                            let (id, start, from) = open.remove(k);
-                            regions.push((id, start, w.span.start, from));
-                        }
+                    match open.remove(id) {
+                        Some((start, from)) => regions.push((id.clone(), start, w.span.start, from)),
                         None => unmatched.push((w.span, id.clone())),
                     }
                 }
@@ -115,7 +113,9 @@ pub fn scan(a: &Analysis, file: FileId, tokens: &[Token], comments: &[Comment]) 
             WaiverKind::Guide => {}
         }
     }
-    for (id, start, from) in open {
+    let mut rest: Vec<(String, (u32, usize))> = open.into_iter().collect();
+    rest.sort_by_key(|(_, (start, from))| (*from, *start));
+    for (id, (start, from)) in rest {
         regions.push((id, start, u32::MAX, from));
     }
     Waivers { items, regions, unmatched }
