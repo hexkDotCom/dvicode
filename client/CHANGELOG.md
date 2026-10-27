@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (preview)
 
 - **DVICode Lint**: rules that check what SystemVerilog and UVM code means, shown with the
   compile problems and run in CI by the same engine as `dvicode lint`.
