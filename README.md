@@ -4,13 +4,13 @@
 [![Open VSX](https://img.shields.io/open-vsx/v/hexk/dvicode?label=Open%20VSX)](https://open-vsx.org/extension/hexk/dvicode)
 [![License](https://img.shields.io/github/license/hexkDotCom/dvicode)](LICENSE)
 
-**Free, open-source SystemVerilog and UVM navigation for VS Code.**
+**Free, open-source SystemVerilog and UVM navigation and lint for VS Code.**
 
-Follow definitions across packages and class hierarchies, see what a macro expands to, and
-explore your design and UVM testbench without starting a simulator. DVICode runs on your
-desktop, in WSL, or beside your sources on a Linux server over SSH. Start with automatic
-project discovery, then add your existing file lists for full control. Apache-2.0 licensed;
-currently in preview.
+Follow definitions across packages and class hierarchies, see what a macro expands to,
+explore your design and UVM testbench without starting a simulator, and catch the UVM mistakes
+a compiler lets through, in the editor and in CI. DVICode runs on your desktop, in WSL, or
+beside your sources on a Linux server over SSH. Start with automatic project discovery, then
+add your existing file lists for full control. Apache-2.0 licensed; currently in preview.
 
 ![Hovering a UVM macro shows its expansion, right-click Go to Definition opens uvm_env in the UVM 1.2 library, a misspelled type is underlined as you type and fixed from the lightbulb, a deleted semicolon is flagged at once, and clicking components in the Verification Hierarchy jumps to their code](docs/images/dvicode-demo.gif)
 
@@ -18,12 +18,20 @@ currently in preview.
 
 - **DVICode Lint**: rules about meaning, not only syntax: a `randomize()` whose result is
   thrown away, a UVM registration macro that registers another class, a constructor the
-  factory cannot call, deprecated UVM API (the `recommended` rules, on by default); and, when
-  you choose them, the checkable rules of the
-  [HEXK SystemVerilog/UVM Style Guide](https://github.com/hexkDotCom/sv-uvm-style-guide).
-  Findings show with the compile problems, with fixes and one-click waivers; the same engine
-  runs in CI as `dvicode lint` (SARIF, JUnit, GitHub annotations, baselines, `pip install
-  dvicode`). See [the lint guide](docs/lint.md) and [the rules](docs/lint/README.md).
+  factory cannot call, a phase method with another signature than UVM's, deprecated UVM API
+  (the `recommended` rules, on by default); and, when you choose them, the checkable rules of
+  the [HEXK SystemVerilog/UVM Style Guide](https://github.com/hexkDotCom/sv-uvm-style-guide)
+  (52 rules in all). Lint knows the whole project (build files, packages, the class hierarchy,
+  the UVM library) and reports only what it can prove. Findings show with the compile
+  problems, with quick fixes, one-click waivers (`// LNG-10 waived: <reason>`) and a
+  per-project `.dvicode/lint.json`. The same engine runs in CI as `dvicode lint`: text, JSON,
+  SARIF, JUnit and GitHub output, baselines, `--changed-since`; from a release archive,
+  `pip install dvicode` or a container image. See [the lint guide](docs/lint.md) and
+  [the rules](docs/lint/README.md).
+- **Clickable simulator logs**: in `*.log` files, `transcript` and terminals, source locations
+  (UVM report lines, VCS messages, `file(line)` and `file:line`) open the file at the line,
+  also for logs written on another machine. A UVM component path (`uvm_test_top.env.sb`)
+  selects the component in the Verification Hierarchy and opens its class.
 - **Errors as you type**: undeclared names, unknown types, members and ports, missing
   includes and macros, syntax mistakes. Tested to report no problems on UVM 1.2, UVM 1.1d and
   the UBUS example, and no errors on OpenTitan, Ibex, core-v-verif, CVA6 and PULP AXI with
@@ -91,7 +99,9 @@ currently in preview.
   search), the macros the file uses or tests as defined there, the lines `` `ifdef `` removes,
   design elements defined more than once and which one is used, and the preprocessing
   problems. Hover an `` `include `` to see what found it. **Copy Compile Context** puts the
-  report on the clipboard for an issue.
+  report on the clipboard for an issue. For a header that several roots compile differently,
+  **Compile This File As...** chooses the context hover, definition, problems and
+  highlighting use.
 - **Filter and follow**: filter each view by name or path, and let it follow the editor:
   jump with **F12** or **Ctrl+click** and the view selects where you landed.
 - **Macro expansion**: see exactly what a `` `uvm_* `` macro turns into, one level or all.
@@ -213,6 +223,10 @@ testbench; it needs no UVM installation.
   lines. It filters by name and follows the cursor.
 - **DVICode: Expand Macro One Level**, **Expand Macro All Levels** and **Show Including
   File**; the first and last are also in the editor's context menu.
+- **Show Drivers**, **Show Loads**, **Show Assertions and Coverage**, **Show Compile Context**
+  and **Compile This File As...** in the editor's context menu.
+- **DVICode: Show Lint Rules** lists the rules of the running engine; **DVICode: Create Lint
+  Configuration** writes `.dvicode/lint.json` (saving it re-lints the project).
 - **DVICode: Set Current Build Configuration...** to switch between `.dvicode/*.build` files.
 - **DVICode: Show Project Status** (also the status bar item) and **Rebuild Project**.
 - **DVICode: Report Issue** opens VS Code's issue reporter with your setup and the log filled
@@ -236,6 +250,13 @@ testbench; it needs no UVM installation.
 | `dvicode.uvmHome` | | UVM location for `-uvm` when `$UVM_HOME` is not set |
 | `dvicode.server.logLevel` | `info` | Engine log in the DVICode output channel; `debug` shows how the build file or the folder was read, `trace` every file |
 | `dvicode.maxProblems` | `1000` | Problems shown after a full build. Open files are exempt from this limit; per-file limits still apply |
+| `dvicode.lint.enable` | `true` | Show lint findings with the compile problems |
+| `dvicode.lint.rulesets` | `["recommended"]` | Lint rulesets (`recommended`, `hexk`) where no `.dvicode/lint.json` chooses them |
+| `dvicode.format.*` | | Formatter: indent size, tabs, `case` items, list and continuation indentation, directives, trailing blanks, blank lines |
+| `dvicode.logs.links` | `true` | Clickable locations and component paths in simulator logs and terminals |
+| `dvicode.logs.maxFileSizeMB` | `50` | Logs larger than this get no links |
+| `dvicode.inlayHints.ports`, `.parameters`, `.arguments` | `true` | Which inlay hints are shown |
+| `dvicode.designHierarchy.showInactiveGenerate` | `false` | Also show generate blocks whose condition is false, marked *not elaborated* |
 
 ## FAQ
 
@@ -308,9 +329,24 @@ a build file or `` `include `` naming another host gets a problem instead. See
 
 ## Status
 
-DVICode is young and moving fast. Not supported yet: VHDL, e and PSS; elaboration of
-parameter values and `generate` conditions; a view of every config-db setting;
-diagrams; code formatting; lint rules.
+DVICode is in preview and moving fast. Each release is checked against UVM 1.2 and 1.1d and a
+corpus of open-source designs and testbenches (see [the test corpus](scripts/corpus/README.md));
+every lint rule is run on that corpus too, and only rules whose findings hold on real code are
+in `recommended`.
+
+Not supported yet:
+
+- VHDL, e and PSS.
+- Full elaboration: parameters and `generate` conditions are evaluated per instance, but
+  Drivers and Loads do not follow interfaces, `alias`, `bind` instances or connections
+  through expressions, and a condition that cannot be evaluated is shown as *undetermined*.
+- Formatter: alignment of declarations and connections (it changes indentation and blanks
+  only).
+- Views: a list of every `uvm_config_db` setting in the test; diagrams.
+- Lint: code produced by project macros, and classes outside the build (a VIP that is not
+  compiled), are counted as unknown, not checked. The `hexk` rules report much on RTL and
+  generated code; use `owned` or `exclude` in `.dvicode/lint.json` to keep them to your own
+  testbench.
 
 **Help us improve it:** try it on your project, and when something is wrong, run
 **DVICode: Report Issue** (or open an issue) with a minimal code sample that shows it, your
