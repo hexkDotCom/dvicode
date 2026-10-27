@@ -14,6 +14,7 @@ static TRAILING_WHITESPACE: RuleMeta = RuleMeta {
     summary: "A line ends in spaces or tabs.",
     why: "Trailing whitespace is invisible noise in diffs and reviews.",
     params: &[],
+    text_only: true,
 };
 
 impl Rule for TrailingWhitespace {

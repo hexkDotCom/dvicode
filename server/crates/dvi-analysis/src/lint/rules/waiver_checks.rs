@@ -18,6 +18,7 @@ static WITHOUT_REASON: RuleMeta = RuleMeta {
     summary: "A waiver or suppression gives no reason.",
     why: "The style guide (§0) requires every waiver to say why the rule does not apply; a reason is what reviewers and later readers check.",
     params: &[],
+    text_only: true,
 };
 
 static UNKNOWN_ID: RuleMeta = RuleMeta {
@@ -29,6 +30,7 @@ static UNKNOWN_ID: RuleMeta = RuleMeta {
     summary: "A waiver or suppression names a rule that does not exist.",
     why: "A misspelled rule ID waives nothing, so the finding it was meant for stays (or a later one goes unnoticed).",
     params: &[],
+    text_only: true,
 };
 
 static UNATTACHED: RuleMeta = RuleMeta {
@@ -40,6 +42,7 @@ static UNATTACHED: RuleMeta = RuleMeta {
     summary: "A waiver is followed by no statement or declaration it could cover.",
     why: "A waiver covers the statement or declaration right after it; one before `end`, `else` or the end of the file covers nothing.",
     params: &[],
+    text_only: true,
 };
 
 static UNMATCHED: RuleMeta = RuleMeta {
@@ -51,6 +54,7 @@ static UNMATCHED: RuleMeta = RuleMeta {
     summary: "`dvicode-lint: enable=` without a `disable=` before it.",
     why: "An enable that ends no suppression usually means the disable was removed or misspelled.",
     params: &[],
+    text_only: true,
 };
 
 /// Whether an ID names something: a lint rule, or a rule of the style guide.
@@ -112,15 +116,8 @@ impl Rule for SuppressionUnmatched {
 
     fn check(&self, cx: &mut Cx) {
         let facts = cx.facts.clone();
-        let items = &facts.waivers.items;
-        for (i, w) in items.iter().enumerate() {
-            if w.kind != WaiverKind::Enable {
-                continue;
-            }
-            let opened = items[..i].iter().any(|d| d.kind == WaiverKind::Disable && d.ids.iter().any(|x| w.ids.contains(x)));
-            if !opened {
-                cx.report(None, w.span, "This enable ends no disable", Vec::new());
-            }
+        for (span, id) in &facts.waivers.unmatched {
+            cx.report(None, *span, format!("This enable of {id} ends no disable of it"), Vec::new());
         }
     }
 }

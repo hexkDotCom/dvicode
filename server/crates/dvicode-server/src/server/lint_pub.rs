@@ -3,13 +3,17 @@
 //! problems of the same file, by the same problem check (see `Server::publish`).
 
 use dvi_analysis::ide::url_of;
+use dvi_analysis::lint::baseline::Baseline;
 use dvi_analysis::lint::config::{ConfigFile, ConfigSet, Defaults, DiskEnv};
 use dvi_analysis::lint::{rules, FileLint, Finding, Level, Ruleset};
 use dvi_analysis::Analysis;
 use dvi_syntax::{FileId, LineIndex};
-use lsp_types::{CodeDescription, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, NumberOrString, Position, Range, Url};
+use lsp_types::{
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeDescription, Command, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, NumberOrString, Position, Range, Url,
+};
 use serde_json::Value;
-use std::path::Path;
+use rustc_hash::FxHashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const SOURCE: &str = "dvicode-lint";
@@ -46,6 +50,9 @@ impl LintSettings {
 #[derive(Default)]
 pub struct LintConfigs {
     set: Mutex<Option<Arc<ConfigSet>>>,
+    /// Baselines read, by path, with the size and time of the file read (`None`: missing or
+    /// unreadable).
+    baselines: Mutex<FxHashMap<PathBuf, (Option<(u64, std::time::SystemTime)>, Option<Arc<Baseline>>)>>,
 }
 
 impl LintConfigs {
@@ -71,24 +78,60 @@ impl LintConfigs {
         if let Some(c) = self.set.lock().unwrap().as_ref() {
             c.invalidate();
         }
+        self.baselines.lock().unwrap().clear();
+    }
+
+    /// The baseline at `path`, read again when the file changed (wherever it is, watched or
+    /// not).
+    pub fn baseline(&self, path: &Path) -> Option<Arc<Baseline>> {
+        let stamp = dvi_project::fsx::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+        if let Some((s, b)) = self.baselines.lock().unwrap().get(path) {
+            if *s == stamp {
+                return b.clone();
+            }
+        }
+        let b = dvi_project::fsx::read(path).ok().and_then(|t| String::from_utf8(t).ok()).and_then(|t| Baseline::read(&t).ok()).map(Arc::new);
+        self.baselines.lock().unwrap().insert(path.to_path_buf(), (stamp, b.clone()));
+        b
     }
 }
 
-/// Whether `path` is a lint configuration file.
+/// Whether `path` is a lint configuration or baseline file: a JSON file in a `.dvicode` folder.
 pub fn is_config(path: &Path) -> bool {
-    path.file_name().is_some_and(|n| n == "lint.json") && path.parent().and_then(Path::file_name).is_some_and(|n| n == ".dvicode")
+    path.extension().is_some_and(|e| e == "json") && path.parent().and_then(Path::file_name).is_some_and(|n| n == ".dvicode")
 }
 
-/// What linting a file gave, as diagnostics (empty when it is not linted).
-pub fn file_diagnostics(a: &Analysis, set: &ConfigSet, f: FileId) -> Vec<Diagnostic> {
+/// What linting a file gave, as diagnostics (empty when it is not linted): at most `room`
+/// findings, and a notice when there are more.
+pub fn file_diagnostics(a: &Analysis, configs: &LintConfigs, set: &ConfigSet, f: FileId, room: usize) -> Vec<Diagnostic> {
     let cfg = a.lint_config(set, &DiskEnv, f);
     if !cfg.owned.is_owned() {
         return Vec::new();
     }
     let lint: FileLint = a.lint_file(f, &cfg, None);
-    let mut out: Vec<Diagnostic> = lint.findings.iter().filter(|x| x.suppressed.is_none()).filter_map(|x| to_lsp(a, x)).collect();
-    let more = out.len().saturating_sub(MAX_PER_FILE);
-    out.truncate(MAX_PER_FILE);
+    let open: Vec<&Finding> = lint.findings.iter().filter(|x| x.suppressed.is_none()).collect();
+    // Findings the baseline lists are shown as hints (not in the Problems view).
+    let mut listed = vec![false; open.len()];
+    if let (Some(path), Some(unit)) = (&cfg.baseline, lint.unit) {
+        if let Some(b) = configs.baseline(path) {
+            let fps: Vec<_> = open.iter().map(|x| a.fingerprint(unit, x, &set.root)).collect();
+            listed = b.matched(&fps);
+        }
+    }
+    let mut out: Vec<Diagnostic> = open
+        .iter()
+        .zip(listed)
+        .filter_map(|(x, listed)| {
+            let mut d = to_lsp(a, x)?;
+            if listed {
+                d.severity = Some(DiagnosticSeverity::HINT);
+            }
+            Some(d)
+        })
+        .collect();
+    let room = room.min(MAX_PER_FILE);
+    let more = out.len().saturating_sub(room);
+    out.truncate(room);
     if more > 0 {
         out.push(notice(format!("Lint: {more} more findings in this file are not shown")));
     }
@@ -138,6 +181,85 @@ fn to_lsp(a: &Analysis, x: &Finding) -> Option<Diagnostic> {
     })
 }
 
+/// The code actions of the lint findings of `f` that overlap `start..=end`: each finding's
+/// fixes, a waiver above it, and turning its rule off in the file. A waiver or a suppression
+/// is inserted with a `<reason>` placeholder, which the VS Code extension then selects
+/// (`dvicode.lint.selectReason`).
+pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u32) -> Vec<CodeActionOrCommand> {
+    let cfg = a.lint_config(set, &DiskEnv, f);
+    if !cfg.owned.is_owned() {
+        return Vec::new();
+    }
+    let (Some(text), Some(li)) = (a.file_text(f), a.file_lines(f)) else { return Vec::new() };
+    let uri = url_of(&a.path(f));
+    let lint = a.lint_file(f, &cfg, None);
+    let mut out = Vec::new();
+    let mut waived: Vec<(&str, u32)> = Vec::new();
+    let mut disabled: Vec<&str> = Vec::new();
+    let select = |line: u32| Command {
+        title: "Select the reason".into(),
+        command: "dvicode.lint.selectReason".into(),
+        arguments: Some(vec![serde_json::json!(uri.to_string()), serde_json::json!(line)]),
+    };
+    for x in lint.findings.iter().filter(|x| x.suppressed.is_none() && x.span.start <= end && start <= x.span.end) {
+        let Some(meta) = rules::meta(x.rule) else { continue };
+        let diag = to_lsp(a, x);
+        let diagnostics = diag.clone().map(|d| vec![d]);
+        for fix in &x.fixes {
+            if let Some(edit) = a.versioned_edit(fix.edits.clone()) {
+                out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: fix.title.clone(),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: diagnostics.clone(),
+                    edit: Some(edit),
+                    is_preferred: fix.safe.then_some(true),
+                    ..Default::default()
+                }));
+            }
+        }
+        // Findings about waivers and suppressions cannot be waived.
+        if meta.id.starts_with("waiver-") || meta.id.starts_with("suppression-") {
+            continue;
+        }
+        // A waiver on its own line above the finding's line, indented like it: only when the
+        // finding's statement starts the line (else the waiver would cover what is before it).
+        let line = li.line_of(x.span.start);
+        let ls = li.line_start(line);
+        let starts_line = text.get(ls as usize..x.span.start as usize).is_some_and(|s| s.trim().is_empty());
+        if starts_line && !waived.contains(&(x.rule, line)) {
+            waived.push((x.rule, line));
+            let indent: String = text[ls as usize..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let id = meta.guide.first().copied().unwrap_or(meta.id);
+            let at = dvi_syntax::Span::new(f, ls, ls);
+            if let Some(edit) = a.versioned_edit(vec![(at, format!("{indent}// {id} waived: <reason>\n"))]) {
+                out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: format!("Waive {id} here"),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: diagnostics.clone(),
+                    edit: Some(edit),
+                    command: Some(select(line)),
+                    ..Default::default()
+                }));
+            }
+        }
+        if !disabled.contains(&x.rule) {
+            disabled.push(x.rule);
+            let at = dvi_syntax::Span::new(f, 0, 0);
+            if let Some(edit) = a.versioned_edit(vec![(at, format!("// dvicode-lint: disable-file={} <reason>\n", x.rule))]) {
+                out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: format!("Turn {} off in this file", x.rule),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics,
+                    edit: Some(edit),
+                    command: Some(select(0)),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+    out
+}
+
 /// A configuration file's problems, as diagnostics of that file.
 pub fn config_diagnostics(c: &ConfigFile) -> (Url, Vec<Diagnostic>) {
     let li = LineIndex::new(&c.text);
@@ -150,7 +272,7 @@ pub fn config_diagnostics(c: &ConfigFile) -> (Url, Vec<Diagnostic>) {
         .iter()
         .map(|p| Diagnostic {
             range: Range::new(pos(p.start), pos(p.end)),
-            severity: Some(DiagnosticSeverity::ERROR),
+            severity: Some(if p.warning { DiagnosticSeverity::WARNING } else { DiagnosticSeverity::ERROR }),
             code: Some(NumberOrString::String("lint-config".into())),
             source: Some(SOURCE.into()),
             message: p.message.clone(),

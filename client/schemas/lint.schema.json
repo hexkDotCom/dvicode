@@ -198,7 +198,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule CLS-2 (no lint rule checks it yet)"
+          "description": "Style guide rule CLS-2: sets extern-method"
         },
         "CLS-3": {
           "allOf": [
@@ -246,7 +246,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule CLS-8 (no lint rule checks it yet)"
+          "description": "Style guide rule CLS-8: sets factory-incompatible-constructor"
         },
         "CMP-1": {
           "allOf": [
@@ -406,7 +406,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule COV-6 (no lint rule checks it yet)"
+          "description": "Style guide rule COV-6: sets illegal-bins"
         },
         "COV-7": {
           "allOf": [
@@ -478,7 +478,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule DOC-6 (no lint rule checks it yet)"
+          "description": "Style guide rule DOC-6: sets todo-format"
         },
         "DOC-7": {
           "allOf": [
@@ -518,7 +518,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-11 (no lint rule checks it yet)"
+          "description": "Style guide rule FAC-11: sets uvm-deprecated-api"
         },
         "FAC-2": {
           "allOf": [
@@ -542,7 +542,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-4 (no lint rule checks it yet)"
+          "description": "Style guide rule FAC-4: sets field-macros-in-component"
         },
         "FAC-5": {
           "allOf": [
@@ -566,7 +566,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-7 (no lint rule checks it yet)"
+          "description": "Style guide rule FAC-7: sets uvm-do-macros"
         },
         "FAC-8": {
           "allOf": [
@@ -574,7 +574,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-8 (no lint rule checks it yet)"
+          "description": "Style guide rule FAC-8: sets p-sequencer"
         },
         "FAC-9": {
           "allOf": [
@@ -646,7 +646,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FIL-7 (no lint rule checks it yet)"
+          "description": "Style guide rule FIL-7: sets timescale"
         },
         "FIL-8": {
           "allOf": [
@@ -710,7 +710,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FMT-2: sets trailing-whitespace"
+          "description": "Style guide rule FMT-2: sets trailing-whitespace, ascii-only, final-newline"
         },
         "FMT-3": {
           "allOf": [
@@ -718,7 +718,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FMT-3 (no lint rule checks it yet)"
+          "description": "Style guide rule FMT-3: sets line-length"
         },
         "FMT-4": {
           "allOf": [
@@ -742,7 +742,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FMT-6 (no lint rule checks it yet)"
+          "description": "Style guide rule FMT-6: sets end-label"
         },
         "FMT-7": {
           "allOf": [
@@ -750,7 +750,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FMT-7 (no lint rule checks it yet)"
+          "description": "Style guide rule FMT-7: sets end-comment"
         },
         "FMT-8": {
           "allOf": [
@@ -782,7 +782,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule IFC-2 (no lint rule checks it yet)"
+          "description": "Style guide rule IFC-2: sets program-block"
         },
         "IFC-3": {
           "allOf": [
@@ -854,7 +854,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule LNG-10: sets randomize-result-discarded"
+          "description": "Style guide rule LNG-10: sets randomize-result-discarded, randomize-in-assert, randomize-void-cast"
         },
         "LNG-11": {
           "allOf": [
@@ -926,7 +926,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule LNG-20 (no lint rule checks it yet)"
+          "description": "Style guide rule LNG-20: sets cast-as-task"
         },
         "LNG-21": {
           "allOf": [
@@ -990,7 +990,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule MSG-1 (no lint rule checks it yet)"
+          "description": "Style guide rule MSG-1: sets display-in-uvm-class"
         },
         "MSG-2": {
           "allOf": [
@@ -1462,7 +1462,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule TRN-1 (no lint rule checks it yet)"
+          "description": "Style guide rule TRN-1: sets extends-uvm-transaction"
         },
         "TRN-2": {
           "allOf": [
@@ -1568,8 +1568,362 @@
           ],
           "description": "Style guide rule TST-8 (no lint rule checks it yet)"
         },
+        "ascii-only": {
+          "markdownDescription": "A line holds a character outside ASCII.\n\nSystemVerilog tools differ in how they read other encodings; a stray non-breaking space or typographic quote breaks some of them and is invisible in review.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "cast-as-task": {
+          "markdownDescription": "`$cast` called as a task.\n\nA failed task-form `$cast` is only a run-time error the simulator may continue past with the destination unchanged; call it as a function and report failure (LNG-20).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "display-in-uvm-class": {
+          "markdownDescription": "`$display` (or `$write`, `$monitor`, `$strobe`) in a UVM class.\n\nUVM classes report with the UVM report macros, which the test can filter, count and redirect; `$display` bypasses all of that (MSG-1).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "end-comment": {
+          "markdownDescription": "A comment follows `end`.\n\nEnd comments (`end // while (...)`) go stale when the code above changes; nothing checks them.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "end-label": {
+          "markdownDescription": "A class, function, task, module, interface, package, covergroup, property, sequence or clocking block ends without a label.\n\n`endclass : bus_driver` is checked by the compiler; a comment is not.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "extends-uvm-transaction": {
+          "markdownDescription": "A class extends `uvm_transaction`.\n\nSequence items extend `uvm_sequence_item`, which sequences and sequencers expect (TRN-1).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "extern-method": {
+          "markdownDescription": "A class method declared `extern`.\n\nTwo copies of every signature cost more than they give; define methods in the class body (CLS-2).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "factory-incompatible-constructor": {
+          "markdownDescription": "The factory cannot call the constructor of a registered class.\n\nThe UVM factory constructs a component with new(name, parent) and an object with new() and new(name); a constructor that needs other arguments fails when the factory first creates the class, often far from the class itself.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "field-macros-in-component": {
+          "markdownDescription": "A `` `uvm_field_* `` macro in a component.\n\nField macros in a component trigger implicit config-db lookups (apply_config_settings); configuration is explicit in the style guide (FAC-4).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "final-newline": {
+          "markdownDescription": "The file does not end with exactly one newline.\n\nA missing final newline joins the last line with whatever follows it (an `include, a concatenated file list); extra blank lines are noise.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "illegal-bins": {
+          "markdownDescription": "`illegal_bins` in a covergroup.\n\nIllegal values are errors that assertions or checkers must report; coverage only samples. Exclude values with `ignore_bins` (COV-6).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "line-length": {
+          "markdownDescription": "A line is longer than the limit.\n\nLong lines are hard to read side by side in reviews and diffs.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                },
+                "max": {
+                  "default": 120,
+                  "description": "the longest line allowed, in characters",
+                  "maximum": 1000,
+                  "minimum": 40,
+                  "type": "integer"
+                },
+                "tab-width": {
+                  "default": 4,
+                  "description": "the columns a tab counts for",
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "p-sequencer": {
+          "markdownDescription": "`` `uvm_declare_p_sequencer ``.\n\nIt locks a sequence to one sequencer type (FAC-8); see SEQ-8 for alternatives.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "program-block": {
+          "markdownDescription": "A `program` block.\n\nProgram blocks change scheduling in ways that hide races instead of fixing them; the style guide does not use them (IFC-2).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "randomize-in-assert": {
+          "markdownDescription": "randomize() is called inside an assertion.\n\nWhen assertions are turned off ($assertoff, a simulator option), the whole assertion is skipped, the randomize() call with it: the test silently runs on unrandomized values.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "randomize-result-discarded": {
           "markdownDescription": "The result of randomize() is discarded.\n\nrandomize() returns 0 when the constraints cannot be met and then leaves the variables unchanged; a discarded result lets the test run on with stale values.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "randomize-void-cast": {
+          "markdownDescription": "The result of randomize() is discarded with void'(...).\n\nThe style guide asks for every randomize() result to be checked (LNG-10); `void'` only says the result is ignored on purpose.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "suppression-not-waiver": {
+          "markdownDescription": "A `dvicode-lint:` suppression.\n\nSuppressions turn rules off for a region; the style guide's waiver record is a `// <ID> waived: <reason>` comment on the code it covers (§0).",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -1608,8 +1962,108 @@
             }
           ]
         },
+        "timescale": {
+          "markdownDescription": "A `` `timescale `` directive.\n\n`` `timescale `` leaks into every file compiled after it, so a file's time unit depends on compile order; declare `timeunit` and `timeprecision` in the package, module or interface instead (FIL-7).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "todo-format": {
+          "markdownDescription": "A TODO is not written `TODO:<owner>:<P1|P2|P3>: <text>`.\n\nA fixed form makes TODOs greppable and summarizable by owner and priority, and P1s can be checked before sign-off.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "trailing-whitespace": {
           "markdownDescription": "A line ends in spaces or tabs.\n\nTrailing whitespace is invisible noise in diffs and reviews.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "uvm-deprecated-api": {
+          "markdownDescription": "Deprecated UVM API is used.\n\nThese parts of UVM were deprecated in UVM 1.2 and removed in IEEE 1800.2: code using them does not compile with a current UVM library (or with +define+UVM_NO_DEPRECATED).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "uvm-do-macros": {
+          "markdownDescription": "A `` `uvm_do ``, `` `uvm_create ``, `` `uvm_send `` or `` `uvm_rand_send `` macro.\n\nThese macros hide create, start_item, randomize and finish_item, and their randomization results; write the steps explicitly (FAC-7).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "uvm-override-signature": {
+          "markdownDescription": "A UVM phase method is overridden with another signature.\n\nA phase method only runs when it overrides UVM's own declaration exactly: a task where UVM declares a function, or other arguments, is either refused by the compiler late or never called.",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -1744,6 +2198,10 @@
   },
   "properties": {
     "$schema": {
+      "type": "string"
+    },
+    "baseline": {
+      "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists are not reported",
       "type": "string"
     },
     "comment": {

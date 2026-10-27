@@ -43,6 +43,8 @@ pub enum Simple {
     Assert(usize, usize),
     /// A macro call used as a statement: the call (with its arguments).
     Macro(usize, usize),
+    /// A delay control before a statement (`#10`, `#(d)`): from the `#` to after its value.
+    Delay(usize, usize),
 }
 
 /// The simple statements of a function or task, in order; `None` as for [`walk_method`].
@@ -295,6 +297,11 @@ impl Walker<'_> {
             let j = if y.is_punct("(") { self.group(k + 1)? } else { k + 2 };
             // `#1step`, `#10ns`: the unit is part of the number or a following identifier.
             let j = if t.get(j).is_some_and(|z| z.is_ident() && !z.ws_before() && matches!(z.text.as_str(), "s" | "ms" | "us" | "ns" | "ps" | "fs" | "step")) { j + 1 } else { j };
+            if x.is_punct("#") {
+                if let Some(s) = &mut self.simple {
+                    s.push(Simple::Delay(k, j));
+                }
+            }
             self.mark(k, j, f);
             return self.stmt(j, f);
         }

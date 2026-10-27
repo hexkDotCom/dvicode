@@ -95,7 +95,12 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn err(&self, m: &str) -> Error {
-        Error { at: self.i.min(self.s.len()) as u32, message: m.to_string() }
+        // On a character boundary, so that the place can be shown.
+        let mut at = self.i.min(self.s.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        Error { at: at as u32, message: m.to_string() }
     }
 
     fn ws(&mut self) {
@@ -328,6 +333,8 @@ mod tests {
         for bad in ["{\"a\": 1,}", "[1,]", "{// c\n}", "{\"a\": 01}", "{'a': 1}", "{\"a\": 1} x", "{\"a\": 1, \"a\": 2}", "\"\\x\"", "\"a\nb\""] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+        let e = parse("{\"comment\":\"\\é\"}").unwrap_err();
+        assert!("{\"comment\":\"\\é\"}".is_char_boundary(e.at as usize));
         let e = parse("{\n  // note\n}").unwrap_err();
         assert!(e.message.contains("comment"));
         assert_eq!(e.at, 4);

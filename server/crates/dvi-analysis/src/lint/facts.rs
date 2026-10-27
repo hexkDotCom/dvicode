@@ -16,6 +16,9 @@ pub struct FactCache {
     files: Mutex<FxHashMap<(UnitId, FileId), Arc<FileFacts>>>,
     classes: Mutex<FxHashMap<(UnitId, DeclId), Arc<ClassFacts>>>,
     uvm_files: Mutex<Option<Arc<FxHashSet<FileId>>>>,
+    /// Files whose path is in the project folder but whose real place is not (a link), and the
+    /// project folder's real place.
+    linked: Mutex<(Option<Option<std::path::PathBuf>>, FxHashMap<FileId, bool>)>,
 }
 
 /// One file as one unit compiles it.
@@ -26,9 +29,17 @@ pub struct FileFacts {
     /// Functions, tasks and processes written in the file.
     pub bodies: Vec<Body>,
     pub waivers: Waivers,
+    /// The token ranges of `` `define `` directives, in order.
+    pub defines: Vec<(usize, usize)>,
+    /// The comments of the file, in order.
+    pub comments: Vec<waivers::Comment>,
     /// The unit includes the file more than once (each time it may read differently): only
     /// rules about its text apply.
     pub repeated: bool,
+    /// The parser reported syntax errors in the file.
+    pub syntax_errors: bool,
+    /// The file holds encrypted code.
+    pub encrypted: bool,
 }
 
 /// A procedural body: a function, a task, or an `initial`/`always*`/`final` process.
@@ -69,6 +80,14 @@ pub enum UvmRole {
 /// Bases followed at most (a deeper chain is reported unknown, not walked).
 const MAX_ANCESTRY: usize = 1_000;
 
+impl FileFacts {
+    /// Whether token `k` is part of a `` `define `` (its name or its body).
+    pub fn in_define(&self, k: usize) -> bool {
+        let i = self.defines.partition_point(|(s, _)| *s <= k);
+        i > 0 && k < self.defines[i - 1].1
+    }
+}
+
 impl FactCache {
     pub fn file(&self, a: &Analysis, unit: UnitId, file: FileId) -> Arc<FileFacts> {
         if let Some(f) = self.files.lock().unwrap().get(&(unit, file)) {
@@ -85,6 +104,25 @@ impl FactCache {
         }
         let f = Arc::new(class_facts(a, c));
         self.classes.lock().unwrap().entry(key).or_insert(f).clone()
+    }
+
+    /// Whether `file` is in the project folder by its path but elsewhere in fact: a link (to a
+    /// file, or in a linked folder) that leaves the project.
+    pub fn linked_out(&self, a: &Analysis, file: FileId) -> bool {
+        if let Some(x) = self.linked.lock().unwrap().1.get(&file) {
+            return *x;
+        }
+        let root = {
+            let mut l = self.linked.lock().unwrap();
+            l.0.get_or_insert_with(|| dvi_project::fsx::canonicalize(&a.setup.root).ok()).clone()
+        };
+        let path = a.path(file);
+        let out = match (root, path.starts_with(&a.setup.root)) {
+            (Some(root), true) => dvi_project::fsx::canonicalize(&path).is_ok_and(|p| !p.starts_with(&root)),
+            _ => false,
+        };
+        self.linked.lock().unwrap().1.insert(file, out);
+        out
     }
 
     /// The files of the UVM library: the file that declares `uvm_pkg` and every file it
@@ -162,9 +200,37 @@ fn file_facts(a: &Analysis, unit: UnitId, file: FileId) -> FileFacts {
         bodies.push(Body { decl: None, start, end, stmts });
     }
     bodies.sort_by_key(|b| b.start);
-    let waivers = waivers::scan(a, unit, file, &tokens);
-    let repeated = u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count() > 1;
-    FileFacts { file, tokens, bodies, waivers, repeated }
+    // A `define runs to the end of its line, continued lines included.
+    let mut defines = Vec::new();
+    let mut k = 0;
+    while k < tokens.len() {
+        if tokens[k].kind == TokKind::Directive && tokens[k].text == "define" {
+            let mut e = k + 1;
+            while e < tokens.len() && (!tokens[e].nl_before() || tokens[e].flags & dvi_syntax::token::flags::CONT_BEFORE != 0) {
+                e += 1;
+            }
+            defines.push((k, e));
+            k = e;
+        } else {
+            k += 1;
+        }
+    }
+    let comments = waivers::comments(a, unit, file, &tokens);
+    let waivers = waivers::scan(a, file, &tokens, &comments);
+    // Included more than once, and not guarded (a guarded header's later copies are empty).
+    let repeated = u.includes.iter().filter(|i| i.entered && i.resolved == Some(file)).count() > 1 && !guarded(&raw);
+    let syntax_errors = u.parsed.diags.iter().any(|d| d.code == "SYNTAX_ERROR" && d.span.file == file);
+    let encrypted = raw.iter().enumerate().any(|(i, t)| {
+        t.kind == TokKind::Directive && (t.text == "protected" || t.text == "pragma" && raw.get(i + 1).is_some_and(|n| n.text == "protect"))
+    }) || u.parsed.decls.iter().any(|d| d.span.file == file && d.has(dflags::ENCRYPTED));
+    FileFacts { file, tokens, bodies, waivers, defines, comments, repeated, syntax_errors, encrypted }
+}
+
+/// Whether a file's text is wrapped in an include guard: `ifndef G / `define G first, `endif last.
+pub fn guarded(t: &[Token]) -> bool {
+    let t: Vec<&Token> = t.iter().filter(|x| x.kind != TokKind::Eof).collect();
+    let [a, b, c, d, ..] = t.as_slice() else { return false };
+    a.kind == TokKind::Directive && a.text == "ifndef" && c.kind == TokKind::Directive && c.text == "define" && b.text == d.text && t.last().is_some_and(|e| e.kind == TokKind::Directive && e.text == "endif")
 }
 
 fn shift(s: Simple, by: usize) -> Simple {
@@ -172,6 +238,7 @@ fn shift(s: Simple, by: usize) -> Simple {
         Simple::Expr(a, b) => Simple::Expr(a + by, b + by),
         Simple::Assert(a, b) => Simple::Assert(a + by, b + by),
         Simple::Macro(a, b) => Simple::Macro(a + by, b + by),
+        Simple::Delay(a, b) => Simple::Delay(a + by, b + by),
     }
 }
 
@@ -217,4 +284,19 @@ fn class_facts(a: &Analysis, c: DeclRef) -> ClassFacts {
         (Err(e), None) => Err(*e),
     };
     ClassFacts { ancestry, role, parameterized, is_virtual }
+}
+
+/// Whether the declaration at `name` is made by a macro: its name is written as an argument of
+/// a macro call (`` `MY_PHASE(build_phase) ``), so its header is the macro's.
+pub fn in_macro_call(a: &Analysis, unit: UnitId, name: dvi_syntax::Span) -> bool {
+    a.unit(unit).macro_uses.iter().any(|m| m.call_span.file == name.file && m.call_span.start <= name.start && name.end <= m.call_span.end)
+}
+
+/// The class a member is declared in (its parent, or the class of an out-of-block method).
+pub fn member_class(a: &Analysis, r: DeclRef) -> Option<DeclRef> {
+    let d = a.decl(r);
+    match d.parent {
+        Some(p) if matches!(a.unit(r.unit).parsed.decl(p).kind, DeclKind::Class | DeclKind::InterfaceClass) => Some(DeclRef { unit: r.unit, decl: p }),
+        _ => a.owner_class(r),
+    }
 }

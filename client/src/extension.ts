@@ -142,9 +142,9 @@ async function startClient(ctx: vscode.ExtensionContext): Promise<LanguageClient
   output.appendLine(`Server: ${launch.target} (mode ${launch.mode}); path mapping: ${mapper.describe()}`);
   watcher?.dispose();
   watcher = vscode.workspace.createFileSystemWatcher('**/*.{sv,svh,svi,svp,sva,v,vh,vp,vlib,build,f,F}');
-  // Lint configurations: the engine reads them for every problem check.
+  // Lint configurations and baselines: the engine reads them for every problem check.
   lintWatcher?.dispose();
-  lintWatcher = vscode.workspace.createFileSystemWatcher('**/.dvicode/lint.json');
+  lintWatcher = vscode.workspace.createFileSystemWatcher('**/.dvicode/*.json');
   const clientOptions: LanguageClientOptions = {
     documentSelector: SV_SELECTOR,
     outputChannel: output,
@@ -484,6 +484,25 @@ interface LintRule {
   docs: string;
 }
 
+/**
+ * After a lint code action inserted a waiver or a suppression: selects its `<reason>`
+ * placeholder on `line` so that typing replaces it.
+ */
+async function selectLintReason(uri: string, line: number): Promise<void> {
+  const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === vscode.Uri.parse(uri).toString()) ?? vscode.window.activeTextEditor;
+  if (!ed || line >= ed.document.lineCount) {
+    return;
+  }
+  const text = ed.document.lineAt(line).text;
+  const at = text.indexOf('<reason>');
+  if (at < 0) {
+    return;
+  }
+  const sel = new vscode.Selection(line, at, line, at + '<reason>'.length);
+  ed.selection = sel;
+  ed.revealRange(sel);
+}
+
 /** The lint rules of the engine, as a Markdown preview. */
 async function showLintRules(): Promise<void> {
   if (!client) {
@@ -671,6 +690,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<DvicodeApi
     vscode.commands.registerCommand('dvicode.rebuild', () => client?.sendRequest('dvicode/rebuild')),
     vscode.commands.registerCommand('dvicode.showStatus', showStatus),
     vscode.commands.registerCommand('dvicode.lint.showRules', showLintRules),
+    vscode.commands.registerCommand('dvicode.lint.selectReason', selectLintReason),
     vscode.commands.registerCommand('dvicode.selectBuildConfig', selectBuildConfig),
     vscode.commands.registerCommand('dvicode.expandMacro', () => expandMacro(false)),
     vscode.commands.registerCommand('dvicode.expandMacroAll', () => expandMacro(true)),

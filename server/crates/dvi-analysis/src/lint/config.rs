@@ -23,6 +23,8 @@ pub struct ConfigProblem {
     pub start: u32,
     pub end: u32,
     pub message: String,
+    /// A note that does not make the configuration unusable (shown, never failing a run).
+    pub warning: bool,
 }
 
 /// Where a setting comes from.
@@ -65,24 +67,31 @@ impl Glob {
         if text.starts_with('/') || text.as_bytes().get(1) == Some(&b':') {
             return Err("paths are relative to the folder that holds .dvicode".into());
         }
-        let parts: Vec<String> = text.split('/').filter(|p| !p.is_empty() && *p != ".").map(fold_case).collect();
+        let mut parts: Vec<String> = text.split('/').filter(|p| !p.is_empty() && *p != ".").map(fold_case).collect();
         if parts.iter().skip_while(|p| *p == "..").any(|p| p == "..") {
             return Err("\"..\" may only start a path".into());
         }
-        Ok(Glob { text: text.to_string(), base: base.to_path_buf(), parts })
+        // `../x`: `x` in the folder above.
+        let mut base = base.to_path_buf();
+        while parts.first().is_some_and(|p| p == "..") {
+            parts.remove(0);
+            base = base.parent().ok_or("the path leaves the file system's root")?.to_path_buf();
+        }
+        if parts.len() > 64 {
+            return Err("too many parts".into());
+        }
+        Ok(Glob { text: text.to_string(), base, parts })
     }
 
     /// Whether `path` (absolute) is matched, or is in a folder that is.
     pub fn matches(&self, path: &Path) -> bool {
         let Some(rel) = relative(&self.base, path) else { return false };
-        let rel: Vec<String> = rel.iter().map(|s| fold_case(s)).collect();
-        // Outside the base folder: only a pattern that leaves it too.
-        let ups = |v: &[String]| v.iter().take_while(|c| *c == "..").count();
-        if ups(&rel) != ups(&self.parts) {
+        if rel.first().is_some_and(|c| c == "..") {
             return false;
         }
+        let rel: Vec<String> = rel.iter().map(|s| fold_case(s)).collect();
         // The pattern against each leading part of the path: a folder covers what is in it.
-        (0..=rel.len()).any(|k| match_parts(&self.parts, &rel[..k]))
+        match_prefixes(&self.parts, &rel)
     }
 }
 
@@ -119,13 +128,32 @@ fn relative(base: &Path, path: &Path) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn match_parts(pat: &[String], comps: &[String]) -> bool {
-    match pat.first() {
-        None => comps.is_empty(),
-        Some(p) if p == "**" => (0..=comps.len()).any(|k| match_parts(&pat[1..], &comps[k..])),
-        Some(p) if p == ".." => comps.first().is_some_and(|c| c == "..") && match_parts(&pat[1..], &comps[1..]),
-        Some(p) => comps.first().is_some_and(|c| c != ".." && dvi_project::glob::match_component(p, c)) && match_parts(&pat[1..], &comps[1..]),
+/// Whether `pat` matches `comps[..k]` for some `k`: one pass per pattern part from the first,
+/// each keeping the set of path positions the parts so far can end at (no backtracking).
+fn match_prefixes(pat: &[String], comps: &[String]) -> bool {
+    let n = comps.len();
+    // at[j]: the parts so far match comps[..j].
+    let mut at = vec![false; n + 1];
+    at[0] = true;
+    for p in pat {
+        let mut next = vec![false; n + 1];
+        if p == "**" {
+            let mut any = false;
+            for j in 0..=n {
+                any |= at[j];
+                next[j] = any;
+            }
+        } else {
+            for j in 0..n {
+                next[j + 1] = at[j] && dvi_project::glob::match_component(p, &comps[j]);
+            }
+        }
+        at = next;
+        if !at.contains(&true) {
+            return false;
+        }
     }
+    at.contains(&true)
 }
 
 /// One `rules` entry.
@@ -172,9 +200,12 @@ pub struct ConfigFile {
     include: Vec<PathEntry>,
     examples: Vec<PathEntry>,
     pub uvm: Option<String>,
+    /// The baseline file named (absolute), and where its value is written.
+    pub baseline: Option<PathBuf>,
+    baseline_at: (u32, u32),
 }
 
-const TOP_KEYS: &[&str] = &["$schema", "comment", "extends", "rulesets", "rules", "overrides", "owned", "exclude", "include", "examples", "uvm"];
+const TOP_KEYS: &[&str] = &["$schema", "comment", "extends", "rulesets", "rules", "overrides", "owned", "exclude", "include", "examples", "uvm", "baseline"];
 
 impl ConfigFile {
     /// Reads `text` as the configuration at `path` (`<base>/.dvicode/lint.json`).
@@ -212,6 +243,13 @@ impl ConfigFile {
                 "exclude" => c.exclude = c.paths_of(v, "exclude"),
                 "include" => c.include = c.paths_of(v, "include"),
                 "examples" => c.examples = c.paths_of(v, "examples"),
+                "baseline" => match v.as_str().map(|p| Glob::new(p, &c.base)) {
+                    Some(Ok(g)) if !dvi_project::glob::has_wildcard(&g.text) => {
+                        c.baseline = Some(c.base.join(&g.text));
+                        c.baseline_at = (v.start, v.end);
+                    }
+                    _ => c.problem(v.start, v.end, "\"baseline\" must be a file path relative to the folder that holds .dvicode".into()),
+                },
                 "uvm" => match v.as_str() {
                     Some(s @ ("1.2" | "ieee")) => c.uvm = Some(s.to_string()),
                     _ => c.problem(v.start, v.end, "\"uvm\" must be \"1.2\" or \"ieee\"".into()),
@@ -223,7 +261,16 @@ impl ConfigFile {
     }
 
     fn problem(&mut self, start: u32, end: u32, message: String) {
-        self.problems.push(ConfigProblem { path: self.path.clone(), start, end: end.max(start), message });
+        self.problems.push(ConfigProblem { path: self.path.clone(), start, end: end.max(start), message, warning: false });
+    }
+
+    fn note(&mut self, start: u32, end: u32, message: String) {
+        self.problems.push(ConfigProblem { path: self.path.clone(), start, end: end.max(start), message, warning: true });
+    }
+
+    /// The problems that make it unusable.
+    pub fn errors(&self) -> impl Iterator<Item = &ConfigProblem> {
+        self.problems.iter().filter(|p| !p.warning)
     }
 
     fn unknown_key(&mut self, m: &Member, known: &[&str]) {
@@ -405,6 +452,27 @@ impl ConfigFile {
     }
 }
 
+/// `path` below `root`, compared as the file system compares names (ignoring case on Windows
+/// and macOS).
+fn strip_root<'p>(path: &'p Path, root: &Path) -> Option<&'p Path> {
+    if let Ok(r) = path.strip_prefix(root) {
+        return Some(r);
+    }
+    if !cfg!(any(windows, target_os = "macos")) {
+        return None;
+    }
+    let n = root.components().count();
+    let same = path.components().zip(root.components()).take_while(|(a, b)| a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase()).count();
+    if same != n {
+        return None;
+    }
+    let mut it = path.components();
+    for _ in 0..n {
+        it.next();
+    }
+    Some(it.as_path())
+}
+
 /// Small edit distance, for "did you mean" (names are short).
 fn edit_distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
@@ -471,6 +539,8 @@ pub struct FileConfig {
     /// The guide's example exceptions apply (`examples`).
     pub example: bool,
     pub uvm: Option<String>,
+    /// The baseline that applies (the nearest configuration that names one).
+    pub baseline: Option<PathBuf>,
     pub rulesets: (Vec<Ruleset>, Origin),
     /// The reasons of the overrides that matched, for `--print-config`.
     pub overrides: Vec<(Origin, Option<String>)>,
@@ -489,7 +559,9 @@ pub struct ConfigSet {
     pub defaults: Defaults,
     /// `--config FILE`: this file only, no lookup.
     pub explicit: Option<PathBuf>,
-    files: Mutex<FxHashMap<PathBuf, Option<Arc<ConfigFile>>>>,
+    /// What was read, and the generation it was read in: a read that started before the last
+    /// invalidation is not kept.
+    files: Mutex<(u64, FxHashMap<PathBuf, Option<Arc<ConfigFile>>>)>,
 }
 
 impl ConfigSet {
@@ -499,26 +571,46 @@ impl ConfigSet {
 
     /// Forgets what was read (a configuration file changed).
     pub fn invalidate(&self) {
-        self.files.lock().unwrap().clear();
+        let mut f = self.files.lock().unwrap();
+        f.0 += 1;
+        f.1.clear();
     }
 
     fn load(&self, env: &dyn ConfigEnv, path: &Path) -> Option<Arc<ConfigFile>> {
-        if let Some(c) = self.files.lock().unwrap().get(path) {
-            return c.clone();
-        }
+        let generation = {
+            let f = self.files.lock().unwrap();
+            if let Some(c) = f.1.get(path) {
+                return c.clone();
+            }
+            f.0
+        };
         let c = if env.is_file(path) {
-            Some(Arc::new(match env.read(path) {
+            let mut c = match env.read(path) {
                 Some(t) => ConfigFile::parse(path, &t),
                 None => {
                     let mut c = ConfigFile::parse(path, "{}");
                     c.problem(0, 0, "Cannot read this configuration file".into());
                     c
                 }
-            }))
+            };
+            // The baseline it names: missing is a note (it may not be written yet); unreadable
+            // is an error, since its findings would come back without a word.
+            if let Some(b) = c.baseline.clone() {
+                let (s, e) = c.baseline_at;
+                if !env.is_file(&b) {
+                    c.note(s, e, format!("The baseline {} does not exist (write it with `dvicode lint --write-baseline`)", b.display()));
+                } else if let Err(why) = env.read(&b).ok_or_else(|| "cannot read it".to_string()).and_then(|t| super::baseline::Baseline::read(&t)) {
+                    c.problem(s, e, format!("The baseline {}: {why}", b.display()));
+                }
+            }
+            Some(Arc::new(c))
         } else {
             None
         };
-        self.files.lock().unwrap().insert(path.to_path_buf(), c.clone());
+        let mut f = self.files.lock().unwrap();
+        if f.0 == generation {
+            f.1.insert(path.to_path_buf(), c.clone());
+        }
         c
     }
 
@@ -528,7 +620,7 @@ impl ConfigSet {
             return self.load(env, p).into_iter().collect();
         }
         let mut dirs = vec![self.root.clone()];
-        if let Some(rel) = file.parent().and_then(|d| d.strip_prefix(&self.root).ok()) {
+        if let Some(rel) = file.parent().and_then(|d| strip_root(d, &self.root)) {
             let mut d = self.root.clone();
             for c in rel.components() {
                 d.push(c);
@@ -549,14 +641,15 @@ impl ConfigSet {
 
     /// The configuration files read so far (with their problems).
     pub fn loaded(&self) -> Vec<Arc<ConfigFile>> {
-        let mut v: Vec<Arc<ConfigFile>> = self.files.lock().unwrap().values().flatten().cloned().collect();
+        let mut v: Vec<Arc<ConfigFile>> = self.files.lock().unwrap().1.values().flatten().cloned().collect();
         v.sort_by(|a, b| a.path.cmp(&b.path));
         v
     }
 
-    /// The configuration of `file`. `library`: the file belongs to the UVM library or is
-    /// built in (never owned unless a configuration includes it).
-    pub fn for_file(&self, env: &dyn ConfigEnv, file: &Path, library: bool) -> FileConfig {
+    /// The configuration of `file`. `outside`: why the file is not the project's although its
+    /// path may say so (built in, the UVM library, a link to elsewhere): it is then owned only
+    /// when a configuration includes it.
+    pub fn for_file(&self, env: &dyn ConfigEnv, file: &Path, outside: Option<&str>) -> FileConfig {
         let chain = self.chain(env, file);
         let d = &self.defaults;
         let default_origin = if d.from_setting { Origin::Setting } else { Origin::Default };
@@ -564,6 +657,7 @@ impl ConfigSet {
         let mut explicit: FxHashMap<&'static str, (Option<Level>, FxHashMap<String, i64>, Origin)> = FxHashMap::default();
         let mut overrides = Vec::new();
         let mut uvm = None;
+        let mut baseline = None;
         let apply = |explicit: &mut FxHashMap<&'static str, (Option<Level>, FxHashMap<String, i64>, Origin)>, entries: &[RuleEntry], path: &Path| {
             for e in entries {
                 for t in &e.targets {
@@ -612,6 +706,9 @@ impl ConfigSet {
             if c.uvm.is_some() {
                 uvm = c.uvm.clone();
             }
+            if c.baseline.is_some() {
+                baseline = c.baseline.clone();
+            }
         }
         if let Some(r) = &d.cli_rulesets {
             rulesets = (r.clone(), Origin::CommandLine);
@@ -634,8 +731,8 @@ impl ConfigSet {
             rules_out.insert(m.id, RuleSetting { level, params, origin });
         }
         let mut owned = match owned_roots.iter().find(|(g, _)| g.matches(file)) {
-            Some((_, o)) if !library => Owned::Yes(o.clone()),
-            Some(_) => Owned::No("part of the UVM library or built in".into()),
+            Some((_, o)) if outside.is_none() => Owned::Yes(o.clone()),
+            Some(_) => Owned::No(outside.unwrap_or_default().to_string()),
             None => Owned::No("outside the owned folders".into()),
         };
         for (include, p, path) in marks {
@@ -647,7 +744,7 @@ impl ConfigSet {
                 };
             }
         }
-        FileConfig { enabled: d.enabled, rules: rules_out, owned, example, uvm, rulesets, overrides }
+        FileConfig { enabled: d.enabled, rules: rules_out, owned, example, uvm, baseline, rulesets, overrides }
     }
 
     /// A hash of everything that decides configurations (for the JSON output).
@@ -728,7 +825,7 @@ mod tests {
     }
 
     fn level(set: &ConfigSet, env: &Mem, f: &str, rule: &str) -> Level {
-        set.for_file(env, &file(f), false).rules[rule].level
+        set.for_file(env, &file(f), None).rules[rule].level
     }
 
     #[test]
@@ -776,16 +873,34 @@ mod tests {
     fn ownership() {
         let env = Mem(vec![cfg_at("", r#"{ "exclude": ["vendor", {"path": "**/*_reg_block.sv", "reason": "generated"}], "include": ["vendor/ours/**", "../shared/pkg"] }"#)]);
         let set = ConfigSet::new(&root(), Defaults::default(), None);
-        let own = |f: &str| set.for_file(&env, &file(f), false).owned.is_owned();
+        let own = |f: &str| set.for_file(&env, &file(f), None).owned.is_owned();
         assert!(own("tb/a.sv"));
         assert!(!own("vendor/x/a.sv"));
         assert!(own("vendor/ours/a.sv"));
         assert!(!own("tb/x_reg_block.sv"));
         let shared = root().parent().unwrap().join("shared").join("pkg").join("a.sv");
-        assert!(set.for_file(&env, &shared, false).owned.is_owned());
+        assert!(set.for_file(&env, &shared, None).owned.is_owned());
         let other = root().parent().unwrap().join("other").join("a.sv");
-        assert!(!set.for_file(&env, &other, false).owned.is_owned());
-        assert!(!set.for_file(&env, &file("tb/uvm_pkg.sv"), true).owned.is_owned());
+        assert!(!set.for_file(&env, &other, None).owned.is_owned());
+        assert!(!set.for_file(&env, &file("tb/uvm_pkg.sv"), Some("part of the UVM library")).owned.is_owned());
+    }
+
+    #[test]
+    fn parent_folders_and_many_double_stars() {
+        // `..` names the folder above, which covers the project folder too.
+        let g = Glob::new("..", &root()).unwrap();
+        assert!(g.matches(&file("tb/a.sv")));
+        let g = Glob::new("../shared/**/*.sv", &root()).unwrap();
+        assert!(g.matches(&root().parent().unwrap().join("shared").join("x").join("a.sv")));
+        assert!(!g.matches(&file("shared/a.sv")));
+        // No backtracking blow-up.
+        let deep = format!("{}missing.sv", "**/".repeat(40));
+        let g = Glob::new(&deep, &root()).unwrap();
+        let mut p = root();
+        for i in 0..60 {
+            p.push(format!("d{i}"));
+        }
+        assert!(!g.matches(&p.join("a.sv")));
     }
 
     #[test]

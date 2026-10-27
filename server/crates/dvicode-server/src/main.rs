@@ -7,8 +7,10 @@
 //!   dvicode-server lint <dir> [...]              lint a project (see `lint --help`)
 //!   dvicode-server --version
 
+mod changed;
 mod check;
 mod lint_cmd;
+mod lint_out;
 mod crash;
 mod format;
 mod fs;

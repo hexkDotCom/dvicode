@@ -46,6 +46,9 @@ pub const DEPRECATED: &[Deprecated] = &[
     Deprecated { name: "get_config_int", owner: Some("uvm_component"), macro_: false, instead: "uvm_config_db#(uvm_bitstream_t)::get" },
     Deprecated { name: "get_config_string", owner: Some("uvm_component"), macro_: false, instead: "uvm_config_db#(string)::get" },
     Deprecated { name: "get_config_object", owner: Some("uvm_component"), macro_: false, instead: "uvm_config_db#(uvm_object)::get" },
+    Deprecated { name: "set_config_int", owner: None, macro_: false, instead: "uvm_config_db#(uvm_bitstream_t)::set" },
+    Deprecated { name: "set_config_string", owner: None, macro_: false, instead: "uvm_config_db#(string)::set" },
+    Deprecated { name: "set_config_object", owner: None, macro_: false, instead: "uvm_config_db#(uvm_object)::set" },
     Deprecated { name: "print_config_settings", owner: Some("uvm_component"), macro_: false, instead: "print_config" },
     Deprecated { name: "global_stop_request", owner: None, macro_: false, instead: "objections (raise_objection/drop_objection)" },
     Deprecated { name: "stop_request", owner: Some("uvm_root"), macro_: false, instead: "objections (raise_objection/drop_objection)" },
@@ -63,6 +66,7 @@ pub const DEPRECATED: &[Deprecated] = &[
     Deprecated { name: "uvm_declare_sequence_lib", owner: None, macro_: true, instead: "uvm_sequence_library" },
 ];
 
-pub fn deprecated(name: &str, macro_: bool) -> Option<&'static Deprecated> {
-    DEPRECATED.iter().find(|d| d.name == name && d.macro_ == macro_)
+/// The entries for a name (a member may be deprecated both in a class and as a package item).
+pub fn deprecated(name: &str, macro_: bool) -> impl Iterator<Item = &'static Deprecated> + '_ {
+    DEPRECATED.iter().filter(move |d| d.name == name && d.macro_ == macro_)
 }

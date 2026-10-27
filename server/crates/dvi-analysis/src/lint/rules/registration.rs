@@ -1,8 +1,9 @@
 //! `uvm-registration-mismatch`: a UVM registration macro that does not fit the class it is in.
 
 use crate::lint::facts::UvmRole;
-use crate::lint::{Cx, Level, Rule, RuleMeta, Ruleset};
-use crate::world::DeclRef;
+use crate::lint::{Cx, Fix, Level, Rule, RuleMeta, Ruleset};
+use crate::world::{DeclRef, Unit};
+use dvi_syntax::preproc::MacroUse;
 use dvi_syntax::ast::{DeclId, DeclKind};
 use dvi_syntax::{Span, TokKind};
 
@@ -17,14 +18,52 @@ static META: RuleMeta = RuleMeta {
     summary: "A UVM registration macro does not fit its class.",
     why: "The factory creates what the macro registers: another class's name, the object macro on a component, or a non-parameterized macro on a parameterized class registers the wrong thing or fails to compile only where the factory is used.",
     params: &[],
+    text_only: false,
 };
 
 /// What a registration macro's name says.
-struct Form {
-    component: bool,
-    param: bool,
-    abstract_: bool,
-    begin: bool,
+#[derive(Clone, Copy)]
+pub(super) struct Form {
+    pub component: bool,
+    pub param: bool,
+    pub abstract_: bool,
+    pub begin: bool,
+}
+
+/// A UVM registration macro written in a class of the file being linted.
+pub(super) struct Registration<'u> {
+    pub class: DeclRef,
+    pub call: &'u MacroUse,
+    pub form: Form,
+}
+
+/// The registration macros of the UVM library written in the file being linted, each with the
+/// innermost class around it (a call outside any class is left out).
+pub(super) fn registrations<'u>(cx: &mut Cx, u: &'u Unit) -> Vec<Registration<'u>> {
+    let a = cx.a;
+    let uvm = a.lint_facts.uvm_files(a);
+    // The classes written in this file, smallest last: a call belongs to the innermost.
+    let mut classes: Vec<DeclId> = u.parsed.decls.iter().enumerate().filter(|(_, d)| d.kind == DeclKind::Class && d.span.file == cx.file).map(|(i, _)| i as DeclId).collect();
+    classes.sort_by_key(|c| std::cmp::Reverse(u.parsed.decl(*c).span.end - u.parsed.decl(*c).span.start));
+    let mut out = Vec::new();
+    for m in &u.macro_uses {
+        if m.name_span.file != cx.file || !cx.step(1) {
+            continue;
+        }
+        let Some(f) = form(&m.name) else { continue };
+        // UVM's own macro, not a project's of the same name.
+        if !m.def.as_ref().is_some_and(|d| uvm.contains(&d.name_span.file)) {
+            continue;
+        }
+        let Some(&cid) = classes.iter().rev().find(|c| {
+            let d = u.parsed.decl(**c);
+            d.span.start <= m.name_span.start && m.name_span.end <= d.span.end
+        }) else {
+            continue;
+        };
+        out.push(Registration { class: DeclRef { unit: cx.unit, decl: cid }, call: m, form: f });
+    }
+    out
 }
 
 fn form(name: &str) -> Option<Form> {
@@ -68,29 +107,11 @@ impl Rule for RegistrationMismatch {
         let facts = cx.facts.clone();
         let u = a.unit(cx.unit).clone();
         let uvm = a.lint_facts.uvm_files(a);
-        // The classes written in this file, smallest last: a call belongs to the innermost.
-        let mut classes: Vec<DeclId> = u.parsed.decls.iter().enumerate().filter(|(_, d)| d.kind == DeclKind::Class && d.span.file == cx.file).map(|(i, _)| i as DeclId).collect();
-        classes.sort_by_key(|c| std::cmp::Reverse(u.parsed.decl(*c).span.end - u.parsed.decl(*c).span.start));
-        for m in &u.macro_uses {
-            if m.name_span.file != cx.file || !cx.step(1) {
-                continue;
-            }
-            let Some(f) = form(&m.name) else { continue };
-            // UVM's own macro, not a project's of the same name.
-            if !m.def.as_ref().is_some_and(|d| uvm.contains(&d.name_span.file)) {
-                continue;
-            }
-            let Some(&cid) = classes.iter().rev().find(|c| {
-                let d = u.parsed.decl(**c);
-                d.span.start <= m.name_span.start && m.name_span.end <= d.span.end
-            }) else {
-                continue;
-            };
+        for Registration { class, call: m, form: f } in registrations(cx, &u) {
             if facts.repeated {
                 cx.unknown("repeated inclusion");
                 continue;
             }
-            let class = DeclRef { unit: cx.unit, decl: cid };
             let cf = a.lint_facts.class(a, class);
             let cname = a.decl(class).name.clone();
             let related = vec![(a.decl(class).name_span, format!("class {cname}"))];
@@ -102,24 +123,26 @@ impl Rule for RegistrationMismatch {
                     continue;
                 }
                 Arg::Class(_) => {}
-                Arg::Unknown => cx.unknown("unresolved macro argument"),
+                Arg::Unknown => cx.unknown_at("unresolved macro argument", m.call_span),
             }
             let role = match cf.role {
                 Ok(r) => r,
                 Err(_) => {
-                    cx.unknown("class ancestry");
+                    cx.unknown_at("class ancestry", m.call_span);
                     continue;
                 }
             };
             match (role, f.component) {
                 (UvmRole::Component, false) => {
                     let fix = macro_name(&Form { component: true, ..f });
-                    cx.report(Some("family"), m.call_span, format!("{cname} is a component but is registered with `{}: use `{fix}", m.name), related.clone());
+                    let fixes = vec![rename(m.name_span, &fix, true)];
+                    cx.report_fix(Some("family"), m.call_span, format!("{cname} is a component but is registered with `{}: use `{fix}", m.name), related.clone(), fixes);
                     continue;
                 }
                 (UvmRole::Object, true) => {
                     let fix = macro_name(&Form { component: false, ..f });
-                    cx.report(Some("family"), m.call_span, format!("{cname} is an object, not a component, but is registered with `{}: use `{fix}", m.name), related.clone());
+                    let fixes = vec![rename(m.name_span, &fix, true)];
+                    cx.report_fix(Some("family"), m.call_span, format!("{cname} is an object, not a component, but is registered with `{}: use `{fix}", m.name), related.clone(), fixes);
                     continue;
                 }
                 (UvmRole::Component | UvmRole::Object, _) => {}
@@ -128,18 +151,24 @@ impl Rule for RegistrationMismatch {
             }
             if cf.parameterized && !f.param {
                 let fix = macro_name(&Form { param: true, ..f });
-                cx.report(Some("param"), m.call_span, format!("{cname} is parameterized but `{} registers it by name: use `{fix} (parameterized classes are registered by type)", m.name), related.clone());
+                let fixes = vec![rename(m.name_span, &fix, false)];
+                cx.report_fix(Some("param"), m.call_span, format!("{cname} is parameterized but `{} registers it by name: use `{fix} (parameterized classes are registered by type)", m.name), related.clone(), fixes);
                 continue;
             }
             if cf.is_virtual && !f.abstract_ {
                 let abs = macro_name(&Form { abstract_: true, ..f });
                 // Only where the library has abstract registration (IEEE 1800.2).
-                if a.global.macros.get(abs.as_str()).is_some_and(|defs| defs.iter().any(|d| uvm.contains(&d.name_span.file))) {
+                if u.macros_after.get(abs.as_str()).is_some_and(|d| uvm.contains(&d.name_span.file)) {
                     cx.report(Some("abstract"), m.call_span, format!("{cname} is a virtual class: register it with `{abs} (the factory cannot construct it)"), related);
                 }
             }
         }
     }
+}
+
+/// Replaces the macro called at `name` (its `` `name `` token) with `` `to ``.
+fn rename(name: Span, to: &str, safe: bool) -> Fix {
+    Fix { title: format!("Use `{to}"), edits: vec![(name, format!("`{to}"))], safe }
 }
 
 enum Arg {

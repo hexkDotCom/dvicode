@@ -8,7 +8,10 @@
 //! (`.dvicode/lint.json`, [`config`]) chooses the rules and their levels per file; waivers in
 //! the code ([`waivers`]) suppress single findings.
 
+pub mod baseline;
+pub mod catalog;
 pub mod config;
+pub mod docs;
 pub mod facts;
 pub mod guide_ids;
 pub mod json;
@@ -121,12 +124,14 @@ pub struct RuleMeta {
     pub summary: &'static str,
     pub why: &'static str,
     pub params: &'static [ParamMeta],
+    /// Looks only at the text and the comments: it does not need the code to parse.
+    pub text_only: bool,
 }
 
 impl RuleMeta {
     /// Where its documentation is published.
     pub fn docs_url(&self) -> String {
-        format!("https://hexkdotcom.github.io/dvicode/lint/{}", self.id)
+        format!("https://github.com/hexkDotCom/dvicode/blob/main/docs/lint/{}.md", self.id)
     }
 }
 
@@ -148,6 +153,18 @@ pub struct Finding {
     pub related: Vec<(Span, String)>,
     /// The waiver or suppression that covers it.
     pub suppressed: Option<String>,
+    /// Rewrites that resolve it.
+    #[serde(skip)]
+    pub fixes: Vec<Fix>,
+}
+
+/// A rewrite that resolves a finding.
+#[derive(Clone, Debug)]
+pub struct Fix {
+    pub title: String,
+    pub edits: Vec<(Span, String)>,
+    /// Keeps the code's behaviour except for what the rule asks (else a suggestion to review).
+    pub safe: bool,
 }
 
 /// What linting one file in one context gave.
@@ -156,11 +173,14 @@ pub struct FileLint {
     pub findings: Vec<Finding>,
     /// Candidates a rule saw but could not decide, by rule and reason.
     pub unknown: FxHashMap<(&'static str, &'static str), u32>,
+    /// Where some of them are (a few per rule): rule, reason, place.
+    pub unknown_places: Vec<(&'static str, &'static str, Span)>,
     /// Rules that did not look at everything (budget, cancellation, code the walker cannot
     /// follow), with why.
     pub incomplete: Vec<(&'static str, &'static str)>,
-    /// The context it was linted in.
+    /// The context it was linted in, and its unit in this snapshot.
     pub context: Option<ContextKey>,
+    pub unit: Option<UnitId>,
     /// The file is owned (linted at all).
     pub owned: bool,
 }
@@ -180,21 +200,39 @@ pub struct Cx<'a> {
     steps: u64,
     findings: Vec<Finding>,
     unknown: FxHashMap<&'static str, u32>,
+    unknown_places: Vec<(&'static str, Span)>,
     incomplete: Option<&'static str>,
 }
+
+/// Unknown places kept per rule and file.
+const UNKNOWN_PLACES: usize = 20;
 
 impl<'a> Cx<'a> {
     /// A finding at `span`, which must be in the file being linted.
     pub fn report(&mut self, subcheck: Option<&'static str>, span: Span, message: impl Into<String>, related: Vec<(Span, String)>) {
+        self.report_fix(subcheck, span, message, related, Vec::new());
+    }
+
+    /// A finding with the rewrites that resolve it (edits in files the user owns only).
+    pub fn report_fix(&mut self, subcheck: Option<&'static str>, span: Span, message: impl Into<String>, related: Vec<(Span, String)>, fixes: Vec<Fix>) {
         if span.file != self.file {
             return;
         }
-        self.findings.push(Finding { rule: self.rule.id, subcheck, span, message: message.into(), level: self.level, related, suppressed: None });
+        let fixes = fixes.into_iter().filter(|f| f.edits.iter().all(|(s, _)| s.file == self.file)).collect();
+        self.findings.push(Finding { rule: self.rule.id, subcheck, span, message: message.into(), level: self.level, related, suppressed: None, fixes });
     }
 
     /// A candidate whose facts are not known.
     pub fn unknown(&mut self, reason: &'static str) {
         *self.unknown.entry(reason).or_default() += 1;
+    }
+
+    /// A candidate at `at` whose facts are not known.
+    pub fn unknown_at(&mut self, reason: &'static str, at: Span) {
+        self.unknown(reason);
+        if self.unknown_places.len() < UNKNOWN_PLACES && at.file == self.file {
+            self.unknown_places.push((reason, at));
+        }
     }
 
     /// The rule could not look at everything in the file.
@@ -225,8 +263,16 @@ impl Analysis {
     /// The configuration of `file`: never owned when it is built in or part of the UVM
     /// library, unless a configuration includes it.
     pub fn lint_config(&self, set: &config::ConfigSet, env: &dyn config::ConfigEnv, file: FileId) -> config::FileConfig {
-        let library = self.vfs.is_builtin(file) || file == dvi_syntax::preproc::COMMAND_LINE_FILE || self.lint_facts.uvm_files(self).contains(&file);
-        set.for_file(env, &self.path(file), library)
+        let outside = if self.vfs.is_builtin(file) || file == dvi_syntax::preproc::COMMAND_LINE_FILE {
+            Some("built in")
+        } else if self.lint_facts.uvm_files(self).contains(&file) {
+            Some("part of the UVM library")
+        } else if self.lint_facts.linked_out(self, file) {
+            Some("reached through a link to a folder outside the project")
+        } else {
+            None
+        };
+        set.for_file(env, &self.path(file), outside)
     }
 
     /// Lints `file` with its resolved configuration, in `unit` (else the file's context unit).
@@ -237,14 +283,24 @@ impl Analysis {
         }
         let Some(unit) = unit.or_else(|| self.context_unit(file)) else { return out };
         out.context = Some(self.context_key(unit));
+        out.unit = Some(unit);
+        let enabled: Vec<&'static dyn Rule> = rules::all().iter().copied().filter(|r| cfg.rules.get(r.meta().id).is_some_and(|s| s.level != Level::Off)).collect();
+        if enabled.is_empty() {
+            return out;
+        }
         let facts = self.lint_facts.file(self, unit, file);
+        // Code the parser could not read, or cannot see: what is there is not known.
+        if enabled.iter().any(|r| !r.meta().text_only) {
+            if facts.syntax_errors {
+                out.incomplete.push(("lint", "syntax errors in the file"));
+            } else if facts.encrypted {
+                out.incomplete.push(("lint", "encrypted code in the file"));
+            }
+        }
         let empty = FxHashMap::default();
-        for rule in rules::all() {
+        for rule in enabled {
             let meta = rule.meta();
             let Some(set) = cfg.rules.get(meta.id) else { continue };
-            if set.level == Level::Off {
-                continue;
-            }
             let mut cx = Cx {
                 a: self,
                 file,
@@ -256,12 +312,14 @@ impl Analysis {
                 steps: 0,
                 findings: Vec::new(),
                 unknown: FxHashMap::default(),
+                unknown_places: Vec::new(),
                 incomplete: None,
             };
             rule.check(&mut cx);
             for (reason, n) in cx.unknown {
                 *out.unknown.entry((meta.id, reason)).or_default() += n;
             }
+            out.unknown_places.extend(cx.unknown_places.into_iter().map(|(r, s)| (meta.id, r, s)));
             if let Some(r) = cx.incomplete {
                 out.incomplete.push((meta.id, r));
             }

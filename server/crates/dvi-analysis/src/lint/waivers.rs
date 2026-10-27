@@ -22,6 +22,10 @@ use dvi_syntax::{FileId, Span, TokKind, Token};
 #[derive(Clone, Debug, Default)]
 pub struct Waivers {
     pub items: Vec<Waiver>,
+    /// Suppressed regions, one per ID: the ID, the byte range, and the comment that opened it.
+    pub regions: Vec<(String, u32, u32, usize)>,
+    /// `enable=` IDs with no `disable=` open for them: the comment and the ID.
+    pub unmatched: Vec<(Span, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,28 +66,15 @@ const CLOSERS: &[&str] = &[
 
 /// Finds the waivers of `file` (`tokens`: its active tokens in `unit`). Comments are in the
 /// gaps between tokens; a comment in code `ifdef` leaves out is dormant (not returned).
-pub fn scan(a: &Analysis, unit: UnitId, file: FileId, tokens: &[Token]) -> Waivers {
+pub fn scan(a: &Analysis, file: FileId, tokens: &[Token], comments: &[Comment]) -> Waivers {
     let Some(text) = a.file_text(file) else { return Waivers::default() };
-    let inactive: Vec<Span> = a.unit(unit).inactive.iter().filter(|s| s.file == file).copied().collect();
     let mut items = Vec::new();
-    let mut prev_end = 0usize;
-    for i in 0..=tokens.len() {
-        let gap_end = tokens.get(i).map_or(text.len(), |t| t.span.start as usize).min(text.len());
-        if gap_end > prev_end {
-            comments_in(&text, prev_end, gap_end, &mut |s, e| {
-                if inactive.iter().any(|x| x.start <= s && s < x.end) {
-                    return;
-                }
-                if let Some(w) = parse_comment(&text[s as usize..e as usize], Span::new(file, s, e)) {
-                    items.push((w, i));
-                }
-            });
-        }
-        if let Some(t) = tokens.get(i) {
-            prev_end = prev_end.max(t.span.end as usize);
+    for c in comments.iter().filter(|c| c.line) {
+        if let Some(w) = parse_comment(&text[c.span.start as usize..c.span.end as usize], c.span) {
+            items.push((w, c.next));
         }
     }
-    let items = items
+    let items: Vec<Waiver> = items
         .into_iter()
         .map(|(mut w, next)| {
             if w.kind == WaiverKind::Guide {
@@ -92,22 +83,102 @@ pub fn scan(a: &Analysis, unit: UnitId, file: FileId, tokens: &[Token]) -> Waive
             w
         })
         .collect();
-    Waivers { items }
+    // Suppressed regions, each ID on its own: `disable=a,b` then `enable=a` leaves `b` off.
+    let mut regions = Vec::new();
+    let mut unmatched = Vec::new();
+    let mut open: Vec<(String, u32, usize)> = Vec::new();
+    for (i, w) in items.iter().enumerate() {
+        match w.kind {
+            WaiverKind::Disable => {
+                for id in &w.ids {
+                    if !open.iter().any(|(o, _, _)| o == id) {
+                        open.push((id.clone(), w.span.end, i));
+                    }
+                }
+            }
+            WaiverKind::Enable => {
+                for id in &w.ids {
+                    match open.iter().position(|(o, _, _)| o == id) {
+                        Some(k) => {
+                            let (id, start, from) = open.remove(k);
+                            regions.push((id, start, w.span.start, from));
+                        }
+                        None => unmatched.push((w.span, id.clone())),
+                    }
+                }
+            }
+            WaiverKind::DisableFile => {
+                for id in &w.ids {
+                    regions.push((id.clone(), 0, u32::MAX, i));
+                }
+            }
+            WaiverKind::Guide => {}
+        }
+    }
+    for (id, start, from) in open {
+        regions.push((id, start, u32::MAX, from));
+    }
+    Waivers { items, regions, unmatched }
 }
 
-/// Calls `f(start, end)` for each `//` comment (without its newline) in `text[from..to]`, which
-/// holds no token: only whitespace and comments.
-fn comments_in(text: &str, from: usize, to: usize, f: &mut dyn FnMut(u32, u32)) {
+/// A comment of the file (in active code).
+#[derive(Clone, Copy, Debug)]
+pub struct Comment {
+    /// Without the newline of a `//` comment.
+    pub span: Span,
+    /// The index of the first token after it.
+    pub next: usize,
+    /// `//` (else `/* */`).
+    pub line: bool,
+}
+
+/// The comments of `file` (`tokens`: its active tokens in `unit`). Comments are in the gaps
+/// between the lexer's tokens, so strings and escaped names are never taken for comments; the
+/// parts of a gap that `ifdef` leaves out are skipped.
+pub fn comments(a: &Analysis, unit: UnitId, file: FileId, tokens: &[Token]) -> Vec<Comment> {
+    let Some(text) = a.file_text(file) else { return Vec::new() };
+    let mut inactive: Vec<Span> = a.unit(unit).inactive.iter().filter(|s| s.file == file).copied().collect();
+    inactive.sort_by_key(|s| s.start);
+    let mut out = Vec::new();
+    let mut prev_end = 0usize;
+    let mut k = 0usize;
+    for i in 0..=tokens.len() {
+        let gap_end = tokens.get(i).map_or(text.len(), |t| t.span.start as usize).min(text.len());
+        // The gap without what `ifdef` leaves out.
+        let mut from = prev_end;
+        while from < gap_end {
+            while k < inactive.len() && (inactive[k].end as usize) <= from {
+                k += 1;
+            }
+            let (to, skip) = match inactive.get(k) {
+                Some(x) if (x.start as usize) < gap_end => ((x.start as usize).max(from), (x.end as usize).min(gap_end)),
+                _ => (gap_end, gap_end),
+            };
+            comments_in(&text, from, to, &mut |s, e, line| out.push(Comment { span: Span::new(file, s, e), next: i, line }));
+            from = skip.max(to);
+        }
+        if let Some(t) = tokens.get(i) {
+            prev_end = prev_end.max(t.span.end as usize);
+        }
+    }
+    out
+}
+
+/// Calls `f(start, end, line)` for each comment in `text[from..to]`, which holds no token:
+/// only whitespace and comments (a `//` comment without its newline).
+fn comments_in(text: &str, from: usize, to: usize, f: &mut dyn FnMut(u32, u32, bool)) {
     let b = text.as_bytes();
     let mut i = from;
     while i + 1 < to {
         if b[i] == b'/' && b[i + 1] == b'/' {
             let e = text[i..to].find('\n').map_or(to, |n| i + n);
             let e = if e > i && b[e - 1] == b'\r' { e - 1 } else { e };
-            f(i as u32, e as u32);
+            f(i as u32, e as u32, true);
             i = e;
         } else if b[i] == b'/' && b[i + 1] == b'*' {
-            i = text[i + 2..to].find("*/").map_or(to, |n| i + 2 + n + 2);
+            let e = text[i + 2..to].find("*/").map_or(to, |n| i + 2 + n + 2);
+            f(i as u32, e as u32, false);
+            i = e;
         } else {
             i += 1;
         }
@@ -157,9 +228,21 @@ fn coverage(t: &[Token], k: usize) -> Option<(u32, u32)> {
         return None;
     }
     let start = x.span.start;
+    // A function or task: to its `endfunction`/`endtask` (a prototype: to its `;`).
+    let mut q = k;
+    let mut proto = false;
+    while t.get(q).is_some_and(|y| matches!(y.text.as_str(), "virtual" | "static" | "protected" | "local" | "automatic" | "pure" | "extern")) {
+        proto |= t[q].text == "pure" || t[q].text == "extern";
+        q += 1;
+    }
+    if !proto && t.get(q).is_some_and(|y| y.is_kw("function") || y.is_kw("task")) {
+        let end_kw = if t[q].is_kw("function") { "endfunction" } else { "endtask" };
+        let e = (q..t.len()).find(|&j| t[j].is_kw(end_kw))?;
+        return Some((start, t[e].span.end));
+    }
     // A statement: as the statement walker sees it.
     if let Some(end) = stmt::statement_end(t, k).filter(|e| *e > k) {
-        if !matches!(x.text.as_str(), "class" | "virtual" | "module" | "interface" | "package" | "program" | "function" | "task" | "covergroup") {
+        if !matches!(x.text.as_str(), "class" | "virtual" | "module" | "interface" | "package" | "program" | "function" | "task" | "covergroup" | "static" | "protected" | "local" | "pure" | "extern") {
             return Some((start, t[end - 1].span.end));
         }
     }
@@ -200,8 +283,8 @@ pub fn names_rule(id: &str, rule: &super::RuleMeta) -> bool {
 
 /// Marks the findings that a waiver or a suppression covers.
 pub fn apply(_a: &Analysis, _file: FileId, facts: &FileFacts, findings: &mut [Finding], _cfg: &FileConfig) {
-    let w = &facts.waivers.items;
-    if w.is_empty() {
+    let w = &facts.waivers;
+    if w.items.is_empty() {
         return;
     }
     for f in findings.iter_mut() {
@@ -211,24 +294,15 @@ pub fn apply(_a: &Analysis, _file: FileId, facts: &FileFacts, findings: &mut [Fi
             continue;
         }
         let at = f.span.start;
-        for x in w {
-            let hit = match x.kind {
-                WaiverKind::Guide => x.covers.is_some_and(|(s, e)| s <= at && at < e) && x.ids.iter().any(|i| names_rule(i, meta)),
-                WaiverKind::DisableFile => x.ids.iter().any(|i| names_rule(i, meta)),
-                WaiverKind::Disable => {
-                    x.span.end <= at
-                        && x.ids.iter().any(|i| names_rule(i, meta))
-                        && !w.iter().any(|y| y.kind == WaiverKind::Enable && y.span.start > x.span.end && y.span.end <= at && y.ids.iter().any(|i| x.ids.contains(i)))
-                }
-                WaiverKind::Enable => false,
-            };
-            if hit {
-                f.suppressed = Some(match x.kind {
-                    WaiverKind::Guide => format!("{} waived: {}", x.ids.join(", "), x.reason),
-                    _ => format!("dvicode-lint: disable={} {}", x.ids.join(","), x.reason).trim_end().to_string(),
-                });
-                break;
-            }
+        let guide = w.items.iter().find(|x| x.kind == WaiverKind::Guide && x.covers.is_some_and(|(s, e)| s <= at && at < e) && x.ids.iter().any(|i| names_rule(i, meta)));
+        if let Some(x) = guide {
+            f.suppressed = Some(format!("{} waived: {}", x.ids.join(", "), x.reason));
+            continue;
+        }
+        if let Some((id, _, _, from)) = w.regions.iter().find(|(id, s, e, _)| *s <= at && at < *e && names_rule(id, meta)) {
+            let x = &w.items[*from];
+            let how = if x.kind == WaiverKind::DisableFile { "disable-file" } else { "disable" };
+            f.suppressed = Some(format!("dvicode-lint: {how}={id} {}", x.reason).trim_end().to_string());
         }
     }
 }
@@ -273,5 +347,8 @@ mod tests {
         assert_eq!(covered("`uvm_component_utils(c)\nint x;", 0), Some("`uvm_component_utils(c)"));
         assert_eq!(covered("end", 0), None);
         assert_eq!(covered("`ifdef X\nx = 1;\n`endif", 0), None);
+        assert_eq!(covered("virtual function void f(); x = 1; endfunction y = 2;", 0), Some("virtual function void f(); x = 1; endfunction"));
+        assert_eq!(covered("extern function void f(); y = 2;", 0), Some("extern function void f();"));
+        assert_eq!(covered("task t; #1; endtask", 0), Some("task t; #1; endtask"));
     }
 }

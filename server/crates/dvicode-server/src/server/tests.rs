@@ -2256,7 +2256,7 @@ fn lint_findings_are_published_with_the_compile_problems() {
     assert!(s.contains(&("dvicode-lint".into(), "randomize-result-discarded".into())), "{s:?}");
     let d = p.diagnostics.iter().find(|d| d.source.as_deref() == Some("dvicode-lint")).unwrap();
     assert!(d.message.ends_with("(LNG-10)"), "{}", d.message);
-    assert_eq!(d.code_description.as_ref().map(|c| c.href.as_str()), Some("https://hexkdotcom.github.io/dvicode/lint/randomize-result-discarded"));
+    assert_eq!(d.code_description.as_ref().map(|c| c.href.as_str()), Some("https://github.com/hexkDotCom/dvicode/blob/main/docs/lint/randomize-result-discarded.md"));
     // Open: one list.
     c.open(&r, 1, RND);
     let p = c.wait_problems(&r, |p| p.version == Some(1));
@@ -2294,5 +2294,25 @@ fn a_lint_configuration_change_republishes_and_shows_its_problems() {
     c.wait_problems(&cfg_uri, |p| p.diagnostics.is_empty());
     let p = c.wait_problems(&r, |p| p.diagnostics.iter().any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) && d.source.as_deref() == Some("dvicode-lint")));
     assert_eq!(p.diagnostics.len(), 2);
+    c.shutdown();
+}
+
+#[test]
+fn lint_code_actions_fix_waive_and_turn_off() {
+    let root = project("lint-actions", &[("r.sv", RND)]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let r = uri(&root, "r.sv");
+    c.open(&r, 1, RND);
+    c.wait_problems(&r, |p| p.diagnostics.len() == 2);
+    let pos = at(RND, "randomize();");
+    let acts = c.request_ok("textDocument/codeAction", json!({ "textDocument": { "uri": r }, "range": { "start": pos, "end": pos }, "context": { "diagnostics": [] } }));
+    let titles: Vec<&str> = acts.as_array().unwrap().iter().filter_map(|x| x["title"].as_str()).collect();
+    assert!(titles.contains(&"Check the result of randomize()"), "{titles:?}");
+    assert!(titles.contains(&"Waive LNG-10 here"), "{titles:?}");
+    assert!(titles.contains(&"Turn randomize-result-discarded off in this file"), "{titles:?}");
+    let text = acts.to_string();
+    assert!(text.contains(r#"if (!randomize()) $fatal(1, \"randomize() failed\");"#), "{text}");
+    assert!(text.contains(r#"      // LNG-10 waived: <reason>\n"#), "{text}");
+    assert!(text.contains("dvicode.lint.selectReason"), "{text}");
     c.shutdown();
 }

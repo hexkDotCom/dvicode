@@ -128,6 +128,9 @@ struct PubState {
     /// File -> sequence number of the newest job that covers it.
     latest: FxHashMap<Url, u64>,
     next: u64,
+    /// The newest full job: lint configuration problems found by an older job are not
+    /// published (the newer one decides about every configuration file).
+    config_owner: u64,
 }
 
 /// `dvicode.inlayHints` in the settings `v` (the `dvicode` section): each kind on unless set
@@ -1243,6 +1246,7 @@ impl Server {
                         *owner = g;
                     }
                 }
+                st.config_owner = g;
             }
             g
         };
@@ -1250,6 +1254,7 @@ impl Server {
         let limit = self.settings.max_problems.unwrap_or(1000);
         let hooks = self.hooks.clone();
         let lint = self.lint_configs.get(&a.setup.root, &self.lint);
+        let lint_configs = self.lint_configs.clone();
         if let Some(h) = &hooks.problem_check {
             h(true);
         }
@@ -1261,9 +1266,11 @@ impl Server {
             files.sort_by_key(|f| !open.contains(f));
             // Files whose lint findings are added after every file's compile problems.
             let mut later: Vec<(FileId, Url, Vec<Diagnostic>)> = Vec::new();
-            let lint_of = |f: FileId| -> Vec<Diagnostic> {
+            // Lint findings of a file, in the room its compile problems leave of the file's limit.
+            let lint_of = |f: FileId, compile: usize| -> Vec<Diagnostic> {
                 let Some(set) = &lint else { return Vec::new() };
-                crash::catch("lint", None, || lint_pub::file_diagnostics(&a, set, f))
+                let room = dvi_analysis::ide::diagnostics::MAX_DIAGS_PER_FILE.saturating_sub(compile);
+                crash::catch("lint", None, || lint_pub::file_diagnostics(&a, &lint_configs, set, f, room))
                     .unwrap_or_else(|| vec![lint_pub::notice("Lint failed on this file (see the DVICode log)".into())])
             };
             for f in files {
@@ -1295,7 +1302,8 @@ impl Server {
                 };
                 let mut lsp: Vec<Diagnostic> = diags.iter().filter_map(|d| util::to_lsp_diag(&a, d)).collect();
                 if open.contains(&f) {
-                    lsp.extend(lint_of(f));
+                    let n = lsp.len();
+                    lsp.extend(lint_of(f, n));
                 } else {
                     if limit > 0 {
                         if total >= limit {
@@ -1313,13 +1321,21 @@ impl Server {
                     now.insert(uri);
                 }
             }
+            let mut cut_said = false;
             for (f, uri, compile) in later {
                 if published.lock().unwrap().latest.get(&uri) != Some(&generation) {
                     continue;
                 }
-                let mut extra = lint_of(f);
-                if limit > 0 {
-                    extra.truncate(limit.saturating_sub(total));
+                let mut extra = lint_of(f, compile.len());
+                if limit > 0 && extra.len() > limit.saturating_sub(total) {
+                    let room = limit.saturating_sub(total);
+                    let cut = extra.len() - room;
+                    extra.truncate(room);
+                    // Said once, in the file whose findings the limit cut first.
+                    if !cut_said {
+                        cut_said = true;
+                        extra.push(lint_pub::notice(format!("Lint: {cut} findings in this file are not shown (the problem limit, dvicode.maxProblems, is reached)")));
+                    }
                 }
                 if extra.is_empty() {
                     continue;
@@ -1334,7 +1350,7 @@ impl Server {
                 for c in set.loaded() {
                     let (uri, diags) = lint_pub::config_diagnostics(&c);
                     let mut st = published.lock().unwrap();
-                    if st.latest.get(&uri).is_some_and(|g| *g > generation) {
+                    if st.config_owner > generation || st.latest.get(&uri).is_some_and(|g| *g > generation) {
                         continue;
                     }
                     st.latest.insert(uri.clone(), generation);
@@ -2114,7 +2130,9 @@ impl Server {
             }),
             // Links are for build files only (`on_build_doc_request`).
             "textDocument/documentLink" => self.send(Message::Response(ok_response(req.id, Value::Null))),
-            "textDocument/codeAction" => self.spawn(req, |a, p: CodeActionParams| {
+            "textDocument/codeAction" => {
+                let lint = self.lint_configs.get(&self.analysis.setup.root, &self.lint);
+                self.spawn(req, move |a, p: CodeActionParams| {
                 // Kinds form a dotted hierarchy: `refactor` asks for `refactor.rewrite`, not `refactor.re`.
                 let wants = |kind: &str| p.context.only.as_ref().is_none_or(|o| o.iter().any(|k| k.as_str().is_empty() || kind == k.as_str() || kind.starts_with(&format!("{}.", k.as_str()))));
                 let Some((f, start)) = pos(a, &p.text_document.uri, p.range.start) else { return Ok(None) };
@@ -2137,6 +2155,9 @@ impl Server {
                         }))
                     })
                     .collect();
+                if let (true, Some(set)) = (wants("quickfix"), &lint) {
+                    actions.extend(lint_pub::code_actions(a, set, f, start, end));
+                }
                 if wants("refactor.rewrite") {
                     let refactors = a.implement_pure_methods(f, start).into_iter().chain(a.instance_actions(f, start));
                     for r in refactors.filter(|r| editable(&r.edits)) {
@@ -2146,7 +2167,8 @@ impl Server {
                     }
                 }
                 Ok(Some(actions))
-            }),
+                })
+            }
             // ---------------------------------------------------------- custom
             "dvicode/status" => self.spawn_project(req, |a, _: Value| Ok(a.status())),
             "dvicode/serverInfo" => self.spawn_now(req, |_, _: Value| {

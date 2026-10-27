@@ -197,7 +197,7 @@ async function run() {
       }, 20000);
       const code = typeof d[0].code === 'object' ? d[0].code.value : d[0].code;
       const href = typeof d[0].code === 'object' ? String(d[0].code.target) : '';
-      if (code !== 'randomize-result-discarded' || d[0].range.start.line !== p.line + 2 || !href.endsWith('/lint/randomize-result-discarded')) {
+      if (code !== 'randomize-result-discarded' || d[0].range.start.line !== p.line + 2 || !href.endsWith('/lint/randomize-result-discarded.md')) {
         throw new Error(`finding: ${code} at ${d[0].range.start.line + 1} (${href})`);
       }
       await cfg.update('lint.enable', false, vscode.ConfigurationTarget.Workspace);
@@ -206,6 +206,13 @@ async function run() {
     } finally {
       await cfg.update('lint.enable', undefined, vscode.ConfigurationTarget.Workspace);
       await vscode.commands.executeCommand('workbench.action.files.revert');
+      // Setting and clearing a workspace setting leaves an empty settings file behind.
+      const dir = path.join(folder.fsPath, '.vscode');
+      const file = path.join(dir, 'settings.json');
+      if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').replace(/\s/g, '') === '{}') {
+        fs.rmSync(file);
+        if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+      }
     }
   });
 

@@ -42,6 +42,13 @@ const UVM_MACROS: &str = r#"`ifndef UVM_MACROS_SVH
 `define uvm_component_param_utils(T) typedef uvm_component_registry#(T) type_id;
 `define uvm_component_abstract_utils(T) typedef uvm_abstract_component_registry#(T,`"T`") type_id;
 `define uvm_info(ID, MSG, V) begin end
+`define uvm_sequence_utils(T, S) `uvm_object_utils(T)
+`define uvm_component_utils_begin(T) `uvm_component_utils(T)
+`define uvm_component_utils_end
+`define uvm_field_int(F, FL)
+`define uvm_do(S) begin end
+`define uvm_declare_p_sequencer(T) T p_sequencer;
+`define uvm_fatal(ID, MSG) begin end
 `endif
 "#;
 
@@ -52,8 +59,18 @@ package uvm_pkg;
   class uvm_abstract_object_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
   class uvm_component_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
   class uvm_abstract_component_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
-  class uvm_component extends uvm_object; function new(string name, uvm_component parent); super.new(name); endfunction endclass
-  class uvm_sequence_item extends uvm_object; function new(string name = ""); super.new(name); endfunction endclass
+  class uvm_phase; endclass
+  class uvm_component extends uvm_object;
+    function new(string name, uvm_component parent); super.new(name); endfunction
+    virtual function void build_phase(uvm_phase phase); endfunction
+    virtual function void connect_phase(uvm_phase phase); endfunction
+    virtual task run_phase(uvm_phase phase); endtask
+    virtual function void set_config_int(string inst, string field, int value); endfunction
+  endclass
+  function void global_stop_request(); endfunction
+  class uvm_transaction extends uvm_object; function new(string name = ""); super.new(name); endfunction endclass
+  class uvm_sequence_item extends uvm_transaction; function new(string name = ""); super.new(name); endfunction endclass
+  typedef enum { UVM_NONE, UVM_LOW, UVM_MEDIUM, UVM_DEFAULT } uvm_verbosity;
   class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
   virtual class uvm_port_base #(type IF = uvm_object) extends IF;
     function new(string name, uvm_component parent); endfunction
@@ -82,6 +99,24 @@ fn lint(a: &Analysis, root: &PathBuf, rulesets: &[Ruleset]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Every rule has a page; its bad examples give its finding and its good ones none.
+#[test]
+fn rule_pages_and_their_examples() {
+    use dvi_analysis::lint::{docs, rules};
+    for r in rules::all() {
+        let id = r.meta().id;
+        let page = docs::page(id).unwrap_or_else(|| panic!("{id} has no page"));
+        let ex = docs::examples(page);
+        assert!(ex.iter().any(|(b, _)| *b) && ex.iter().any(|(b, _)| !*b), "{id}: a bad and a good example");
+        for (i, (bad, code)) in ex.iter().enumerate() {
+            let (a, root) = project(&format!("doc-{id}-{i}"), &[("ex.sv", code)]);
+            let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.starts_with("ex.sv:")).collect();
+            let hit = got.iter().any(|s| s.contains(&format!(" {id}")) && !s.ends_with("(waived)"));
+            assert_eq!(hit, *bad, "{id} example {i} ({}): {got:?}\n{code}", if *bad { "bad" } else { "good" });
+        }
+    }
 }
 
 #[test]
@@ -232,6 +267,45 @@ endpackage
 }
 
 #[test]
+fn suppressions_per_rule_and_subroutine_waivers() {
+    let tb = r#"package tb_pkg;
+  class c;
+    rand int a;
+    // dvicode-lint: disable=randomize-result-discarded,trailing-whitespace legacy
+    function void f();
+      randomize();
+      // dvicode-lint: enable=randomize-result-discarded
+      randomize();@@
+    endfunction
+    // LNG-10 waived: generated test vectors, failures do not matter
+    function void g();
+      randomize();
+      randomize();
+    endfunction
+    function void h();
+      randomize();
+    endfunction
+  endclass
+endpackage
+"#;
+    // A space at the end of line 8 (an editor would strip it from this file).
+    let tb = tb.replace("@@", " ");
+    let (a, root) = project("supp", &[("tb.sv", &tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.contains("randomize") || s.contains("whitespace")).collect();
+    assert_eq!(
+        got,
+        [
+            "tb.sv:6 randomize-result-discarded (waived)",
+            "tb.sv:8 randomize-result-discarded",
+            "tb.sv:8 trailing-whitespace (waived)",
+            "tb.sv:12 randomize-result-discarded (waived)",
+            "tb.sv:13 randomize-result-discarded (waived)",
+            "tb.sv:16 randomize-result-discarded",
+        ]
+    );
+}
+
+#[test]
 fn configuration_and_ownership() {
     let tb = "package tb_pkg;\n  class c; rand int a; function void f(); randomize(); endfunction endclass\nendpackage\n";
     let lint_json = r#"{
@@ -247,7 +321,7 @@ fn configuration_and_ownership() {
         let cfg = a.lint_config(&set, &DiskEnv, f);
         let name = a.path(f).file_name().unwrap().to_string_lossy().to_string();
         let r = a.lint_file(f, &cfg, None);
-        seen.push((name, cfg.owned.is_owned(), r.findings.iter().map(|x| (x.rule, x.level)).collect::<Vec<_>>()));
+        seen.push((name, cfg.owned.is_owned(), r.findings.iter().filter(|x| x.rule.starts_with("randomize")).map(|x| (x.rule, x.level)).collect::<Vec<_>>()));
     }
     let get = |n: &str| seen.iter().find(|s| s.0 == n).unwrap().clone();
     assert_eq!(get("tb.sv").2, [("randomize-result-discarded", Level::Error)]);
@@ -262,6 +336,135 @@ fn trailing_whitespace_in_hexk_only() {
     let tb = "package tb_pkg; \n  string s = \"a \\\n b\";\nendpackage\t\n";
     let (a, root) = project("ws", &[("tb.sv", tb)]);
     assert!(lint(&a, &root, &[Ruleset::Recommended]).is_empty());
-    assert_eq!(lint(&a, &root, &[Ruleset::Hexk]), ["tb.sv:1 trailing-whitespace", "tb.sv:4 trailing-whitespace"]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.contains("whitespace")).collect();
+    assert_eq!(got, ["tb.sv:1 trailing-whitespace", "tb.sv:4 trailing-whitespace"]);
+}
+
+
+#[test]
+fn randomize_in_assert() {
+    let tb = r#"package tb_pkg;
+  class c;
+    rand int a;
+    function void f();
+      assert (randomize());
+      assert (this.randomize() with { a > 0; }) else $error("x");
+      assume (std::randomize(a));
+      cover (randomize());
+      if (!randomize()) $error("ok");
+      assert #0 (randomize());
+    endfunction
+  endclass
+endpackage
+"#;
+    let (a, root) = project("rasrt", &[("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("in-assert")).collect();
+    assert_eq!(got, ["tb.sv:5 randomize-in-assert", "tb.sv:6 randomize-in-assert", "tb.sv:7 randomize-in-assert", "tb.sv:10 randomize-in-assert"]);
+}
+
+#[test]
+fn factory_incompatible_constructor() {
+    let tb = r#"`include "uvm_macros.svh"
+package tb_pkg;
+  import uvm_pkg::*;
+  class good_env extends uvm_env;
+    `uvm_component_utils(good_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class one_arg_env extends uvm_env;
+    `uvm_component_utils(one_arg_env)
+    function new(string name); super.new(name, null); endfunction
+  endclass
+  class implicit_env extends uvm_env;
+    `uvm_component_utils(implicit_env)
+  endclass
+  class extra_env extends uvm_env;
+    `uvm_component_utils(extra_env)
+    function new(string name, uvm_component parent, int n); super.new(name, parent); endfunction
+  endclass
+  class good_item extends uvm_sequence_item;
+    `uvm_object_utils(good_item)
+    function new(string name = "good_item"); super.new(name); endfunction
+  endclass
+  class no_default_item extends uvm_sequence_item;
+    `uvm_object_utils(no_default_item)
+    function new(string name); super.new(name); endfunction
+  endclass
+  class implicit_item extends uvm_sequence_item;
+    `uvm_object_utils(implicit_item)
+  endclass
+  class proto_item extends uvm_sequence_item;
+    `uvm_object_utils(proto_item)
+    extern function new(string name = "proto_item");
+  endclass
+  function proto_item::new(string name = "proto_item"); super.new(name); endfunction
+  virtual class abs_env extends uvm_env;
+    `uvm_component_abstract_utils(abs_env)
+    function new(string name); super.new(name, null); endfunction
+  endclass
+endpackage
+"#;
+    let (a, root) = project("ctor", &[("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("constructor")).collect();
+    assert_eq!(
+        got,
+        [
+            "tb.sv:10 factory-incompatible-constructor/component",
+            "tb.sv:12 factory-incompatible-constructor/component",
+            "tb.sv:17 factory-incompatible-constructor/component",
+            "tb.sv:25 factory-incompatible-constructor/object",
+            "tb.sv:27 factory-incompatible-constructor/object",
+        ]
+    );
+}
+
+#[test]
+fn uvm_override_signature() {
+    let tb = r#"`include "uvm_macros.svh"
+package tb_pkg;
+  import uvm_pkg::*;
+  class good_env extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase); endfunction
+    task run_phase(uvm_pkg::uvm_phase phase); endtask
+  endclass
+  class bad_env extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    task build_phase(uvm_phase phase); endtask
+    function void connect_phase(); endfunction
+    function int run_phase(uvm_phase phase); endfunction
+  endclass
+  class not_uvm;
+    task build_phase(); endtask
+  endclass
+endpackage
+"#;
+    let (a, root) = project("ovsig", &[("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("override")).collect();
+    assert_eq!(got, ["tb.sv:11 uvm-override-signature/kind", "tb.sv:12 uvm-override-signature/arguments", "tb.sv:13 uvm-override-signature/kind"]);
+}
+
+#[test]
+fn uvm_deprecated_api() {
+    let tb = r#"`include "uvm_macros.svh"
+package tb_pkg;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      set_config_int("*", "n", 1);
+      global_stop_request();
+    endfunction
+  endclass
+  class my_seq extends uvm_sequence_item;
+    `uvm_sequence_utils(my_seq, my_sqr)
+    function void set_config_int(string a, string b, int c); endfunction
+    function void f(); set_config_int("a", "b", 1); endfunction
+  endclass
+endpackage
+"#;
+    let (a, root) = project("depr", &[("tb.sv", tb)]);
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Recommended]).into_iter().filter(|s| s.contains("deprecated")).collect();
+    assert_eq!(got, ["tb.sv:7 uvm-deprecated-api", "tb.sv:8 uvm-deprecated-api", "tb.sv:12 uvm-deprecated-api"]);
 }
 

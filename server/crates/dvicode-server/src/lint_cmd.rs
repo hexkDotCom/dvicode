@@ -7,6 +7,8 @@
 
 use crate::check::{is_input_failure, load_setup};
 use dvi_analysis::lint::config::{ConfigSet, Defaults, DiskEnv, FileConfig};
+use crate::lint_out::{self, Item, Kept};
+use dvi_analysis::lint::baseline::{self, Baseline, Fingerprint};
 use dvi_analysis::lint::{rules, FileLint, Level, Ruleset};
 use dvi_analysis::{Analysis, UnitKind, Vfs};
 use dvi_syntax::{FileId, Severity};
@@ -18,8 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const USAGE: &str = "usage: dvicode lint <dir> [PATH...] [--build FILE] [--env K=V] [--config FILE]
-         [--rulesets r1,r2] [--rule ID=LEVEL]... [--format text|json] [--output FILE]
-         [--fail-on error|warning|info|never] [--all-contexts] [--jobs N]
+         [--rulesets r1,r2] [--rule ID=LEVEL]... [--format text|json|sarif|junit|github]
+         [--output FILE] [--fail-on error|warning|info|never] [--all-contexts] [--jobs N]
+         [--baseline FILE] [--write-baseline FILE] [--changed-since REF [--changed-exact]]
          [--allow-incomplete] [--no-fail-on-compile-errors] [--show-suppressed] [--stats]
        dvicode lint --list-rules [--format text|json|md]
        dvicode lint --explain ID
@@ -46,6 +49,11 @@ struct Opts {
     explain: Option<String>,
     print_config: Option<PathBuf>,
     schema: bool,
+    baseline: Option<PathBuf>,
+    write_baseline: Option<PathBuf>,
+    docs: Option<PathBuf>,
+    changed_since: Option<String>,
+    changed_exact: bool,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
@@ -70,6 +78,11 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         explain: None,
         print_config: None,
         schema: false,
+        baseline: None,
+        write_baseline: None,
+        docs: None,
+        changed_since: None,
+        changed_exact: false,
     };
     let mut i = 0;
     let value = |i: &mut usize, name: &str| -> Result<String, String> {
@@ -120,6 +133,11 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--explain" => o.explain = Some(value(&mut i, a)?),
             "--print-config" => o.print_config = Some(PathBuf::from(value(&mut i, a)?)),
             "--schema" => o.schema = true,
+            "--baseline" => o.baseline = Some(PathBuf::from(value(&mut i, a)?)),
+            "--docs" => o.docs = Some(PathBuf::from(value(&mut i, a)?)),
+            "--write-baseline" => o.write_baseline = Some(PathBuf::from(value(&mut i, a)?)),
+            "--changed-since" => o.changed_since = Some(value(&mut i, a)?),
+            "--changed-exact" => o.changed_exact = true,
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ if o.dir.is_none() => o.dir = Some(PathBuf::from(a)),
@@ -127,7 +145,10 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         }
         i += 1;
     }
-    if !matches!(o.format.as_str(), "text" | "json" | "md") {
+    if o.changed_exact && o.changed_since.is_none() {
+        return Err("--changed-exact goes with --changed-since REF".into());
+    }
+    if !matches!(o.format.as_str(), "text" | "json" | "md" | "sarif" | "junit" | "github") {
         return Err(format!("unknown format {}", o.format));
     }
     Ok(o)
@@ -147,6 +168,22 @@ pub fn run(args: &[String]) -> i32 {
     if o.schema {
         return emit(&o, &(serde_json::to_string_pretty(&schema()).unwrap_or_default() + "\n"));
     }
+    if let Some(dir) = &o.docs {
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(dir)?;
+            for (name, text) in docs() {
+                std::fs::write(dir.join(name), text)?;
+            }
+            Ok(())
+        };
+        return match write() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("lint: cannot write the rule pages in {}: {e}", dir.display());
+                3
+            }
+        };
+    }
     if o.list_rules {
         return emit(&o, &list_rules(&o.format));
     }
@@ -160,15 +197,25 @@ pub fn run(args: &[String]) -> i32 {
         };
     }
     let defaults = Defaults { cli_rulesets: o.rulesets.clone(), cli_rules: o.rules.clone(), ..Defaults::default() };
+    if let Some(c) = &o.config {
+        if !c.is_file() {
+            eprintln!("lint: cannot read the configuration {}", c.display());
+            return 2;
+        }
+    }
     if let Some(file) = &o.print_config {
-        let dir = o.dir.clone().or_else(|| file.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
+        // The project: the folder given, else the current one (as `lint` itself).
+        let dir = o.dir.clone().unwrap_or_else(|| PathBuf::from("."));
         let root = crate::check::canonical_path(&dir);
         let file = crate::check::canonical_path(file);
-        let set = ConfigSet::new(&root, defaults, o.config.clone());
-        let cfg = set.for_file(&DiskEnv, &file, false);
+        let set = ConfigSet::new(&root, defaults, o.config.as_ref().map(|c| crate::check::canonical_path(c)));
+        let cfg = set.for_file(&DiskEnv, &file, None);
         let text = print_config(&set, &file, &cfg);
         let code = emit(&o, &text);
-        return if set.loaded().iter().any(|c| !c.problems.is_empty()) { 2 } else { code };
+        if code != 0 {
+            return code;
+        }
+        return if set.loaded().iter().any(|c| c.errors().next().is_some()) { 2 } else { 0 };
     }
     let Some(dir) = o.dir.clone() else {
         eprintln!("{USAGE}");
@@ -215,12 +262,6 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     let a = Analysis::build(Arc::new(Vfs::new()), setup);
     let build_ms = t0.elapsed().as_millis();
     let set = ConfigSet::new(&root, defaults, o.config.clone().map(|c| crate::check::canonical_path(&c)));
-    if let Some(c) = &o.config {
-        if !c.is_file() {
-            eprintln!("lint: cannot read the configuration {}", c.display());
-            return 2;
-        }
-    }
     // The files to report, in path order.
     let mut files = a.project_files();
     files.retain(|f| !a.vfs.is_builtin(*f));
@@ -238,8 +279,8 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     for c in set.loaded() {
         for p in &c.problems {
             let (line, col) = line_col(&c.text, p.start);
-            eprintln!("{}:{}:{}: error: {}", p.path.display(), line + 1, col + 1, p.message);
-            config_problems += 1;
+            eprintln!("{}:{}:{}: {}: {}", p.path.display(), line + 1, col + 1, if p.warning { "warning" } else { "error" }, p.message);
+            config_problems += usize::from(!p.warning);
         }
     }
     if config_problems > 0 {
@@ -254,6 +295,9 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     // Compile failure, whatever is owned: errors anywhere in the project, or build inputs that
     // were not read.
     let input_failures = a.setup.config.problems.iter().filter(|p| is_input_failure(p)).count();
+    // Computed once before the files are checked in parallel: it runs parallel work itself, which
+    // workers all waiting for it could not run.
+    let _ = a.hidden_uses();
     let compile_errors: usize = a.project_files().par_iter().map(|f| a.file_diagnostics(*f).iter().filter(|d| d.severity == Severity::Error).count()).sum();
     let t1 = std::time::Instant::now();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(o.jobs).build().expect("thread pool");
@@ -271,26 +315,66 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             .collect()
     });
     let lint_ms = t1.elapsed().as_millis();
-    // Findings: one per place, rule and message, with the contexts it holds in.
-    let mut findings: Vec<Value> = Vec::new();
-    let mut text = String::new();
-    let (mut counts, mut suppressed, mut shown_fail) = (FxHashMap::<Level, usize>::default(), 0usize, false);
+    let rel_of = |p: &Path| p.strip_prefix(&root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| p.to_string_lossy().to_string());
+    // What changed, when only that is reported.
+    let changed = match &o.changed_since {
+        Some(rev) => match crate::changed::since(&root, rev, o.changed_exact) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("lint: --changed-since: {e}");
+                return 2;
+            }
+        },
+        None => None,
+    };
+    // Baselines: the one given, else each file's (from its configuration).
+    let mut baselines: FxHashMap<PathBuf, Option<Baseline>> = FxHashMap::default();
+    if let Some(b) = &o.baseline {
+        match std::fs::read_to_string(b).map_err(|e| e.to_string()).and_then(|t| Baseline::read(&t)) {
+            Ok(x) => {
+                baselines.insert(PathBuf::new(), Some(x));
+            }
+            Err(e) => {
+                eprintln!("lint: the baseline {}: {e}", b.display());
+                return 2;
+            }
+        }
+    }
+    let mut items: Vec<Item> = Vec::new();
+    // Occurrences of equal core fingerprints, so that repeated statements differ.
+    let mut seen_core: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut new_baseline: Vec<Fingerprint> = Vec::new();
     let mut unknown: FxHashMap<String, u32> = FxHashMap::default();
+    let mut unknown_places: Vec<String> = Vec::new();
     let mut incomplete: Vec<Value> = Vec::new();
-    let mut linted_files = 0usize;
-    for l in &linted {
+    let mut linted_files: Vec<String> = Vec::new();
+    for (l, (_, cfg)) in linted.iter().zip(owned.iter()) {
         let path = a.path(l.file);
-        let rel = path.strip_prefix(&root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| path.to_string_lossy().to_string());
-        let mut merged: Vec<(&dvi_analysis::lint::Finding, Vec<Value>)> = Vec::new();
+        let rel = rel_of(&path);
+        // One finding per place, rule and message, with the contexts it holds in; it is
+        // suppressed only when it is in every context.
+        let mut merged: Vec<(dvi_analysis::lint::Finding, Vec<Value>)> = Vec::new();
+        let mut index: FxHashMap<(&'static str, u32, u32, &str), usize> = FxHashMap::default();
+        let mut unit = None;
         for r in &l.results {
-            if r.context.is_some() {
-                linted_files += 1;
+            if r.context.is_some() && unit.is_none() {
+                linted_files.push(rel.clone());
+                unit = r.unit;
             }
             let ctx = r.context.as_ref().map(|c| context_dto(c, &root));
             for x in &r.findings {
-                match merged.iter_mut().find(|(y, _)| y.rule == x.rule && y.span == x.span && y.message == x.message) {
-                    Some((_, ctxs)) => ctxs.extend(ctx.clone()),
-                    None => merged.push((x, ctx.clone().into_iter().collect())),
+                match index.get(&(x.rule, x.span.start, x.span.end, x.message.as_str())) {
+                    Some(&i) => {
+                        let (y, ctxs) = &mut merged[i];
+                        ctxs.extend(ctx.clone());
+                        if x.suppressed.is_none() {
+                            y.suppressed = None;
+                        }
+                    }
+                    None => {
+                        index.insert((x.rule, x.span.start, x.span.end, x.message.as_str()), merged.len());
+                        merged.push((x.clone(), ctx.clone().into_iter().collect()));
+                    }
                 }
             }
             for ((rule, reason), n) in &r.unknown {
@@ -299,60 +383,93 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             for (rule, reason) in &r.incomplete {
                 incomplete.push(json!({ "path": rel, "rule": rule, "reason": reason }));
             }
+            for (rule, reason, at) in &r.unknown_places {
+                let (l, c) = a.to_range(*at).map_or((0, 0), |r| (r.start.line + 1, r.start.character + 1));
+                unknown_places.push(format!("{}:{l}:{c}: {rule}: {reason}", path.display()));
+            }
         }
-        for (x, ctxs) in merged {
+        let Some(unit) = unit else { continue };
+        let fps: Vec<Fingerprint> = merged.iter().map(|(x, _)| a.fingerprint(unit, x, &root)).collect();
+        // The baseline: what is not waived in the code.
+        let open: Vec<usize> = (0..merged.len()).filter(|i| merged[*i].0.suppressed.is_none()).collect();
+        let open_fps: Vec<Fingerprint> = open.iter().map(|i| fps[*i].clone()).collect();
+        if o.write_baseline.is_some() {
+            new_baseline.extend(open_fps.iter().cloned());
+        }
+        let base_key = if o.baseline.is_some() { Some(PathBuf::new()) } else { cfg.baseline.clone() };
+        let mut in_base = vec![false; merged.len()];
+        if let Some(k) = base_key {
+            let b = baselines.entry(k.clone()).or_insert_with(|| std::fs::read_to_string(&k).ok().and_then(|t| Baseline::read(&t).ok()));
+            if let Some(b) = b {
+                for (j, hit) in b.take(&open_fps).into_iter().enumerate() {
+                    in_base[open[j]] = hit;
+                }
+            }
+        }
+        for (i, (x, ctxs)) in merged.into_iter().enumerate() {
             let range = a.to_range(x.span);
-            let (line, col) = range.map_or((0, 0), |r| (r.start.line + 1, r.start.character + 1));
-            if x.suppressed.is_some() {
-                suppressed += 1;
-            } else {
-                *counts.entry(x.level).or_default() += 1;
-                shown_fail |= o.fail_on.is_some_and(|f| x.level >= f);
+            if let (Some(c), Some(r)) = (&changed, &range) {
+                if !crate::changed::touches(c, &path, r.start.line + 1, r.end.line + 1) {
+                    continue;
+                }
             }
-            if x.suppressed.is_none() || o.show_suppressed {
-                let meta = rules::meta(x.rule);
-                let tag = match meta.and_then(|m| m.guide.first()) {
-                    Some(g) => format!("{}/{g}", x.rule),
-                    None => x.rule.to_string(),
-                };
-                let waived = x.suppressed.as_ref().map(|s| format!(" (suppressed: {s})")).unwrap_or_default();
-                text.push_str(&format!("{}:{line}:{col}: {}: {} [{tag}]{waived}\n", path.display(), x.level.as_str(), x.message));
-            }
-            let related: Vec<Value> = x
-                .related
-                .iter()
-                .filter_map(|(s, m)| {
-                    let r = a.to_range(*s)?;
-                    let p = a.path(s.file);
-                    Some(json!({ "path": p.strip_prefix(&root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| p.to_string_lossy().to_string()), "range": r, "message": m }))
-                })
-                .collect();
-            findings.push(json!({
-                "rule": x.rule,
-                "subcheck": x.subcheck,
-                "level": x.level,
-                "message": x.message,
-                "path": rel,
-                "range": range,
-                "contexts": ctxs,
-                "related": related,
-                "suppressed": x.suppressed,
-            }));
+            let related = x.related.iter().filter_map(|(s, m)| Some((rel_of(&a.path(s.file)), a.to_range(*s)?, m.clone()))).collect();
+            let kept = match (&x.suppressed, in_base[i]) {
+                (Some(w), _) => Kept::InSource(w.clone()),
+                (None, true) => Kept::Baseline,
+                (None, false) => Kept::No,
+            };
+            let fp = &fps[i];
+            let core = fnv(format!("{}|{}|{}|{}|{}", fp.rule, fp.subcheck, fp.path, fp.symbol, fp.text).as_bytes());
+            let nth = seen_core.entry(core).or_default();
+            *nth += 1;
+            let fingerprint = format!("{core:016x}:{nth}");
+            let context_fingerprint = fp.around.clone();
+            let outside = path.strip_prefix(&root).is_err();
+            items.push(Item { rule: x.rule, subcheck: x.subcheck, level: x.level, message: x.message, path: path.display().to_string(), rel: rel.clone(), range, related, contexts: ctxs, kept, fingerprint, context_fingerprint, outside });
         }
     }
     let complete = incomplete.is_empty();
+    if let Some(out) = &o.write_baseline {
+        if !complete {
+            eprintln!("lint: the baseline is not written: the analysis is incomplete (see --stats)");
+            return 4;
+        }
+        let file = baseline::file_of(new_baseline, &format!("dvicode {}", env!("CARGO_PKG_VERSION")));
+        let text = serde_json::to_string_pretty(&file).unwrap_or_default() + "\n";
+        let tmp = out.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, out)) {
+            eprintln!("lint: cannot write the baseline {}: {e}", out.display());
+            return 3;
+        }
+        eprintln!("dvicode lint: baseline of {} finding(s) written to {}", file.findings.iter().map(|e| e.count as usize).sum::<usize>(), out.display());
+    }
+    let mut counts = FxHashMap::<Level, usize>::default();
+    let mut shown_fail = false;
+    let (mut waived, mut baselined) = (0usize, 0usize);
+    for x in &items {
+        match x.kept {
+            Kept::No => {
+                *counts.entry(x.level).or_default() += 1;
+                shown_fail |= o.fail_on.is_some_and(|f| x.level >= f);
+            }
+            Kept::InSource(_) => waived += 1,
+            Kept::Baseline => baselined += 1,
+        }
+    }
     let n = |l: Level| counts.get(&l).copied().unwrap_or(0);
     let total: usize = counts.values().sum();
     let mut unknown_v: Vec<(String, u32)> = unknown.into_iter().collect();
     unknown_v.sort();
     let summary = format!(
-        "dvicode lint: {total} finding(s) ({} errors, {} warnings, {} info, {} hints), {suppressed} suppressed, {} unknown; files: {} owned, {linted_files} linted; compile: {compile_errors} errors{}{}",
+        "dvicode lint: {total} finding(s) ({} errors, {} warnings, {} info, {} hints), {waived} suppressed, {baselined} in the baseline, {} unknown; files: {} owned, {} linted; compile: {compile_errors} errors{}{}",
         n(Level::Error),
         n(Level::Warning),
         n(Level::Info),
         n(Level::Hint),
         unknown_v.iter().map(|(_, n)| *n as usize).sum::<usize>(),
         owned.len(),
+        linted_files.len(),
         if input_failures > 0 { format!(", {input_failures} build inputs not read") } else { String::new() },
         if complete { String::new() } else { format!("; incomplete in {} place(s)", incomplete.len()) },
     );
@@ -363,15 +480,24 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                 "tool": { "name": "dvicode", "version": env!("CARGO_PKG_VERSION") },
                 "config": { "hash": format!("{:016x}", set.hash()) },
                 "complete": complete,
-                "files": { "owned": owned.len(), "linted": linted_files },
+                "files": { "owned": owned.len(), "linted": linted_files.len() },
                 "compile": { "errors": compile_errors, "buildInputsNotRead": input_failures },
                 "unknown": unknown_v.iter().map(|(k, n)| (k.clone(), json!(n))).collect::<serde_json::Map<String, Value>>(),
                 "incomplete": incomplete,
-                "findings": findings,
+                "findings": lint_out::json_items(&items),
             });
             serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
         }
-        _ => text,
+        "sarif" => {
+            let mut root_uri = dvi_analysis::ide::url_of(&root).to_string();
+            if !root_uri.ends_with('/') {
+                root_uri.push('/');
+            }
+            serde_json::to_string_pretty(&lint_out::sarif(&items, &root_uri, complete, env!("CARGO_PKG_VERSION"))).unwrap_or_default() + "\n"
+        }
+        "junit" => lint_out::junit(&items, &linted_files, o.fail_on),
+        "github" => lint_out::github(&items),
+        _ => lint_out::text(&items, o.show_suppressed),
     };
     if emit(o, &out) != 0 {
         return 3;
@@ -385,6 +511,9 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         for i in &incomplete {
             eprintln!("  incomplete {i}");
         }
+        for u in unknown_places.iter().take(200) {
+            eprintln!("  unknown at {u}");
+        }
     }
     if !complete && !o.allow_incomplete {
         return 4;
@@ -393,6 +522,53 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         return 1;
     }
     0
+}
+
+fn fnv(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for x in b {
+        h ^= *x as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// The rule pages (`<id>.md`) and their index (`README.md`).
+pub fn docs() -> Vec<(String, String)> {
+    let metas: Vec<_> = rules::all().iter().map(|r| r.meta()).collect();
+    let mut out = Vec::new();
+    let mut index = String::from(
+        "# DVICode Lint rules\n\n\
+         Generated by `dvicode lint --docs docs/lint` from the rules themselves; do not edit.\n\n\
+         Choose rulesets and levels in `.dvicode/lint.json` (see [the lint guide](../lint.md)). \
+         `recommended` is on by default; `hexk` adds the checkable rules of the \
+         [HEXK SystemVerilog/UVM Style Guide](https://github.com/hexkDotCom/sv-uvm-style-guide).\n\n\
+         | Rule | Guide | Rulesets | Level | What it finds |\n|---|---|---|---|---|\n",
+    );
+    for m in &metas {
+        let sets: Vec<&str> = m.rulesets.iter().map(|r| r.name()).collect();
+        index.push_str(&format!("| [`{}`]({}.md) | {} | {} | {} | {} |\n", m.id, m.id, m.guide.join(", "), sets.join(", "), m.default_level.as_str(), m.summary.replace('|', "\\|")));
+        let mut page = format!("# {}\n\n{}\n\n", m.id, m.summary);
+        page.push_str(&format!("- Rulesets: {}\n- Default level: {}\n", sets.join(", "), m.default_level.as_str()));
+        if !m.guide.is_empty() {
+            let links: Vec<String> = m.guide.iter().map(|g| format!("[{g}](https://github.com/hexkDotCom/sv-uvm-style-guide/blob/main/sv_uvm_style_guide.md)")).collect();
+            page.push_str(&format!("- Style guide: {}\n", links.join(", ")));
+        }
+        if !m.subchecks.is_empty() {
+            page.push_str(&format!("- Subchecks: {}\n", m.subchecks.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")));
+        }
+        page.push('\n');
+        page.push_str(dvi_analysis::lint::docs::page(m.id).unwrap_or(""));
+        let id = m.guide.first().copied().unwrap_or(m.id);
+        page.push_str(&format!(
+            "\n## Waive\n\nOne finding: `// {id} waived: <reason>` on the line before the statement or declaration. \
+             The rule: `\"{}\": \"off\"` in `.dvicode/lint.json`, for all files or under `overrides` for some.\n",
+            m.id
+        ));
+        out.push((format!("{}.md", m.id), page));
+    }
+    out.push(("README.md".to_string(), index));
+    out
 }
 
 /// The JSON Schema of `.dvicode/lint.json` (editors validate and complete the file with it).
@@ -455,17 +631,22 @@ pub fn schema() -> Value {
             "include": paths.clone(),
             "examples": paths,
             "uvm": { "enum": ["1.2", "ieee"] },
+            "baseline": { "type": "string", "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists are not reported" },
         },
     })
 }
 
 fn context_dto(c: &dvi_analysis::select::ContextKey, root: &Path) -> Value {
     let r = c.root.strip_prefix(root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| c.root.to_string_lossy().to_string());
-    json!({ "root": r, "invocation": c.invocation, "nth": c.nth })
+    json!({ "root": r, "invocation": c.invocation, "nth": c.nth, "before": c.before })
 }
 
 fn line_col(text: &str, at: u32) -> (usize, usize) {
-    let before = &text[..(at as usize).min(text.len())];
+    let mut at = (at as usize).min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let before = &text[..at];
     let line = before.matches('\n').count();
     let col = before.rfind('\n').map_or(before.chars().count(), |n| before[n + 1..].chars().count());
     (line, col)
@@ -631,6 +812,22 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_configuration_or_output_is_an_error() {
+        let root = project("missing", &[("p.sv", SRC)]);
+        assert_eq!(lint(&root, &["--config", "no-such.json"]).0, 2);
+        // Writing into a folder fails: an internal failure, before anything else.
+        let v: Vec<String> = vec![root.to_string_lossy().to_string(), "--output".into(), root.to_string_lossy().to_string()];
+        assert_eq!(super::run(&v), 3);
+        std::fs::write(root.join(".dvicode/lint.json"), "{ bad").unwrap();
+        let file = root.join("p.sv");
+        let v: Vec<String> = vec!["--print-config".into(), file.to_string_lossy().to_string(), root.to_string_lossy().to_string(), "--output".into(), root.to_string_lossy().to_string()];
+        assert_eq!(super::run(&v), 3);
+        let out = root.join("cfg.txt");
+        let v: Vec<String> = vec!["--print-config".into(), file.to_string_lossy().to_string(), root.to_string_lossy().to_string(), "--output".into(), out.to_string_lossy().to_string()];
+        assert_eq!(super::run(&v), 2);
+    }
+
+    #[test]
     fn compile_errors_fail_unless_asked_not_to() {
         let root = project("compile", &[("p.sv", "module m;\n  assign x = undeclared_y;\nendmodule\n")]);
         assert_eq!(lint(&root, &[]).0, 1);
@@ -668,6 +865,76 @@ mod tests {
         assert!(v.as_array().unwrap().iter().any(|r| r["id"] == "uvm-registration-mismatch"));
         assert!(super::explain("LNG-10").unwrap().contains("randomize-result-discarded"));
         assert!(super::explain("nothing").is_none());
+    }
+
+    #[test]
+    fn baselines_accept_the_findings_they_list() {
+        let root = project("base", &[("p.sv", SRC)]);
+        let b = root.join("base.json");
+        let bs = b.to_string_lossy().to_string();
+        assert_eq!(lint(&root, &["--write-baseline", &bs]).0, 1);
+        let text = std::fs::read_to_string(&b).unwrap();
+        assert!(text.contains("\"rule\": \"randomize-result-discarded\""), "{text}");
+        assert_eq!(lint(&root, &["--baseline", &bs]).0, 0);
+        // Lines moved: still accepted. A new finding: reported.
+        std::fs::write(root.join("p.sv"), format!("// a new first line\n\n{}", SRC.replace("randomize();", "randomize();\n      randomize();"))).unwrap();
+        let (code, out) = lint(&root, &["--baseline", &bs, "--format", "json"]);
+        assert_eq!(code, 1, "{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let kept: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["suppressed"].as_str().unwrap_or("-")).collect();
+        assert_eq!(kept, ["baseline", "-"]);
+        // Named in the configuration, the editor's way.
+        std::fs::write(root.join(".dvicode/lint.json"), r#"{ "baseline": "base.json" }"#).unwrap();
+        let (_, out) = lint(&root, &["--format", "json"]);
+        assert!(out.contains("\"suppressed\": \"baseline\""), "{out}");
+        // A broken baseline is an error.
+        std::fs::write(&b, "{}").unwrap();
+        assert_eq!(lint(&root, &["--baseline", &bs]).0, 2);
+    }
+
+    #[test]
+    fn changed_code_only() {
+        let root = project("changed", &[("p.sv", SRC), ("q.sv", &SRC.replace("package p", "package q"))]);
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&root).args(args).output().map(|o| o.status.success()).unwrap_or(false);
+            assert!(ok, "git {args:?}");
+        };
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        git(&["init", "-q"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]);
+        assert_eq!(lint(&root, &["--changed-since", "HEAD"]).0, 0);
+        // A change in q.sv: only its finding.
+        std::fs::write(root.join("q.sv"), SRC.replace("package p", "package q").replace("randomize();", "randomize(); randomize();")).unwrap();
+        let (code, out) = lint(&root, &["--changed-since", "HEAD"]);
+        assert_eq!(code, 1);
+        assert!(out.contains("q.sv") && !out.contains("p.sv"), "{out}");
+        assert_eq!(lint(&root, &["--changed-since", "no-such-rev"]).0, 2);
+    }
+
+    #[test]
+    fn sarif_junit_and_github_outputs() {
+        let root = project("formats", &[("p.sv", SRC)]);
+        let (_, out) = lint(&root, &["--format", "sarif"]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["runs"][0]["results"][0]["ruleId"], "randomize-result-discarded");
+        assert_eq!(v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "p.sv");
+        assert!(v["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"].as_str().unwrap().starts_with("file:///"));
+        let (_, out) = lint(&root, &["--format", "junit"]);
+        assert!(out.contains("<testcase classname=\"randomize-result-discarded\" name=\"p.sv\">"), "{out}");
+        let (_, out) = lint(&root, &["--format", "github"]);
+        assert!(out.starts_with("::warning file=p.sv,title=randomize-result-discarded/LNG-10,line=5,col=7"), "{out}");
+    }
+
+    #[test]
+    fn the_rule_pages_are_current() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/lint");
+        for (name, text) in super::docs() {
+            let shipped = std::fs::read_to_string(dir.join(&name)).unwrap_or_default().replace("\r\n", "\n");
+            assert!(shipped == text, "docs/lint/{name} is out of date: run `dvicode-server lint --docs docs/lint`");
+        }
     }
 
     #[test]
