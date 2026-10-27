@@ -117,6 +117,24 @@ for this repository, sign in with `azure/login`, and run
 `npx vsce publish --azure-credential --packagePath <file>` for each package (vsce 2.26.1 or
 later).
 
+### The `dvicode` command: PyPI and the container image
+
+Each release also has the `dvicode` command as an archive per platform (with `SHA256SUMS`)
+and as five Python wheels, all attested like the packages. Every archive and wheel carries
+`LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` for its own engine and the Rust standard library
+notices.
+
+- **PyPI:** run the `Release` workflow by hand from `main` with `pypi_tag` set (`v0.8.0`). PyPI
+  must first trust it: on pypi.org, add a trusted publisher for the project `dvicode` with this
+  repository, the workflow `release.yml` and the environment `pypi` (create that environment
+  in the repository settings). The job checks that the release has exactly the five wheels of
+  that version, each attested under its own name, then uploads them. A run that stopped part
+  way can be run again: wheels already on PyPI are skipped.
+- **Container image:** run the workflow with `container_tag` set. It builds
+  `ghcr.io/hexkdotcom/dvicode:<version>` and `:latest` from the release's Linux x64 archive.
+  A new package on ghcr.io is private: after the first push, open the package's settings on
+  GitHub and change its visibility to public (the job warns while an anonymous pull fails).
+
 ## Before the first public release
 
 - Publish from the public repository (or point `repository`, `bugs` and `homepage` in

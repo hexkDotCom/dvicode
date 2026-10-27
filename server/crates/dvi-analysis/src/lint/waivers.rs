@@ -215,6 +215,36 @@ fn parse_comment(c: &str, span: Span) -> Option<Waiver> {
 
 /// What a guide waiver before `tokens[k]` covers: the statement or declaration starting there.
 fn coverage(t: &[Token], k: usize) -> Option<(u32, u32)> {
+    let (start, end) = coverage_from(t, k)?;
+    // A case item (`0, 1: begin ... end`) or a labelled statement: the statement after the
+    // label's `:`, when it reaches further than the first `;` (the colon of `?:` does not).
+    let x = &t[k];
+    if x.kind == TokKind::Directive {
+        return Some((start, end));
+    }
+    let mut depth = 0i32;
+    for j in k..t.len() {
+        let y = &t[j];
+        if y.kind != TokKind::Punct {
+            continue;
+        }
+        match y.text.as_str() {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth -= 1,
+            ";" if depth <= 0 => break,
+            ":" if depth == 0 => {
+                if let Some(e) = stmt::statement_end(t, j + 1).filter(|e| *e > j + 1) {
+                    return Some((start, end.max(t[e - 1].span.end)));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    Some((start, end))
+}
+
+fn coverage_from(t: &[Token], k: usize) -> Option<(u32, u32)> {
     let mut k = k;
     // Attributes between the waiver and the code.
     while t.get(k).is_some_and(|x| x.is_punct("(*")) {
@@ -350,5 +380,10 @@ mod tests {
         assert_eq!(covered("virtual function void f(); x = 1; endfunction y = 2;", 0), Some("virtual function void f(); x = 1; endfunction"));
         assert_eq!(covered("extern function void f(); y = 2;", 0), Some("extern function void f();"));
         assert_eq!(covered("task t; #1; endtask", 0), Some("task t; #1; endtask"));
+        assert_eq!(covered("0, 1: begin x(); y(); end\n2: z();", 0), Some("0, 1: begin x(); y(); end"));
+        assert_eq!(covered("default: if (a) x(); else y(); z();", 0), Some("default: if (a) x(); else y();"));
+        assert_eq!(covered("if (a) x = b ? c : d; else y = 1; z = 2;", 0), Some("if (a) x = b ? c : d; else y = 1;"));
+        assert_eq!(covered("x = b ? c : d; y = 1;", 0), Some("x = b ? c : d;"));
+        assert_eq!(covered("bit [3:0] x; y = 1;", 0), Some("bit [3:0] x;"));
     }
 }

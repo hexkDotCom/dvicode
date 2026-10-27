@@ -24,7 +24,7 @@ jobs:
 |---|---|---|
 | `version` | the action's pinned release | the DVICode release to download (checked against its `SHA256SUMS`) |
 | `path` | `.` | the project folder (its build file, or auto-configuration) |
-| `args` | | more `dvicode lint` arguments: `--rulesets hexk`, `--build FILE`, `--baseline FILE`, `--changed-since origin/main` (fetch the history first) |
+| `args` | | more `dvicode lint` arguments: `--rulesets hexk`, `--build FILE`, `--baseline FILE`, `--changed-since origin/main` (fetch the history first). Split into words as a shell would, keeping quoted parts together; variables and wildcards are not expanded |
 | `fail-on` | `warning` | the lowest level that fails the step (`error`, `warning`, `info`, `never`) |
 | `sarif` | `true` | upload SARIF to code scanning (the job needs `security-events: write`) |
 
@@ -33,4 +33,5 @@ Rules come from the project's `.dvicode/lint.json`. See the
 [rule reference](https://github.com/hexkDotCom/dvicode/blob/main/docs/lint/README.md).
 
 The SARIF is uploaded even when the lint step fails, so the findings are in code scanning
-either way. Apache-2.0.
+either way. On pull requests from forks the token is read-only and cannot upload it: use
+`sarif: ${{ !github.event.pull_request.head.repo.fork }}`. Apache-2.0.

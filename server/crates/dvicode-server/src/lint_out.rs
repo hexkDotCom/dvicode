@@ -262,7 +262,9 @@ fn gh_prop(s: &str) -> String {
 pub const GITHUB_MAX: usize = 50;
 
 /// GitHub workflow annotations (`::warning file=...::message`), the counted findings only.
-pub fn github(items: &[Item]) -> String {
+/// GitHub reads `file` from the repository root: the path relative to `base` (the working
+/// directory, normally the checkout) when the file is below it, else relative to the project.
+pub fn github(items: &[Item], base: Option<&std::path::Path>) -> String {
     let mut s = String::new();
     let mut shown: [usize; 3] = [0; 3];
     let mut left: [usize; 3] = [0; 3];
@@ -277,7 +279,11 @@ pub fn github(items: &[Item]) -> String {
             continue;
         }
         shown[k] += 1;
-        let mut props = format!("file={},title={}", gh_prop(&x.rel), gh_prop(&x.tag()));
+        let file = base
+            .and_then(|b| std::path::Path::new(&x.path).strip_prefix(b).ok())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| x.rel.clone());
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(&x.tag()));
         if let Some(r) = x.range {
             props.push_str(&format!(",line={},col={},endLine={},endColumn={}", r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1));
         }
@@ -317,10 +323,10 @@ mod tests {
     #[test]
     fn github_escaping() {
         let x = item("randomize-result-discarded", Level::Warning, "a,b:c.sv", "50% done\nnext");
-        let out = github(&[x]);
+        let out = github(&[x], None);
         assert_eq!(out, "::warning file=a%2Cb%3Ac.sv,title=randomize-result-discarded/LNG-10,line=5,col=7,endLine=5,endColumn=19::50%25 done%0Anext\n");
         let many: Vec<Item> = (0..GITHUB_MAX + 3).map(|_| item("randomize-result-discarded", Level::Error, "a.sv", "m")).collect();
-        let out = github(&many);
+        let out = github(&many, None);
         assert_eq!(out.lines().filter(|l| l.starts_with("::error")).count(), GITHUB_MAX);
         assert!(out.contains("3 more errors"));
     }

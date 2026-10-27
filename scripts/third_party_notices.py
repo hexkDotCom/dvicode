@@ -10,10 +10,12 @@ Covers:
     whose notices Rust publishes as COPYRIGHT-library.html (copied next to the output).
 
 Run where cargo works:
-  python3 scripts/third_party_notices.py [--targets T1,T2] [--out FILE] [--rust-std-copy FILE]
+  python3 scripts/third_party_notices.py [--targets T1,T2] [--out FILE] [--rust-std-copy FILE] [--cli]
 
 --targets lists the Rust targets of the binaries shipped together (crates are combined);
-the default is the static Linux server only.
+the default is the static Linux server only. --cli writes the notices of the `dvicode` command
+(archives, wheels, container image): no npm section, and the Rust notices copied next to the
+output as licenses/rust-std-library.html unless --rust-std-copy says where.
 """
 
 import argparse
@@ -149,11 +151,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--targets", default=TARGET, help="comma-separated Rust targets")
     ap.add_argument("--out", default=str(ROOT / "THIRD_PARTY_NOTICES.md"))
-    ap.add_argument("--rust-std-copy", default=str(ROOT / "client" / "licenses" / "rust-std-library.html"))
+    ap.add_argument("--rust-std-copy", default=None)
+    ap.add_argument("--cli", action="store_true", help="the dvicode command: no npm packages")
     args = ap.parse_args()
+    if args.rust_std_copy is None:
+        args.rust_std_copy = str(
+            Path(args.out).parent / "licenses" / "rust-std-library.html" if args.cli else ROOT / "client" / "licenses" / "rust-std-library.html"
+        )
 
     problems = []
-    npm = npm_packages()
+    npm = [] if args.cli else npm_packages()
     targets = [t for t in args.targets.split(",") if t]
     rust = rust_packages(targets)
     sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
@@ -174,12 +181,13 @@ def main():
         "`scripts/third_party_notices.py`; do not edit it by hand.",
         "",
     ]
-    out += section(
-        "VS Code extension (bundled into dist/extension.js)",
-        "These npm packages are compiled into the extension bundle.",
-        npm,
-        problems,
-    )
+    if not args.cli:
+        out += section(
+            "VS Code extension (bundled into dist/extension.js)",
+            "These npm packages are compiled into the extension bundle.",
+            npm,
+            problems,
+        )
     out += section(
         "Language server (server/*/dvicode-server)",
         "These Rust crates are statically linked into the server binaries (targets "
@@ -193,7 +201,7 @@ def main():
         f"The server binaries statically link the Rust standard library ({rustc_version}) and,",
         "for the Linux (musl) targets, the musl C library and libunwind. Their copyright and license",
         "notices are published by the Rust project as COPYRIGHT-library.html; a copy ships",
-        "with the extension as `licenses/rust-std-library.html` and is also available at",
+        "next to this file as `licenses/rust-std-library.html` and is also available at",
         "https://github.com/rust-lang/rust/blob/master/COPYRIGHT.",
         "",
     ]

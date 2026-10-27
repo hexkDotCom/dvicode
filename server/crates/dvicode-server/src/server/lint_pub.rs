@@ -184,8 +184,8 @@ fn to_lsp(a: &Analysis, x: &Finding) -> Option<Diagnostic> {
 /// The code actions of the lint findings of `f` that overlap `start..=end`: each finding's
 /// fixes, a waiver above it, and turning its rule off in the file. A waiver or a suppression
 /// is inserted with a `<reason>` placeholder, which the VS Code extension then selects
-/// (`dvicode.lint.selectReason`).
-pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u32) -> Vec<CodeActionOrCommand> {
+/// (`dvicode.lint.selectReason`, only for a client that runs it: `select_reason`).
+pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u32, select_reason: bool) -> Vec<CodeActionOrCommand> {
     let cfg = a.lint_config(set, &DiskEnv, f);
     if !cfg.owned.is_owned() {
         return Vec::new();
@@ -196,10 +196,12 @@ pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u
     let mut out = Vec::new();
     let mut waived: Vec<(&str, u32)> = Vec::new();
     let mut disabled: Vec<&str> = Vec::new();
-    let select = |line: u32| Command {
-        title: "Select the reason".into(),
-        command: "dvicode.lint.selectReason".into(),
-        arguments: Some(vec![serde_json::json!(uri.to_string()), serde_json::json!(line)]),
+    let select = |line: u32| {
+        select_reason.then(|| Command {
+            title: "Select the reason".into(),
+            command: "dvicode.lint.selectReason".into(),
+            arguments: Some(vec![serde_json::json!(uri.to_string()), serde_json::json!(line)]),
+        })
     };
     for x in lint.findings.iter().filter(|x| x.suppressed.is_none() && x.span.start <= end && start <= x.span.end) {
         let Some(meta) = rules::meta(x.rule) else { continue };
@@ -237,7 +239,7 @@ pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u
                     kind: Some(CodeActionKind::QUICKFIX),
                     diagnostics: diagnostics.clone(),
                     edit: Some(edit),
-                    command: Some(select(line)),
+                    command: select(line),
                     ..Default::default()
                 }));
             }
@@ -251,7 +253,7 @@ pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u
                     kind: Some(CodeActionKind::QUICKFIX),
                     diagnostics,
                     edit: Some(edit),
-                    command: Some(select(0)),
+                    command: select(0),
                     ..Default::default()
                 }));
             }

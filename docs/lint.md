@@ -89,8 +89,8 @@ Output formats:
 ## Configuration: `.dvicode/lint.json`
 
 A project's configuration lives in `.dvicode/lint.json`. Write it as strict JSON. Put notes in
-`comment` fields, which are allowed on every object. The extension validates the file and
-completes rule IDs as you type.
+`comment` fields: at the top level, in a rule's object form, in an override and in a path's
+object form. The extension validates the file and completes rule IDs as you type.
 
 ```json
 {
@@ -220,7 +220,25 @@ request and uploads SARIF to code scanning:
     args: --rulesets recommended
 ```
 
-Without the action:
+Uploading SARIF needs `security-events: write`. Give the job these permissions:
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hexkDotCom/dvicode-lint-action@v1
+```
+
+On pull requests from forks the token is read-only, so the upload cannot work there; the
+annotations still show. Turn the upload off for them:
+`sarif: ${{ !github.event.pull_request.head.repo.fork }}`.
+
+Without the action (same permissions):
 
 ```yaml
 - run: pip install dvicode
@@ -230,6 +248,10 @@ Without the action:
   with:
     sarif_file: dvicode-lint.sarif
 ```
+
+The `args` input is split into words as a shell would split it, keeping quoted parts together
+(`--build "config files/sim.build"`). Variables and wildcards are not expanded. Annotations
+use paths from the repository root, also when `path` is a subfolder.
 
 **GitLab CI**:
 
@@ -264,16 +286,24 @@ The hook lints the project and reports only the files being committed.
 ## Other editors
 
 `dvicode --stdio` is the language server: lint findings, diagnostics, navigation, formatting.
-Settings go in the client's initialization options, under the same names without `dvicode.`.
+Settings go in the client's initialization options as nested objects: `dvicode.lint.enable`
+and `dvicode.lint.rulesets` become
+
+```json
+{ "lint": { "enable": true, "rulesets": ["recommended", "hexk"] } }
+```
 
 - **Neovim** (0.11+): `vim.lsp.config('dvicode', { cmd = { 'dvicode', '--stdio' }, filetypes = { 'systemverilog', 'verilog' }, root_markers = { '.dvicode', '.git' } })`
   then `vim.lsp.enable('dvicode')`.
 - **Emacs** (eglot): `(add-to-list 'eglot-server-programs '((verilog-mode) "dvicode" "--stdio"))`.
-- **Sublime Text** (LSP package): a client with `"command": ["dvicode", "--stdio"]` and
-  `"selector": "source.systemverilog"`.
+- **Sublime Text** (LSP package), in `LSP.sublime-settings`:
 
-Code actions are plain LSP edits in any editor. Only VS Code also selects the `<reason>`
-placeholder after a Waive.
+  ```json
+  { "clients": { "dvicode": { "enabled": true, "command": ["dvicode", "--stdio"], "selector": "source.systemverilog" } } }
+  ```
+
+Code actions are plain LSP edits in any editor. After a Waive, replace the `<reason>`
+placeholder with the reason; VS Code selects it for you.
 
 ## Credits
 

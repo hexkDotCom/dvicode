@@ -6,6 +6,7 @@ RUN apk add --no-cache git \
  && git config --system --add safe.directory '*'
 COPY dvicode /usr/local/bin/dvicode
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/dvicode/
+COPY licenses /usr/share/doc/dvicode/licenses
 WORKDIR /src
 ENTRYPOINT ["dvicode"]
 CMD ["lint", "."]

@@ -82,6 +82,8 @@ function settingsForServer(): object {
     uncHosts,
     inlayHints: c.get<Record<string, boolean>>('inlayHints', {}),
     lint: { enable: c.get<boolean>('lint.enable', true), rulesets: c.get<string[]>('lint.rulesets', ['recommended']) },
+    // Commands of this extension the server may attach to code actions.
+    clientCommands: ['dvicode.lint.selectReason'],
   };
 }
 

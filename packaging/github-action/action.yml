@@ -19,7 +19,7 @@ inputs:
     required: false
     default: '.'
   args:
-    description: 'More arguments for `dvicode lint` (--rulesets hexk, --build FILE, --baseline FILE, --changed-since origin/main...)'
+    description: 'More arguments for `dvicode lint` (--rulesets hexk, --build FILE, --baseline FILE, --changed-since origin/main...): split as a shell splits words, with quotes ("a b") kept together; no variables or wildcards'
     required: false
     default: ''
   fail-on:
@@ -38,6 +38,7 @@ runs:
   using: composite
   steps:
     - name: Install dvicode ${{ inputs.version }}
+      id: install
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
@@ -53,14 +54,17 @@ runs:
         esac
         name="dvicode-$VERSION-$platform"
         base="https://github.com/hexkDotCom/dvicode/releases/download/v$VERSION"
-        dir="$RUNNER_TEMP/dvicode"
-        mkdir -p "$dir"
+        # A folder of its own: the action may run more than once in a job.
+        dir=$(mktemp -d "$RUNNER_TEMP/dvicode.XXXXXX")
         cd "$dir"
         curl -fsSL -o "$name.$ext" "$base/$name.$ext"
         curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
-        grep " $name.$ext\$" SHA256SUMS | sha256sum -c -
+        # macOS has shasum, not sha256sum.
+        if command -v sha256sum > /dev/null; then sum="sha256sum"; else sum="shasum -a 256"; fi
+        grep " $name.$ext\$" SHA256SUMS | $sum -c -
         if [ "$ext" = zip ]; then unzip -q "$name.$ext"; else tar -xzf "$name.$ext"; fi
         echo "$dir/$name" >> "$GITHUB_PATH"
+        echo "dir=$dir" >> "$GITHUB_OUTPUT"
     - name: Lint
       id: lint
       shell: bash
@@ -68,16 +72,28 @@ runs:
         LINT_PATH: ${{ inputs.path }}
         LINT_ARGS: ${{ inputs.args }}
         FAIL_ON: ${{ inputs.fail-on }}
+        SARIF: ${{ steps.install.outputs.dir }}/dvicode-lint.sarif
       run: |
-        set +e
-        # shellcheck disable=SC2086
-        dvicode lint "$LINT_PATH" --format github --output-sarif "$RUNNER_TEMP/dvicode-lint.sarif" --fail-on "$FAIL_ON" $LINT_ARGS
+        # The arguments as words: xargs splits them and honours quotes, without expanding
+        # anything (no eval). Bash 3 too (macOS).
+        args=()
+        if [ -n "${LINT_ARGS//[[:space:]]/}" ]; then
+          if ! printf '%s' "$LINT_ARGS" | xargs printf '%.0s' > /dev/null; then
+            echo "::error::cannot split the args input (unbalanced quotes?)"
+            echo "code=2" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          while IFS= read -r -d '' a; do args+=("$a"); done < <(printf '%s' "$LINT_ARGS" | xargs printf '%s\0')
+        fi
+        dvicode lint "$LINT_PATH" --format github --output-sarif "$SARIF" --fail-on "$FAIL_ON" ${args[@]+"${args[@]}"}
         echo "code=$?" >> "$GITHUB_OUTPUT"
+        # hashFiles() sees only the workspace: say here whether there is a report.
+        if [ -f "$SARIF" ]; then echo "sarif=$SARIF" >> "$GITHUB_OUTPUT"; fi
     - name: Upload SARIF
-      if: always() && inputs.sarif == 'true' && hashFiles(format('{0}/dvicode-lint.sarif', runner.temp)) != ''
+      if: always() && inputs.sarif == 'true' && steps.lint.outputs.sarif != ''
       uses: github/codeql-action/upload-sarif@v3
       with:
-        sarif_file: ${{ runner.temp }}/dvicode-lint.sarif
+        sarif_file: ${{ steps.lint.outputs.sarif }}
         category: dvicode-lint
     - name: Result
       shell: bash

@@ -194,7 +194,11 @@ jobs:
             install -m 755 engines/engine-$platform/* "$d/$exe"
             cp LICENSE NOTICE "$d/"
             cp docs/lint-cli-readme.md "$d/README.md"
-            python3 scripts/third_party_notices.py --targets "${rust_target[$platform]}" --out "$d/THIRD_PARTY_NOTICES.md"
+            # The notices of this platform's engine, with the Rust notices in licenses/; the
+            # wheel of the platform carries the same files.
+            python3 scripts/third_party_notices.py --cli --targets "${rust_target[$platform]}" --out "$d/THIRD_PARTY_NOTICES.md"
+            mkdir -p "notices/$platform"
+            cp -r "$d/THIRD_PARTY_NOTICES.md" "$d/licenses" "notices/$platform/"
             if [ "$platform" = win32-x64 ]; then
               (cd cli && zip -qr "dvicode-$version-$platform.zip" "dvicode-$version-$platform")
             else
@@ -203,7 +207,7 @@ jobs:
             rm -rf "$d"
           done
           (cd cli && sha256sum dvicode-* > SHA256SUMS)
-          python3 scripts/pypi/build_wheels.py --engines engines --version "$version" --out wheels --readme docs/lint-cli-readme.md
+          python3 scripts/pypi/build_wheels.py --engines engines --version "$version" --out wheels --readme docs/lint-cli-readme.md --notices notices
           ls -l cli wheels
           # The Linux wheel runs here: the command answers.
           python3 -m venv /tmp/w && /tmp/w/bin/pip install -q wheels/*manylinux*x86_64*.whl && /tmp/w/bin/dvicode lint --list-rules > /dev/null
@@ -331,13 +335,24 @@ jobs:
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $TAG"; exit 1; }
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p '*.whl' -D wheels
+          version=${TAG#v}
           ls -l wheels
-          test "$(ls wheels | wc -l)" = 5 || { echo "expected the five platform wheels"; exit 1; }
+          # Exactly the five wheels of that version (scripts/pypi/build_wheels.py names them).
+          expected=$(printf "dvicode-$version-py3-none-%s.whl\n" \
+            manylinux_2_17_x86_64.manylinux2014_x86_64.musllinux_1_1_x86_64 \
+            manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64 \
+            win_amd64 macosx_11_0_arm64 macosx_10_12_x86_64 | sort)
+          test "$(ls wheels | sort)" = "$expected" || { echo "expected:"; echo "$expected"; exit 1; }
           for f in wheels/*.whl; do
+            name=$(basename "$f")
+            digest=$(sha256sum "$f" | cut -d' ' -f1)
+            # Attested under this very name: the name decides which platforms pip installs it on.
             gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-              --source-ref "refs/tags/$TAG" --deny-self-hosted-runners > /dev/null \
-              || { echo "no attestation of $f"; exit 1; }
+              --source-ref "refs/tags/$TAG" --deny-self-hosted-runners --format json \
+              | jq -e --arg n "$name" --arg d "$digest" \
+                  'any(.[].verificationResult.statement.subject[]; .name == $n and .digest.sha256 == $d)' >/dev/null \
+              || { echo "no attestation of $name with digest $digest"; exit 1; }
           done
       - name: Publish
         run: |
@@ -346,7 +361,9 @@ jobs:
           oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=pypi" | jq -r .value)
           token=$(curl -sSf -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"$oidc\"}" | jq -r .token)
           python3 -m pip install -q twine==6.1.0
-          TWINE_USERNAME=__token__ TWINE_PASSWORD="$token" python3 -m twine upload --non-interactive wheels/*.whl
+          # --skip-existing: a run that stopped part way can be run again (PyPI never takes
+          # other content under a file name it has).
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$token" python3 -m twine upload --non-interactive --skip-existing wheels/*.whl
 
   container:
     name: Push the container image
@@ -373,10 +390,15 @@ jobs:
           gh attestation verify "dvicode-$version-linux-x64.tar.gz" -R "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "refs/tags/$TAG" > /dev/null
           tar -xzf "dvicode-$version-linux-x64.tar.gz"
-          cp "dvicode-$version-linux-x64/dvicode" "dvicode-$version-linux-x64"/{LICENSE,NOTICE,THIRD_PARTY_NOTICES.md} packaging/docker/
+          cp -r "dvicode-$version-linux-x64/dvicode" "dvicode-$version-linux-x64"/{LICENSE,NOTICE,THIRD_PARTY_NOTICES.md,licenses} packaging/docker/
           image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr A-Z a-z)/dvicode
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker build -t "$image:$version" -t "$image:latest" packaging/docker
           docker run --rm "$image:$version" lint --list-rules > /dev/null
           docker push "$image:$version"
           docker push "$image:latest"
+          # A new package on ghcr.io is private: the first time, make it public in the package
+          # settings (docs/releasing.md); until then pulling it anonymously fails.
+          docker logout ghcr.io
+          docker pull -q "$image:$version" > /dev/null \
+            || echo "::warning::$image is not public yet: change its visibility in the package settings"

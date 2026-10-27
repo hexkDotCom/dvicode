@@ -3,7 +3,11 @@
 the `dvicode` command (`pip install dvicode`, then `dvicode lint .`).
 
 Usage: build_wheels.py --engines DIR --version X.Y.Z --out DIR [--readme FILE] [--license FILE]
-       [--notice FILE]
+       [--notice FILE] [--notices DIR]
+
+With --notices, DIR/<platform>/ holds that platform's THIRD_PARTY_NOTICES.md and
+licenses/rust-std-library.html (scripts/third_party_notices.py --cli), which the wheel carries
+with LICENSE and NOTICE.
 
 DIR holds the engines as the release workflow downloads them: DIR/engine-<platform>/dvicode-server
 (dvicode-server.exe on Windows), for the platforms below. The wheels need nothing but the
@@ -92,7 +96,7 @@ def record_line(name, data):
     return f"{name},sha256={digest},{len(data)}"
 
 
-def build(platform, tag, engine, version, out, readme, license_text, notice_text):
+def build(platform, tag, engine, version, out, readme, license_text, notice_text, notices=None):
     exe = "dvicode.exe" if platform.startswith("win32") else "dvicode"
     dist = f"dvicode-{version}.dist-info"
     files = [
@@ -105,6 +109,10 @@ def build(platform, tag, engine, version, out, readme, license_text, notice_text
         (f"{dist}/licenses/LICENSE", license_text, 0o644),
         (f"{dist}/licenses/NOTICE", notice_text, 0o644),
     ]
+    if notices:
+        d = os.path.join(notices, platform)
+        for rel in ("THIRD_PARTY_NOTICES.md", "licenses/rust-std-library.html"):
+            files.append((f"{dist}/licenses/{rel}", open(os.path.join(d, rel), "rb").read(), 0o644))
     record = [record_line(n, d) for n, d, _ in files] + [f"{dist}/RECORD,,"]
     files.append((f"{dist}/RECORD", ("\n".join(record) + "\n").encode(), 0o644))
     path = os.path.join(out, f"dvicode-{version}-py3-none-{tag}.whl")
@@ -125,6 +133,7 @@ def main():
     ap.add_argument("--readme", default=None)
     ap.add_argument("--license", default="LICENSE")
     ap.add_argument("--notice", default="NOTICE")
+    ap.add_argument("--notices", default=None)
     ap.add_argument("--platforms", default=",".join(PLATFORMS))
     a = ap.parse_args()
     readme = open(a.readme, encoding="utf-8").read() if a.readme else "DVICode Lint: `dvicode lint <project>`."
@@ -138,7 +147,7 @@ def main():
         if not os.path.exists(exe):
             print(f"build_wheels: no engine for {platform} at {exe}", file=sys.stderr)
             return 1
-        print(build(platform, PLATFORMS[platform], exe, a.version, a.out, readme, license_text, notice_text))
+        print(build(platform, PLATFORMS[platform], exe, a.version, a.out, readme, license_text, notice_text, a.notices))
         built += 1
     return 0 if built else 1
 

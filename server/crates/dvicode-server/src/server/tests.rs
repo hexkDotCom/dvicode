@@ -2313,6 +2313,13 @@ fn lint_code_actions_fix_waive_and_turn_off() {
     let text = acts.to_string();
     assert!(text.contains(r#"if (!randomize()) $fatal(1, \"randomize() failed\");"#), "{text}");
     assert!(text.contains(r#"      // LNG-10 waived: <reason>\n"#), "{text}");
-    assert!(text.contains("dvicode.lint.selectReason"), "{text}");
+    // Only a client that says it runs the command gets it (other editors would fail on it).
+    assert!(!text.contains("dvicode.lint.selectReason"), "{text}");
+    c.shutdown();
+    let (mut c, _) = Client::start(&root, json!({ "clientCommands": ["dvicode.lint.selectReason"] }));
+    c.open(&r, 1, RND);
+    c.wait_problems(&r, |p| p.diagnostics.len() == 2);
+    let acts = c.request_ok("textDocument/codeAction", json!({ "textDocument": { "uri": r }, "range": { "start": pos, "end": pos }, "context": { "diagnostics": [] } }));
+    assert!(acts.to_string().contains("dvicode.lint.selectReason"), "{acts}");
     c.shutdown();
 }

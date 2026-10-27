@@ -301,6 +301,9 @@ struct Server {
     format_settings: Value,
     /// The `dvicode.lint` settings: no build depends on them either.
     lint: lint_pub::LintSettings,
+    /// The client runs `dvicode.lint.selectReason` (it says so in `initializationOptions.
+    /// clientCommands`): waiver actions then select their `<reason>` placeholder.
+    select_reason: bool,
     /// The project's lint configurations, as the problem checks read them.
     lint_configs: Arc<lint_pub::LintConfigs>,
     /// The client can be asked to request inlay hints again.
@@ -456,6 +459,12 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
     let hint_kinds = params.initialization_options.as_ref().map(hint_kinds_of).unwrap_or_default();
     let format_settings = params.initialization_options.as_ref().and_then(|v| v.get("format")).cloned().unwrap_or(Value::Null);
     let lint = params.initialization_options.as_ref().map(lint_pub::LintSettings::of).unwrap_or_default();
+    let select_reason = params
+        .initialization_options
+        .as_ref()
+        .and_then(|v| v.get("clientCommands"))
+        .and_then(Value::as_array)
+        .is_some_and(|c| c.iter().any(|x| x.as_str() == Some("dvicode.lint.selectReason")));
     let hint_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false);
     let token_refresh = params.capabilities.workspace.as_ref().and_then(|w| w.semantic_tokens.as_ref()).and_then(|t| t.refresh_support).unwrap_or(false);
     let document_changes = params.capabilities.workspace.as_ref().and_then(|w| w.workspace_edit.as_ref()).and_then(|e| e.document_changes).unwrap_or(false);
@@ -483,6 +492,7 @@ pub(crate) fn run_with(conn: Connection, hooks: Hooks) -> Res<()> {
         hint_kinds,
         format_settings,
         lint,
+        select_reason,
         lint_configs: Arc::default(),
         hint_refresh,
         token_refresh,
@@ -2132,6 +2142,7 @@ impl Server {
             "textDocument/documentLink" => self.send(Message::Response(ok_response(req.id, Value::Null))),
             "textDocument/codeAction" => {
                 let lint = self.lint_configs.get(&self.analysis.setup.root, &self.lint);
+                let select_reason = self.select_reason;
                 self.spawn(req, move |a, p: CodeActionParams| {
                 // Kinds form a dotted hierarchy: `refactor` asks for `refactor.rewrite`, not `refactor.re`.
                 let wants = |kind: &str| p.context.only.as_ref().is_none_or(|o| o.iter().any(|k| k.as_str().is_empty() || kind == k.as_str() || kind.starts_with(&format!("{}.", k.as_str()))));
@@ -2156,7 +2167,7 @@ impl Server {
                     })
                     .collect();
                 if let (true, Some(set)) = (wants("quickfix"), &lint) {
-                    actions.extend(lint_pub::code_actions(a, set, f, start, end));
+                    actions.extend(lint_pub::code_actions(a, set, f, start, end, select_reason));
                 }
                 if wants("refactor.rewrite") {
                     let refactors = a.implement_pure_methods(f, start).into_iter().chain(a.instance_actions(f, start));

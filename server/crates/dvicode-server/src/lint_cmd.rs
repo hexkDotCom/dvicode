@@ -455,7 +455,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         let file = baseline::file_of(new_baseline, &format!("dvicode {}", env!("CARGO_PKG_VERSION")));
         let text = serde_json::to_string_pretty(&file).unwrap_or_default() + "\n";
         let tmp = out.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, out)) {
+        if let Err(e) = make_parent(out).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, out)) {
             eprintln!("lint: cannot write the baseline {}: {e}", out.display());
             return 3;
         }
@@ -507,14 +507,14 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         }
         "sarif" => sarif_text(&items, &root, complete),
         "junit" => lint_out::junit(&items, &linted_files, o.fail_on),
-        "github" => lint_out::github(&items),
+        "github" => lint_out::github(&items, std::env::current_dir().ok().map(|d| crate::check::canonical_path(&d)).as_deref()),
         _ => lint_out::text(&items, o.show_suppressed),
     };
     if emit(o, &out) != 0 {
         return 3;
     }
     if let Some(p) = &o.output_sarif {
-        if let Err(e) = std::fs::write(p, sarif_text(&items, &root, complete)) {
+        if let Err(e) = make_parent(p).and_then(|_| std::fs::write(p, sarif_text(&items, &root, complete))) {
             eprintln!("lint: cannot write {}: {e}", p.display());
             return 3;
         }
@@ -782,6 +782,14 @@ fn print_config(set: &ConfigSet, file: &Path, cfg: &FileConfig) -> String {
     let guide: Vec<&str> = dvi_analysis::lint::guide_ids::GUIDE_IDS.iter().map(|(i, _)| *i).filter(|g| !rules::all().iter().any(|r| r.meta().guide.contains(g))).collect();
     s.push_str(&format!("guide rules not checked by any lint rule: {}\n", guide.len()));
     s
+}
+
+/// Creates the folder an output file goes to (`.dvicode/` of a project that has none yet).
+fn make_parent(p: &Path) -> std::io::Result<()> {
+    match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => std::fs::create_dir_all(d),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
