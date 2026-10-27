@@ -67,7 +67,7 @@ static END_COMMENT: RuleMeta = RuleMeta {
     rulesets: &[Ruleset::Hexk],
     default_level: Level::Warning,
     subchecks: &[],
-    summary: "A comment follows `end`.",
+    summary: "A comment follows `end` on its line.",
     why: "End comments (`end // while (...)`) go stale when the code above changes; nothing checks them.",
     params: &[],
     text_only: true,
@@ -194,8 +194,11 @@ impl Rule for EndComment {
         let Some(text) = cx.a.file_text(cx.file) else { return };
         for c in &facts.comments {
             // On the line of the token before it, which is an `end`.
-            let Some(prev) = c.next.checked_sub(1).and_then(|k| t.get(k)) else { continue };
-            if !(prev.is_kw("end") || prev.is_kw("join") || prev.is_kw("join_any") || prev.is_kw("join_none") || prev.is_kw("endcase")) {
+            let Some(k) = c.next.checked_sub(1) else { continue };
+            let Some(prev) = t.get(k) else { continue };
+            // `end`, or `end : label`.
+            let is_end = prev.is_kw("end") || prev.kind == TokKind::Ident && k >= 2 && t[k - 1].is_punct(":") && t[k - 2].is_kw("end");
+            if !is_end {
                 continue;
             }
             if text[prev.span.end as usize..c.span.start as usize].contains('\n') {

@@ -214,7 +214,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule CLS-4 (no lint rule checks it yet)"
+          "description": "Style guide rule CLS-4: sets virtual-on-override"
         },
         "CLS-5": {
           "allOf": [
@@ -318,7 +318,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule CMP-4 (no lint rule checks it yet)"
+          "description": "Style guide rule CMP-4: sets missing-super-phase-call"
         },
         "CMP-5": {
           "allOf": [
@@ -414,7 +414,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule COV-7 (no lint rule checks it yet)"
+          "description": "Style guide rule COV-7: sets coverage-weight-goal"
         },
         "COV-8": {
           "allOf": [
@@ -502,7 +502,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-1 (no lint rule checks it yet)"
+          "description": "Style guide rule FAC-1: sets component-created-with-new"
         },
         "FAC-10": {
           "allOf": [
@@ -518,7 +518,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-11: sets uvm-deprecated-api"
+          "description": "Style guide rule FAC-11: sets uvm-deprecated-api, uvm-internal-member"
         },
         "FAC-2": {
           "allOf": [
@@ -526,7 +526,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-2: sets uvm-registration-mismatch"
+          "description": "Style guide rule FAC-2: sets uvm-registration-mismatch, uvm-class-not-registered"
         },
         "FAC-3": {
           "allOf": [
@@ -582,7 +582,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FAC-9 (no lint rule checks it yet)"
+          "description": "Style guide rule FAC-9: sets direct-report-call"
         },
         "FIL-1": {
           "allOf": [
@@ -606,7 +606,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FIL-2 (no lint rule checks it yet)"
+          "description": "Style guide rule FIL-2: sets file-extension"
         },
         "FIL-3": {
           "allOf": [
@@ -614,7 +614,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FIL-3 (no lint rule checks it yet)"
+          "description": "Style guide rule FIL-3: sets class-outside-package"
         },
         "FIL-4": {
           "allOf": [
@@ -622,7 +622,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FIL-4 (no lint rule checks it yet)"
+          "description": "Style guide rule FIL-4: sets compilation-unit-import"
         },
         "FIL-5": {
           "allOf": [
@@ -638,7 +638,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FIL-6 (no lint rule checks it yet)"
+          "description": "Style guide rule FIL-6: sets include-guard"
         },
         "FIL-7": {
           "allOf": [
@@ -646,7 +646,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FIL-7: sets timescale"
+          "description": "Style guide rule FIL-7: sets delay-without-unit, timeunit-first, timescale"
         },
         "FIL-8": {
           "allOf": [
@@ -702,7 +702,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule FMT-13 (no lint rule checks it yet)"
+          "description": "Style guide rule FMT-13: sets formatter-drift"
         },
         "FMT-2": {
           "allOf": [
@@ -878,7 +878,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule LNG-13 (no lint rule checks it yet)"
+          "description": "Style guide rule LNG-13: sets constraint-name"
         },
         "LNG-14": {
           "allOf": [
@@ -998,7 +998,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule MSG-2 (no lint rule checks it yet)"
+          "description": "Style guide rule MSG-2: sets message-id-get-name"
         },
         "MSG-3": {
           "allOf": [
@@ -1062,7 +1062,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule NAM-1 (no lint rule checks it yet)"
+          "description": "Style guide rule NAM-1: sets naming-case"
         },
         "NAM-2": {
           "allOf": [
@@ -1070,7 +1070,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule NAM-2 (no lint rule checks it yet)"
+          "description": "Style guide rule NAM-2: sets naming-case"
         },
         "NAM-3": {
           "allOf": [
@@ -1078,7 +1078,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule NAM-3 (no lint rule checks it yet)"
+          "description": "Style guide rule NAM-3: sets naming-prefix"
         },
         "NAM-4": {
           "allOf": [
@@ -1110,7 +1110,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule NAM-7 (no lint rule checks it yet)"
+          "description": "Style guide rule NAM-7: sets create-name-chars"
         },
         "NAM-8": {
           "allOf": [
@@ -1118,7 +1118,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule NAM-8 (no lint rule checks it yet)"
+          "description": "Style guide rule NAM-8: sets create-name-matches"
         },
         "NAM-9": {
           "allOf": [
@@ -1158,7 +1158,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule OBJ-4 (no lint rule checks it yet)"
+          "description": "Style guide rule OBJ-4: sets objection-without-description"
         },
         "OBJ-5": {
           "allOf": [
@@ -1310,7 +1310,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule SEQ-11 (no lint rule checks it yet)"
+          "description": "Style guide rule SEQ-11: sets default-sequence"
         },
         "SEQ-12": {
           "allOf": [
@@ -1334,7 +1334,7 @@
               "$ref": "#/definitions/setting"
             }
           ],
-          "description": "Style guide rule SEQ-14 (no lint rule checks it yet)"
+          "description": "Style guide rule SEQ-14: sets pre-do-override"
         },
         "SEQ-15": {
           "allOf": [
@@ -1608,8 +1608,208 @@
             }
           ]
         },
+        "class-outside-package": {
+          "markdownDescription": "A class declared outside a package.\n\nClasses in packages have one definition the whole testbench shares; a class in a module or at compilation-unit scope is a separate type in each place (FIL-3).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "compilation-unit-import": {
+          "markdownDescription": "An `import` at compilation-unit scope.\n\nAn import outside a module, interface or package leaks into every file compiled after it, so a file's meaning depends on the compile order (FIL-4).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "component-created-with-new": {
+          "markdownDescription": "A component is created with `new` instead of the factory.\n\nA component made with `new` cannot be overridden by a test (FAC-1); only TLM ports, exports, imps and analysis FIFOs are made with `new`.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "constraint-name": {
+          "markdownDescription": "A constraint is not named `<what>_cstr`.\n\nOne suffix makes constraints easy to find and to switch off by name (LNG-13).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "coverage-weight-goal": {
+          "markdownDescription": "`option.weight` or `option.goal` is set.\n\nA goal under 100 hides holes, and weights turn the total into a negotiation (COV-7). Weight 0 on a coverpoint that only builds a cross is the exception.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "create-name-chars": {
+          "markdownDescription": "A factory `create` name has characters outside `[a-zA-Z0-9_]` or `__`.\n\nInstance names appear in hierarchical paths, config-db lookups and logs; other characters break glob matching and tools (NAM-7).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "create-name-matches": {
+          "markdownDescription": "A factory `create` name differs from the variable it is assigned to.\n\nLog paths then map directly to code (NAM-8).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "default-sequence": {
+          "markdownDescription": "`default_sequence` is set.\n\nDefault sequences start stimulus implicitly from configuration; start sequences explicitly from the test (SEQ-11).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "delay-without-unit": {
+          "markdownDescription": "A delay literal without a time unit.\n\nA bare #10 means whatever the scope's time unit is; write #10ns (FIL-7).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "direct-report-call": {
+          "markdownDescription": "`uvm_report_info/warning/error/fatal` is called directly.\n\nThe report macros skip building the message when it is filtered; direct calls always build it (FAC-9).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "display-in-uvm-class": {
-          "markdownDescription": "`$display` (or `$write`, `$monitor`, `$strobe`) in a UVM class.\n\nUVM classes report with the UVM report macros, which the test can filter, count and redirect; `$display` bypasses all of that (MSG-1).",
+          "markdownDescription": "`$display` in a class, or another reporting system task in a UVM class.\n\nClasses must not use `$display`; UVM classes report only with the UVM report macros, which the test can filter, count and redirect (MSG-1).",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -1629,7 +1829,7 @@
           ]
         },
         "end-comment": {
-          "markdownDescription": "A comment follows `end`.\n\nEnd comments (`end // while (...)`) go stale when the code above changes; nothing checks them.",
+          "markdownDescription": "A comment follows `end` on its line.\n\nEnd comments (`end // while (...)`) go stale when the code above changes; nothing checks them.",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -1748,6 +1948,26 @@
             }
           ]
         },
+        "file-extension": {
+          "markdownDescription": "A compiled file or an included file has the wrong extension.\n\nCompiled units and files included into packages use .sv; .svh is for macro and header files only (FIL-2).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "final-newline": {
           "markdownDescription": "The file does not end with exactly one newline.\n\nA missing final newline joins the last line with whatever follows it (an `include, a concatenated file list); extra blank lines are noise.",
           "oneOf": [
@@ -1768,8 +1988,48 @@
             }
           ]
         },
+        "formatter-drift": {
+          "markdownDescription": "Lines differ from what the project's formatter makes.\n\nA project that names its formatter keeps its code as the formatter makes it, so that layout is never argued about or changed by hand (FMT-13). Checked only when .dvicode/lint.json names DVICode's formatter (\"formatter\": \"dvicode\").",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "illegal-bins": {
           "markdownDescription": "`illegal_bins` in a covergroup.\n\nIllegal values are errors that assertions or checkers must report; coverage only samples. Exclude values with `ignore_bins` (COV-6).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "include-guard": {
+          "markdownDescription": "An included file has no include guard named after it.\n\nA guard makes a second `include harmless; naming it after the file (BUS_DRIVER_SV) avoids two files sharing one guard (FIL-6).",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -1822,8 +2082,128 @@
             }
           ]
         },
+        "message-id-get-name": {
+          "markdownDescription": "A report message ID is `get_name()`.\n\nInstance names depend on where the class is instantiated and are already in the message header; IDs should be static and functional (MSG-2).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "missing-super-phase-call": {
+          "markdownDescription": "A function phase does not call `super.<phase>(phase)` first.\n\nThe parent's phase work (UVM's own, or a base class's) is skipped or runs late; CMP-4 asks for the call first in every function phase.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "naming-case": {
+          "markdownDescription": "A name is not in the case the style guide asks for.\n\nlower_snake_case for classes, variables, functions, tasks, instances, signals, packages, interfaces and modules (as the UVM library); UPPER_SNAKE_CASE for parameters, localparams, enum literals and constant macros (NAM-1, NAM-2).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "naming-prefix": {
+          "markdownDescription": "A name starts with `uvm_` or `m_`.\n\n`uvm_` belongs to the library and `m_` marks UVM internals; project names with them hide that distinction (NAM-3).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "objection-without-description": {
+          "markdownDescription": "`raise_objection`/`drop_objection` without a description.\n\nThe description is what `+UVM_OBJECTION_TRACE` shows (OBJ-4).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "p-sequencer": {
           "markdownDescription": "`` `uvm_declare_p_sequencer ``.\n\nIt locks a sequence to one sequencer type (FAC-8); see SEQ-8 for alternatives.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "pre-do-override": {
+          "markdownDescription": "`pre_do`, `mid_do` or `post_do` is overridden.\n\nThese hooks run inside UVM's item flow and are easy to misuse; SEQ-14 allows them only to change a sequence that cannot be edited, together with a factory override.",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -1982,6 +2362,26 @@
             }
           ]
         },
+        "timeunit-first": {
+          "markdownDescription": "A scope with delays or time values does not declare timeunit and timeprecision first.\n\nWithout them the scope's time unit comes from compile order or tool defaults (FIL-7).",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "todo-format": {
           "markdownDescription": "A TODO is not written `TODO:<owner>:<P1|P2|P3>: <text>`.\n\nA fixed form makes TODOs greppable and summarizable by owner and priority, and P1s can be checked before sign-off.",
           "oneOf": [
@@ -2004,6 +2404,26 @@
         },
         "trailing-whitespace": {
           "markdownDescription": "A line ends in spaces or tabs.\n\nTrailing whitespace is invisible noise in diffs and reviews.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "uvm-class-not-registered": {
+          "markdownDescription": "A concrete UVM class is not registered with the factory.\n\nOnly registered classes can be created and overridden through the factory (FAC-1, FAC-2); an unregistered class cannot be replaced from a test.",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -2062,6 +2482,26 @@
             }
           ]
         },
+        "uvm-internal-member": {
+          "markdownDescription": "A UVM internal member (`m_...`) is used.\n\nMembers whose names start with `m_` are UVM's internals: they change between UVM versions without notice (FAC-11). `m_sequencer` is documented and allowed.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "uvm-override-signature": {
           "markdownDescription": "A UVM phase method is overridden with another signature.\n\nA phase method only runs when it overrides UVM's own declaration exactly: a task where UVM declares a function, or other arguments, is either refused by the compiler late or never called.",
           "oneOf": [
@@ -2084,6 +2524,26 @@
         },
         "uvm-registration-mismatch": {
           "markdownDescription": "A UVM registration macro does not fit its class.\n\nThe factory creates what the macro registers: another class's name, the object macro on a component, or a non-parameterized macro on a parameterized class registers the wrong thing or fails to compile only where the factory is used.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/level"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "type": "string"
+                },
+                "level": {
+                  "$ref": "#/definitions/level"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "virtual-on-override": {
+          "markdownDescription": "`virtual` is repeated on an override of a UVM virtual method.\n\nAn override of a virtual method is virtual anyway; the style guide keeps `virtual` for new methods that extensions may override (CLS-4).",
           "oneOf": [
             {
               "$ref": "#/definitions/level"
@@ -2217,6 +2677,13 @@
       "description": "parent (default): start from the configuration above; none: from the defaults",
       "enum": [
         "parent",
+        "none"
+      ]
+    },
+    "formatter": {
+      "description": "The project's formatter (FMT-13): with \"dvicode\", the hexk rule formatter-drift reports lines DVICode's formatter would change",
+      "enum": [
+        "dvicode",
         "none"
       ]
     },

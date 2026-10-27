@@ -35,7 +35,7 @@ meta!(UVM_DO, "uvm-do-macros", ["FAC-7"], Warning, "A `` `uvm_do ``, `` `uvm_cre
 meta!(P_SEQUENCER, "p-sequencer", ["FAC-8"], Warning, "`` `uvm_declare_p_sequencer ``.", "It locks a sequence to one sequencer type (FAC-8); see SEQ-8 for alternatives.");
 meta!(CAST_AS_TASK, "cast-as-task", ["LNG-20"], Warning, "`$cast` called as a task.", "A failed task-form `$cast` is only a run-time error the simulator may continue past with the destination unchanged; call it as a function and report failure (LNG-20).");
 meta!(VOID_RANDOMIZE, "randomize-void-cast", ["LNG-10"], Warning, "The result of randomize() is discarded with void'(...).", "The style guide asks for every randomize() result to be checked (LNG-10); `void'` only says the result is ignored on purpose.");
-meta!(DISPLAY, "display-in-uvm-class", ["MSG-1"], Warning, "`$display` (or `$write`, `$monitor`, `$strobe`) in a UVM class.", "UVM classes report with the UVM report macros, which the test can filter, count and redirect; `$display` bypasses all of that (MSG-1).");
+meta!(DISPLAY, "display-in-uvm-class", ["MSG-1"], Warning, "`$display` in a class, or another reporting system task in a UVM class.", "Classes must not use `$display`; UVM classes report only with the UVM report macros, which the test can filter, count and redirect (MSG-1).");
 meta!(SUPPRESSION, "suppression-not-waiver", [], Info, "A `dvicode-lint:` suppression.", "Suppressions turn rules off for a region; the style guide's waiver record is a `// <ID> waived: <reason>` comment on the code it covers (§0).");
 
 pub struct ProgramBlock;
@@ -174,7 +174,13 @@ impl Rule for UvmDoMacros {
     }
     fn check(&self, cx: &mut Cx) {
         let u = cx.a.unit(cx.unit).clone();
-        let fam = |n: &str| ["uvm_do", "uvm_create", "uvm_send", "uvm_rand_send"].iter().any(|p| n == *p || n.strip_prefix(p).is_some_and(|r| r.starts_with('_')));
+        // The sequence macros (not `uvm_do_callbacks and the other callback macros).
+        const SEQ_MACROS: &[&str] = &[
+            "uvm_do", "uvm_do_with", "uvm_do_pri", "uvm_do_pri_with", "uvm_do_on", "uvm_do_on_with", "uvm_do_on_pri", "uvm_do_on_pri_with", "uvm_create",
+            "uvm_create_on", "uvm_send", "uvm_send_pri", "uvm_rand_send", "uvm_rand_send_with", "uvm_rand_send_pri", "uvm_rand_send_pri_with", "uvm_do_seq",
+            "uvm_do_seq_with",
+        ];
+        let fam = |n: &str| SEQ_MACROS.contains(&n);
         for (m, _) in library_calls(cx, &u, &fam) {
             cx.report(None, m.call_span, format!("`{}: write create, start_item, randomize (checked) and finish_item explicitly", m.name), Vec::new());
         }
@@ -255,8 +261,15 @@ impl Rule for RandomizeVoidCast {
                 if !(t[s].is_kw("void") && t.get(s + 1).is_some_and(|x| x.text == "'") && t.get(s + 2).is_some_and(|x| x.is_punct("(")) && t[e - 1].is_punct(")")) {
                     continue;
                 }
-                if t[s + 3..e - 1].iter().any(|x| x.kind == TokKind::Ident && x.text == "randomize") {
-                    cx.report(None, Span::new(cx.file, t[s].span.start, t[e].span.end), "void'(randomize()): check the result instead (LNG-10)", Vec::new());
+                // Only a call of the built-in randomize, directly (not a function that takes its result).
+                match super::randomize::builtin_randomize_call(cx, &t[s + 3..e - 1]) {
+                    Some(true) => cx.report(None, Span::new(cx.file, t[s].span.start, t[e].span.end), "void'(randomize()): check the result instead (LNG-10)", Vec::new()),
+                    Some(false) => {}
+                    None => {
+                        if t[s + 3..e - 1].iter().any(|x| x.kind == TokKind::Ident && x.text == "randomize") {
+                            cx.unknown_at("unresolved receiver", t[s].span);
+                        }
+                    }
                 }
             }
         }
@@ -275,31 +288,38 @@ impl Rule for DisplayInUvmClass {
         for b in &facts.bodies {
             let Some(d) = b.decl else { continue };
             let Some(class) = member_class(a, DeclRef { unit: cx.unit, decl: d }) else { continue };
-            let hits: Vec<Span> = t[b.start..b.end]
-                .iter()
-                .filter(|x| x.kind == TokKind::SysIdent && is_display(&x.text))
-                .map(|x| x.span)
-                .collect();
-            if hits.is_empty() {
+            let _ = &u;
+            // `$display` in any class.
+            let displays: Vec<(Span, String)> = t[b.start..b.end].iter().filter(|x| x.kind == TokKind::SysIdent && is_display(&x.text)).map(|x| (x.span, x.text.to_string())).collect();
+            for (s, name) in &displays {
+                cx.report(None, *s, format!("{name} in a class: report with `uvm_info and the other UVM report macros (or $info/$warning/$error/$fatal in a UVM-free package)"), Vec::new());
+            }
+            // The other reporting tasks in UVM classes.
+            let others: Vec<(Span, String)> = t[b.start..b.end].iter().filter(|x| x.kind == TokKind::SysIdent && is_other_report(&x.text)).map(|x| (x.span, x.text.to_string())).collect();
+            if others.is_empty() {
                 continue;
             }
-            let _ = &u;
             match a.lint_facts.class(a, class).role {
                 Ok(UvmRole::None) => {}
                 Ok(_) => {
-                    for s in hits {
-                        cx.report(None, s, "Report with `uvm_info (or `uvm_warning, `uvm_error, `uvm_fatal) in UVM classes, not with $display", Vec::new());
+                    for (s, name) in others {
+                        cx.report(None, s, format!("{name} in a UVM class: report with `uvm_info, `uvm_warning, `uvm_error or `uvm_fatal"), Vec::new());
                     }
                 }
-                Err(_) => cx.unknown_at("class ancestry", hits[0]),
+                Err(_) => cx.unknown_at("class ancestry", others[0].0),
             }
         }
     }
 }
 
 fn is_display(s: &str) -> bool {
-    let base = ["$display", "$write", "$monitor", "$strobe"];
-    base.iter().any(|b| s == *b || s.strip_prefix(b).is_some_and(|r| matches!(r, "b" | "h" | "o")))
+    s == "$display" || s.strip_prefix("$display").is_some_and(|r| matches!(r, "b" | "h" | "o"))
+}
+
+/// Reporting tasks other than `$display` that UVM classes do not use.
+fn is_other_report(s: &str) -> bool {
+    let base = ["$write", "$monitor", "$strobe"];
+    base.iter().any(|b| s == *b || s.strip_prefix(b).is_some_and(|r| matches!(r, "b" | "h" | "o"))) || matches!(s, "$info" | "$warning" | "$error" | "$fatal")
 }
 
 impl Rule for SuppressionNotWaiver {

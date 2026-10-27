@@ -1,6 +1,6 @@
 # display-in-uvm-class
 
-`$display` (or `$write`, `$monitor`, `$strobe`) in a UVM class.
+`$display` in a class, or another reporting system task in a UVM class.
 
 - Rulesets: hexk
 - Default level: warning

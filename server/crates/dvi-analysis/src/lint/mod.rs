@@ -195,6 +195,10 @@ pub struct Cx<'a> {
     pub unit: UnitId,
     pub facts: Arc<facts::FileFacts>,
     pub params: &'a FxHashMap<String, i64>,
+    /// The file is one of the configuration's `examples` (the guide's example exceptions).
+    pub example: bool,
+    /// The configuration names DVICode's formatter as the project's (`"formatter": "dvicode"`).
+    pub formatter_named: bool,
     rule: &'static RuleMeta,
     level: Level,
     steps: u64,
@@ -307,6 +311,8 @@ impl Analysis {
                 unit,
                 facts: facts.clone(),
                 params: set.params.as_ref().unwrap_or(&empty),
+                example: cfg.example,
+                formatter_named: cfg.formatter.as_deref() == Some("dvicode"),
                 rule: meta,
                 level: set.level,
                 steps: 0,

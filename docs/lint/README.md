@@ -12,6 +12,28 @@ Choose rulesets and levels in `.dvicode/lint.json` (see [the lint guide](../lint
 | [`factory-incompatible-constructor`](factory-incompatible-constructor.md) | CLS-8 | recommended | warning | The factory cannot call the constructor of a registered class. |
 | [`uvm-override-signature`](uvm-override-signature.md) |  | recommended | warning | A UVM phase method is overridden with another signature. |
 | [`uvm-deprecated-api`](uvm-deprecated-api.md) | FAC-11 | recommended | warning | Deprecated UVM API is used. |
+| [`uvm-class-not-registered`](uvm-class-not-registered.md) | FAC-2 | hexk | warning | A concrete UVM class is not registered with the factory. |
+| [`missing-super-phase-call`](missing-super-phase-call.md) | CMP-4 | hexk | warning | A function phase does not call `super.<phase>(phase)` first. |
+| [`component-created-with-new`](component-created-with-new.md) | FAC-1 | hexk | warning | A component is created with `new` instead of the factory. |
+| [`uvm-internal-member`](uvm-internal-member.md) | FAC-11 | hexk | warning | A UVM internal member (`m_...`) is used. |
+| [`direct-report-call`](direct-report-call.md) | FAC-9 | hexk | warning | `uvm_report_info/warning/error/fatal` is called directly. |
+| [`message-id-get-name`](message-id-get-name.md) | MSG-2 | hexk | warning | A report message ID is `get_name()`. |
+| [`objection-without-description`](objection-without-description.md) | OBJ-4 | hexk | warning | `raise_objection`/`drop_objection` without a description. |
+| [`default-sequence`](default-sequence.md) | SEQ-11 | hexk | warning | `default_sequence` is set. |
+| [`pre-do-override`](pre-do-override.md) | SEQ-14 | hexk | info | `pre_do`, `mid_do` or `post_do` is overridden. |
+| [`virtual-on-override`](virtual-on-override.md) | CLS-4 | hexk | warning | `virtual` is repeated on an override of a UVM virtual method. |
+| [`constraint-name`](constraint-name.md) | LNG-13 | hexk | warning | A constraint is not named `<what>_cstr`. |
+| [`create-name-chars`](create-name-chars.md) | NAM-7 | hexk | warning | A factory `create` name has characters outside `[a-zA-Z0-9_]` or `__`. |
+| [`create-name-matches`](create-name-matches.md) | NAM-8 | hexk | warning | A factory `create` name differs from the variable it is assigned to. |
+| [`compilation-unit-import`](compilation-unit-import.md) | FIL-4 | hexk | warning | An `import` at compilation-unit scope. |
+| [`class-outside-package`](class-outside-package.md) | FIL-3 | hexk | warning | A class declared outside a package. |
+| [`include-guard`](include-guard.md) | FIL-6 | hexk | warning | An included file has no include guard named after it. |
+| [`delay-without-unit`](delay-without-unit.md) | FIL-7 | hexk | warning | A delay literal without a time unit. |
+| [`timeunit-first`](timeunit-first.md) | FIL-7 | hexk | warning | A scope with delays or time values does not declare timeunit and timeprecision first. |
+| [`file-extension`](file-extension.md) | FIL-2 | hexk | warning | A compiled file or an included file has the wrong extension. |
+| [`naming-case`](naming-case.md) | NAM-1, NAM-2 | hexk | warning | A name is not in the case the style guide asks for. |
+| [`naming-prefix`](naming-prefix.md) | NAM-3 | hexk | warning | A name starts with `uvm_` or `m_`. |
+| [`coverage-weight-goal`](coverage-weight-goal.md) | COV-7 | hexk | warning | `option.weight` or `option.goal` is set. |
 | [`program-block`](program-block.md) | IFC-2 | hexk | warning | A `program` block. |
 | [`timescale`](timescale.md) | FIL-7 | hexk | warning | A `` `timescale `` directive. |
 | [`extern-method`](extern-method.md) | CLS-2 | hexk | warning | A class method declared `extern`. |
@@ -22,14 +44,15 @@ Choose rulesets and levels in `.dvicode/lint.json` (see [the lint guide](../lint
 | [`p-sequencer`](p-sequencer.md) | FAC-8 | hexk | warning | `` `uvm_declare_p_sequencer ``. |
 | [`cast-as-task`](cast-as-task.md) | LNG-20 | hexk | warning | `$cast` called as a task. |
 | [`randomize-void-cast`](randomize-void-cast.md) | LNG-10 | hexk | warning | The result of randomize() is discarded with void'(...). |
-| [`display-in-uvm-class`](display-in-uvm-class.md) | MSG-1 | hexk | warning | `$display` (or `$write`, `$monitor`, `$strobe`) in a UVM class. |
+| [`display-in-uvm-class`](display-in-uvm-class.md) | MSG-1 | hexk | warning | `$display` in a class, or another reporting system task in a UVM class. |
 | [`suppression-not-waiver`](suppression-not-waiver.md) |  | hexk | info | A `dvicode-lint:` suppression. |
 | [`trailing-whitespace`](trailing-whitespace.md) | FMT-2 | hexk | info | A line ends in spaces or tabs. |
+| [`formatter-drift`](formatter-drift.md) | FMT-13 | hexk | warning | Lines differ from what the project's formatter makes. |
 | [`ascii-only`](ascii-only.md) | FMT-2 | hexk | warning | A line holds a character outside ASCII. |
 | [`final-newline`](final-newline.md) | FMT-2 | hexk | warning | The file does not end with exactly one newline. |
 | [`line-length`](line-length.md) | FMT-3 | hexk | info | A line is longer than the limit. |
 | [`end-label`](end-label.md) | FMT-6 | hexk | warning | A class, function, task, module, interface, package, covergroup, property, sequence or clocking block ends without a label. |
-| [`end-comment`](end-comment.md) | FMT-7 | hexk | warning | A comment follows `end`. |
+| [`end-comment`](end-comment.md) | FMT-7 | hexk | warning | A comment follows `end` on its line. |
 | [`todo-format`](todo-format.md) | DOC-6 | hexk | warning | A TODO is not written `TODO:<owner>:<P1\|P2\|P3>: <text>`. |
 | [`waiver-without-reason`](waiver-without-reason.md) |  | recommended | warning | A waiver or suppression gives no reason. |
 | [`waiver-unknown-id`](waiver-unknown-id.md) |  | recommended | warning | A waiver or suppression names a rule that does not exist. |

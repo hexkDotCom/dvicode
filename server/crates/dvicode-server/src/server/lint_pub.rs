@@ -260,16 +260,18 @@ pub fn code_actions(a: &Analysis, set: &ConfigSet, f: FileId, start: u32, end: u
     out
 }
 
-/// A configuration file's problems, as diagnostics of that file.
-pub fn config_diagnostics(c: &ConfigFile) -> (Url, Vec<Diagnostic>) {
+/// A configuration file's problems (and its notes), as diagnostics of that file.
+pub fn config_diagnostics(set: &ConfigSet, c: &ConfigFile) -> (Url, Vec<Diagnostic>) {
     let li = LineIndex::new(&c.text);
     let pos = |at: u32| {
         let (l, ch) = li.position(&c.text, at);
         Position::new(l, ch)
     };
+    let notes = set.reason_notes(&DiskEnv, c);
     let diags = c
         .problems
         .iter()
+        .chain(notes.iter())
         .map(|p| Diagnostic {
             range: Range::new(pos(p.start), pos(p.end)),
             severity: Some(if p.warning { DiagnosticSeverity::WARNING } else { DiagnosticSeverity::ERROR }),

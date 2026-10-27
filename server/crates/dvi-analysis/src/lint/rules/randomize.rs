@@ -177,16 +177,30 @@ fn check_fix(cx: &Cx, stmt: Span) -> Option<Fix> {
     Some(Fix { title: "Check the result of randomize()".into(), edits: vec![(stmt, keep_else(cx, stmt, new))], safe: false })
 }
 
-/// `new` (an `if` without `else`) in place of the statement at `stmt`: in `begin ... end` when an
-/// `else` follows, which would otherwise bind to the new `if`.
+/// `new` (an `if` without `else`) in place of the statement at `stmt`: in `begin ... end` unless
+/// the statement is one of a sequence (after `;`, `begin`, `end`, ...), where no `else` can
+/// follow it: as the body of an `if`, `else` or loop, a later `else` (perhaps behind an
+/// `` `ifdef ``) would bind to the new `if`.
 pub(super) fn keep_else(cx: &Cx, stmt: Span, new: String) -> String {
     let t = &cx.facts.tokens;
-    let k = t.partition_point(|x| x.span.start < stmt.end);
-    if t.get(k).is_some_and(|x| x.is_kw("else")) {
-        format!("begin {new} end")
-    } else {
+    let k = t.partition_point(|x| x.span.start < stmt.start);
+    let in_sequence = k.checked_sub(1).and_then(|p| t.get(p)).is_some_and(|x| {
+        x.is_punct(";") || x.kind == TokKind::Keyword && matches!(x.text.as_str(), "begin" | "end" | "fork" | "join" | "join_any" | "join_none") || x.is_punct(":") && k >= 2 && t[k - 2].kind == TokKind::Ident && k >= 3 && (t[k - 3].is_kw("begin") || t[k - 3].is_kw("fork") || t[k - 3].is_punct(";"))
+    });
+    if in_sequence {
         new
+    } else {
+        format!("begin {new} end")
     }
+}
+
+/// Whether `t` (inside a `void'(...)`) is exactly a call of the built-in `randomize`.
+pub(super) fn builtin_randomize_call(cx: &Cx, t: &[Token]) -> Option<bool> {
+    let call = shape(t)?;
+    if call.macro_in_callee {
+        return None;
+    }
+    callee_is_builtin(cx, t[call.name].span, call.prefix)
 }
 
 /// A statement that is only a `randomize` call: where the name is and what is before it.

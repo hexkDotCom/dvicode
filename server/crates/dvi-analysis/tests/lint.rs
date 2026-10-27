@@ -54,13 +54,28 @@ const UVM_MACROS: &str = r#"`ifndef UVM_MACROS_SVH
 
 const UVM_PKG: &str = r#"`include "uvm_macros.svh"
 package uvm_pkg;
-  class uvm_object; function new(string name = ""); endfunction endclass
-  class uvm_object_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
+  class uvm_object;
+    protected string m_name;
+    function new(string name = ""); m_name = name; endfunction
+    function string get_name(); return m_name; endfunction
+  endclass
+  class uvm_object_registry #(type T = uvm_object, string Tname = "<unknown>");
+    static function T create(string name = "", uvm_component parent = null, string contxt = ""); endfunction
+  endclass
   class uvm_abstract_object_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
-  class uvm_component_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
+  class uvm_component_registry #(type T = uvm_object, string Tname = "<unknown>");
+    static function T create(string name, uvm_component parent, string contxt = ""); endfunction
+  endclass
   class uvm_abstract_component_registry #(type T = uvm_object, string Tname = "<unknown>"); endclass
-  class uvm_phase; endclass
-  class uvm_component extends uvm_object;
+  class uvm_phase;
+    function void raise_objection(uvm_object obj, string description = "", int count = 1); endfunction
+    function void drop_objection(uvm_object obj, string description = "", int count = 1); endfunction
+  endclass
+  class uvm_report_object extends uvm_object;
+    function new(string name = ""); super.new(name); endfunction
+    virtual function void uvm_report_info(string id, string message, int verbosity = 0, string filename = "", int line = 0); endfunction
+  endclass
+  class uvm_component extends uvm_report_object;
     function new(string name, uvm_component parent); super.new(name); endfunction
     virtual function void build_phase(uvm_phase phase); endfunction
     virtual function void connect_phase(uvm_phase phase); endfunction
@@ -72,6 +87,15 @@ package uvm_pkg;
   class uvm_sequence_item extends uvm_transaction; function new(string name = ""); super.new(name); endfunction endclass
   typedef enum { UVM_NONE, UVM_LOW, UVM_MEDIUM, UVM_DEFAULT } uvm_verbosity;
   class uvm_env extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_sequence_base extends uvm_sequence_item;
+    function new(string name = ""); super.new(name); endfunction
+    virtual task pre_do(bit is_item); endtask
+  endclass
+  class uvm_tlm_analysis_fifo #(type T = int) extends uvm_component; function new(string name, uvm_component parent); super.new(name, parent); endfunction endclass
+  class uvm_config_db #(type T = int);
+    static function void set(uvm_component cntxt, string inst_name, string field_name, T value); endfunction
+    static function bit get(uvm_component cntxt, string inst_name, string field_name, inout T value); endfunction
+  endclass
   virtual class uvm_port_base #(type IF = uvm_object) extends IF;
     function new(string name, uvm_component parent); endfunction
   endclass
@@ -111,8 +135,10 @@ fn rule_pages_and_their_examples() {
         let ex = docs::examples(page);
         assert!(ex.iter().any(|(b, _)| *b) && ex.iter().any(|(b, _)| !*b), "{id}: a bad and a good example");
         for (i, (bad, code)) in ex.iter().enumerate() {
-            let (a, root) = project(&format!("doc-{id}-{i}"), &[("ex.sv", code)]);
-            let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| s.starts_with("ex.sv:")).collect();
+            let files = docs::example_files(code);
+            let refs: Vec<(&str, &str)> = files.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+            let (a, root) = project(&format!("doc-{id}-{i}"), &refs);
+            let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| files.iter().any(|(n, _)| s.starts_with(&format!("{}:", n.rsplit('/').next().unwrap())))).collect();
             let hit = got.iter().any(|s| s.contains(&format!(" {id}")) && !s.ends_with("(waived)"));
             assert_eq!(hit, *bad, "{id} example {i} ({}): {got:?}\n{code}", if *bad { "bad" } else { "good" });
         }
@@ -468,3 +494,86 @@ endpackage
     assert_eq!(got, ["tb.sv:7 uvm-deprecated-api", "tb.sv:8 uvm-deprecated-api", "tb.sv:12 uvm-deprecated-api"]);
 }
 
+
+/// The cases of the L2 review: each line names the finding expected (or none).
+#[test]
+fn hexk_review_cases() {
+    let tb = r#"`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class t1 extends uvm_env;
+    `uvm_component_utils(t1)
+    bit enabled;
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      if (enabled)
+        env = my_env::type_id::create("env", this);
+    endfunction
+    function void connect_phase(uvm_phase phase);
+      if (touch()) begin end
+      super.connect_phase(phase);
+    endfunction
+    function bit touch(); return 1; endfunction
+  endclass
+  class t2 extends uvm_env;
+    `uvm_component_utils(t2)
+    my_env env = new("env", null);
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      my_env e2 = my_env::type_id::create("e2", this);
+    endfunction
+  endclass
+  class settings;
+    int goal;
+  endclass
+  class user;
+    settings option;
+    function void f(); option.goal = 90; endfunction
+    function int randomize_all(); return 1; endfunction
+    function void g(); void'(randomize_all()); endfunction
+  endclass
+  function bit inspect(uvm_object o); return 1; endfunction
+  class t3 extends uvm_env;
+    `uvm_component_utils(t3)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      bit ok;
+      super.build_phase(phase);
+      ok = inspect(my_env::type_id::create("item", this));
+      uvm_config_db#(int)::set(.cntxt(this), .inst_name("sqr.main_phase"), .field_name("default_sequence"), .value(0));
+    endfunction
+    task run_phase(uvm_phase phase);
+      phase.raise_objection(.obj(this), .description());
+    endtask
+  endclass
+endpackage
+module m;
+  bit [1:0] a, b;
+  covergroup cg;
+    cp_a: coverpoint a iff (a inside {1, 2}) { option.weight = 0; }
+    cp_b: coverpoint b;
+    x: cross cp_a, cp_b { option.weight = 0; }
+  endgroup
+endmodule
+"#;
+    let (a, root) = project("review2", &[("tb.sv", tb)]);
+    let want = ["missing-super-phase-call", "component-created-with-new", "create-name-matches", "default-sequence", "objection-without-description", "coverage-weight-goal", "randomize-void-cast"];
+    let got: Vec<String> = lint(&a, &root, &[Ruleset::Hexk]).into_iter().filter(|s| want.iter().any(|w| s.contains(&format!(" {w}")))).collect();
+    assert_eq!(
+        got,
+        [
+            "tb.sv:13 missing-super-phase-call",
+            "tb.sv:17 missing-super-phase-call",
+            "tb.sv:25 component-created-with-new",
+            "tb.sv:27 missing-super-phase-call",
+            "tb.sv:48 default-sequence",
+            "tb.sv:51 objection-without-description",
+            "tb.sv:60 coverage-weight-goal",
+        ]
+    );
+}

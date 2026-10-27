@@ -14,6 +14,29 @@ pub fn page(id: &str) -> Option<&'static str> {
         "uvm-override-signature" => OVERRIDE_SIGNATURE,
         "uvm-deprecated-api" => DEPRECATED_API,
         "trailing-whitespace" => TRAILING_WHITESPACE,
+        "uvm-class-not-registered" => NOT_REGISTERED_PAGE,
+        "missing-super-phase-call" => MISSING_SUPER_PAGE,
+        "component-created-with-new" => CREATED_WITH_NEW_PAGE,
+        "uvm-internal-member" => INTERNAL_MEMBER_PAGE,
+        "direct-report-call" => DIRECT_REPORT_PAGE,
+        "message-id-get-name" => MESSAGE_ID_PAGE,
+        "objection-without-description" => OBJECTION_PAGE,
+        "default-sequence" => DEFAULT_SEQUENCE_PAGE,
+        "pre-do-override" => PRE_DO_PAGE,
+        "virtual-on-override" => VIRTUAL_OVERRIDE_PAGE,
+        "constraint-name" => CONSTRAINT_NAME_PAGE,
+        "create-name-chars" => CREATE_CHARS_PAGE,
+        "create-name-matches" => CREATE_MATCHES_PAGE,
+        "compilation-unit-import" => CU_IMPORT_PAGE,
+        "class-outside-package" => CLASS_OUTSIDE_PAGE,
+        "include-guard" => INCLUDE_GUARD_PAGE,
+        "delay-without-unit" => DELAY_UNIT_PAGE,
+        "timeunit-first" => TIMEUNIT_FIRST_PAGE,
+        "file-extension" => FILE_EXTENSION_PAGE,
+        "naming-case" => NAMING_CASE_PAGE,
+        "naming-prefix" => NAMING_PREFIX_PAGE,
+        "coverage-weight-goal" => WEIGHT_GOAL_PAGE,
+        "formatter-drift" => FORMATTER_DRIFT_PAGE,
         "program-block" => PROGRAM_BLOCK,
         "timescale" => TIMESCALE_PAGE,
         "extern-method" => EXTERN_METHOD,
@@ -831,6 +854,916 @@ endmodule
 ```
 "#;
 
+const NOT_REGISTERED_PAGE: &str = r#"## What it finds
+
+A concrete (not `virtual`) class derived from `uvm_object` (components included, TLM ports
+not) with no UVM registration macro and no `type_id` of its own. When a project macro in the
+class body may register it, the class is counted as unknown instead.
+
+## Why
+
+Only registered classes can be created and overridden through the factory (FAC-1, FAC-2).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class bus_item extends uvm_sequence_item;
+    function new(string name = "bus_item"); super.new(name); endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class bus_item extends uvm_sequence_item;
+    `uvm_object_utils(bus_item)
+    function new(string name = "bus_item"); super.new(name); endfunction
+  endclass
+endpackage
+```
+"#;
+
+const MISSING_SUPER_PAGE: &str = r#"## What it finds
+
+A function phase of a component (`build_phase`, `connect_phase`, `end_of_elaboration_phase`,
+`start_of_simulation_phase`, `extract_phase`, `check_phase`, `report_phase`, `final_phase`)
+whose first statement, after declarations, is not an unconditional `super.<phase>(phase)`.
+Task phases are not checked (CMP-4 depends on what the parent's phase does), nor overrides of
+a pure virtual method.
+
+## Why
+
+The parent's phase work (UVM's own, or a base class's) is skipped, or runs after the derived
+class's (style guide CMP-4).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      env = my_env::type_id::create("env", this);
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = my_env::type_id::create("env", this);
+    endfunction
+  endclass
+endpackage
+```
+
+## Fix
+
+When the method calls no `super.<phase>` at all, the quick fix inserts the call first.
+"#;
+
+const CREATED_WITH_NEW_PAGE: &str = r#"## What it finds
+
+`x = new(...)` (or a declaration with `= new`) where `x` is a component: a class derived from
+`uvm_component` other than UVM's analysis FIFOs. TLM ports, exports and imps are not
+components.
+
+## Why
+
+A component created with `new` cannot be replaced by a factory override from a test (style
+guide FAC-1). Sequences, sequence items and configuration objects are also created through the
+factory; this rule checks components.
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = new("env", this);
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = my_env::type_id::create("env", this);
+    endfunction
+  endclass
+endpackage
+```
+"#;
+
+const INTERNAL_MEMBER_PAGE: &str = r#"## What it finds
+
+A reference to a member of the UVM library whose name starts with `m_` (UVM's internals),
+except the documented `m_sequencer`.
+
+## Why
+
+UVM's internals change between versions without notice (style guide FAC-11).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class bus_item extends uvm_sequence_item;
+    `uvm_object_utils(bus_item)
+    function new(string name = "bus_item"); super.new(name); endfunction
+    function string label(); return m_name; endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class bus_item extends uvm_sequence_item;
+    `uvm_object_utils(bus_item)
+    function new(string name = "bus_item"); super.new(name); endfunction
+    function string label(); return get_name(); endfunction
+  endclass
+endpackage
+```
+"#;
+
+const DIRECT_REPORT_PAGE: &str = r#"## What it finds
+
+A call of UVM's `uvm_report_info`, `uvm_report_warning`, `uvm_report_error` or
+`uvm_report_fatal`. The report macros' own calls are not seen (they are made by the macro
+expansion); a project macro that calls them is not followed.
+
+## Why
+
+The report macros skip building the message when its verbosity filters it out; a direct call
+always builds it (style guide FAC-9).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void report_phase(uvm_phase phase);
+      super.report_phase(phase);
+      uvm_report_info("TEST", "done");
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void report_phase(uvm_phase phase);
+      super.report_phase(phase);
+      `uvm_info("TEST", "done", UVM_LOW)
+    endfunction
+  endclass
+endpackage
+```
+"#;
+
+const MESSAGE_ID_PAGE: &str = r#"## What it finds
+
+A UVM report macro (`` `uvm_info `` and the others, `_context` forms too) whose message ID is
+`get_name()` (with `this.`, `super.` or another receiver).
+
+## Why
+
+Instance names depend on where a class is instantiated and are already printed in the message
+header; IDs should be static and functional, or `get_type_name()` (style guide MSG-2).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void report_phase(uvm_phase phase);
+      super.report_phase(phase);
+      `uvm_info(get_name(), "done", UVM_LOW)
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void report_phase(uvm_phase phase);
+      super.report_phase(phase);
+      `uvm_info("TEST_DONE", "done", UVM_LOW)
+    endfunction
+  endclass
+endpackage
+```
+"#;
+
+const OBJECTION_PAGE: &str = r#"## What it finds
+
+A call of UVM's `raise_objection` or `drop_objection` (on a phase or an objection) whose
+description argument is missing or `""`, by position or by name (`.description(...)`).
+
+## Why
+
+The description is what `+UVM_OBJECTION_TRACE` shows when an objection keeps a phase open
+(style guide OBJ-4).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    task run_phase(uvm_phase phase);
+      phase.raise_objection(this);
+      phase.drop_objection(this, "test done");
+    endtask
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    task run_phase(uvm_phase phase);
+      phase.raise_objection(this, "test running");
+      phase.drop_objection(this, "test done");
+    endtask
+  endclass
+endpackage
+```
+"#;
+
+const DEFAULT_SEQUENCE_PAGE: &str = r#"## What it finds
+
+`default_sequence` set through UVM's `uvm_config_db::set` (the field name, third) or
+`uvm_resource_db::set` (the name, second) as a string literal. The deprecated `set_config_*`
+calls and names built at run time are not followed.
+
+## Why
+
+A default sequence starts stimulus implicitly from configuration; tests start their sequences
+explicitly (style guide SEQ-11).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      uvm_config_db#(int)::set(this, "env.sqr.main_phase", "default_sequence", 0);
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      uvm_config_db#(int)::set(this, "env", "count", 4);
+    endfunction
+  endclass
+endpackage
+```
+"#;
+
+const PRE_DO_PAGE: &str = r#"## What it finds
+
+An override of UVM's sequence hooks `pre_do`, `mid_do` or `post_do` (an information).
+
+## Why
+
+These hooks run inside UVM's item flow; the style guide allows overriding them only to change a
+sequence that cannot be edited, together with a factory override (SEQ-14). Waive the finding
+where that is the case.
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class bus_seq extends uvm_sequence_base;
+    `uvm_object_utils(bus_seq)
+    function new(string name = "bus_seq"); super.new(name); endfunction
+    task pre_do(bit is_item); endtask
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class bus_seq extends uvm_sequence_base;
+    `uvm_object_utils(bus_seq)
+    function new(string name = "bus_seq"); super.new(name); endfunction
+  endclass
+endpackage
+```
+"#;
+
+const VIRTUAL_OVERRIDE_PAGE: &str = r#"## What it finds
+
+`virtual` written on a method that overrides a virtual method of the UVM library
+(`build_phase`, `do_copy`, ...), directly or through project classes.
+
+## Why
+
+The override is virtual anyway; the style guide keeps the keyword for new methods that
+extensions may override, so that it says something (CLS-4).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    virtual function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+    endfunction
+  endclass
+endpackage
+```
+
+## Fix
+
+The quick fix removes `virtual`.
+"#;
+
+const CONSTRAINT_NAME_PAGE: &str = r#"## What it finds
+
+A constraint whose name does not end in `_cstr`, unless a base class declares a constraint of
+that name (an override keeps it).
+
+## Why
+
+One suffix makes constraints easy to find and to turn off by name (style guide LNG-13).
+
+## Example
+
+```systemverilog bad
+class packet;
+  rand int len;
+  constraint len_c { len < 64; }
+endclass
+```
+
+```systemverilog good
+class packet;
+  rand int len;
+  constraint len_cstr { len < 64; }
+endclass
+```
+"#;
+
+const CREATE_CHARS_PAGE: &str = r#"## What it finds
+
+The name given to UVM's factory `create` as a string literal when it is empty, holds a
+character outside `[a-zA-Z0-9_]`, or holds `__`.
+
+## Why
+
+Instance names are parts of hierarchical paths; other characters break config-db glob matching
+and tools that read logs (style guide NAM-7).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = my_env::type_id::create("my env", this);
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = my_env::type_id::create("env", this);
+    endfunction
+  endclass
+endpackage
+```
+"#;
+
+const CREATE_MATCHES_PAGE: &str = r#"## What it finds
+
+`x = T::type_id::create("y", ...)` where the literal name is not the name of the variable it
+is assigned to. Array elements and names built at run time are not checked.
+
+## Why
+
+Log paths then map directly to code (style guide NAM-8).
+
+## Example
+
+```systemverilog bad
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = my_env::type_id::create("environment", this);
+    endfunction
+  endclass
+endpackage
+```
+
+```systemverilog good
+`include "uvm_macros.svh"
+package p;
+  import uvm_pkg::*;
+  class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+  endclass
+  class my_test extends uvm_env;
+    `uvm_component_utils(my_test)
+    my_env env;
+    function new(string name, uvm_component parent); super.new(name, parent); endfunction
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = my_env::type_id::create("env", this);
+    endfunction
+  endclass
+endpackage
+```
+"#;
+
+const CU_IMPORT_PAGE: &str = r#"## What it finds
+
+An `import` at compilation-unit scope: outside any module, interface or package.
+
+## Why
+
+It applies to every file compiled after it, so a file's names depend on the compile order
+(style guide FIL-4).
+
+## Example
+
+```systemverilog bad
+package util_pkg;
+endpackage
+import util_pkg::*;
+module m;
+endmodule
+```
+
+```systemverilog good
+package util_pkg;
+endpackage
+module m;
+  import util_pkg::*;
+endmodule
+```
+"#;
+
+const CLASS_OUTSIDE_PAGE: &str = r#"## What it finds
+
+A class declared at compilation-unit scope, or in a module or interface. Files the
+configuration marks as `examples` may declare classes in their module (a self-contained
+example or unit test, as FIL-3 allows).
+
+## Why
+
+A class in a package has one definition that the whole testbench shares (style guide FIL-3).
+
+## Example
+
+```systemverilog bad
+class packet;
+endclass
+```
+
+```systemverilog good
+package p;
+  class packet;
+  endclass
+endpackage
+```
+"#;
+
+const INCLUDE_GUARD_PAGE: &str = r#"## What it finds
+
+A file that the build includes and that is not wrapped, as a whole, in an include guard named
+after it: `` `ifndef BUS_CFG_SVH `` / `` `define BUS_CFG_SVH `` first, the matching `` `endif ``
+last. The name is the file name upper-cased, every run of other characters as `_`.
+
+## Why
+
+A guard makes a second `` `include `` harmless; a name taken from the file keeps two files from
+sharing one guard (style guide FIL-6).
+
+## Example
+
+```systemverilog bad
+package p;
+  `include "bus_cfg.svh"
+endpackage
+//@ file: bus_cfg.svh
+typedef int bus_word_t;
+```
+
+```systemverilog good
+package p;
+  `include "bus_cfg.svh"
+endpackage
+//@ file: bus_cfg.svh
+`ifndef BUS_CFG_SVH
+`define BUS_CFG_SVH
+typedef int bus_word_t;
+`endif
+```
+"#;
+
+const DELAY_UNIT_PAGE: &str = r#"## What it finds
+
+A delay whose value is a number without a time unit: `#10`, `#(10)`, `a = #5 b;`,
+`assign #2 a = b;`. `#0`, `#1step`, cycle delays (`##1`) and delays computed from names
+(`#(period * 2)`) are not reported.
+
+## Why
+
+A bare `#10` means whatever the scope's time unit is (style guide FIL-7).
+
+## Example
+
+```systemverilog bad
+module m;
+  timeunit 1ns;
+  timeprecision 1ps;
+  bit a;
+  initial #10 a = 1;
+endmodule
+```
+
+```systemverilog good
+module m;
+  timeunit 1ns;
+  timeprecision 1ps;
+  bit a;
+  initial #10ns a = 1;
+endmodule
+```
+"#;
+
+const TIMEUNIT_FIRST_PAGE: &str = r#"## What it finds
+
+A module, interface or package that holds a delay or a time literal of its own (not one of a
+nested design element) and does not declare both `timeunit` and `timeprecision` as its first
+items after its header (`timeunit 1ns / 1ps;` declares both).
+
+## Why
+
+Without them, the scope's time unit comes from compile order or tool defaults (style guide
+FIL-7).
+
+## Example
+
+```systemverilog bad
+module m;
+  bit a;
+  initial #10ns a = 1;
+endmodule
+```
+
+```systemverilog good
+module m;
+  timeunit 1ns;
+  timeprecision 1ps;
+  bit a;
+  initial #10ns a = 1;
+endmodule
+```
+"#;
+
+const FILE_EXTENSION_PAGE: &str = r#"## What it finds
+
+A compiled file whose name does not end in `.sv`; an included file that ends neither in `.sv`
+nor in `.svh`; a `.svh` file that holds code (classes, functions, design elements) rather than
+macros, types and parameters.
+
+## Why
+
+One extension for code makes files easy to find and tools easy to configure (style guide
+FIL-2).
+
+## Example
+
+```systemverilog bad
+package p;
+  `include "bus_item.svh"
+endpackage
+//@ file: bus_item.svh
+class bus_item;
+endclass
+```
+
+```systemverilog good
+package p;
+  `include "bus_defs.svh"
+endpackage
+//@ file: bus_defs.svh
+`define BUS_WIDTH 32
+```
+"#;
+
+const NAMING_CASE_PAGE: &str = r#"## What it finds
+
+Names not in the case the guide asks for: `lower_snake_case` for classes, variables, functions,
+tasks, instances, signals, ports, arguments, packages, interfaces, modules and types;
+`UPPER_SNAKE_CASE` for parameters, localparams, type parameters, enum literals and constant
+macros (object-like macros whose body is one number or string). Escaped names, names written
+by macros, and methods (with their arguments) that override a library method or implement an
+interface class keep their spelling.
+
+## Why
+
+One convention, the UVM library's, everywhere (style guide NAM-1, NAM-2).
+
+## Example
+
+```systemverilog bad
+class busDriver;
+endclass
+```
+
+```systemverilog good
+class bus_driver;
+endclass
+```
+"#;
+
+const NAMING_PREFIX_PAGE: &str = r#"## What it finds
+
+A declaration or macro whose name starts with `uvm_` or `m_`, except overrides of library
+methods.
+
+## Why
+
+`uvm_` belongs to the library and `m_` marks UVM's internals; project names with them hide
+that distinction (style guide NAM-3).
+
+## Example
+
+```systemverilog bad
+class m_driver;
+endclass
+```
+
+```systemverilog good
+class bus_driver;
+endclass
+```
+"#;
+
+const WEIGHT_GOAL_PAGE: &str = r#"## What it finds
+
+`option.weight` or `option.goal` set in a covergroup, coverpoint or cross, or through a
+covergroup handle. `option.weight = 0` in a coverpoint (one that exists only to build a cross)
+is the guide's exception and is not reported.
+
+## Why
+
+A goal under 100 hides holes, and weights turn the total into a negotiation (style guide
+COV-7).
+
+## Example
+
+```systemverilog bad
+module m;
+  bit [1:0] mode;
+  covergroup cg;
+    option.goal = 90;
+    coverpoint mode;
+  endgroup
+endmodule
+```
+
+```systemverilog good
+module m;
+  bit [1:0] mode;
+  covergroup cg;
+    coverpoint mode;
+  endgroup
+endmodule
+```
+"#;
+
+const FORMATTER_DRIFT_PAGE: &str = r#"## What it finds
+
+When `.dvicode/lint.json` says `"formatter": "dvicode"`: the lines that DVICode's formatter,
+with the project's `.dvicode/format.json`, would change (one finding per run of lines).
+
+## Why
+
+A project that names its formatter keeps its code as the formatter makes it (style guide
+FMT-13). Put the formatter's options in `.dvicode/format.json` so that every editor and the
+CLI use the same ones.
+
+## Example
+
+```systemverilog bad
+module m;
+wire a;
+endmodule
+//@ file: .dvicode/lint.json
+{ "formatter": "dvicode" }
+```
+
+```systemverilog good
+module m;
+  wire a;
+endmodule
+//@ file: .dvicode/lint.json
+{ "formatter": "dvicode" }
+```
+"#;
+
 const WAIVER_WITHOUT_REASON: &str = r#"## What it finds
 
 A waiver (`// <ID> waived: <reason>`) or a `dvicode-lint: disable=` suppression with no reason,
@@ -939,6 +1872,23 @@ module m;
 endmodule
 ```
 "#;
+
+/// The files of an example: `//@ file: <name>` lines start each file; without one the code is
+/// `ex.sv`.
+pub fn example_files(code: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in code.split_inclusive('\n') {
+        if let Some(name) = line.trim().strip_prefix("//@ file:") {
+            out.push((name.trim().to_string(), String::new()));
+            continue;
+        }
+        match out.last_mut() {
+            Some((_, c)) => c.push_str(line),
+            None => out.push(("ex.sv".to_string(), line.to_string())),
+        }
+    }
+    out
+}
 
 /// The examples of a page: (is it the bad one, the code).
 pub fn examples(page: &str) -> Vec<(bool, String)> {

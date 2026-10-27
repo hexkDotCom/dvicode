@@ -1348,7 +1348,7 @@ impl Server {
             // The problems of the lint configurations read (one that is fixed is cleared).
             if let Some(set) = &lint {
                 for c in set.loaded() {
-                    let (uri, diags) = lint_pub::config_diagnostics(&c);
+                    let (uri, diags) = lint_pub::config_diagnostics(set, &c);
                     let mut st = published.lock().unwrap();
                     if st.config_owner > generation || st.latest.get(&uri).is_some_and(|g| *g > generation) {
                         continue;

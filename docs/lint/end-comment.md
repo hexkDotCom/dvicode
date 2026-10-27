@@ -1,6 +1,6 @@
 # end-comment
 
-A comment follows `end`.
+A comment follows `end` on its line.
 
 - Rulesets: hexk
 - Default level: warning

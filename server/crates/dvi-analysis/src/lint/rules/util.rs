@@ -57,12 +57,6 @@ pub fn argument(t: &[Token], args: &[(usize, usize)], pos: usize, name: &str) ->
     Some(args.get(pos).copied().filter(|(s, e)| e > s))
 }
 
-/// The token at byte `at` of the file's active tokens.
-pub fn token_at(t: &[Token], at: u32) -> Option<usize> {
-    let k = t.partition_point(|x| x.span.start < at);
-    (t.get(k)?.span.start == at).then_some(k)
-}
-
 /// The reference segment written at `at` (exactly), with what it resolves to.
 pub fn reference_at<'u>(cx: &'u Cx, at: Span) -> Option<(RefId, &'u RefSeg, usize, Option<DeclRef>)> {
     let u = cx.a.unit(cx.unit);

@@ -22,7 +22,8 @@ use std::sync::Arc;
 const USAGE: &str = "usage: dvicode lint <dir> [PATH...] [--build FILE] [--env K=V] [--config FILE]
          [--rulesets r1,r2] [--rule ID=LEVEL]... [--format text|json|sarif|junit|github]
          [--output FILE] [--fail-on error|warning|info|never] [--all-contexts] [--jobs N]
-         [--baseline FILE] [--write-baseline FILE] [--changed-since REF [--changed-exact]]
+         [--output-sarif FILE] [--baseline FILE] [--write-baseline FILE]
+         [--changed-since REF [--changed-exact]]
          [--allow-incomplete] [--no-fail-on-compile-errors] [--show-suppressed] [--stats]
        dvicode lint --list-rules [--format text|json|md]
        dvicode lint --explain ID
@@ -52,6 +53,8 @@ struct Opts {
     baseline: Option<PathBuf>,
     write_baseline: Option<PathBuf>,
     docs: Option<PathBuf>,
+    /// SARIF written there too (for CI: annotations on stdout, SARIF for code scanning).
+    output_sarif: Option<PathBuf>,
     changed_since: Option<String>,
     changed_exact: bool,
 }
@@ -81,6 +84,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         baseline: None,
         write_baseline: None,
         docs: None,
+        output_sarif: None,
         changed_since: None,
         changed_exact: false,
     };
@@ -135,6 +139,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--schema" => o.schema = true,
             "--baseline" => o.baseline = Some(PathBuf::from(value(&mut i, a)?)),
             "--docs" => o.docs = Some(PathBuf::from(value(&mut i, a)?)),
+            "--output-sarif" => o.output_sarif = Some(PathBuf::from(value(&mut i, a)?)),
             "--write-baseline" => o.write_baseline = Some(PathBuf::from(value(&mut i, a)?)),
             "--changed-since" => o.changed_since = Some(value(&mut i, a)?),
             "--changed-exact" => o.changed_exact = true,
@@ -277,7 +282,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
     let configs: Vec<FileConfig> = files.iter().map(|f| a.lint_config(&set, &DiskEnv, *f)).collect();
     let mut config_problems = 0;
     for c in set.loaded() {
-        for p in &c.problems {
+        for p in c.problems.iter().chain(set.reason_notes(&DiskEnv, &c).iter()) {
             let (line, col) = line_col(&c.text, p.start);
             eprintln!("{}:{}:{}: {}: {}", p.path.display(), line + 1, col + 1, if p.warning { "warning" } else { "error" }, p.message);
             config_problems += usize::from(!p.warning);
@@ -310,7 +315,18 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
                 } else {
                     vec![None]
                 };
-                Linted { file: *f, results: units.into_iter().map(|u| a.lint_file(*f, cfg, u)).collect() }
+                // A failure in one file is reported and the others are still linted.
+                let results = units
+                    .into_iter()
+                    .map(|u| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.lint_file(*f, cfg, u))).unwrap_or_else(|_| {
+                            let mut r = FileLint::default();
+                            r.incomplete.push(("lint", "internal error"));
+                            r
+                        })
+                    })
+                    .collect();
+                Linted { file: *f, results }
             })
             .collect()
     });
@@ -430,6 +446,7 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         }
     }
     let complete = incomplete.is_empty();
+    let internal = incomplete.iter().any(|i| i["reason"] == "internal error");
     if let Some(out) = &o.write_baseline {
         if !complete {
             eprintln!("lint: the baseline is not written: the analysis is incomplete (see --stats)");
@@ -488,19 +505,19 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             });
             serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
         }
-        "sarif" => {
-            let mut root_uri = dvi_analysis::ide::url_of(&root).to_string();
-            if !root_uri.ends_with('/') {
-                root_uri.push('/');
-            }
-            serde_json::to_string_pretty(&lint_out::sarif(&items, &root_uri, complete, env!("CARGO_PKG_VERSION"))).unwrap_or_default() + "\n"
-        }
+        "sarif" => sarif_text(&items, &root, complete),
         "junit" => lint_out::junit(&items, &linted_files, o.fail_on),
         "github" => lint_out::github(&items),
         _ => lint_out::text(&items, o.show_suppressed),
     };
     if emit(o, &out) != 0 {
         return 3;
+    }
+    if let Some(p) = &o.output_sarif {
+        if let Err(e) = std::fs::write(p, sarif_text(&items, &root, complete)) {
+            eprintln!("lint: cannot write {}: {e}", p.display());
+            return 3;
+        }
     }
     eprintln!("{summary}");
     if o.stats {
@@ -515,6 +532,10 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
             eprintln!("  unknown at {u}");
         }
     }
+    if internal {
+        eprintln!("lint: internal error while linting some files (see the messages above)");
+        return 3;
+    }
     if !complete && !o.allow_incomplete {
         return 4;
     }
@@ -522,6 +543,14 @@ fn lint_project(o: &Opts, dir: &Path, defaults: Defaults) -> i32 {
         return 1;
     }
     0
+}
+
+fn sarif_text(items: &[Item], root: &Path, complete: bool) -> String {
+    let mut root_uri = dvi_analysis::ide::url_of(root).to_string();
+    if !root_uri.ends_with('/') {
+        root_uri.push('/');
+    }
+    serde_json::to_string_pretty(&lint_out::sarif(items, &root_uri, complete, env!("CARGO_PKG_VERSION"))).unwrap_or_default() + "\n"
 }
 
 fn fnv(b: &[u8]) -> u64 {
@@ -631,6 +660,7 @@ pub fn schema() -> Value {
             "include": paths.clone(),
             "examples": paths,
             "uvm": { "enum": ["1.2", "ieee"] },
+            "formatter": { "enum": ["dvicode", "none"], "description": "The project's formatter (FMT-13): with \"dvicode\", the hexk rule formatter-drift reports lines DVICode's formatter would change" },
             "baseline": { "type": "string", "description": "A baseline file (written by `dvicode lint --write-baseline`), relative to the folder holding .dvicode: the findings it lists are not reported" },
         },
     })

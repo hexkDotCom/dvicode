@@ -203,9 +203,11 @@ pub struct ConfigFile {
     /// The baseline file named (absolute), and where its value is written.
     pub baseline: Option<PathBuf>,
     baseline_at: (u32, u32),
+    /// The project's formatter (`"dvicode"` or `"none"`).
+    pub formatter: Option<String>,
 }
 
-const TOP_KEYS: &[&str] = &["$schema", "comment", "extends", "rulesets", "rules", "overrides", "owned", "exclude", "include", "examples", "uvm", "baseline"];
+const TOP_KEYS: &[&str] = &["$schema", "comment", "extends", "rulesets", "rules", "overrides", "owned", "exclude", "include", "examples", "uvm", "baseline", "formatter"];
 
 impl ConfigFile {
     /// Reads `text` as the configuration at `path` (`<base>/.dvicode/lint.json`).
@@ -249,6 +251,10 @@ impl ConfigFile {
                         c.baseline_at = (v.start, v.end);
                     }
                     _ => c.problem(v.start, v.end, "\"baseline\" must be a file path relative to the folder that holds .dvicode".into()),
+                },
+                "formatter" => match v.as_str() {
+                    Some(s @ ("dvicode" | "none")) => c.formatter = Some(s.to_string()),
+                    _ => c.problem(v.start, v.end, "\"formatter\" must be \"dvicode\" (the project formats with DVICode's formatter) or \"none\"".into()),
                 },
                 "uvm" => match v.as_str() {
                     Some(s @ ("1.2" | "ieee")) => c.uvm = Some(s.to_string()),
@@ -541,6 +547,8 @@ pub struct FileConfig {
     pub uvm: Option<String>,
     /// The baseline that applies (the nearest configuration that names one).
     pub baseline: Option<PathBuf>,
+    /// The project's formatter, as the nearest configuration that names one says.
+    pub formatter: Option<String>,
     pub rulesets: (Vec<Ruleset>, Origin),
     /// The reasons of the overrides that matched, for `--print-config`.
     pub overrides: Vec<(Origin, Option<String>)>,
@@ -639,6 +647,35 @@ impl ConfigSet {
         out
     }
 
+    /// Notes on a configuration file under `hexk` (as it applies in the file's own folder, the
+    /// rulesets inherited included): the guide's §0 asks a reason of every exception, so
+    /// overrides that turn rules down and exclusions without one are noted
+    /// (`config-without-reason`). They never fail a run.
+    pub fn reason_notes(&self, env: &dyn ConfigEnv, c: &ConfigFile) -> Vec<ConfigProblem> {
+        let here = self.for_file(env, &c.base.join("lint-config-probe.sv"), None);
+        if !here.rulesets.0.contains(&Ruleset::Hexk) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut note = |at: u32, m: &str| out.push(ConfigProblem { path: c.path.clone(), start: at, end: at + 1, message: m.to_string(), warning: true });
+        let unjustified = |r: &Option<String>| r.as_deref().is_none_or(|r| r.trim().is_empty() || r.trim() == "<reason>");
+        for o in &c.overrides {
+            // Lowered: a rule below the level the configuration gives it there, or rulesets
+            // without `hexk`.
+            let lowers = o.rules.iter().any(|r| r.level.is_some_and(|l| r.targets.iter().any(|t| here.rules.get(t).is_some_and(|s| l < s.level))))
+                || o.rulesets.as_ref().is_some_and(|(r, _)| !r.contains(&Ruleset::Hexk));
+            if lowers && unjustified(&o.reason) {
+                note(o.at, "config-without-reason: this override turns rules down without a \"reason\" (the style guide asks a reason of every exception)");
+            }
+        }
+        for e in &c.exclude {
+            if unjustified(&e.reason) {
+                note(e.at, "config-without-reason: this exclusion has no \"reason\" (write it as { \"path\": ..., \"reason\": ... })");
+            }
+        }
+        out
+    }
+
     /// The configuration files read so far (with their problems).
     pub fn loaded(&self) -> Vec<Arc<ConfigFile>> {
         let mut v: Vec<Arc<ConfigFile>> = self.files.lock().unwrap().1.values().flatten().cloned().collect();
@@ -658,6 +695,7 @@ impl ConfigSet {
         let mut overrides = Vec::new();
         let mut uvm = None;
         let mut baseline = None;
+        let mut formatter = None;
         let apply = |explicit: &mut FxHashMap<&'static str, (Option<Level>, FxHashMap<String, i64>, Origin)>, entries: &[RuleEntry], path: &Path| {
             for e in entries {
                 for t in &e.targets {
@@ -709,6 +747,9 @@ impl ConfigSet {
             if c.baseline.is_some() {
                 baseline = c.baseline.clone();
             }
+            if c.formatter.is_some() {
+                formatter = c.formatter.clone();
+            }
         }
         if let Some(r) = &d.cli_rulesets {
             rulesets = (r.clone(), Origin::CommandLine);
@@ -744,7 +785,7 @@ impl ConfigSet {
                 };
             }
         }
-        FileConfig { enabled: d.enabled, rules: rules_out, owned, example, uvm, baseline, rulesets, overrides }
+        FileConfig { enabled: d.enabled, rules: rules_out, owned, example, uvm, baseline, formatter, rulesets, overrides }
     }
 
     /// A hash of everything that decides configurations (for the JSON output).
