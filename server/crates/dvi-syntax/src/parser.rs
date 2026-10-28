@@ -2411,6 +2411,13 @@ impl<'t> Parser<'t> {
         }
         if self.at_kw("soft") {
             self.bump();
+            // `soft foreach (a[i]) { ... }` and `soft if (c) { ... }`: a VCS extension (the
+            // standard has `soft` before an expression only) that makes the whole set soft.
+            // Read as without `soft`, so that a `foreach` declares its loop variables.
+            if self.at_kw("foreach") || self.at_kw("if") {
+                self.constraint_item();
+                return;
+            }
         }
         if self.at_kw("solve") {
             // `solve a, b before c [hard];` (`hard` is a VCS extension, after a variable).
@@ -4195,10 +4202,11 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// Reference used only as a resolution aid (not reported, not navigated).
+    /// Reference used only as a resolution aid (not reported, not navigated). `Foreign`, not
+    /// `Loose`: the receiver of `ghost.randomize(x)` must not make `ghost` an implicit net.
     fn add_ref_hidden(&mut self, segs: Vec<RefSeg>) -> RefId {
         let id = self.u.refs.len() as RefId;
-        self.u.refs.push(RefChain { segs, scope: self.scope(), kind: RefKind::Loose });
+        self.u.refs.push(RefChain { segs, scope: self.scope(), kind: RefKind::Foreign });
         id
     }
 
@@ -4246,9 +4254,20 @@ impl<'t> Parser<'t> {
                     l.called = true;
                 }
                 let iter_method = segs.last().is_some_and(|s| ARRAY_ITER_METHODS.contains(&s.name.as_str())) && segs.len() > 1;
+                // `obj.randomize(x, y)`: the arguments are random variables of `obj` (IEEE 1800
+                // 18.11), looked up in its class as the `with` block is. `std::randomize(v)` and
+                // a bare `randomize(v)` take the caller's scope.
+                let arg_kind = if segs.len() > 1 && segs.last().is_some_and(|s| s.name == "randomize" && s.sep == Sep::Dot) {
+                    let base: Vec<RefSeg> = segs[..segs.len() - 1].to_vec();
+                    RefKind::With { target: self.add_ref_hidden(base) }
+                } else if iter_method {
+                    RefKind::Loose
+                } else {
+                    kind
+                };
                 self.bump();
                 loop {
-                    self.scan_expr(STOP_NONE, if iter_method { RefKind::Loose } else { kind });
+                    self.scan_expr(STOP_NONE, arg_kind);
                     if self.eat_p(")") {
                         break;
                     }

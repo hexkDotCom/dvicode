@@ -4546,3 +4546,83 @@ fn a_name_after_endif_or_else_is_ignored_with_a_warning() {
         ]
     );
 }
+
+/// A comma or a bracket inside a `` `"...`" `` written in macro arguments is text, not a
+/// separator (#14); a `` `" `` left open on its line does not take the following lines along.
+#[test]
+fn a_comma_inside_a_quoted_string_argument_is_text() {
+    clean(
+        "quotedcomma",
+        &[(
+            "t.sv",
+            "`define TC soft_db\n`define note(MSG) $display(MSG)\n`define two(A, B) $display(A, B)\n\
+             module t;\n  initial begin\n\
+             \x20   `note(`\"`TC polling done!`\");\n\
+             \x20   `note(`\"`TC polling done, req cleared`\");\n\
+             \x20   `note(`\"`TC main_phase(): Finished!`\");\n\
+             \x20   `two(`\"x, y`\", 1);\n\
+             \x20   `two(1, `\"x, y`\");\n\
+             \x20   `note(`\"step 1) done, ok`\");\n\
+             \x20   `note(`\"a [b, c`\");\n\
+             \x20 end\nendmodule\n",
+        )],
+    );
+    let (a, _) = project("quotedopen", &[("t.sv", "`define two(A, B) $display(A, B)\nmodule t;\n  initial `two(`\"x,\n    1);\nendmodule\n")]);
+    let p = problems(&a);
+    assert!(!p.iter().any(|m| m.contains("Unterminated")), "{p:?}");
+}
+
+/// `soft foreach` and `soft if` (a VCS extension) read as without `soft`: loop variables are
+/// declared, also in a `foreach` nested in them (#15).
+#[test]
+fn soft_foreach_declares_the_loop_variable() {
+    clean(
+        "softforeach",
+        &[(
+            "t.sv",
+            "class c;\n  rand bit en[4];\n  rand bit mode;\n  rand int v;\n\
+             \x20 constraint c1 { soft foreach (en[i]) { en[i] inside {0, 1}; } }\n\
+             \x20 constraint c2 { foreach (en[j]) { en[j] inside {0, 1}; } }\n\
+             \x20 constraint c3 { soft if (mode) { v == 1; } else { v == 2; } }\n\
+             \x20 constraint c4 { soft mode -> { v inside {[1:3]}; } }\n\
+             \x20 constraint c5 { soft v == 1; }\n\
+             \x20 constraint c6 { if (mode) { soft foreach (en[k]) { en[k] == 0; } } }\n\
+             \x20 constraint c7 { soft if (mode) { foreach (en[m]) { en[m] == 1; } } }\n\
+             endclass\n",
+        )],
+    );
+}
+
+/// `obj.randomize(member)`: the arguments are members of `obj` (#16); `std::randomize(v)` and a
+/// bare `randomize(v)` take the caller's scope.
+#[test]
+fn randomize_arguments_are_members_of_the_object() {
+    let text = "class cfg_c;\n  rand int delay;\n  rand int other_v;\n\
+                \x20 function void self_r();\n    void'(randomize(other_v));\n    void'(this.randomize(other_v));\n  endfunction\nendclass\n\
+                class test_c;\n  cfg_c cfg;\n  int local_v;\n  function void run();\n\
+                \x20   if (!cfg.randomize(delay) with { delay inside {1, 2, 3}; }) $display(\"fail\");\n\
+                \x20   if (!cfg.randomize(other_v, delay)) $display(\"fail\");\n\
+                \x20   if (!cfg.randomize(null)) $display(\"fail\");\n\
+                \x20   if (!std::randomize(local_v) with { local_v inside {1, 2}; }) $display(\"fail\");\n\
+                \x20 endfunction\nendclass\n";
+    let (a, root) = project("randargs", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    // Go to definition from the argument lands on the member.
+    use dvi_syntax::SourceProvider;
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let off = (text.find("cfg.randomize(delay)").unwrap() + "cfg.randomize(".len()) as u32;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![1]);
+
+    // A module's own `randomize` function: its arguments are the caller's names.
+    let text = "module service;\n  int x;\n  function bit randomize(input int arg); return arg != 0; endfunction\nendmodule\n\
+                module top;\n  service u();\n  int x;\n  initial void'(u.randomize(x));\nendmodule\n";
+    let (a, root) = project("randmodule", &[("t.sv", text)]);
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let off = (text.find("u.randomize(x)").unwrap() + "u.randomize(".len()) as u32;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![6]);
+
+    // The receiver of a randomize call does not make an undeclared name an implicit net.
+    let (a, _) = project("randghost", &[("t.sv", "module m;\n  initial begin\n    $display(ghost);\n    void'(ghost.randomize(ghost2));\n  end\nendmodule\n")]);
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("'ghost' is not declared")), "{p:?}");
+}

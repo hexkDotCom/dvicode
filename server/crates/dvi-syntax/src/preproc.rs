@@ -1207,12 +1207,21 @@ impl<'a> Pp<'a> {
     fn collect_args(&mut self, tok: &Token) -> Option<(Vec<Vec<Token>>, Span)> {
         let mut args = vec![Vec::new()];
         let mut depth = 1i32;
+        // Inside a `` `"...`" `` written in the arguments (`` `msg(`"a, b)`") ``), commas and
+        // brackets are text, as inside "..." (IEEE 1800 22.5.1). A string literal ends on its
+        // line: a `" left open there is not followed onto the next.
+        let mut quoted = false;
         loop {
             let Some(t) = self.next() else {
                 self.res.diags.push(Diag::error(tok.span, "MACRO_ARGUMENTS", format!("Unterminated arguments of macro `{}", tok.text)));
                 return None;
             };
-            if t.kind == TokKind::Punct {
+            if quoted && t.nl_before() {
+                quoted = false;
+            }
+            if t.kind == TokKind::MacroQuote {
+                quoted = !quoted;
+            } else if t.kind == TokKind::Punct && !quoted {
                 match t.text.as_str() {
                     "(" | "[" | "{" => depth += 1,
                     ")" | "]" | "}" => {

@@ -184,7 +184,10 @@ impl Analysis {
                 let u = self.unit(unit);
                 let t = u.parsed.reference(target);
                 if let Some(obj) = self.resolve_chain(unit, t, t.segs.len() - 1) {
-                    if let Some(ty) = self.type_of(obj) {
+                    // Only a class object is randomized with its members in scope: `u.randomize(x)`
+                    // on a module instance calls that module's function, whose arguments are the
+                    // caller's.
+                    if let Some(ty) = self.type_of(obj).and_then(|t| self.follow_typedef(t)).filter(|t| self.decl(*t).kind == DeclKind::Class) {
                         if let Some(m) = self.member_of(ty, name) {
                             return Some(m);
                         }
