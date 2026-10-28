@@ -255,17 +255,8 @@ edit causes elsewhere (in a subclass, say): lint the whole project where that ma
 
 ## CI recipes
 
-**GitHub Actions** with the [DVICode Lint action][action]. It shows annotations on the pull
-request and uploads SARIF to code scanning:
-
-```yaml
-- uses: hexkDotCom/dvicode-lint-action@v1
-  with:
-    path: .
-    args: --rulesets recommended
-```
-
-Uploading SARIF needs `security-events: write`. Give the job these permissions:
+**GitHub Actions**: findings show as annotations on the pull request, and the SARIF upload puts
+them in code scanning, which needs `security-events: write`:
 
 ```yaml
 jobs:
@@ -276,27 +267,18 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: hexkDotCom/dvicode-lint-action@v1
+      - run: pip install dvicode
+      - run: dvicode lint . --format github --output-sarif dvicode-lint.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: dvicode-lint.sarif
 ```
 
 On pull requests from forks the token is read-only, so the upload cannot work there; the
-annotations still show. Turn the upload off for them:
-`sarif: ${{ !github.event.pull_request.head.repo.fork }}`.
-
-Without the action (same permissions):
-
-```yaml
-- run: pip install dvicode
-- run: dvicode lint . --format github --output-sarif dvicode-lint.sarif
-- uses: github/codeql-action/upload-sarif@v3
-  if: always()
-  with:
-    sarif_file: dvicode-lint.sarif
-```
-
-The `args` input is split into words as a shell would split it, keeping quoted parts together
-(`--build "config files/sim.build"`). Variables and wildcards are not expanded. Annotations
-use paths from the repository root, also when `path` is a subfolder.
+annotations still show. Skip the upload for them:
+`if: always() && !github.event.pull_request.head.repo.fork`. Annotations use paths from the
+repository root, also when the project is a subfolder.
 
 **GitLab CI**:
 
@@ -360,4 +342,3 @@ used.
 
 [guide]: https://github.com/hexkDotCom/sv-uvm-style-guide
 [releases]: https://github.com/hexkDotCom/dvicode/releases
-[action]: https://github.com/hexkDotCom/dvicode-lint-action
