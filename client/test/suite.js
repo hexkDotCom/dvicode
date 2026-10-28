@@ -183,7 +183,7 @@ async function run() {
     return `new declaration found${d ? '; typo reported' : ''}`;
   });
 
-  await test('lint: a finding as typed, and the setting turns lint off', async () => {
+  await test('lint: off by default, a finding as typed once on, and the setting turns it off', async () => {
     const doc = await open('rtl/top.sv');
     const ed = await vscode.window.showTextDocument(doc);
     const p = lineOf(doc, 'state_e state;');
@@ -191,6 +191,11 @@ async function run() {
     const lintOf = () => vscode.languages.getDiagnostics(doc.uri).filter((x) => x.source === 'dvicode-lint');
     const cfg = vscode.workspace.getConfiguration('dvicode');
     try {
+      // Off by default: the compile problems of the edit come, the lint finding does not.
+      if (cfg.inspect('lint.enable').defaultValue !== false) throw new Error('dvicode.lint.enable is not off by default');
+      await new Promise((r) => setTimeout(r, 3000));
+      if (lintOf().length) throw new Error(`lint findings while off: ${lintOf().map((x) => x.code).join(', ')}`);
+      await cfg.update('lint.enable', true, vscode.ConfigurationTarget.Workspace);
       const d = await waitFor('lint finding', async () => {
         const ds = lintOf();
         return ds.length ? ds : undefined;

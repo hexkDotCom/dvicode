@@ -31,6 +31,14 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
   line above are kept. `` `define `` definitions, block comments, strings and protected
   regions are never touched. Settings under `dvicode.format`, or a `.dvicode/format.json` in
   the project. Alignment of declarations and connections is not done yet.
+- **DVICode Lint** (preview, off by default: turn on `dvicode.lint.enable`): rules about
+  meaning, not only syntax, such as a `randomize()` whose result is thrown away, a UVM
+  registration macro that registers another class or a constructor the factory cannot call;
+  and, when you choose them, the checkable rules of the
+  [HEXK SystemVerilog/UVM Style Guide](https://github.com/hexkDotCom/sv-uvm-style-guide).
+  Findings show with the compile problems, with quick fixes and one-click waivers; the same
+  engine runs in CI as `dvicode lint`. See
+  [the lint guide](https://github.com/hexkDotCom/dvicode/blob/main/docs/lint.md).
 - **Parameters per instance**: the Design Hierarchy shows the parameter values each instance
   gets (overrides, `defparam`s, defaults, localparams and constant functions evaluated), the
   generate branches that exist in it and one block per generate loop copy (`g[0]`, `g[1]`);

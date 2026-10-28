@@ -305,8 +305,8 @@
         },
         "dvicode.lint.enable": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "Show DVICode Lint findings in the Problems view, with the compile problems. Which rules run, and at what level, is set by `#dvicode.lint.rulesets#` and by `.dvicode/lint.json` files in the project."
+          "default": false,
+          "markdownDescription": "Show DVICode Lint findings in the Problems view, with the compile problems. Off by default while lint is in preview. Which rules run, and at what level, is set by `#dvicode.lint.rulesets#` and by `.dvicode/lint.json` files in the project."
         },
         "dvicode.lint.rulesets": {
           "type": "array",

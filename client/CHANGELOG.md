@@ -4,7 +4,9 @@
 
 - **DVICode Lint**: rules that check what SystemVerilog and UVM code means, shown with the
   compile problems and run in CI by the same engine as `dvicode lint`.
-  - `recommended` (on by default): a discarded `randomize()` result, `randomize()` inside an
+  - Off by default in the editor while lint is in preview: turn it on with
+    `dvicode.lint.enable` (Create Lint Configuration offers to).
+  - `recommended` (the default ruleset): a discarded `randomize()` result, `randomize()` inside an
     `assert`, a UVM registration macro that does not fit its class, a registered class whose
     constructor the factory cannot call, a phase method with another signature than UVM's,
     deprecated UVM API.
@@ -18,6 +20,13 @@
     wheels (`pip install dvicode`) and a container image. See docs/lint.md.
 - Preprocessor: a name alone after `` `endif `` or `` `else `` on its line (`` `endif FOO_SV ``)
   is ignored with a warning instead of being read as code.
+- A comma or a bracket inside a `` `"...`" `` string written in macro arguments is part of the
+  string, not an argument separator
+  ([#14](https://github.com/hexkDotCom/dvicode/issues/14)).
+- `soft foreach` and `soft if` constraints (a VCS extension) declare their loop variables
+  ([#15](https://github.com/hexkDotCom/dvicode/issues/15)).
+- The arguments of `obj.randomize(x, y)` are looked up in `obj`'s class, as the `with` block
+  is ([#16](https://github.com/hexkDotCom/dvicode/issues/16)).
 
 ## 0.7.0 (preview)
 

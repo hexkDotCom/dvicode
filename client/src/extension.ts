@@ -81,7 +81,7 @@ function settingsForServer(): object {
     maxProblems,
     uncHosts,
     inlayHints: c.get<Record<string, boolean>>('inlayHints', {}),
-    lint: { enable: c.get<boolean>('lint.enable', true), rulesets: c.get<string[]>('lint.rulesets', ['recommended']) },
+    lint: { enable: c.get<boolean>('lint.enable', false), rulesets: c.get<string[]>('lint.rulesets', ['recommended']) },
     // Commands of this extension the server may attach to code actions.
     clientCommands: ['dvicode.lint.selectReason'],
   };
@@ -546,6 +546,20 @@ async function createLintConfig(): Promise<void> {
   };
   await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(config, null, 2) + '\n', 'utf8'));
   await vscode.window.showTextDocument(uri);
+  await offerToTurnOnLint();
+}
+
+/** Lint is off by default: offers to turn it on for this workspace when it is off. */
+async function offerToTurnOnLint(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration('dvicode');
+  if (cfg.get<boolean>('lint.enable', false)) {
+    return;
+  }
+  const on = 'Turn On';
+  const answer = await vscode.window.showInformationMessage('DVICode Lint is off (dvicode.lint.enable). Turn it on for this workspace?', on);
+  if (answer === on) {
+    await cfg.update('lint.enable', true, vscode.ConfigurationTarget.Workspace);
+  }
 }
 
 /** The lint rules of the engine, as a Markdown preview. */

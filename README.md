@@ -19,9 +19,10 @@ add your existing file lists for full control. Apache-2.0 licensed; currently in
 - **DVICode Lint**: rules about meaning, not only syntax: a `randomize()` whose result is
   thrown away, a UVM registration macro that registers another class, a constructor the
   factory cannot call, a phase method with another signature than UVM's, deprecated UVM API
-  (the `recommended` rules, on by default); and, when you choose them, the checkable rules of
+  (the `recommended` rules, the default); and, when you choose them, the checkable rules of
   the [HEXK SystemVerilog/UVM Style Guide](https://github.com/hexkDotCom/sv-uvm-style-guide)
-  (52 rules in all). Lint knows the whole project (build files, packages, the class hierarchy,
+  (52 rules in all). Lint is in preview and off by default in the editor: turn it on with
+  `dvicode.lint.enable`. Lint knows the whole project (build files, packages, the class hierarchy,
   the UVM library) and reports only what it can prove. Findings show with the compile
   problems, with quick fixes, one-click waivers (`// LNG-10 waived: <reason>`) and a
   per-project `.dvicode/lint.json`. The same engine runs in CI as `dvicode lint`: text, JSON,
@@ -250,7 +251,7 @@ testbench; it needs no UVM installation.
 | `dvicode.uvmHome` | | UVM location for `-uvm` when `$UVM_HOME` is not set |
 | `dvicode.server.logLevel` | `info` | Engine log in the DVICode output channel; `debug` shows how the build file or the folder was read, `trace` every file |
 | `dvicode.maxProblems` | `1000` | Problems shown after a full build. Open files are exempt from this limit; per-file limits still apply |
-| `dvicode.lint.enable` | `true` | Show lint findings with the compile problems |
+| `dvicode.lint.enable` | `false` | Show lint findings with the compile problems (off while lint is in preview) |
 | `dvicode.lint.rulesets` | `["recommended"]` | Lint rulesets (`recommended`, `hexk`) where no `.dvicode/lint.json` chooses them |
 | `dvicode.format.*` | | Formatter: indent size, tabs, `case` items, list and continuation indentation, directives, trailing blanks, blank lines |
 | `dvicode.logs.links` | `true` | Clickable locations and component paths in simulator logs and terminals |

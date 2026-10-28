@@ -5,7 +5,10 @@ if you ask for it, against the [HEXK SystemVerilog/UVM Style Guide][guide]. It i
 DVICode engine: the editor shows its findings with the compile problems, and the `dvicode lint`
 command runs the same checks in CI.
 
-- **`recommended`** (on by default): a small set of correctness rules that hold on real code,
+Lint is in preview: in VS Code it is off until you turn on `dvicode.lint.enable` (or run
+**DVICode: Create Lint Configuration**, which offers to). The command always runs it.
+
+- **`recommended`** (the default ruleset): a small set of correctness rules that hold on real code,
   such as a `randomize()` whose result is thrown away, or a UVM registration macro that registers
   another class.
 - **`hexk`** (opt-in): the checkable rules of the style guide, house style included. It
@@ -37,12 +40,12 @@ Settings:
 
 | Setting | Default | |
 |---|---|---|
-| `dvicode.lint.enable` | `true` | Show lint findings at all. |
+| `dvicode.lint.enable` | `false` | Show lint findings at all (off while lint is in preview). |
 | `dvicode.lint.rulesets` | `["recommended"]` | The rulesets used where no `.dvicode/lint.json` chooses them. |
 
 **DVICode: Show Lint Rules** lists the rules of the running engine. **DVICode: Create Lint
 Configuration** writes `.dvicode/lint.json` in the first workspace folder, the project the
-engine works on.
+engine works on, and offers to turn lint on for the workspace when it is off.
 
 The editor reads `lint.json` and the baseline from disk: a change applies when the file is
 saved. A baseline outside the `.dvicode` folder is read again at the next edit, or at
