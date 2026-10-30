@@ -54,8 +54,8 @@ jobs:
           - { platform: linux-x64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, exe: dvicode-server }
           - { platform: linux-arm64, os: ubuntu-latest, target: aarch64-unknown-linux-musl, exe: dvicode-server, emulator: qemu-aarch64 }
           - { platform: win32-x64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: dvicode-server.exe }
-          - { platform: darwin-arm64, os: macos-14, target: aarch64-apple-darwin, exe: dvicode-server }
-          - { platform: darwin-x64, os: macos-14, target: x86_64-apple-darwin, exe: dvicode-server, emulator: arch -x86_64 }
+          - { platform: darwin-arm64, os: macos-15, target: aarch64-apple-darwin, exe: dvicode-server }
+          - { platform: darwin-x64, os: macos-15, target: x86_64-apple-darwin, exe: dvicode-server, emulator: arch -x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
