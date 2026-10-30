@@ -8,9 +8,14 @@
 - Design Hierarchy: the instances a `bind` adds show where they go, marked *bind*: under every
   instance of a module (`bind fifo fifo_sva u_sva (.*);`, also through a macro), under the listed
   instances (`bind fifo : dut.u_a ...`), or under an instance path (`bind dut.g[1].u_c ...`,
-  from the top or from the module the statement is in). A `bind` written in a module counts only
-  where that module is elaborated. A bound instance's parameter values use the names of the
-  instance it goes into, and parameter hover lists its values too.
+  from the top, from the module the statement is in, or from a scope above it, as IEEE 1800
+  23.8 searches upward; selects such as `g[P-1]` are evaluated). A `bind` written in a module
+  counts only where that module is elaborated. A bound instance's parameter values use the
+  names of the instance it goes into, and parameter hover lists its values too.
+- Go to definition, Assertions and Coverage, and Drivers/Loads follow `bind`s the same way: a
+  name such as `dut.u_b.chk.p` reaches a bound instance only through an instance the `bind`
+  goes into; checks in instance-path binds are found; Drivers/Loads follows a bound checker's
+  ports down from the signals it connects and up from its ports.
 - Hover on a system task or function such as a PLI/VPI one (`$my_plusargs(...)`) says what it is.
 
 ## 0.8.0 (preview)

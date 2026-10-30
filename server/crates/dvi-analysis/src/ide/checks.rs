@@ -16,7 +16,6 @@ use dvi_syntax::ast::{dflags, DeclId, DeclKind, RefId, VerifForm, VerifKind, Ver
 use dvi_syntax::{FileId, Span, TokKind, Token};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
-use smol_str::SmolStr;
 use std::sync::Arc;
 
 /// References looked at (resolved) at most, over a whole search.
@@ -732,21 +731,16 @@ impl Search<'_> {
             let inst = DeclRef { unit: target.unit, decl: id };
             out.extend(self.implicit_hits(inst, &name, false, depth));
         }
-        // `bind <module> ...` in any unit.
-        let module = home_decl.name.to_string();
+        // `bind`s into the module (`bind <module> ...`, `bind <module> : <instances> ...`,
+        // `bind <instance path> ...`), in any unit. The bind's actuals are names of the module:
+        // the target's name there must be the target (not one of a nested scope).
+        if a.lookup(target.unit, home, &name).map(|t| a.decl_key(a.canonical(t))) != Some(key) {
+            return out;
+        }
+        let module = home_decl.name.as_str();
         let mut seen: FxHashSet<(FileId, u32)> = FxHashSet::default();
-        let mut paths: Vec<SmolStr> = Vec::new();
         for un in a.units.iter().flatten() {
-            for (bound_to, inst) in &un.parsed.binds {
-                if bound_to.contains('.') {
-                    if !paths.contains(bound_to) {
-                        paths.push(bound_to.clone());
-                    }
-                    continue;
-                }
-                if *bound_to != module.as_str() {
-                    continue;
-                }
+            for (_, inst) in &un.parsed.binds {
                 let r = DeclRef { unit: un.id, decl: *inst };
                 let sp = a.decl(r).name_span;
                 if !seen.insert((sp.file, sp.start)) {
@@ -756,34 +750,8 @@ impl Search<'_> {
                     return out;
                 }
                 self.candidates += 1;
-                // The bind's actuals are names of the module: the target's name there must be
-                // the target (not one of a nested scope).
-                if a.lookup(target.unit, home, &name).map(|t| a.decl_key(a.canonical(t))) != Some(key) {
-                    continue;
-                }
-                out.extend(self.implicit_hits(r, &name, true, depth));
-            }
-        }
-        // A bind to an instance path is not followed: said when the path's last instance is
-        // one of this module.
-        let lasts: FxHashSet<&str> = paths.iter().filter_map(|p| p.rsplit('.').next()).collect();
-        if !lasts.is_empty() {
-            let home_ref = DeclRef { unit: target.unit, decl: home };
-            let home_key = a.decl_key(a.canonical(home_ref));
-            let mut mine: FxHashSet<String> = FxHashSet::default();
-            for un in a.units.iter().flatten() {
-                for (i, d) in un.parsed.decls.iter().enumerate() {
-                    if d.kind == DeclKind::Instance && lasts.contains(d.name.as_str()) && !mine.contains(d.name.as_str()) {
-                        let r = DeclRef { unit: un.id, decl: i as DeclId };
-                        if a.type_of(r).is_some_and(|t| a.decl_key(a.canonical(t)) == home_key) {
-                            mine.insert(d.name.to_string());
-                        }
-                    }
-                }
-            }
-            for p in &paths {
-                if p.rsplit('.').next().is_some_and(|l| mine.contains(l)) {
-                    self.note(format!("not followed: bind to an instance path ({p})"));
+                if a.bind_target(r).is_some_and(|t| a.decl(t.module).name == module) {
+                    out.extend(self.implicit_hits(r, &name, true, depth));
                 }
             }
         }

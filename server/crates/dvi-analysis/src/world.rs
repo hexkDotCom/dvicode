@@ -196,6 +196,9 @@ pub struct Analysis {
     /// Without a build file: the copy of a design element defined more than once that each
     /// instance means (`Analysis::instance_definitions`).
     pub instance_defs: Arc<std::sync::OnceLock<FxHashMap<(UnitId, Span), DeclRef>>>,
+    /// The instances (not `bind`s) by the name of the design element they instantiate
+    /// (`Analysis::instances_by_type`).
+    pub instances_by_type: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
     /// Out-of-block method and constraint bodies (`function C::f()`) by name, for finding a
     /// prototype's implementation (`Analysis::implementation_of`).
     pub out_of_block: Arc<std::sync::OnceLock<FxHashMap<SmolStr, Vec<DeclRef>>>>,
@@ -596,7 +599,12 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     }
     // ... and its paths (`bind dut.g[1].u ...`, `bind m : u1, u2 ...`), not its declaration's id.
     for p in &u.parsed.bind_places {
-        p.paths.hash(&mut h);
+        for segs in &p.paths {
+            segs.len().hash(&mut h);
+            for s in segs {
+                (&s.name, &s.sel).hash(&mut h);
+            }
+        }
     }
     // The scopes each region removed by `ifdef` is in (not its position): whether it may hide
     // members of a package or class that other files use.
@@ -691,6 +699,7 @@ impl Analysis {
             hidden_uses: Arc::default(),
             hidden_seed: None,
             instance_defs: Arc::default(),
+            instances_by_type: Arc::default(),
             out_of_block: Arc::default(),
             config_calls: Arc::default(),
             config_places_cache: Arc::default(),
@@ -997,6 +1006,7 @@ impl Analysis {
         self.global = Arc::new(g);
         self.file_units = Arc::new(fu);
         self.instance_defs = Arc::default();
+        self.instances_by_type = Arc::default();
         self.out_of_block = Arc::default();
         self.config_calls = Arc::default();
         self.config_places_cache = Arc::default();
@@ -1089,6 +1099,7 @@ impl Analysis {
         next.hidden_uses = Arc::default();
         next.hidden_seed = None;
         next.instance_defs = Arc::default();
+        next.instances_by_type = Arc::default();
         next.out_of_block = Arc::default();
         next.config_calls = Arc::default();
         next.config_places_cache = Arc::default();
@@ -1372,6 +1383,7 @@ impl Analysis {
         next.hidden_uses = Arc::default();
         next.hidden_seed = None;
         next.instance_defs = Arc::default();
+        next.instances_by_type = Arc::default();
         next.out_of_block = Arc::default();
         next.config_calls = Arc::default();
         next.config_places_cache = Arc::default();
@@ -1405,6 +1417,7 @@ impl Analysis {
         next.hidden_uses = Arc::default();
         next.hidden_seed = None;
         next.instance_defs = Arc::default();
+        next.instances_by_type = Arc::default();
         next.out_of_block = Arc::default();
         next.config_calls = Arc::default();
         next.config_places_cache = Arc::default();

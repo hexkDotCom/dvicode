@@ -1693,12 +1693,16 @@ impl<'t> Parser<'t> {
             let name = self.tok().text.clone();
             self.bump();
             let mut sel = String::new();
+            let mut groups = Vec::new();
             while self.at_p("[") {
-                let end = self.skip_group_from(self.pos);
-                sel.extend(self.toks[self.pos..end.min(self.toks.len())].iter().flat_map(|t| t.text.chars()));
+                let end = self.skip_group_from(self.pos).min(self.toks.len());
+                sel.extend(self.toks[self.pos..end].iter().flat_map(|t| t.text.chars()));
+                if end >= self.pos + 3 && self.toks[end - 1].is_punct("]") {
+                    groups.push((self.toks[self.pos + 1].span, self.toks[end - 2].span));
+                }
                 self.pos = end;
             }
-            out.push(BindSeg { name, sel: SmolStr::new(sel) });
+            out.push(BindSeg { name, sel: SmolStr::new(sel), groups });
             if !(self.at_p(".") && self.nth(1).kind == TokKind::Ident) {
                 break;
             }

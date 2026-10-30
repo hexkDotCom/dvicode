@@ -2,7 +2,7 @@
 //! member chains (`a.b.c`).
 
 use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
-use dvi_syntax::ast::{dflags, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefId, RefKind, Sep, TypeRef};
+use dvi_syntax::ast::{dflags, BindSeg, Decl, DeclId, DeclKind, ParsedUnit, RefChain, RefId, RefKind, Sep, TypeRef};
 use dvi_syntax::Span;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
@@ -18,6 +18,9 @@ thread_local! {
     /// The bases found during the outermost `class_base` call on this thread, by class and
     /// by the depth of the call that found each.
     static BASE_MEMO: std::cell::RefCell<FxHashMap<(DeclRef, usize), Option<DeclRef>>> = std::cell::RefCell::default();
+    /// While [`Analysis::bind_target`] runs on this thread: no bound instance is looked for (its
+    /// lookups would start another).
+    static IN_BIND_TARGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// How many `follow_typedef` calls are on this thread's stack.
     static TYPEDEF_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// While [`Analysis::with_lookup_memo`] runs on this thread: the lexical lookups made so
@@ -606,6 +609,12 @@ impl Analysis {
 
     /// Looks up `name` inside a container (class, package, struct, module, block...).
     pub fn member_of(&self, container: DeclRef, name: &str) -> Option<DeclRef> {
+        self.member_via(container, name, None)
+    }
+
+    /// [`Analysis::member_of`], reached through the instance `via` of the container (a bound
+    /// instance must go into that instance).
+    fn member_via(&self, container: DeclRef, name: &str, via: Option<DeclRef>) -> Option<DeclRef> {
         let container = self.follow_typedef(container)?;
         let d = self.decl(container);
         match d.kind {
@@ -614,7 +623,7 @@ impl Analysis {
                 let u = self.unit(container.unit);
                 let own = pick(&u.parsed, u.parsed.lookup_member(container.decl, name)).map(|m| DeclRef { unit: container.unit, decl: m });
                 if own.is_none() && d.kind.is_definition() {
-                    if let Some(b) = self.bound_instance(container, &d.name, name) {
+                    if let Some(b) = self.bound_instance(&d.name, name, via) {
                         return Some(b);
                     }
                 }
@@ -628,36 +637,145 @@ impl Analysis {
         }
     }
 
-    /// An instance called `name` that a `bind` adds to `module`: `bind module_name ...`, or
-    /// `bind inst.path ...` where the path, from the scope of the `bind`, names an instance of
-    /// the module.
-    fn bound_instance(&self, module: DeclRef, module_name: &str, name: &str) -> Option<DeclRef> {
-        if let Some(b) = self.global.binds.get(module_name).and_then(|v| v.iter().find(|b| self.decl(**b).name == name)) {
-            return Some(*b);
+    /// An instance called `name` that a `bind` adds to the module `module_name`, through the
+    /// instance `via` of it when known: `bind module_name ...` (any instance), `bind
+    /// module_name : u1, u2 ...` or `bind inst.path ...` (the instances named).
+    fn bound_instance(&self, module_name: &str, name: &str, via: Option<DeclRef>) -> Option<DeclRef> {
+        if IN_BIND_TARGET.with(|c| c.get()) {
+            return None;
         }
-        for (target, v) in &self.global.binds {
-            if self.global.definitions.contains_key(target) {
-                continue;
-            }
+        let via = via.map(|i| self.decl_key(self.canonical(i)));
+        for v in self.global.binds.values() {
             for b in v.iter().filter(|b| self.decl(**b).name == name) {
-                let scope = self.decl(*b).parent.unwrap_or(ParsedUnit::ROOT);
-                let mut segs = target.split('.');
-                let Some(mut inst) = segs.next().and_then(|s| self.lookup(b.unit, scope, s)) else { continue };
-                // Further segments go through declared instances only (not other binds).
-                for s in segs {
-                    let Some(m) = self.type_of(inst) else { break };
-                    let u = self.unit(m.unit);
-                    match pick(&u.parsed, u.parsed.lookup_member(m.decl, s)) {
-                        Some(d) => inst = DeclRef { unit: m.unit, decl: d },
-                        None => break,
-                    }
-                }
-                if self.decl(inst).kind == DeclKind::Instance && self.decl(inst).name == target.rsplit('.').next().unwrap_or("") && self.type_of(inst) == Some(module) {
+                let Some(t) = self.bind_target(*b) else { continue };
+                if self.decl(t.module).name == module_name && t.goes_into(self, via) {
                     return Some(*b);
                 }
             }
         }
         None
+    }
+
+    /// Where the `bind` statement of the bound instance `b` puts it: see [`BindTarget`].
+    pub fn bind_target(&self, b: DeclRef) -> Option<BindTarget> {
+        if !self.decl(b).has(dflags::BOUND) {
+            return None;
+        }
+        let was = IN_BIND_TARGET.with(|c| c.replace(true));
+        let t = self.bind_target_in(b);
+        IN_BIND_TARGET.with(|c| c.set(was));
+        t
+    }
+
+    fn bind_target_in(&self, b: DeclRef) -> Option<BindTarget> {
+        let u = self.unit(b.unit);
+        let d = u.parsed.decl(b.decl);
+        // In declaration order.
+        let place = match u.parsed.bind_places.binary_search_by_key(&b.decl, |p| p.inst) {
+            Ok(i) => &u.parsed.bind_places[i],
+            Err(_) => u.parsed.bind_places.iter().find(|p| p.inst == b.decl)?,
+        };
+        let scope = d.parent.unwrap_or(ParsedUnit::ROOT);
+        let module_named = |name: &str| {
+            let ok = |m: &DeclRef| matches!(self.decl(*m).kind, DeclKind::Module | DeclKind::Interface);
+            self.lookup(b.unit, scope, name).filter(ok).or_else(|| self.definition(b.unit, name).filter(ok))
+        };
+        if d.has(dflags::BIND_LIMITED) {
+            // `bind m : paths`: the instances of `m` at those paths.
+            let target = match u.parsed.binds.binary_search_by_key(&b.decl, |(_, i)| *i) {
+                Ok(i) => &u.parsed.binds[i],
+                Err(_) => u.parsed.binds.iter().find(|(_, i)| *i == b.decl)?,
+            };
+            let module = module_named(&target.0)?;
+            let key = self.decl_key(self.canonical(module));
+            let instances = place.paths.iter().filter_map(|p| self.bind_path_instance(b.unit, scope, p)).filter(|i| self.type_of(*i).is_some_and(|t| self.decl_key(self.canonical(t)) == key)).collect();
+            return Some(BindTarget { module, instances: Some(instances) });
+        }
+        let segs = place.paths.first()?;
+        // One name: an instance seen where the statement is wins over a definition.
+        if let [one] = segs.as_slice() {
+            let local = self.lookup(b.unit, scope, &one.name).is_some_and(|r| self.decl(r).kind == DeclKind::Instance);
+            if one.sel.is_empty() && !local {
+                if let Some(module) = module_named(&one.name) {
+                    return Some(BindTarget { module, instances: None });
+                }
+            }
+        }
+        let inst = self.bind_path_instance(b.unit, scope, segs)?;
+        let module = self.type_of(inst).filter(|m| self.decl(*m).kind.is_definition())?;
+        Some(BindTarget { module, instances: Some(vec![inst]) })
+    }
+
+    /// The instance declaration a `bind` path names, found statically from `scope`: its first
+    /// name where the statement is, or a definition of that name (a top, or a module above),
+    /// or an instance declared in a module that instantiates the statement's (IEEE 1800 23.8);
+    /// the others through declared members (generate blocks included, not other binds).
+    /// Selects are not looked at.
+    fn bind_path_instance(&self, unit: UnitId, scope: DeclId, segs: &[BindSeg]) -> Option<DeclRef> {
+        let (first, rest) = segs.split_first()?;
+        let scoped = |r: &DeclRef| matches!(self.decl(*r).kind, DeclKind::Instance | DeclKind::Generate | DeclKind::Block);
+        let mut cur = self.lookup(unit, scope, &first.name).filter(scoped).or_else(|| self.definition(unit, &first.name)).or_else(|| self.declared_above(unit, scope, &first.name))?;
+        for s in rest {
+            let m = self.type_of(cur)?;
+            let u = self.unit(m.unit);
+            cur = DeclRef { unit: m.unit, decl: pick(&u.parsed, u.parsed.lookup_member(m.decl, &s.name))? };
+        }
+        (self.decl(cur).kind == DeclKind::Instance).then_some(cur)
+    }
+
+    /// An instance or generate block named `name` declared in a module that instantiates the
+    /// definition `scope` is in, nearest first (a few levels up).
+    fn declared_above(&self, unit: UnitId, scope: DeclId, name: &str) -> Option<DeclRef> {
+        let def = crate::ide::checks::definition_of_pub(&self.unit(unit).parsed, scope)?;
+        let mut level = vec![DeclRef { unit, decl: def }];
+        let mut seen: FxHashSet<(u32, u32)> = level.iter().map(|d| self.decl_key(*d)).collect();
+        for _ in 0..8 {
+            let mut next = Vec::new();
+            for d in level {
+                let key = self.decl_key(self.canonical(d));
+                for &i in self.instances_by_type().get(&self.decl(d).name).into_iter().flatten() {
+                    if !self.type_of(i).is_some_and(|t| self.decl_key(self.canonical(t)) == key) {
+                        continue;
+                    }
+                    let u = self.unit(i.unit);
+                    let Some(p) = crate::ide::checks::definition_of_pub(&u.parsed, i.decl) else { continue };
+                    let pr = DeclRef { unit: i.unit, decl: p };
+                    if !seen.insert(self.decl_key(pr)) {
+                        continue;
+                    }
+                    if let Some(&m) = u.parsed.lookup_member(p, name).first() {
+                        if matches!(u.parsed.decl(m).kind, DeclKind::Instance | DeclKind::Generate | DeclKind::Block) {
+                            return Some(DeclRef { unit: i.unit, decl: m });
+                        }
+                    }
+                    next.push(pr);
+                }
+            }
+            if next.is_empty() || seen.len() > 4096 {
+                break;
+            }
+            level = next;
+        }
+        None
+    }
+
+    /// The instances of the project (not `bind`s) by the name of the design element each
+    /// instantiates, as written. Computed once per snapshot.
+    pub(crate) fn instances_by_type(&self) -> &FxHashMap<SmolStr, Vec<DeclRef>> {
+        self.instances_by_type.get_or_init(|| {
+            let mut out: FxHashMap<SmolStr, Vec<DeclRef>> = FxHashMap::default();
+            for u in self.units.iter().flatten() {
+                for (i, d) in u.parsed.decls.iter().enumerate() {
+                    if d.kind != DeclKind::Instance || d.has(dflags::BOUND) {
+                        continue;
+                    }
+                    if let Some(ty) = d.ty.as_ref().and_then(|t| t.text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).next()).filter(|t| !t.is_empty()) {
+                        out.entry(SmolStr::new(ty)).or_default().push(DeclRef { unit: u.id, decl: i as DeclId });
+                    }
+                }
+            }
+            out
+        })
     }
 
     /// Names a package re-exports with `export other_pkg::name;`, `export other_pkg::*;` or
@@ -717,7 +835,8 @@ impl Analysis {
             (Sep::Scope, DeclKind::TypeParam) => None,
             _ => self.type_of(prev),
         }?;
-        self.member_of(container, name)
+        // Through an instance: only the `bind`s that go into it.
+        self.member_via(container, name, (pd.kind == DeclKind::Instance).then_some(prev))
     }
 
     /// Unpacked dimensions of a declaration, including those of array typedefs it uses.
@@ -879,6 +998,25 @@ impl Analysis {
                 return Some(s);
             }
             s = d.parent?;
+        }
+    }
+}
+
+/// Where a `bind` statement puts its instance: into `module`, in every instance of it
+/// (`instances: None`, `bind m ...`), or in the instance declarations the statement names
+/// (`bind m : u1, u2 ...`, `bind dut.u_a ...`), found statically (none when a path is not).
+pub struct BindTarget {
+    pub module: DeclRef,
+    pub instances: Option<Vec<DeclRef>>,
+}
+
+impl BindTarget {
+    /// Whether the statement puts its instance into the instance declaration of key `via`
+    /// (`None`: some instance of the module, not known which).
+    pub fn goes_into(&self, a: &Analysis, via: Option<(u32, u32)>) -> bool {
+        match (&self.instances, via) {
+            (Some(v), Some(k)) => v.iter().any(|i| a.decl_key(a.canonical(*i)) == k),
+            _ => true,
         }
     }
 }

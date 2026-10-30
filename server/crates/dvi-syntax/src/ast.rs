@@ -200,6 +200,8 @@ pub struct BindPlace {
 pub struct BindSeg {
     pub name: SmolStr,
     pub sel: SmolStr,
+    /// The first and last token inside each select (`1+0` of `[1+0]`).
+    pub groups: Vec<(Span, Span)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

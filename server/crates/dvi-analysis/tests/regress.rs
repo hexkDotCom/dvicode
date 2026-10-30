@@ -4014,7 +4014,7 @@ fn drivers_and_loads_through_implicit_connections_macros_and_classes() {
     let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
     let show = |after: &str, name: &str, writes: bool| access_lines(&a, f, word_at(DRIVERS_EDGE_SRC, after, name), writes);
     let tb = "logic a";
-    let bind = vec!["`bind` instances in tb are not followed".to_string()];
+    let bind: Vec<String> = vec![];
     assert_eq!(
         show(tb, "b", true),
         (
@@ -4025,7 +4025,7 @@ fn drivers_and_loads_through_implicit_connections_macros_and_classes() {
         "named, `.*` and `.o` connections; the fourth level is past the depth limit"
     );
     assert_eq!(show(tb, "c", true).0, ["connections connection of u_x line 14 (module not found: not followed)", "writes blocking line 15 in initial"], "the macro's assignment");
-    assert_eq!(show(tb, "c", false), (vec!["connections i of g.u_g (input) line 12".to_string(), "  reads read line 3 @g.u_g".into(), "connections connection of u_x line 14 (module not found: not followed)".into()], vec![], bind.clone()), "in a generate block; the `.i` of m2 is no read of m3's port");
+    assert_eq!(show(tb, "c", false), (vec!["connections i of g.u_g (input) line 12".to_string(), "  reads read line 3 @g.u_g".into(), "connections connection of u_x line 14 (module not found: not followed)".into(), "connections c of u_bind (bind) (input) line 18".into()], vec![], bind.clone()), "in a generate block; the `.i` of m2 is no read of m3's port; the bind's port");
     assert_eq!(show("output logic r", "r", true).0, ["writes blocking line 16 in task"]);
     let field = vec!["a class field: the sites are those of every object of the class".to_string()];
     assert_eq!(show("int f", "f", true), (vec!["writes blocking line 21 in function".to_string(), "writes blocking line 25 in initial".into()], vec![], field.clone()));
@@ -4880,4 +4880,163 @@ fn binds_exist_where_written_and_resolve_there() {
     let (a, _) = project_build("bindescaped", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", escaped)]);
     let lines = tree_of(&a, "top");
     assert!(lines.iter().any(|l| l.ends_with(".b:  (bind t.sv:1)")), "{lines:?}");
+}
+
+const BIND_FOLLOW_SRC: &str = "module chk(input logic p, input logic [3:0] q);
+  a_p: assert property (@(posedge p) q != 0);
+endmodule
+module core(input logic clk);
+  logic [3:0] bus;
+  logic [1:0] idx;
+endmodule
+module dut;
+  logic c;
+  core u_a(.clk(c));
+  core u_b(.clk(c));
+endmodule
+module top;
+  dut d();
+  logic x;
+  assign x = d.u_a.b_l.p;
+  assign x = d.u_b.b_l.p;
+  assign x = d.u_b.b_p.p;
+endmodule
+bind core : top.d.u_a chk b_l (.p(clk), .q(bus[idx]));
+bind top.d.u_b chk b_p (.p(clk), .q(bus));
+";
+
+/// Go to definition, Assertions and Coverage, and Drivers/Loads follow a `bind` limited to
+/// listed instances or written to an instance path into the instances it names only.
+#[test]
+fn binds_to_named_instances_are_followed_there_only() {
+    let (a, root) = project("bindfollow", &[("a.sv", BIND_FOLLOW_SRC)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let src = BIND_FOLLOW_SRC;
+    let def_line = |after: &str, word: &str| -> Vec<u32> { a.goto_definition(f, word_at(src, after, word)).iter().map(|l| l.range.start.line + 1).collect() };
+    assert_eq!(def_line("d.u_a.b_l", "b_l"), [20], "the listed instance");
+    assert_eq!(def_line("d.u_b.b_l", "b_l"), Vec::<u32>::new(), "not into u_b");
+    assert_eq!(def_line("d.u_b.b_p", "b_p"), [21]);
+    // Assertions and Coverage of the module's signals.
+    let checks = |after: &str, word: &str| -> Vec<String> {
+        let r = a.checks_at(f, word_at(src, after, word)).unwrap();
+        let mut v: Vec<String> = r.hits.iter().map(|h| format!("{} {}", h.label.clone().unwrap_or_default(), h.children.iter().map(|c| c.label.clone().unwrap_or_default()).collect::<Vec<_>>().join(","))).collect();
+        v.extend(r.notes);
+        v
+    };
+    assert_eq!(checks("logic [3:0] bus", "bus"), ["q of b_l (bind) a_p", "q of b_p (bind) a_p"]);
+    // Drivers and loads.
+    let reads = |after: &str, word: &str, writes: bool| access_lines(&a, f, word_at(src, after, word), writes);
+    let lines = |after: &str, word: &str, writes: bool| {
+        let (lines, limits, notes) = reads(after, word, writes);
+        assert!(limits.is_empty() && notes.is_empty(), "{limits:?} {notes:?}");
+        lines
+    };
+    assert_eq!(
+        lines("module core(", "clk", false),
+        ["connections p of b_p (bind, named instances) (input) line 21", "  reads read line 2 @b_p", "connections p of b_l (bind, named instances) (input) line 20", "  reads read line 2 @b_l"]
+    );
+    assert_eq!(
+        lines("logic c", "c", false),
+        [
+            "connections clk of u_a (input) line 10",
+            "  connections p of b_l (bind, named instances) (input) line 20 @u_a",
+            "    reads read line 2 @u_a.b_l",
+            "connections clk of u_b (input) line 11",
+            "  connections p of b_p (bind, named instances) (input) line 21 @u_b",
+            "    reads read line 2 @u_b.b_p",
+        ],
+        "through u_a, the bind into u_a only"
+    );
+    assert_eq!(lines("logic [1:0] idx", "idx", false), ["reads read line 20"], "an index in a bind's actual");
+    assert_eq!(
+        lines("module chk(", "p", true),
+        ["connections p of b_l (bind, named instances) in core line 20", "  connections clk of u_a in dut line 10 @core", "connections p of b_p (bind, named instances) in core line 21", "  connections clk of u_b in dut line 11 @core"],
+        "up through the named instances only"
+    );
+}
+
+/// Bind paths resolved upward (IEEE 1800 23.8): a writer next to the design, a module above by
+/// its name; a path starting at a generate block where the statement is; selects evaluated.
+#[test]
+fn bind_paths_upward_and_evaluated_selects() {
+    let lib = ("lib.sv", "module leaf; endmodule\nmodule chk; endmodule\n");
+    let src = "module dut;
+  leaf u_a();
+  sub s();
+endmodule
+module sub;
+  bind dut.u_a chk b_mod();
+endmodule
+module binds;
+  bind u_dut.u_a chk b_up();
+endmodule
+module tb;
+  localparam P = 1;
+  dut u_dut();
+  binds bb();
+  for (genvar i = 0; i < 2; i++) begin : g
+    leaf u();
+  end
+  bind g[1].u chk b_gen();
+  bind g[2-1].u chk b_sum();
+  bind g[P].u chk b_par();
+  bind g[P+1].u chk b_none();
+endmodule
+localparam int Q = 0;
+bind tb.g[Q].u chk b_unit();
+";
+    let (a, _) = project_build("bindupward", "lib.sv\nt.sv\n-top tb\n", &[lib, ("t.sv", src)]);
+    let lines = tree_of(&a, "tb");
+    for want in ["tb.u_dut.u_a: b_mod b_up", "tb.g[1].u: b_gen b_par b_sum", "tb.g[0].u: b_unit"] {
+        assert!(lines.iter().any(|l| l == want), "{want}: {lines:?}");
+    }
+    assert!(!lines.iter().any(|l| l.contains("b_none")), "no g[2]: {lines:?}");
+}
+
+/// Review cases: a bind whose instance's own type needs a bind to resolve (no endless
+/// recursion); a hierarchical actual (`top.clk`) is followed; an upward bind is followed by go
+/// to definition; a writer below a module next to the design; a writer's constant in a select.
+#[test]
+fn bind_targets_review_cases() {
+    let cyc = "module chk; endmodule\nmodule top;\n  top::b u();\nendmodule\nbind top : top.u chk b();\n";
+    let (a, root) = project("bindcycle", &[("a.sv", cyc)]);
+    let f = a.vfs.lookup(&root.join("a.sv")).unwrap();
+    let _ = a.goto_definition(f, word_at(cyc, "top::", "b"));
+    let _ = a.hover(f, word_at(cyc, "top::", "b"));
+
+    let src = "module chk(input logic p); wire w = p; endmodule
+module dut; logic [1:0] s; for (genvar i = 0; i < 2; i++) begin : g leaf u(); end endmodule
+module leaf; endmodule
+module top;
+  logic clk;
+  dut d();
+  logic x;
+  assign x = d.g[0].u.b_k.p;
+endmodule
+bind dut chk b_h (.p(top.clk));
+module bindings;
+  localparam K = 1;
+  bind d.g[K].u chk b_k (.p(1'b0));
+endmodule
+module holder;
+  bindings bb();
+endmodule
+module tb;
+  top t();
+endmodule
+";
+    let (a, root) = project_build("bindreview", "t.sv\n-top top\n", &[("t.sv", src)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let (loads, _, notes) = access_lines(&a, f, word_at(src, "logic clk", "clk"), false);
+    assert_eq!(loads, ["connections p of b_h (input) line 10", "  reads read line 1 @b_h"], "{notes:?}");
+    let _ = a;
+    // A writer below a module next to the design, with its own constant in the select.
+    let src2 = src.replace("module top;\n  logic clk;\n  dut d();", "module top;\n  logic clk;\n  dut d();\n  holder h();");
+    let (a, root) = project_build("bindreview2", "t.sv\n-top top\n", &[("t.sv", &src2)]);
+    let f = a.vfs.lookup(&root.join("t.sv")).unwrap();
+    let lines = tree_of(&a, "top");
+    assert!(lines.iter().any(|l| l == "top.d.g[1].u: b_k"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "top.d.g[0].u: "), "{lines:?}");
+    let d: Vec<u32> = a.goto_definition(f, word_at(&src2, "d.g[0].u.b_k", "b_k")).iter().map(|l| l.range.start.line + 1).collect();
+    assert_eq!(d, [14], "found upward, from holder to top: {lines:?}");
 }

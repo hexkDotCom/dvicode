@@ -165,6 +165,12 @@ struct Walk<'a> {
     by_definition: Option<Arc<FxHashMap<(u32, u32), Vec<DeclRef>>>>,
     /// (declaration, instance path) on the current path.
     path: Vec<((u32, u32), String)>,
+    /// Up from a port at this depth: only through these instances (by key), those a `bind`
+    /// named.
+    up_only: Option<(usize, Vec<(u32, u32)>)>,
+    /// The bound instances of the project with where each goes: the module's name, and the
+    /// instances it names (by key) when it names some (built when first needed).
+    bound: Option<Arc<Vec<(DeclRef, smol_str::SmolStr, Option<Vec<(u32, u32)>>)>>>,
 }
 
 impl Analysis {
@@ -176,16 +182,9 @@ impl Analysis {
             if !matches!(self.decl(target).kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port | DeclKind::Field | DeclKind::Argument) {
                 return None;
             }
-            let mut w = Walk { a: self, writes, candidates: 0, sites: 0, hops: 0, limits: Vec::new(), notes: Vec::new(), targets: FxHashMap::default(), tokens: FxHashMap::default(), instances: FxHashMap::default(), lists: FxHashMap::default(), by_definition: None, path: Vec::new() };
+            let mut w = Walk { a: self, writes, candidates: 0, sites: 0, hops: 0, limits: Vec::new(), notes: Vec::new(), targets: FxHashMap::default(), tokens: FxHashMap::default(), instances: FxHashMap::default(), lists: FxHashMap::default(), by_definition: None, path: Vec::new(), up_only: None, bound: None };
             let sites = w.search(target, "", None, None, 0);
             let d = self.decl(target);
-            // `bind` instances in the target's module.
-            if let Some(home) = super::checks::definition_of_pub(&self.unit(target.unit).parsed, target.decl) {
-                let m = self.unit(target.unit).parsed.decl(home).name.clone();
-                if self.units.iter().flatten().any(|u| u.parsed.binds.iter().any(|(to, _)| *to == m)) {
-                    w.note(format!("`bind` instances in {m} are not followed"));
-                }
-            }
             let (uri, line, character) = w.location(d.name_span);
             let kind = match (d.kind, d.parent.map(|p| self.unit(target.unit).parsed.decl(p).name.to_string())) {
                 (DeclKind::Port, Some(p)) => format!("port of {p}"),
@@ -312,6 +311,7 @@ impl Walk<'_> {
             }
         }
         out.extend(self.dot_star(target, ctx, skip, depth));
+        out.extend(self.bound(target, ctx, came_from, skip, depth));
         // Initializers of the declaration itself.
         if self.writes {
             let d = a.decl(target);
@@ -452,6 +452,114 @@ impl Walk<'_> {
         out
     }
 
+    /// The instances `bind`s put into the target's module that connect it (by its name in the
+    /// module): one node for each port carrying the search on. Through the instance
+    /// `came_from` of the module, only the binds into it; not the bound instance `skip`.
+    fn bound(&mut self, target: DeclRef, ctx: &str, came_from: Option<DeclRef>, skip: Option<DeclRef>, depth: usize) -> Vec<AccessSite> {
+        let a = self.a;
+        let u = a.unit(target.unit);
+        let d = a.decl(target);
+        let mut out = Vec::new();
+        if !matches!(d.kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port) || a.global.binds.is_empty() {
+            return out;
+        }
+        let Some(home) = super::checks::definition_of_pub(&u.parsed, target.decl) else { return out };
+        let name = d.name.to_string();
+        let key = a.decl_key(a.canonical(target));
+        if a.lookup(target.unit, home, &name).map(|t| a.decl_key(a.canonical(t))) != Some(key) {
+            return out;
+        }
+        let module = u.parsed.decl(home).name.clone();
+        let via = came_from.map(|i| a.decl_key(a.canonical(i)));
+        let Some(all) = self.bound_targets() else { return out };
+        for (b, m, named) in all.iter() {
+            let b = *b;
+            if *m != module || Some(b) == skip || via.is_some_and(|v| named.as_ref().is_some_and(|n| !n.contains(&v))) {
+                continue;
+            }
+            if self.stopped() {
+                break;
+            }
+            self.candidates += 1;
+            let Some(def) = a.type_of(b).filter(|t| a.decl(*t).kind.is_definition()) else { continue };
+            let Some((toks, l)) = self.inst_list(b) else { continue };
+            if l.macros {
+                continue;
+            }
+            let header = a.port_header(def);
+            let how = if named.is_some() { " (bind, named instances)" } else { " (bind)" };
+            let explicit = l.items.iter().any(|i| matches!(&i.kind, ItemKind::Named { name: n, .. } if *n == name));
+            for (k, it) in l.items.iter().enumerate() {
+                let (port, first, end) = match &it.kind {
+                    ItemKind::Named { name: p, open: Some(o), .. } => (p.clone(), o + 1, it.end - 1),
+                    // `.name`: the module's signal of that name.
+                    ItemKind::Named { name: p, open: None, name_tok } if *p == name => (p.clone(), *name_tok, name_tok + 1),
+                    ItemKind::DotStar if !explicit => (name.clone(), it.first, it.first + 1),
+                    ItemKind::Ordered if header.known => match header.slots.get(k).and_then(|s| s.name.clone()) {
+                        Some(p) => (p, it.body, it.end),
+                        None => continue,
+                    },
+                    _ => continue,
+                };
+                let star = matches!(it.kind, ItemKind::DotStar);
+                let e = &toks[first..end];
+                // The target's name, not a member or a package's (`s.x`, `p::x`).
+                let Some(i) = (0..e.len()).find(|&i| star || (e[i].kind == TokKind::Ident && e[i].text == name && !(i > 0 && (e[i - 1].is_punct(".") || e[i - 1].is_punct("::"))))) else { continue };
+                let Some(p) = a.member_of(def, &port).filter(|p| a.decl(*p).kind == DeclKind::Port) else { continue };
+                // In an index: read, whatever the port does.
+                let mut depth_b = 0i32;
+                for t in &e[..i] {
+                    if t.is_punct("[") {
+                        depth_b += 1;
+                    } else if t.is_punct("]") {
+                        depth_b -= 1;
+                    }
+                }
+                if depth_b > 0 {
+                    if !self.writes {
+                        out.push(self.site("read", "reads", e[i].span, ctx));
+                    }
+                    continue;
+                }
+                if !self.follows(p) {
+                    continue;
+                }
+                let how = if star { format!("{how} (.*)") } else { how.to_string() };
+                if let Some(n) = self.hop(b, p, e[i].span, star || (i == 0 && is_plain(e)), &how, ctx, depth) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Walk::bound`]: every bound instance once, with where it goes (`None` when cancelled).
+    fn bound_targets(&mut self) -> Option<Arc<Vec<(DeclRef, smol_str::SmolStr, Option<Vec<(u32, u32)>>)>>> {
+        if let Some(b) = &self.bound {
+            return Some(b.clone());
+        }
+        let a = self.a;
+        let mut out = Vec::new();
+        let mut seen: FxHashSet<(FileId, u32)> = FxHashSet::default();
+        for (n, &b) in a.global.binds.values().flatten().enumerate() {
+            if n % 256 == 0 && a.cancelled() {
+                self.limit("cancelled");
+                return None;
+            }
+            let x = a.decl(b);
+            if !seen.insert((x.name_span.file, x.name_span.start)) {
+                continue;
+            }
+            if let Some(t) = a.bind_target(b) {
+                let named = t.instances.map(|v| v.iter().map(|i| a.decl_key(a.canonical(*i))).collect());
+                out.push((b, a.decl(t.module).name.clone(), named));
+            }
+        }
+        let out = Arc::new(out);
+        self.bound = Some(out.clone());
+        Some(out)
+    }
+
     /// The tokens of instance `inst`'s file and its connection list.
     fn inst_list(&mut self, inst: DeclRef) -> Option<(Arc<Vec<Token>>, super::instances::ConnList)> {
         let d = self.a.decl(inst);
@@ -476,11 +584,10 @@ impl Walk<'_> {
         let Some(index) = self.definitions() else { return Vec::new() };
         let mut insts: Vec<DeclRef> = Vec::new();
         let mut seen: FxHashSet<(FileId, u32)> = FxHashSet::default();
-        let mut bound = false;
+        let only = self.up_only.take_if(|(d, _)| *d == depth).map(|(_, v)| v);
         for &r in index.get(&dk).map(|v| v.as_slice()).unwrap_or(&[]) {
             let x = a.decl(r);
-            if x.has(dflags::BOUND) {
-                bound = true;
+            if only.as_ref().is_some_and(|v| !v.contains(&a.decl_key(a.canonical(r)))) {
                 continue;
             }
             if seen.insert((x.name_span.file, x.name_span.start)) {
@@ -490,9 +597,6 @@ impl Walk<'_> {
                     break;
                 }
             }
-        }
-        if bound {
-            self.note(format!("`bind` instances of {} are not followed", a.decl(def).name));
         }
         let mut out = Vec::new();
         for inst in insts.into_iter().take(MAX_PARENTS) {
@@ -505,13 +609,25 @@ impl Walk<'_> {
                 break;
             }
             let d = a.decl(inst);
-            let parent = d.parent.and_then(|p| super::checks::definition_of_pub(&a.unit(inst.unit).parsed, p)).map(|p| a.unit(inst.unit).parsed.decl(p).name.to_string()).unwrap_or_default();
+            // Where the actuals are names: the parent, or the module a `bind` puts it into.
+            let (scope, parent, how, named) = if d.has(dflags::BOUND) {
+                let Some(t) = a.bind_target(inst) else { continue };
+                let how = if t.instances.is_some() { " (bind, named instances)" } else { " (bind)" };
+                let named = t.instances.map(|v| v.iter().map(|i| a.decl_key(a.canonical(*i))).collect::<Vec<_>>());
+                (t.module, a.decl(t.module).name.to_string(), how, named)
+            } else {
+                let p = d.parent.and_then(|p| super::checks::definition_of_pub(&a.unit(inst.unit).parsed, p));
+                (DeclRef { unit: inst.unit, decl: d.parent.unwrap_or(0) }, p.map(|p| a.unit(inst.unit).parsed.decl(p).name.to_string()).unwrap_or_default(), "", None)
+            };
             let name = self.inst_path(inst);
             let mut node = self.site("instance", "connections", d.name_span, ctx);
-            node.label = format!("{port} of {name} in {parent}");
-            match self.actual_of(inst, def, port) {
+            node.label = format!("{port} of {name}{how} in {parent}");
+            match self.actual_of(inst, def, port, scope) {
                 Some(Actual::Name(decl)) => {
+                    // Further up from a port of the module: through the instances named only.
+                    let saved = std::mem::replace(&mut self.up_only, named.map(|v| (depth + 1, v)));
                     node.children = self.search(decl, &parent, None, Some(inst), depth + 1);
+                    self.up_only = saved;
                 }
                 Some(Actual::Expr(text)) => {
                     node.notes.push(format!("connected to an expression: {text}"));
@@ -525,22 +641,24 @@ impl Walk<'_> {
     }
 
     /// What instance `inst` (of `def`) connects to its port `port`.
-    fn actual_of(&mut self, inst: DeclRef, def: DeclRef, port: &str) -> Option<Actual> {
+    /// The actual connected to port `port` of `inst` (of `def`), its names looked up in
+    /// `scope`.
+    fn actual_of(&mut self, inst: DeclRef, def: DeclRef, port: &str, scope: DeclRef) -> Option<Actual> {
         let a = self.a;
-        let d = a.decl(inst);
         let (toks, l) = self.inst_list(inst)?;
         if l.macros {
             return None;
         }
         let header = a.port_header(def);
-        let parent = d.parent.unwrap_or(0);
+        let (unit, parent) = (scope.unit, scope.decl);
         let plain = |first: usize, end: usize| -> Option<Actual> {
             let e = &toks[first..end];
             if e.is_empty() {
                 return Some(Actual::Open);
             }
-            if e.len() == 1 && e[0].kind == TokKind::Ident {
-                return a.lookup(inst.unit, parent, &e[0].text).map(Actual::Name);
+            // A name, with selects after it (`bus[3]`): the search goes on in all of it.
+            if e[0].kind == TokKind::Ident && is_plain(e) {
+                return a.lookup(unit, parent, &e[0].text).map(Actual::Name);
             }
             Some(Actual::Expr(super::views::tokens_text(e)))
         };
@@ -550,7 +668,7 @@ impl Walk<'_> {
                 ItemKind::Named { name, open, .. } if name == port => {
                     return match open {
                         Some(o) => plain(o + 1, it.end - 1),
-                        None => a.lookup(inst.unit, parent, port).map(Actual::Name),
+                        None => a.lookup(unit, parent, port).map(Actual::Name),
                     };
                 }
                 ItemKind::DotStar => star = true,
@@ -561,7 +679,7 @@ impl Walk<'_> {
             }
         }
         if star {
-            return a.lookup(inst.unit, parent, port).map(Actual::Name);
+            return a.lookup(unit, parent, port).map(Actual::Name);
         }
         Some(Actual::Open)
     }
@@ -714,8 +832,10 @@ impl Walk<'_> {
         }
         if toks[c].kind == TokKind::Ident {
             if let Some(inst) = self.instance_named(o.unit, toks[c].span) {
-                if a.decl(inst).has(dflags::BOUND) {
-                    self.note(format!("`bind` instance {} is not followed", toks[c].text));
+                if a.decl(inst).has(dflags::BOUND) && o.seg == 0 {
+                    // A simple name in its actuals is one of the module it goes into (see
+                    // `bound`), not of the scope this one was looked up in; a hierarchical
+                    // name (`top.clk`) is the same from either.
                     return Some(None);
                 }
                 if Some(inst) == skip {
@@ -787,13 +907,13 @@ impl Walk<'_> {
                     if at <= *o {
                         return None;
                     }
-                    (name.clone(), is_plain(&toks[o + 1..end.saturating_sub(1)]))
+                    (name.clone(), names_it(&toks[o + 1..end.saturating_sub(1)], at - (o + 1)))
                 } else {
                     (name.clone(), true)
                 }
             }
             ItemKind::Ordered if header.known => match header.slots.get(k).and_then(|s| s.name.clone()) {
-                Some(n) => (n, is_plain(&toks[body..end])),
+                Some(n) => (n, names_it(&toks[body..end], at.saturating_sub(body))),
                 None => return unresolved(self, "port not known"),
             },
             ItemKind::Ordered => return unresolved(self, "port list not known"),
@@ -880,6 +1000,23 @@ fn is_plain(e: &[Token]) -> bool {
         }
     }
     d == 0
+}
+
+/// Whether the actual `e` is the occurrence at `e[at]`: a name with selects after it, or a
+/// hierarchical name ending there (`top.clk`, `top.bus[3]`).
+fn names_it(e: &[Token], at: usize) -> bool {
+    if is_plain(e) {
+        return true;
+    }
+    let mut i = 0;
+    while e.get(i).is_some_and(|t| t.kind == TokKind::Ident) {
+        if e.get(i + 1).is_some_and(|t| t.is_punct(".")) {
+            i += 2;
+            continue;
+        }
+        return i == at && is_plain(&e[i..]);
+    }
+    false
 }
 
 enum Actual {

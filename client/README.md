@@ -60,9 +60,9 @@ desktop, in WSL, or beside your sources on a Linux server over SSH. Currently in
   changes in the test's modeled build, which it may change, and why others are not changed.
 - **Drivers and Loads**: right-click a signal or port and choose Show Drivers or Show Loads to
   see where it is written (assignments, `force`, output arguments, gate outputs) or read,
-  following port connections down into instances and up to where its module is instantiated.
-  The places are found from the source, not by elaborating the design: interfaces, `alias`,
-  `bind` instances and connections through expressions are not followed.
+  following port connections down into instances (`bind` instances too) and up to where its
+  module is instantiated. The places are found from the source, not by elaborating the design:
+  interfaces, `alias` and connections through expressions are not followed.
 - **TLM connections**: with ports shown in the Verification Hierarchy, each port, export and
   imp says what it is connected to, through the `connect()` calls of the components'
   `connect_phase` (also the ports the UVM library makes: a driver's `seq_item_port`, a

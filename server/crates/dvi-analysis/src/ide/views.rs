@@ -1095,7 +1095,7 @@ impl Analysis {
             };
             let key = self.decl_key(self.canonical(t));
             let mut stack = vec![(key, values_hash(&node.params))];
-            cx.anc = vec![Ancestor { module: key, frame: top.frame.clone(), depth: 1 }];
+            cx.anc = vec![Ancestor { module: key, def: t, frame: top.frame.clone(), depth: 1 }];
             cx.names = names;
             if !w.stopped() {
                 node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated, &mut FxHashMap::default(), &top.frame, &mut cx);
@@ -1187,7 +1187,7 @@ impl Analysis {
         // (IEEE 1800 23.11: a bind does not reach into what another bind added).
         if self.decl(scope).kind.is_definition() && cx.in_bound == 0 {
             let key = self.decl_key(self.canonical(scope));
-            for (b, element) in cx.elab.binds.at(key, &cx.names, &cx.anc, &cx.elab.reach) {
+            for (b, element) in cx.elab.binds_at(key, &cx.names, &cx.anc) {
                 let child = super::elab::Child { decl: b.decl, presence: super::elab::Presence::Elaborated, iterations: None, name: self.decl(b).name.clone(), implicit: None };
                 let span = self.decl(b).span;
                 let file = self.vfs.path(span.file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1287,7 +1287,7 @@ impl Analysis {
                         node.presence.get_or_insert_with(|| "not followed: 64 levels of instances".into());
                     } else {
                         stack.push(entry);
-                        cx.anc.push(Ancestor { module: key, frame: ip.frame.clone(), depth: cx.names.len() });
+                        cx.anc.push(Ancestor { module: key, def: m, frame: ip.frame.clone(), depth: cx.names.len() });
                         let m_name = self.decl(m).name.to_string();
                         cx.in_bound += usize::from(bound.is_some());
                         node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default(), &ip.frame, cx);
