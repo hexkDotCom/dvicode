@@ -5,9 +5,12 @@
 - Real-number models: `wreal` nets and ports (`input wreal vdd`) are read as Cadence's
   real-valued net type, and Xcelium's predefined `` `wrealZState `` and `` `wrealXState `` are
   known (a project's own definition, or `+undefine+`, replaces them).
-- Design Hierarchy: the instances a `bind` adds to a module (`bind fifo fifo_sva u_sva (.*);`,
-  also through a macro) show under every instance of it, marked *bind*. Binds limited to listed
-  instances (`bind fifo : u_a ...`) and binds to an instance path are not shown yet.
+- Design Hierarchy: the instances a `bind` adds show where they go, marked *bind*: under every
+  instance of a module (`bind fifo fifo_sva u_sva (.*);`, also through a macro), under the listed
+  instances (`bind fifo : dut.u_a ...`), or under an instance path (`bind dut.g[1].u_c ...`,
+  from the top or from the module the statement is in). A `bind` written in a module counts only
+  where that module is elaborated. A bound instance's parameter values use the names of the
+  instance it goes into, and parameter hover lists its values too.
 - Hover on a system task or function such as a PLI/VPI one (`$my_plusargs(...)`) says what it is.
 
 ## 0.8.0 (preview)

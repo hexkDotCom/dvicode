@@ -187,6 +187,21 @@ pub mod dflags {
     pub const BIND_LIMITED: u32 = 1 << 27;
 }
 
+/// See [`ParsedUnit::bind_places`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BindPlace {
+    pub inst: DeclId,
+    /// Each a path of names with their selects.
+    pub paths: Vec<Vec<BindSeg>>,
+}
+
+/// A name of a `bind` path and the selects after it (`g` and `[1]`), as written, without blanks.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BindSeg {
+    pub name: SmolStr,
+    pub sel: SmolStr,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortDir {
     Input,
@@ -332,6 +347,9 @@ pub struct ParsedUnit {
     /// `bind target ... inst (...)`: the target (a module name, or an instance path such as
     /// `dut.u_core`) and the instance.
     pub binds: Vec<(SmolStr, DeclId)>,
+    /// Where each `bind` instance goes: the target path (`a.b[1].c`), or the instances listed
+    /// after `:` (`bind m : u1, top.u2`), with their selects.
+    pub bind_places: Vec<BindPlace>,
     /// Assertions, coverage items and default clocking, with the references in each part, in
     /// source order.
     pub verif: Vec<VerifItem>,

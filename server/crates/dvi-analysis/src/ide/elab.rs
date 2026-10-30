@@ -10,8 +10,8 @@
 //! propagated down to their context-determined operands, as SystemVerilog sizes them
 //! (IEEE 1800 §11.6–11.8); a value is converted to its declared type as an assignment is.
 
-use crate::world::{Analysis, DeclRef, UnitId};
-use dvi_syntax::ast::{dflags, DeclId, DeclKind, GenKind};
+use crate::world::{Analysis, DeclRef, UnitId, UnitKind};
+use dvi_syntax::ast::{dflags, BindSeg, DeclId, DeclKind, GenKind, ParsedUnit};
 use dvi_syntax::{FileId, Span, TokKind, Token};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -688,11 +688,15 @@ pub struct Eval<'a> {
     steps: usize,
     nodes: usize,
     nest: usize,
+    /// A bound instance's parameter values being evaluated: the definition its names are
+    /// looked up in, and the source range of the values (names elsewhere, in the constants and
+    /// functions they use, keep their own scope).
+    names_in: Option<(DeclRef, Span)>,
 }
 
 impl<'a> Eval<'a> {
     pub fn new(a: &'a Analysis) -> Self {
-        Eval { a, tokens: FxHashMap::default(), constants: FxHashMap::default(), evaluating: Vec::new(), funcs: FxHashMap::default(), leaves: FxHashMap::default(), var_types: Vec::new(), steps: 0, nodes: 0, nest: 0 }
+        Eval { a, tokens: FxHashMap::default(), constants: FxHashMap::default(), evaluating: Vec::new(), funcs: FxHashMap::default(), leaves: FxHashMap::default(), var_types: Vec::new(), steps: 0, nodes: 0, nest: 0, names_in: None }
     }
 
     pub fn file_tokens(&mut self, f: FileId) -> Option<Arc<Vec<Token>>> {
@@ -762,10 +766,49 @@ impl<'a> Eval<'a> {
         let a = self.a;
         let toks = self.file_tokens(span.file)?;
         let k = toks.partition_point(|t| t.span.start < span.start);
+        if let Some(r) = self.bound_lookup(text, span) {
+            return r;
+        }
         if toks.get(k).is_some_and(|t| t.span == span && t.kind == TokKind::Directive && t.text != text) {
             return a.lookup(unit, a.scope_at(unit, span.file, span.start), text);
         }
-        a.resolve_at_span(unit, span)
+        self.at_span(unit, text, span)
+    }
+
+    /// The declaration the name `text` at `span` refers to; in [`Eval::names_in`]'s definition
+    /// when the name is in its range and not qualified (`pkg::W`, `s.f`).
+    fn at_span(&mut self, unit: UnitId, text: &str, span: Span) -> Option<DeclRef> {
+        match self.bound_lookup(text, span) {
+            Some(r) => r,
+            None => self.a.resolve_at_span(unit, span),
+        }
+    }
+
+    /// `Some(the declaration)` when `span` is in [`Eval::names_in`]'s range and not qualified
+    /// (`pkg::W`, `s.f`): `text` looked up in its definition. A name a macro in the range gives
+    /// has the macro's span.
+    fn bound_lookup(&mut self, text: &str, span: Span) -> Option<Option<DeclRef>> {
+        let (scope, range) = self.names_in?;
+        if !(span.file == range.file && range.start <= span.start && span.end <= range.end) {
+            return None;
+        }
+        let toks = self.file_tokens(span.file);
+        let k = toks.as_ref().map_or(0, |t| t.partition_point(|x| x.span.start < span.start));
+        let qualified = toks.as_ref().and_then(|t| k.checked_sub(1).and_then(|j| t.get(j))).is_some_and(|t| t.is_punct("::") || t.is_punct("."));
+        (!qualified).then(|| self.a.lookup(scope.unit, scope.decl, text))
+    }
+
+    /// `f(...)` with `names_in` set for the range of `t`: the value of `f`.
+    fn within<T>(&mut self, into: Option<DeclRef>, t: &[Token], f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.names_in;
+        if let (Some(d), Some(first), Some(last)) = (into, t.first(), t.last()) {
+            if first.span.file == last.span.file {
+                self.names_in = Some((d, Span::new(first.span.file, first.span.start, last.span.end.max(first.span.end))));
+            }
+        }
+        let r = f(self);
+        self.names_in = saved;
+        r
     }
 
     /// The self-determined value of the expression `t` (written in `unit`) in `frame`.
@@ -987,7 +1030,7 @@ impl<'a> Eval<'a> {
     /// `T'(...)` where `T` names a user type: that type.
     fn user_cast(&mut self, n: &Ex, unit: UnitId, frame: &Arc<Frame>) -> R<Option<IntType>> {
         if let Ex::Name(name, sp) = n {
-            if self.a.resolve_at_span(unit, *sp).is_some_and(|r| self.a.decl(r).kind == DeclKind::Typedef) {
+            if self.at_span(unit, name, *sp).is_some_and(|r| self.a.decl(r).kind == DeclKind::Typedef) {
                 return self.user_type(name, *sp, unit, frame).map(Some);
             }
         }
@@ -1154,8 +1197,8 @@ impl<'a> Eval<'a> {
     /// Whether a select of `x` can be read from its value's bits: a genvar, or a parameter
     /// with no type, an integer keyword, or one range ending at 0.
     fn plain_bits(&mut self, x: &Ex, unit: UnitId) -> bool {
-        let Ex::Name(_, sp) = x else { return matches!(x, Ex::Num(_) | Ex::Concat(_) | Ex::Repl(..)) };
-        let Some(r) = self.a.resolve_at_span(unit, *sp) else { return false };
+        let Ex::Name(name, sp) = x else { return matches!(x, Ex::Num(_) | Ex::Concat(_) | Ex::Repl(..)) };
+        let Some(r) = self.at_span(unit, name, *sp) else { return false };
         match self.a.decl(r).kind {
             DeclKind::Genvar => true,
             DeclKind::Parameter | DeclKind::LocalParam => {
@@ -1574,9 +1617,9 @@ impl<'a> Eval<'a> {
                     _ => {
                         let t = self.expand(raw);
                         let x = parse(&t)?;
-                        if let Ex::Name(_, sp) = &x {
+                        if let Ex::Name(name, sp) = &x {
                             // A signal: its declared type.
-                            if let Some(r) = self.a.resolve_at_span(unit, *sp) {
+                            if let Some(r) = self.at_span(unit, name, *sp) {
                                 if matches!(self.a.decl(r).kind, DeclKind::Variable | DeclKind::Net | DeclKind::Port) {
                                     if self.a.decl(r).unpacked_dims() > 0 {
                                         return unsupported("`$bits` of an unpacked array");
@@ -1615,7 +1658,7 @@ impl<'a> Eval<'a> {
 
     fn call(&mut self, n: &str, sp: Span, args: &[Ex], unit: UnitId, frame: &Arc<Frame>) -> R<Val> {
         let a = self.a;
-        let Some(r) = a.resolve_at_span(unit, sp) else { return unresolved(format!("the function `{n}` is not resolved")) };
+        let Some(r) = self.at_span(unit, n, sp) else { return unresolved(format!("the function `{n}` is not resolved")) };
         if a.decl(r).kind != DeclKind::Function {
             return unsupported(format!("the call of `{n}`"));
         }
@@ -2353,6 +2396,14 @@ pub struct Elab<'a> {
     constructs: FxHashMap<(UnitId, DeclId), Vec<usize>>,
     /// Definitions that may be instantiated under the top being elaborated.
     instantiated: FxHashSet<(u32, u32)>,
+    /// Where the `bind`s put their instances.
+    pub binds: BindIndex,
+    /// The definitions elaborated in the design that `bind`s are written in: where a statement
+    /// exists ([`ElabIndex::bind_reach`]; the tops at least).
+    pub reach: FxHashSet<(u32, u32)>,
+    /// The definition of the instance a bound instance being elaborated goes into: the names
+    /// of its parameter values are that definition's ([`Elab::instance_bound`]).
+    bound_into: Option<DeclRef>,
 }
 
 /// An instance on the way down: its definition, frame and path length.
@@ -2361,6 +2412,230 @@ pub struct Ancestor {
     pub module: (u32, u32),
     pub frame: Arc<Frame>,
     pub depth: usize,
+}
+
+/// A `bind` placed by a path: `bind dut.u_a ...`, `bind u_a ...` naming an instance, or each
+/// instance listed after `:` (`bind core : dut.u_a ...`).
+struct PathBind {
+    inst: DeclRef,
+    segs: Vec<BindSeg>,
+    /// The definition the statement is written in (`None`: the compilation unit): the
+    /// statement exists only where the definition is elaborated.
+    written: Option<(u32, u32)>,
+    /// The path starts at an instance seen where the statement is: it goes down from each
+    /// instance of `written`. Otherwise it starts at a top.
+    relative: bool,
+    /// A listed instance: the definition it must be an instance of.
+    module: Option<(u32, u32)>,
+}
+
+/// Where the `bind` statements of the design put their instances, shared by the Design
+/// Hierarchy and the elaboration index. Statements in files opened outside the build, and in
+/// generate blocks (relative to a scope this version does not follow), are left out.
+#[derive(Default)]
+pub struct BindIndex {
+    /// Module-type binds (`bind fifo fifo_sva u (...)`) by the target's definition, with the
+    /// definition each is written in.
+    by_module: FxHashMap<(u32, u32), Vec<(DeclRef, Option<(u32, u32)>)>>,
+    /// Path binds by the name of the instance they go into.
+    by_last: FxHashMap<SmolStr, Vec<PathBind>>,
+    /// The definitions some `bind` is written in.
+    pub writers: FxHashSet<(u32, u32)>,
+}
+
+impl BindIndex {
+    pub fn new(a: &Analysis) -> BindIndex {
+        let mut ix = BindIndex::default();
+        let mut seen = FxHashSet::default();
+        let mut n = 0usize;
+        for u in a.units.iter().flatten() {
+            if u.kind == UnitKind::AdHoc || u.parsed.bind_places.is_empty() {
+                continue;
+            }
+            // The target text of each bound instance (the module of a `bind m : ...`).
+            let targets: FxHashMap<DeclId, &SmolStr> = u.parsed.binds.iter().map(|(t, i)| (*i, t)).collect();
+            for p in &u.parsed.bind_places {
+                n += 1;
+                if n % 1024 == 0 && a.cancelled() {
+                    return ix;
+                }
+                let inst = DeclRef { unit: u.id, decl: p.inst };
+                let d = a.decl(inst);
+                // The scope the statement is written in.
+                let scope = d.parent.unwrap_or(ParsedUnit::ROOT);
+                let sd = u.parsed.decl(scope);
+                let written = if scope == ParsedUnit::ROOT || sd.kind == DeclKind::Package {
+                    None
+                } else if sd.kind.is_definition() {
+                    Some(a.decl_key(a.canonical(DeclRef { unit: u.id, decl: scope })))
+                } else {
+                    continue;
+                };
+                let key = (d.span, d.name.clone(), d.ty.as_ref().map(|t| t.text.clone()), written, p.paths.clone());
+                if !seen.insert(key) {
+                    continue;
+                }
+                // A module or interface named where the statement is (a nested one first).
+                let target_def = |name: &str| {
+                    let ok = |m: &DeclRef| matches!(a.decl(*m).kind, DeclKind::Module | DeclKind::Interface);
+                    a.lookup(u.id, scope, name).filter(ok).or_else(|| a.definition(u.id, name).filter(ok))
+                };
+                // A path whose first name is an instance seen where the statement is.
+                let local = |segs: &[BindSeg]| written.is_some() && segs.first().is_some_and(|s| a.lookup(u.id, scope, &s.name).is_some_and(|r| a.decl(r).kind == DeclKind::Instance));
+                if let Some(w) = written {
+                    ix.writers.insert(w);
+                }
+                if d.has(dflags::BIND_LIMITED) {
+                    // `bind m : paths`: instances of `m` at those paths.
+                    let Some(m) = targets.get(&p.inst).and_then(|t| target_def(t)) else { continue };
+                    let module = Some(a.decl_key(a.canonical(m)));
+                    for segs in &p.paths {
+                        ix.add_path(PathBind { inst, segs: segs.clone(), written, relative: local(segs), module });
+                    }
+                    continue;
+                }
+                let Some(segs) = p.paths.first() else { continue };
+                // One name: an instance seen where the statement is wins over a definition.
+                if let [one] = segs.as_slice() {
+                    if one.sel.is_empty() && !local(segs) {
+                        if let Some(m) = target_def(&one.name) {
+                            ix.by_module.entry(a.decl_key(a.canonical(m))).or_default().push((inst, written));
+                            continue;
+                        }
+                    }
+                }
+                ix.add_path(PathBind { inst, segs: segs.clone(), written, relative: local(segs), module: None });
+            }
+        }
+        ix
+    }
+
+    fn add_path(&mut self, b: PathBind) {
+        if let Some(last) = b.segs.last() {
+            self.by_last.entry(last.name.clone()).or_default().push(b);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_module.is_empty() && self.by_last.is_empty()
+    }
+
+    /// The instances binds put into the instance at `names` (its path from the top: generate
+    /// copies are `g[1]`) of the definition `def`, with `anc` the instances above it and itself,
+    /// and `reach` the definitions elaborated in the design (a statement written in one exists):
+    /// each with the element it is limited to when it names one of an array of instances
+    /// (`arr[1]`, shown on the array).
+    pub fn at(&self, def: (u32, u32), names: &[SmolStr], anc: &[Ancestor], reach: &FxHashSet<(u32, u32)>) -> Vec<(DeclRef, Option<String>)> {
+        let exists = |w: Option<(u32, u32)>| w.is_none_or(|w| reach.contains(&w));
+        let mut out: Vec<(DeclRef, Option<String>)> = Vec::new();
+        for (b, w) in self.by_module.get(&def).into_iter().flatten() {
+            if exists(*w) {
+                out.push((*b, None));
+            }
+        }
+        let Some(last) = names.last() else { return out };
+        for pb in self.by_last.get(last.as_str()).into_iter().flatten() {
+            if pb.module.is_some_and(|m| m != def) || !exists(pb.written) {
+                continue;
+            }
+            // Each name as is, or with its selects (a generate copy `g[1]`), or an element of
+            // the array node of that name.
+            let matches = |names: &[SmolStr]| -> Option<bool> {
+                let mut element = false;
+                for (s, n) in pb.segs.iter().zip(names) {
+                    if s.sel.is_empty() {
+                        if s.name != *n {
+                            return None;
+                        }
+                    } else if n.as_str() == format!("{}{}", s.name, s.sel) {
+                        // A generate copy.
+                    } else if s.name == *n {
+                        element = true;
+                    } else {
+                        return None;
+                    }
+                }
+                Some(element)
+            };
+            let k = pb.segs.len();
+            let hit = match (pb.relative, pb.written) {
+                (true, Some(w)) => anc.iter().filter(|x| x.module == w && x.depth + k == names.len()).find_map(|x| matches(&names[x.depth..])),
+                _ => (k == names.len()).then(|| matches(names)).flatten(),
+            };
+            if let Some(element) = hit {
+                let shown = || pb.segs.iter().map(|s| format!("{}{}", s.name, s.sel)).collect::<Vec<_>>().join(".");
+                out.push((pb.inst, element.then(shown)));
+            }
+        }
+        out
+    }
+
+    /// The definitions under `top`, through declared instances (every generate branch) and the
+    /// instances binds add: where a `bind` written in a definition exists.
+    pub fn reachable(&self, a: &Analysis, top: DeclRef) -> FxHashSet<(u32, u32)> {
+        let mut seen: FxHashSet<(u32, u32)> = FxHashSet::default();
+        let mut todo = vec![top];
+        seen.insert(a.decl_key(a.canonical(top)));
+        let add = |m: DeclRef, seen: &mut FxHashSet<(u32, u32)>, todo: &mut Vec<DeclRef>| {
+            if a.decl(m).kind.is_definition() && seen.insert(a.decl_key(a.canonical(m))) {
+                todo.push(m);
+            }
+        };
+        loop {
+            while let Some(def) = todo.pop() {
+                if a.cancelled() || seen.len() > 1_000_000 {
+                    return seen;
+                }
+                let u = a.unit(def.unit);
+                let mut scopes = vec![def.decl];
+                while let Some(sc) = scopes.pop() {
+                    for &c in &u.parsed.decl(sc).children {
+                        let d = u.parsed.decl(c);
+                        match d.kind {
+                            DeclKind::Instance if !d.has(dflags::BOUND) => {
+                                if let Some(m) = a.type_of(DeclRef { unit: def.unit, decl: c }) {
+                                    add(m, &mut seen, &mut todo);
+                                }
+                            }
+                            DeclKind::Generate | DeclKind::Block => scopes.push(c),
+                            _ => {}
+                        }
+                    }
+                }
+                for (b, w) in self.by_module.get(&a.decl_key(a.canonical(def))).into_iter().flatten() {
+                    if w.is_none_or(|w| seen.contains(&w)) {
+                        if let Some(m) = a.type_of(*b) {
+                            add(m, &mut seen, &mut todo);
+                        }
+                    }
+                }
+            }
+            // Path binds whose statement exists: their definitions may be instantiated.
+            for pb in self.by_last.values().flatten() {
+                if pb.written.is_none_or(|w| seen.contains(&w)) {
+                    if let Some(m) = a.type_of(pb.inst) {
+                        add(m, &mut seen, &mut todo);
+                    }
+                }
+            }
+            // Type binds into definitions reached, written in definitions reached only now.
+            for (t, v) in &self.by_module {
+                if !seen.contains(t) {
+                    continue;
+                }
+                for (b, w) in v {
+                    if w.is_some_and(|w| seen.contains(&w)) {
+                        if let Some(m) = a.type_of(*b) {
+                            add(m, &mut seen, &mut todo);
+                        }
+                    }
+                }
+            }
+            if todo.is_empty() {
+                return seen;
+            }
+        }
+    }
 }
 
 impl<'a> Elab<'a> {
@@ -2386,13 +2661,14 @@ impl<'a> Elab<'a> {
                 }
             }
         }
-        Elab { ev: Eval::new(a), plain, others, constructs, instantiated: FxHashSet::default() }
+        Elab { ev: Eval::new(a), plain, others, constructs, instantiated: FxHashSet::default(), binds: BindIndex::new(a), reach: FxHashSet::default(), bound_into: None }
     }
 
     /// Elaborates under top `t` from now on: the definitions that may be instantiated under
     /// it (in any generate branch) are those an absolute `defparam` may come from.
     pub fn set_top(&mut self, t: DeclRef) {
         let a = self.a();
+        let bound_defs = if self.binds.is_empty() { FxHashSet::default() } else { self.binds.reachable(a, t) };
         if self.plain.is_empty() {
             return;
         }
@@ -2422,6 +2698,8 @@ impl<'a> Elab<'a> {
                 }
             }
         }
+        // Also what the binds may add.
+        seen.extend(bound_defs);
         self.instantiated = seen;
     }
 
@@ -2545,13 +2823,14 @@ impl<'a> Elab<'a> {
             } else if let Some(o) = overrides.get(name.as_str()) {
                 match o {
                     Some(t) if typed => (Ok(Val::Type(text_of(t))), Origin::Override),
-                    // A `bind`'s value naming something: the names are the target module's, and
-                    // they would be read where the statement is.
-                    Some(t) if inst.is_some_and(|i| a.decl(i).has(dflags::BOUND)) && t.iter().any(|x| x.kind == TokKind::Ident) => {
-                        (unsupported("a value in a `bind` that names something (in the target module)"), Origin::Override)
+                    // Evaluated where the instance is, as an assignment to the parameter's type; a
+                    // bound instance's names are those of the instance it goes into.
+                    Some(t) => {
+                        let unit = inst.map_or(def.unit, |i| i.unit);
+                        let into = self.bound_into.filter(|_| inst.is_some_and(|i| a.decl(i).has(dflags::BOUND)));
+                        let ty = self.ev.declared_type(p, &frame);
+                        (ty.and_then(|ty| self.ev.within(into, t, |ev| ev.eval_as(t, unit, parent, &ty))), Origin::Override)
                     }
-                    // Evaluated where the instance is, as an assignment to the parameter's type.
-                    Some(t) => (self.ev.declared_type(p, &frame).and_then(|ty| self.ev.eval_as(t, inst.map_or(def.unit, |i| i.unit), parent, &ty)), Origin::Override),
                     None => (self.ev.declared_value(p, &frame), Origin::Default),
                 }
             } else if let Some(why) = &list_unknown {
@@ -2884,7 +3163,25 @@ impl<'a> Elab<'a> {
             return Some(unsupported("an array of instances with more than one dimension"));
         }
         let inner: Vec<Token> = toks[k + 2..close].to_vec();
-        Some(self.ev.range_bounds(&inner, inst.unit, frame))
+        let into = self.bound_into.filter(|_| a.decl(inst).has(dflags::BOUND));
+        Some(self.ev.within(into, &inner, |ev| ev.range_bounds(&inner, inst.unit, frame)))
+    }
+
+    /// [`Elab::instance`] of a bound instance going into an instance of `into`: the names in
+    /// its parameter values are `into`'s.
+    pub fn instance_bound(&mut self, inst: DeclRef, def: DeclRef, parent: &Arc<Frame>, path: &[SmolStr], anc: &[Ancestor], into: DeclRef) -> InstParams {
+        self.bound_into = Some(into);
+        let r = self.instance(Some(inst), def, parent, path, anc);
+        self.bound_into = None;
+        r
+    }
+
+    /// [`Elab::array_range`] of a bound instance going into an instance of `into`.
+    pub fn array_range_bound(&mut self, inst: DeclRef, frame: &Arc<Frame>, into: DeclRef) -> Option<R<(i128, i128)>> {
+        self.bound_into = Some(into);
+        let r = self.array_range(inst, frame);
+        self.bound_into = None;
+        r
     }
 }
 
@@ -2930,6 +3227,9 @@ pub struct ElabIndex {
     /// loop).
     pub complete: bool,
     pub tops: Vec<String>,
+    /// The definitions elaborated that `bind`s are written in, and the tops: where a `bind`
+    /// statement exists.
+    pub bind_reach: FxHashSet<(u32, u32)>,
 }
 
 struct IndexWalk<'e, 'a> {
@@ -2939,9 +3239,40 @@ struct IndexWalk<'e, 'a> {
     stack: Vec<((u32, u32), u64)>,
     anc: Vec<Ancestor>,
     names: Vec<SmolStr>,
+    /// Bound instances being walked through (binds do not add to what is below them).
+    in_bound: usize,
 }
 
 impl IndexWalk<'_, '_> {
+    /// Instance `cr` (a bound one going into an instance of `into`) and what is below it.
+    fn instance(&mut self, cr: DeclRef, into: Option<DeclRef>, frame: &Arc<Frame>, path: &str, sure: bool) {
+        let a = self.el.a();
+        let d = a.decl(cr);
+        let Some(m) = a.type_of(cr).filter(|m| a.decl(*m).kind.is_definition()) else { return };
+        let child_path = format!("{path}.{}", d.name);
+        self.names.push(d.name.clone());
+        let ip = match into {
+            Some(t) => self.el.instance_bound(cr, m, frame, &self.names, &self.anc, t),
+            None => self.el.instance(Some(cr), m, frame, &self.names, &self.anc),
+        };
+        let key = a.decl_key(a.canonical(m));
+        let entry = (key, hash_shown(&ip.shown));
+        self.index.by_def.entry(key).or_default().push(IndexedInst { path: child_path.clone(), frame: ip.frame.clone(), certain: sure });
+        if !self.stack.contains(&entry) && self.stack.len() < 64 {
+            self.stack.push(entry);
+            self.anc.push(Ancestor { module: key, frame: ip.frame.clone(), depth: self.names.len() });
+            self.in_bound += usize::from(into.is_some());
+            self.walk(m, &ip.frame, &child_path, sure);
+            self.in_bound -= usize::from(into.is_some());
+            self.anc.pop();
+            self.stack.pop();
+        } else {
+            // A recursion cut: what is below is not counted.
+            self.index.complete = false;
+        }
+        self.names.pop();
+    }
+
     /// Counts one scope or instance; false when the budget is spent.
     fn charge(&mut self) -> bool {
         self.count += 1;
@@ -2979,25 +3310,7 @@ impl IndexWalk<'_, '_> {
             match d.kind {
                 DeclKind::Instance if !d.has(dflags::BOUND) => {
                     let cr = DeclRef { unit: scope.unit, decl: child.decl };
-                    if let Some(m) = a.type_of(cr).filter(|m| a.decl(*m).kind.is_definition()) {
-                        let child_path = format!("{path}.{}", d.name);
-                        self.names.push(d.name.clone());
-                        let ip = self.el.instance(Some(cr), m, frame, &self.names, &self.anc);
-                        let key = a.decl_key(a.canonical(m));
-                        let entry = (key, hash_shown(&ip.shown));
-                        self.index.by_def.entry(key).or_default().push(IndexedInst { path: child_path.clone(), frame: ip.frame.clone(), certain: sure });
-                        if !self.stack.contains(&entry) && self.stack.len() < 64 {
-                            self.stack.push(entry);
-                            self.anc.push(Ancestor { module: key, frame: ip.frame.clone(), depth: self.names.len() });
-                            self.walk(m, &ip.frame, &child_path, sure);
-                            self.anc.pop();
-                            self.stack.pop();
-                        } else {
-                            // A recursion cut: what is below is not counted.
-                            self.index.complete = false;
-                        }
-                        self.names.pop();
-                    }
+                    self.instance(cr, None, frame, &path, sure);
                 }
                 DeclKind::Generate | DeclKind::Block => {
                     let gr = DeclRef { unit: scope.unit, decl: child.decl };
@@ -3051,6 +3364,15 @@ impl IndexWalk<'_, '_> {
                 self.names.pop();
             }
         }
+        if a.decl(scope).kind.is_definition() && self.in_bound == 0 {
+            let key = a.decl_key(a.canonical(scope));
+            for (b, _) in self.el.binds.at(key, &self.names, &self.anc, &self.el.reach) {
+                if !self.charge() {
+                    return;
+                }
+                self.instance(b, Some(scope), frame, path, certain);
+            }
+        }
     }
 }
 
@@ -3074,23 +3396,39 @@ impl Analysis {
         }
         let mut el = Elab::new(self);
         let tops = self.design_tops();
-        let mut w = IndexWalk { el: &mut el, index: ElabIndex { by_def: FxHashMap::default(), complete: true, tops: Vec::new() }, count: 0, stack: Vec::new(), anc: Vec::new(), names: Vec::new() };
-        for t in tops {
-            let name = self.decl(t).name.clone();
-            w.index.tops.push(name.to_string());
-            w.names = vec![name.clone()];
-            w.el.set_top(t);
-            let ip = w.el.instance(None, t, &Arc::new(Frame::default()), &w.names, &[]);
-            let key = self.decl_key(self.canonical(t));
-            w.index.by_def.entry(key).or_default().push(IndexedInst { path: name.to_string(), frame: ip.frame.clone(), certain: true });
-            w.stack = vec![(key, hash_shown(&ip.shown))];
-            w.anc = vec![Ancestor { module: key, frame: ip.frame.clone(), depth: 1 }];
-            w.walk(t, &ip.frame, &name, true);
+        // A `bind` written in a definition exists where the definition is elaborated: from the
+        // tops, walk again while the walk elaborates more definitions with binds in them.
+        let mut reach: FxHashSet<(u32, u32)> = tops.iter().map(|t| self.decl_key(self.canonical(*t))).collect();
+        let mut index;
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            let mut w = IndexWalk { el: &mut el, index: ElabIndex { by_def: FxHashMap::default(), complete: true, tops: Vec::new(), bind_reach: reach.clone() }, count: 0, stack: Vec::new(), anc: Vec::new(), names: Vec::new(), in_bound: 0 };
+            for t in &tops {
+                let t = *t;
+                let name = self.decl(t).name.clone();
+                w.index.tops.push(name.to_string());
+                w.names = vec![name.clone()];
+                w.el.set_top(t);
+                w.el.reach = reach.clone();
+                let ip = w.el.instance(None, t, &Arc::new(Frame::default()), &w.names, &[]);
+                let key = self.decl_key(self.canonical(t));
+                w.index.by_def.entry(key).or_default().push(IndexedInst { path: name.to_string(), frame: ip.frame.clone(), certain: true });
+                w.stack = vec![(key, hash_shown(&ip.shown))];
+                w.anc = vec![Ancestor { module: key, frame: ip.frame.clone(), depth: 1 }];
+                w.walk(t, &ip.frame, &name, true);
+            }
+            if self.cancelled() {
+                return None;
+            }
+            let more: Vec<(u32, u32)> = w.index.by_def.keys().filter(|k| w.el.binds.writers.contains(*k) && !reach.contains(*k)).copied().collect();
+            index = w.index;
+            if more.is_empty() || passes >= 8 {
+                break;
+            }
+            reach.extend(more);
         }
-        if self.cancelled() {
-            return None;
-        }
-        let index = Arc::new(w.index);
+        let index = Arc::new(index);
         *self.elab_index.lock().unwrap() = Some(index.clone());
         Some(index)
     }

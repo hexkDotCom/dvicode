@@ -2,7 +2,7 @@
 
 use crate::vfs::{Pin, Reader, Vfs, BUILTIN_DIR};
 use dvi_project::{BuildConfig, Phase, Progress};
-use dvi_syntax::ast::{DeclId, DeclKind, ParsedUnit, RefId, RefKind};
+use dvi_syntax::ast::{dflags, DeclId, DeclKind, ParsedUnit, RefId, RefKind};
 use dvi_syntax::preproc::{command_line_define, def_identity, preprocess, IncludeInfo, MacroDef, MacroName, MacroTable, MacroUse, PpConfig, PpResult, SameMemo};
 use dvi_syntax::{parser, Diag, FileId, SourceProvider, Span};
 use rayon::prelude::*;
@@ -592,7 +592,11 @@ fn interface_fingerprint(u: &Unit, defined_twice: &dyn Fn(&str) -> bool) -> u64 
     // `bind`: which design element gets which instance.
     for (target, inst) in &u.parsed.binds {
         let d = u.parsed.decl(*inst);
-        (target.as_str(), d.name.as_str(), d.ty.as_ref().map(|t| t.text.as_str())).hash(&mut h);
+        (target.as_str(), d.name.as_str(), d.ty.as_ref().map(|t| t.text.as_str()), d.has(dflags::BIND_LIMITED)).hash(&mut h);
+    }
+    // ... and its paths (`bind dut.g[1].u ...`, `bind m : u1, u2 ...`), not its declaration's id.
+    for p in &u.parsed.bind_places {
+        p.paths.hash(&mut h);
     }
     // The scopes each region removed by `ifdef` is in (not its position): whether it may hide
     // members of a package or class that other files use.

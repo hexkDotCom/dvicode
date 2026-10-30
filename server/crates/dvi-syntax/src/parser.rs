@@ -613,38 +613,21 @@ impl<'t> Parser<'t> {
                 let saved = self.kind_override.replace(RefKind::Foreign);
                 if self.at_ident() {
                     // `bind module [: inst_path, ...] checker [#(...)] u (...);` or
-                    // `bind inst.path checker u (...);` (the target is kept as `inst.path`).
-                    let mut target = self.tok().text.to_string();
-                    self.bump();
-                    while (self.at_p(".") && self.nth(1).kind == TokKind::Ident) || self.at_p("[") {
-                        if self.at_p("[") {
-                            self.pos = self.skip_group_from(self.pos);
-                        } else {
-                            target.push('.');
-                            target.push_str(&self.nth(1).text);
-                            self.bump();
-                            self.bump();
-                        }
-                    }
-                    let target = SmolStr::new(target);
+                    // `bind inst.path checker u (...);` (the target is kept as `inst.path`,
+                    // without its selects; `bind_places` has them).
+                    let path = self.bind_path();
+                    let target = SmolStr::new(path.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("."));
                     let limited = self.at_p(":");
+                    let mut paths = Vec::new();
                     if self.eat_p(":") {
                         while self.at_ident() {
-                            self.bump();
-                            while self.at_p(".") || self.at_p("[") {
-                                if self.at_p("[") {
-                                    self.pos = self.skip_group_from(self.pos);
-                                } else {
-                                    self.bump();
-                                    if self.at_ident() {
-                                        self.bump();
-                                    }
-                                }
-                            }
+                            paths.push(self.bind_path());
                             if !self.eat_p(",") {
                                 break;
                             }
                         }
+                    } else {
+                        paths.push(path);
                     }
                     let first = self.u.decls.len();
                     let start = self.tok().span;
@@ -662,6 +645,7 @@ impl<'t> Parser<'t> {
                                 d.flags |= dflags::BIND_LIMITED;
                             }
                             self.u.binds.push((target.clone(), id as DeclId));
+                            self.u.bind_places.push(BindPlace { inst: id as DeclId, paths: paths.clone() });
                         }
                     }
                 } else {
@@ -1702,14 +1686,43 @@ impl<'t> Parser<'t> {
         Some(TypeInfo { tref: TypeRef { text, ref_id, inline }, named, params })
     }
 
-    /// At `wreal` before the declared name: Cadence's real-valued net type. Not before an
-    /// instance (`wreal u (...)`, `wreal u[1:0] (...)`, `wreal #(...) u`: a module named `wreal`).
+    /// A `bind` target or listed instance: `a.b[1].c` as `a`, `b` with `[1]`, `c`.
+    fn bind_path(&mut self) -> Vec<BindSeg> {
+        let mut out = Vec::new();
+        while self.at_ident() {
+            let name = self.tok().text.clone();
+            self.bump();
+            let mut sel = String::new();
+            while self.at_p("[") {
+                let end = self.skip_group_from(self.pos);
+                sel.extend(self.toks[self.pos..end.min(self.toks.len())].iter().flat_map(|t| t.text.chars()));
+                self.pos = end;
+            }
+            out.push(BindSeg { name, sel: SmolStr::new(sel) });
+            if !(self.at_p(".") && self.nth(1).kind == TokKind::Ident) {
+                break;
+            }
+            self.bump();
+        }
+        out
+    }
+
+    /// At `wreal` before the declared name (`wreal v;`, `wreal [1:0] v;`): Cadence's real-valued
+    /// net type. Not before an instance (`wreal u (...)`, `wreal u[1:0] (...)`, `wreal #(...) u`:
+    /// a module named `wreal`).
     fn at_wreal(&self) -> bool {
         let t = self.tok();
-        if !(t.kind == TokKind::Ident && t.text == "wreal" && self.nth(1).kind == TokKind::Ident) {
+        if !(t.kind == TokKind::Ident && t.text == "wreal") {
             return false;
         }
-        let mut j = self.pos + 2;
+        let mut j = self.pos + 1;
+        while self.toks.get(j).is_some_and(|x| x.is_punct("[")) {
+            j = self.skip_group_from(j);
+        }
+        if !self.toks.get(j).is_some_and(|x| x.kind == TokKind::Ident) {
+            return false;
+        }
+        j += 1;
         while self.toks.get(j).is_some_and(|x| x.is_punct("[")) {
             j = self.skip_group_from(j);
         }

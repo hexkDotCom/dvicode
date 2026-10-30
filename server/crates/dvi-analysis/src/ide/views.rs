@@ -1053,7 +1053,16 @@ impl Analysis {
         };
         let mut w = Walk::new(q);
         let mut roots = Vec::new();
-        let mut cx = ElabCx { elab: Elab::new(self), anc: Vec::new(), names: Vec::new(), inactive: q.inactive };
+        let mut cx = ElabCx { elab: Elab::new(self), anc: Vec::new(), names: Vec::new(), inactive: q.inactive, in_bound: 0 };
+        // Where `bind` statements written in definitions exist: the elaborated ones (the tops
+        // only, when no bind is written below them).
+        let keys: FxHashSet<(u32, u32)> = tops.iter().map(|t| self.decl_key(self.canonical(*t))).collect();
+        let mut reach = keys.clone();
+        if cx.elab.binds.writers.iter().any(|k| !keys.contains(k)) {
+            if let Some(i) = self.elab_index() {
+                reach.extend(i.bind_reach.iter().copied());
+            }
+        }
         for t in tops {
             if w.stopped() && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
                 break;
@@ -1065,6 +1074,7 @@ impl Analysis {
             let matched = if q.target.is_some() { w.hit(&name, &name, "", "") } else { w.matched(&[(&name, '.')]) };
             let names = vec![SmolStr::new(&name)];
             cx.elab.set_top(t);
+            cx.elab.reach = reach.clone();
             let top = cx.elab.instance(None, t, &Arc::new(Frame::default()), &names, &[]);
             let mut node = HierNode {
                 name: name.clone(),
@@ -1173,38 +1183,23 @@ impl Analysis {
             }
         }
         flush(&mut out, wrapper.take());
-        // The instances `bind` adds to every instance of this definition, after its own.
-        if self.decl(scope).kind.is_definition() {
-            for b in self.bound_instances(def_name) {
+        // The instances `bind`s add to this instance, after its own; none below a bound instance
+        // (IEEE 1800 23.11: a bind does not reach into what another bind added).
+        if self.decl(scope).kind.is_definition() && cx.in_bound == 0 {
+            let key = self.decl_key(self.canonical(scope));
+            for (b, element) in cx.elab.binds.at(key, &cx.names, &cx.anc, &cx.elab.reach) {
                 let child = super::elab::Child { decl: b.decl, presence: super::elab::Presence::Elaborated, iterations: None, name: self.decl(b).name.clone(), implicit: None };
                 let span = self.decl(b).span;
                 let file = self.vfs.path(span.file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let at = format!("{file}:{}", self.to_range(span).map_or(0, |r| r.start.line + 1));
+                let mut at = format!("{file}:{}", self.to_range(span).map_or(0, |r| r.start.line + 1));
+                if let Some(e) = element {
+                    at.push_str(&format!(", into {e} only"));
+                }
                 let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, None, Some((b, at)));
                 out.extend(nodes);
                 if stop {
                     break;
                 }
-            }
-        }
-        out
-    }
-
-    /// The instances `bind` statements add to each instance of the module (or interface)
-    /// `def_name`: `bind fifo fifo_sva u_sva (.*);`. Once each, also when a header with the
-    /// statement is compiled more than once. Binds to instance paths, or limited to listed
-    /// instances (`bind fifo : u_a ...`), are not followed.
-    pub(crate) fn bound_instances(&self, def_name: &str) -> Vec<DeclRef> {
-        let mut seen = FxHashSet::default();
-        let mut out = Vec::new();
-        for b in self.global.binds.get(def_name).into_iter().flatten() {
-            let d = self.decl(*b);
-            // Files opened outside the build do not change the design.
-            if d.has(dflags::BIND_LIMITED) || self.unit(b.unit).kind == UnitKind::AdHoc {
-                continue;
-            }
-            if seen.insert((d.span, d.name.clone(), d.ty.as_ref().map(|t| t.text.clone()))) {
-                out.push(*b);
             }
         }
         out
@@ -1243,7 +1238,11 @@ impl Analysis {
                 let def_loc = def.and_then(|m| self.decl_location(m));
                 let ty_name = d.ty.as_ref().map(|t| t.text.split(|ch: char| ch == ' ' || ch == '#').next().unwrap_or("").to_string()).unwrap_or_default();
                 let child_path = format!("{path}.{}", d.name);
-                let array = cx.elab.array_range(cr, frame).map(|r| match r {
+                let range = match bound {
+                    Some(_) => cx.elab.array_range_bound(cr, frame, scope),
+                    None => cx.elab.array_range(cr, frame),
+                };
+                let array = range.map(|r| match r {
                     Ok((a, b)) => format!("[{a}:{b}] · {} instances", (a - b).abs() + 1),
                     Err(e) => format!("[…] · range not evaluated: {}", e.why),
                 });
@@ -1262,7 +1261,7 @@ impl Analysis {
                     params: Vec::new(),
                     presence,
                     array,
-                    bound: bound.map(|(_, at)| at),
+                    bound: bound.as_ref().map(|(_, at)| at.clone()),
                 };
                 let matched = if w.q.target.is_some() {
                     w.hit(&node.name, &node.definition, def_name, "")
@@ -1271,7 +1270,10 @@ impl Analysis {
                 };
                 if let Some(m) = def.filter(|m| self.decl(*m).kind.is_definition()) {
                     cx.names.push(d.name.clone());
-                    let ip = cx.elab.instance(Some(cr), m, frame, &cx.names, &cx.anc);
+                    let ip = match bound {
+                        Some(_) => cx.elab.instance_bound(cr, m, frame, &cx.names, &cx.anc, scope),
+                        None => cx.elab.instance(Some(cr), m, frame, &cx.names, &cx.anc),
+                    };
                     node.params = ip.shown;
                     let key = self.decl_key(self.canonical(m));
                     let entry = (key, values_hash(&node.params));
@@ -1287,7 +1289,9 @@ impl Analysis {
                         stack.push(entry);
                         cx.anc.push(Ancestor { module: key, frame: ip.frame.clone(), depth: cx.names.len() });
                         let m_name = self.decl(m).name.to_string();
+                        cx.in_bound += usize::from(bound.is_some());
                         node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default(), &ip.frame, cx);
+                        cx.in_bound -= usize::from(bound.is_some());
                         cx.anc.pop();
                         stack.pop();
                     }
@@ -3131,6 +3135,8 @@ struct ElabCx<'a> {
     anc: Vec<Ancestor>,
     names: Vec<SmolStr>,
     inactive: bool,
+    /// Bound instances being walked through (binds do not add to what is below them).
+    in_bound: usize,
 }
 
 /// A hash of parameter values (a definition repeated with the same values is a cycle).

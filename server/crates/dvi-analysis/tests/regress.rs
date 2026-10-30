@@ -4649,7 +4649,7 @@ fn hover_at(a: &Analysis, root: &std::path::Path, file: &str, text: &str, needle
 #[test]
 fn wreal_is_a_net_type() {
     let text = "module wreal (input real a);\nendmodule\n\
-                module m (input wreal vin, output wreal vout, v);\n  input v;\n  wreal v;\n  wreal arr[3:0];\n  wreal p = 1.5, q;\n  wreal u_inst (p);\n  wreal u_arr[1:0] (p);\n  assign vout = vin;\nendmodule\n\
+                module m (input wreal vin, output wreal vout, v);\n  input v;\n  wreal v;\n  wreal arr[3:0];\n  wreal p = 1.5, q;\n  wreal u_inst (p);\n  wreal u_arr[1:0] (p);\n  wreal [1:0] bus;\n  assign vout = vin;\nendmodule\n\
                 module top;\n  wreal a, b;\n  real r;\n  m u (.vin(a), .vout(b), .v(a));\n  initial r = b;\nendmodule\n";
     let (a, root) = project("wreal", &[("t.sv", text)]);
     assert!(problems(&a).is_empty(), "{:?}", problems(&a));
@@ -4741,9 +4741,9 @@ fn bound_instances_are_in_the_design_hierarchy() {
     );
 }
 
-/// A bound instance's parameter values: a constant is evaluated; one naming something (the
-/// target module's names) is not, rather than read where the `bind` is written. A `bind` in a
-/// file opened outside the build does not change the design.
+/// A bound instance's parameter values: a constant, and one naming the target module's
+/// parameter (not the compilation unit's of the same name, where the `bind` is written). A
+/// `bind` in a file opened outside the build does not change the design.
 #[test]
 fn bound_instance_parameters_and_open_files() {
     let files = [
@@ -4756,7 +4756,8 @@ fn bound_instance_parameters_and_open_files() {
     let u_c = &tree[0].children[0];
     let p = |n: &str| u_c.children.iter().find(|c| c.name == n).map(|c| (c.params[0].value.clone(), c.bound.is_some()));
     assert_eq!(p("u_k"), Some((Some("3".to_string()), true)));
-    assert_eq!(p("u_w"), Some((None, true)));
+    // The W of the core instance (8), not the compilation unit's (1).
+    assert_eq!(p("u_w"), Some((Some("8".to_string()), true)));
     // Opened outside the build: its bind is not part of the design.
     use dvi_syntax::SourceProvider;
     let f = a.vfs.file_id(&root.join("extra.sv"));
@@ -4764,4 +4765,119 @@ fn bound_instance_parameters_and_open_files() {
     let tree = b.design_hierarchy(Some("top"), 1000);
     let names: Vec<&str> = tree[0].children[0].children.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["u_k", "u_w"]);
+}
+
+/// Every node of a tree under its path, with its children's names sorted, and where a bound
+/// one's `bind` is.
+fn tree_map(nodes: &[dvi_analysis::ide::views::HierNode], path: &str, out: &mut Vec<String>) {
+    for n in nodes {
+        let p = if path.is_empty() { n.name.clone() } else { format!("{path}.{}", n.name) };
+        let mut kids: Vec<String> = n.children.iter().map(|c| c.name.clone()).collect();
+        kids.sort();
+        out.push(format!("{p}: {}{}", kids.join(" "), n.bound.as_deref().map(|b| format!(" (bind {b})")).unwrap_or_default()));
+        tree_map(&n.children, &p, out);
+    }
+}
+
+/// Binds to instance paths (absolute, or relative to the module they are written in), to one
+/// instance name, to a generate copy or an array element, and limited to listed instances:
+/// each only where it goes. Not into a bound instance, not from a module outside the design. A
+/// bound instance's parameter value names the target's parameters, in each of its instances,
+/// and the parameter hover lists them.
+#[test]
+fn binds_to_paths_and_listed_instances() {
+    let files = [
+        ("rtl.sv", "module leaf; endmodule\nmodule core #(parameter W = 4); leaf u_leaf(); endmodule\nmodule top;\n  core #(.W(8)) u_a();\n  core u_b();\n  for (genvar i = 0; i < 2; i++) begin : g\n    leaf u_c();\n  end\n  leaf arr[1:0] ();\nendmodule\n"),
+        ("chk.sv", "module chk #(parameter P = 2); endmodule\nmodule chk2; endmodule\n"),
+        ("binds.sv", "module tb;\n  top dut();\n  bind dut.u_b chk u_rel();\n  bind core : dut.u_a chk u_list();\n  bind core : dut.u_b.u_leaf chk u_nowhere();\n  bind dut chk u_one();\n  bind dut.g[1].u_c chk u_gen();\n  bind dut.arr[0] chk u_el();\n  bind core chk #(.P(W * 2)) u_p();\nendmodule\nbind tb.dut.u_a chk u_abs();\nmodule unused;\n  bind leaf chk2 u_never();\nendmodule\nbind chk chk2 u_inside();\n"),
+    ];
+    let (a, root) = project_build("bindpaths", "rtl.sv\nchk.sv\nbinds.sv\n-top tb\n", &files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let mut lines = Vec::new();
+    tree_map(&a.design_hierarchy(Some("tb"), 1000), "", &mut lines);
+    assert_eq!(
+        lines,
+        [
+            "tb: dut",
+            "tb.dut: arr g[0] g[1] u_a u_b u_one",
+            "tb.dut.u_a: u_abs u_leaf u_list u_p",
+            "tb.dut.u_a.u_leaf: ",
+            "tb.dut.u_a.u_p:  (bind binds.sv:9)",
+            "tb.dut.u_a.u_list:  (bind binds.sv:4)",
+            "tb.dut.u_a.u_abs:  (bind binds.sv:11)",
+            "tb.dut.u_b: u_leaf u_p u_rel",
+            "tb.dut.u_b.u_leaf: ",
+            "tb.dut.u_b.u_p:  (bind binds.sv:9)",
+            "tb.dut.u_b.u_rel:  (bind binds.sv:3)",
+            "tb.dut.g[0]: u_c",
+            "tb.dut.g[0].u_c: ",
+            "tb.dut.g[1]: u_c",
+            "tb.dut.g[1].u_c: u_gen",
+            "tb.dut.g[1].u_c.u_gen:  (bind binds.sv:7)",
+            "tb.dut.arr: u_el",
+            "tb.dut.arr.u_el:  (bind binds.sv:8, into dut.arr[0] only)",
+            "tb.dut.u_one:  (bind binds.sv:6)",
+        ]
+    );
+    // `W * 2` with the W of each core instance.
+    let tree = a.design_hierarchy(Some("tb"), 1000);
+    let p_of = |inst: &str| {
+        let core = tree[0].children[0].children.iter().find(|c| c.name == inst).unwrap();
+        core.children.iter().find(|c| c.name == "u_p").unwrap().params[0].value.clone()
+    };
+    assert_eq!((p_of("u_a"), p_of("u_b")), (Some("16".to_string()), Some("8".to_string())));
+    // The hover of chk's P lists the values of the bound instances.
+    let text = files[1].1;
+    let h = hover_at(&a, &root, "chk.sv", text, "P = 2");
+    assert!(h.contains("16") && h.contains("8"), "{h}");
+}
+
+/// A `` `undef `` in the source removes a predefined simulator macro, as it does any other.
+#[test]
+fn undef_removes_a_predefined_macro() {
+    let text = "`undef wrealZState\nmodule m (output wreal v);\n  assign v = `wrealZState;\nendmodule\n";
+    let (a, _) = project("wrealz-undef-src", &[("t.sv", text)]);
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("`wrealZState is not defined")), "{p:?}");
+}
+
+fn tree_of(a: &Analysis, top: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    tree_map(&a.design_hierarchy(Some(top), 1000), "", &mut lines);
+    lines
+}
+
+/// A `bind` written in a module exists only where the module is elaborated (not in a generate
+/// branch that is off); a one-name target that is an instance there goes only into it (not into
+/// a top of that name); a target that is a module nested where the statement is; a macro in a
+/// bound instance array's range takes the target's names; an escaped name with brackets.
+#[test]
+fn binds_exist_where_written_and_resolve_there() {
+    let lib = ("lib.sv", "module leaf; endmodule\nmodule chk #(parameter P = 2); endmodule\n");
+    // Off, then on.
+    let off = "module writer; bind leaf chk b(); endmodule\nmodule top; leaf u(); if (0) begin : g writer w(); end endmodule\n";
+    let (a, _) = project_build("bindwriter-off", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", off)]);
+    assert_eq!(tree_of(&a, "top"), ["top: u", "top.u: "]);
+    let on = off.replace("if (0)", "if (1)");
+    let (a, _) = project_build("bindwriter-on", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", &on)]);
+    assert!(tree_of(&a, "top").contains(&"top.u.b:  (bind t.sv:1)".to_string()), "{:?}", tree_of(&a, "top"));
+    // An instance named like the top.
+    let same = "module top; leaf top(); bind top chk b(); endmodule\n";
+    let (a, _) = project_build("bindsame", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", same)]);
+    assert_eq!(tree_of(&a, "top"), ["top: top", "top.top: b", "top.top.b:  (bind t.sv:1)"]);
+    // A nested module.
+    let nested = "module top;\n  module core; endmodule\n  core u();\n  bind core chk b();\nendmodule\n";
+    let (a, _) = project_build("bindnested", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", nested)]);
+    assert!(tree_of(&a, "top").contains(&"top.u.b:  (bind t.sv:4)".to_string()), "{:?}", tree_of(&a, "top"));
+    // A macro in the range of a bound array.
+    let ranged = "`define N W\nparameter W = 1;\nmodule core #(parameter W = 8); endmodule\nmodule top; core u(); endmodule\nbind core chk b[`N:0] ();\n";
+    let (a, _) = project_build("bindrange", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", ranged)]);
+    let tree = a.design_hierarchy(Some("top"), 1000);
+    let b = &tree[0].children[0].children[0];
+    assert_eq!((b.name.as_str(), b.array.as_deref()), ("b", Some("[8:0] · 9 instances")));
+    // An escaped name with brackets.
+    let escaped = "module top; leaf \\u[0] (); bind \\u[0]  chk b(); endmodule\n";
+    let (a, _) = project_build("bindescaped", "lib.sv\nt.sv\n-top top\n", &[lib, ("t.sv", escaped)]);
+    let lines = tree_of(&a, "top");
+    assert!(lines.iter().any(|l| l.ends_with(".b:  (bind t.sv:1)")), "{lines:?}");
 }
