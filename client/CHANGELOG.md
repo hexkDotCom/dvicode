@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Real-number models: `wreal` nets and ports (`input wreal vdd`) are read as Cadence's
+  real-valued net type, and Xcelium's predefined `` `wrealZState `` and `` `wrealXState `` are
+  known (a project's own definition, or `+undefine+`, replaces them).
+- Design Hierarchy: the instances a `bind` adds to a module (`bind fifo fifo_sva u_sva (.*);`,
+  also through a macro) show under every instance of it, marked *bind*. Binds limited to listed
+  instances (`bind fifo : u_a ...`) and binds to an instance path are not shown yet.
+- Hover on a system task or function such as a PLI/VPI one (`$my_plusargs(...)`) says what it is.
+
 ## 0.8.0 (preview)
 
 - **DVICode Lint**: rules that check what SystemVerilog and UVM code means, shown with the

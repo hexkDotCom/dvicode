@@ -183,6 +183,8 @@ pub mod dflags {
     pub const LOCAL_PARAM: u32 = 1 << 25;
     /// A formal of a covergroup's `with function sample(...)` (not of its constructor).
     pub const SAMPLE_ARG: u32 = 1 << 26;
+    /// A [`BOUND`] instance limited to listed instances of the target (`bind m : u1, u2 ...`).
+    pub const BIND_LIMITED: u32 = 1 << 27;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

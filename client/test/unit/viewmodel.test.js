@@ -335,6 +335,11 @@ test.describe('design hierarchy parameters', () => {
     assert.ok(tip.includes('- `W` = `16` · given'), tip);
     assert.ok(tip.includes('- `N` = ? (unresolved: a defparam with a path this version does not follow may set it) · defparam'), tip);
   });
+  test.it('marks an instance a bind adds, and says where the bind is', () => {
+    const n = node({ name: 'u_sva', definition: 'fifo_sva', bound: 'binds.sv:12' });
+    assert.equal(vm.hierDescription(n), 'fifo_sva · bind');
+    assert.ok(vm.hierTooltip(n, 'top.u_fifo.u_sva').includes('Added by the `bind` at binds.sv:12'));
+  });
 });
 
 test.describe('choosing the compile context', () => {

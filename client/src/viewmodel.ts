@@ -733,6 +733,8 @@ export interface HierInfo {
   params?: ParamInfo[];
   presence?: string;
   array?: string;
+  /** Added by a `bind`: where the statement is (`binds.sv:12`). */
+  bound?: string;
 }
 
 /** A parameter's value as shown: its value, else `?`. */
@@ -754,6 +756,9 @@ export function hierDescription(n: HierInfo): string | undefined {
   if (n.array) {
     parts.push(n.array.split(' · ')[0]);
   }
+  if (n.bound) {
+    parts.push('bind');
+  }
   if (n.presence) {
     parts.push(n.presence.startsWith('not elaborated') ? 'not elaborated' : 'undetermined');
   }
@@ -770,6 +775,9 @@ export function hierTooltip(n: HierInfo, path: string): string {
   }
   if (n.array) {
     lines.push(`Array of instances ${n.array}`);
+  }
+  if (n.bound) {
+    lines.push(`Added by the \`bind\` at ${n.bound}`);
   }
   if (n.params?.length) {
     const origin: Record<string, string> = { default: 'default', override: 'given', defparam: 'defparam', local: 'localparam' };
@@ -831,7 +839,7 @@ export interface CompileContextInfo {
       used: boolean;
       tested: boolean;
       undefined: boolean;
-      seen: { defined: boolean; at: ContextPlace | null; command_line: boolean; params: string | null; value: string; count: number }[];
+      seen: { defined: boolean; at: ContextPlace | null; command_line: boolean; predefined?: boolean; params: string | null; value: string; count: number }[];
       states_cut: number;
     }[];
     macros_total: number;
@@ -968,7 +976,7 @@ export function compileContextMarkdown(c: CompileContextInfo, link: (uri: string
         if (!s.defined) {
           return `not defined${n}`;
         }
-        const where = s.command_line ? 'on the command line' : s.at ? `at ${at(s.at)}` : '';
+        const where = s.predefined ? 'by the simulator' : s.command_line ? 'on the command line' : s.at ? `at ${at(s.at)}` : '';
         const value = s.value.trim() ? ` as ${code(s.value.trim())}` : '';
         return `${s.params ? `${code(s.params)} ` : ''}defined ${where}${value}${n}`;
       });

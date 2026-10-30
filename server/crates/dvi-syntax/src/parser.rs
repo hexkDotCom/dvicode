@@ -627,6 +627,7 @@ impl<'t> Parser<'t> {
                         }
                     }
                     let target = SmolStr::new(target);
+                    let limited = self.at_p(":");
                     if self.eat_p(":") {
                         while self.at_ident() {
                             self.bump();
@@ -657,6 +658,9 @@ impl<'t> Parser<'t> {
                         let d = &mut self.u.decls[id];
                         if d.kind == DeclKind::Instance && d.parent == Some(scope) {
                             d.flags |= dflags::BOUND;
+                            if limited {
+                                d.flags |= dflags::BIND_LIMITED;
+                            }
                             self.u.binds.push((target.clone(), id as DeclId));
                         }
                     }
@@ -1663,6 +1667,11 @@ impl<'t> Parser<'t> {
                 }
                 _ => return None,
             },
+            // `wreal v;`, `input wreal vdd`: Cadence's real-valued net (not an IEEE keyword, so a
+            // name elsewhere), read as a built-in type.
+            TokKind::Ident if self.at_wreal() => {
+                self.bump();
+            }
             TokKind::Ident => {
                 let (rid, pr) = self.named_type(kind);
                 ref_id = Some(rid);
@@ -1691,6 +1700,20 @@ impl<'t> Parser<'t> {
         let _ = flags_virtual;
         let text = self.text_of(from, self.pos);
         Some(TypeInfo { tref: TypeRef { text, ref_id, inline }, named, params })
+    }
+
+    /// At `wreal` before the declared name: Cadence's real-valued net type. Not before an
+    /// instance (`wreal u (...)`, `wreal u[1:0] (...)`, `wreal #(...) u`: a module named `wreal`).
+    fn at_wreal(&self) -> bool {
+        let t = self.tok();
+        if !(t.kind == TokKind::Ident && t.text == "wreal" && self.nth(1).kind == TokKind::Ident) {
+            return false;
+        }
+        let mut j = self.pos + 2;
+        while self.toks.get(j).is_some_and(|x| x.is_punct("[")) {
+            j = self.skip_group_from(j);
+        }
+        !self.toks.get(j).is_some_and(|x| x.is_punct("("))
     }
 
     /// `name [#(...)] {:: name [#(...)]}`; returns the reference and the parameter range of
@@ -1894,7 +1917,9 @@ impl<'t> Parser<'t> {
         if self.at_kw("virtual") {
             fl |= dflags::VIRTUAL_IF;
         }
-        if self.tok().kind == TokKind::Keyword && is_net_type_kw(&self.tok().text) {
+        if self.at_wreal() {
+            kind = DeclKind::Net;
+        } else if self.tok().kind == TokKind::Keyword && is_net_type_kw(&self.tok().text) {
             kind = DeclKind::Net;
             self.bump();
             // Strength, vectored/scalared, delay.

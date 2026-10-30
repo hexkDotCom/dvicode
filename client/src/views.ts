@@ -58,6 +58,8 @@ interface HierNode extends TreeNode {
   presence?: string;
   /** An array of instances: its range. */
   array?: string;
+  /** Added by a `bind`: where the statement is. */
+  bound?: string;
 }
 
 interface FileNode extends TreeNode {

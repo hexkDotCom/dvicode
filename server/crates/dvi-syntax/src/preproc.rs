@@ -91,6 +91,29 @@ pub fn def_identity(d: &Arc<MacroDef>) -> usize {
     Arc::as_ptr(d) as usize
 }
 
+/// Macros a simulator defines by itself, with what each is: Xcelium's real-number-model states.
+/// Their body, `0.0`, only lets the code around them parse.
+pub const SIMULATOR_MACROS: &[(&str, &str)] = &[
+    ("wrealZState", "Predefined by Xcelium for real-number models: the high-impedance value of a `wreal` net. DVICode reads it as `0.0`."),
+    ("wrealXState", "Predefined by Xcelium for real-number models: the unknown value of a `wreal` net. DVICode reads it as `0.0`."),
+];
+
+/// A [`SIMULATOR_MACROS`] definition: like a command-line one, with the start of its name span
+/// at 1 to tell it apart ([`predefined_doc`]).
+pub fn simulator_define(name: &str) -> MacroDef {
+    let mut d = command_line_define(name, Some("0.0"));
+    d.name_span = Span::new(COMMAND_LINE_FILE, 1, 1);
+    d
+}
+
+/// What a predefined simulator macro is ([`simulator_define`]); `None` for any other.
+pub fn predefined_doc(m: &MacroDef) -> Option<&'static str> {
+    if m.name_span.file != COMMAND_LINE_FILE || m.name_span.start != 1 {
+        return None;
+    }
+    SIMULATOR_MACROS.iter().find(|(n, _)| *n == m.name.as_str()).map(|(_, doc)| *doc)
+}
+
 /// A `` `define `` given as `NAME` or `NAME=value`.
 pub fn command_line_define(name: &str, value: Option<&str>) -> MacroDef {
     let body = value.map(|v| crate::lexer::lex(v, COMMAND_LINE_FILE)).unwrap_or_default();

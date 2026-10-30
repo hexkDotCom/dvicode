@@ -2545,6 +2545,11 @@ impl<'a> Elab<'a> {
             } else if let Some(o) = overrides.get(name.as_str()) {
                 match o {
                     Some(t) if typed => (Ok(Val::Type(text_of(t))), Origin::Override),
+                    // A `bind`'s value naming something: the names are the target module's, and
+                    // they would be read where the statement is.
+                    Some(t) if inst.is_some_and(|i| a.decl(i).has(dflags::BOUND)) && t.iter().any(|x| x.kind == TokKind::Ident) => {
+                        (unsupported("a value in a `bind` that names something (in the target module)"), Origin::Override)
+                    }
                     // Evaluated where the instance is, as an assignment to the parameter's type.
                     Some(t) => (self.ev.declared_type(p, &frame).and_then(|ty| self.ev.eval_as(t, inst.map_or(def.unit, |i| i.unit), parent, &ty)), Origin::Override),
                     None => (self.ev.declared_value(p, &frame), Origin::Default),

@@ -4,7 +4,7 @@ use super::{Hit, Target};
 use crate::world::{Analysis, DeclRef};
 use dvi_syntax::ast::{dflags, Decl, DeclKind};
 use dvi_syntax::preproc::{expand_snippet, join_tokens, MacroDef};
-use dvi_syntax::{FileId, SourceProvider, Span};
+use dvi_syntax::{FileId, SourceProvider, Span, TokKind};
 
 impl Analysis {
     /// Markdown hover text and the span it applies to.
@@ -27,7 +27,9 @@ impl Analysis {
         if let Some(h) = self.override_hover(file, off) {
             return Some(h);
         }
-        let hit = self.hit_at(file, off)?;
+        let Some(hit) = self.hit_at(file, off) else {
+            return self.system_routine_hover(file, off);
+        };
         let span = hit.span();
         let target = self.target_of(&hit)?;
         let md = match target {
@@ -59,6 +61,24 @@ impl Analysis {
         Some((md, span))
     }
 
+    /// A `$name` call (`$display`, or a PLI/VPI task such as `$my_plusargs`): what it is. Not
+    /// `$root` and `$unit`, which are scopes.
+    fn system_routine_hover(&self, file: FileId, off: u32) -> Option<(String, Span)> {
+        let toks = self.file_tokens(file)?;
+        // The cursor just after the name (`$display|(`) is on it too, also when the next token
+        // starts there (`(|$display`: on the name).
+        let i = toks.partition_point(|t| t.span.end < off);
+        let t = toks[i.min(toks.len())..].iter().take(2).find(|t| t.kind == TokKind::SysIdent && t.span.start <= off && off <= t.span.end)?;
+        if matches!(t.text.as_str(), "$root" | "$unit") {
+            return None;
+        }
+        let md = format!(
+            "{}\n\nA system task or function: built into the simulator, or added by a PLI/VPI library. DVICode does not check its arguments.",
+            super::context::md_code(&t.text)
+        );
+        Some((md, t.span))
+    }
+
     pub fn macro_hover(&self, m: &MacroDef) -> String {
         let mut body = m.body_text.clone();
         let lines: Vec<&str> = body.lines().collect();
@@ -72,6 +92,9 @@ impl Analysis {
                 s.push_str("\n\n");
                 s.push_str(&doc);
             }
+        } else if let Some(doc) = dvi_syntax::preproc::predefined_doc(m) {
+            s.push_str("\n\n");
+            s.push_str(doc);
         } else {
             s.push_str("\n\nDefined on the command line (+define+)");
         }

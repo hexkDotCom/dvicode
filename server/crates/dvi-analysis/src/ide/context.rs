@@ -147,6 +147,9 @@ pub struct SeenDef {
     /// Where it is defined (`None`: on the command line, or not defined).
     pub at: Option<Place>,
     pub command_line: bool,
+    /// Predefined by the simulator (`wrealZState`): not from the command line or a file.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub predefined: bool,
     /// `(a, b = 1)` for a function-like macro.
     pub params: Option<String>,
     pub value: String,
@@ -434,7 +437,7 @@ impl Analysis {
     }
 
     fn seen_def(&self, def: Option<&MacroDef>, count: usize) -> SeenDef {
-        let Some(def) = def else { return SeenDef { defined: false, at: None, command_line: false, params: None, value: String::new(), count } };
+        let Some(def) = def else { return SeenDef { defined: false, at: None, command_line: false, predefined: false, params: None, value: String::new(), count } };
         let params = def.params.as_ref().map(|ps| {
             let ps: Vec<String> = ps.iter().map(|p| match &p.default {
                 Some(t) => format!("{} = {}", p.name, t.iter().map(|x| x.text.as_str()).collect::<Vec<_>>().join(" ")),
@@ -446,7 +449,8 @@ impl Analysis {
         if def.body_text.chars().count() > VALUE_CHARS {
             value.push('…');
         }
-        SeenDef { defined: true, at: self.place(def.name_span), command_line: def.name_span.file == COMMAND_LINE_FILE, params, value, count }
+        let predefined = dvi_syntax::preproc::predefined_doc(def).is_some();
+        SeenDef { defined: true, at: self.place(def.name_span), command_line: def.name_span.file == COMMAND_LINE_FILE && !predefined, predefined, params, value, count }
     }
 
     /// Lines of `file` in the union of the removed regions recorded for it. A region runs from

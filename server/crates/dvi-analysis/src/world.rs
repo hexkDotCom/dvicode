@@ -145,7 +145,7 @@ impl ProjectSetup {
         let mut initial_macros = Vec::new();
         for inv in &config.invocations {
             pp_configs.push(PpConfig { incdirs: inv.incdirs.clone(), root_dir: root.to_path_buf() });
-            let mut m = MacroTable::new();
+            let mut m = simulator_macros();
             for (n, v) in &inv.defines {
                 m.insert(Arc::new(command_line_define(n, v.as_deref())));
             }
@@ -156,11 +156,21 @@ impl ProjectSetup {
         }
         if pp_configs.is_empty() {
             pp_configs.push(PpConfig { incdirs: Vec::new(), root_dir: root.to_path_buf() });
-            initial_macros.push(MacroTable::new());
+            initial_macros.push(simulator_macros());
         }
         let inv_keys = config.invocations.iter().map(crate::select::invocation_key).collect();
         ProjectSetup { root: root.to_path_buf(), config, pp_configs, initial_macros, env, inv_keys }
     }
+}
+
+/// The macros every compilation starts with before the build's own `+define+`s (which, like a
+/// `` `define `` or `+undefine+`, replace them): the simulator's predefined ones.
+fn simulator_macros() -> MacroTable {
+    let mut m = MacroTable::new();
+    for (n, _) in dvi_syntax::preproc::SIMULATOR_MACROS {
+        m.insert(Arc::new(dvi_syntax::preproc::simulator_define(n)));
+    }
+    m
 }
 
 /// An immutable analysis snapshot. Cloning is cheap.

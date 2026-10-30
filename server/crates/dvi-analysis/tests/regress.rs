@@ -4626,3 +4626,142 @@ fn randomize_arguments_are_members_of_the_object() {
     let p = problems(&a);
     assert!(p.iter().any(|m| m.contains("'ghost' is not declared")), "{p:?}");
 }
+
+// ---- Real-number models and binds ---------------------------------------------------------
+
+/// A project with its own build file (`+define+`s and such), compiled.
+fn project_build(name: &str, build: &str, files: &[(&str, &str)]) -> (Analysis, PathBuf) {
+    let (_, root) = project(name, files);
+    std::fs::write(root.join(".dvicode/default.build"), build).unwrap();
+    let cfg = dvi_project::load(&root, None, &FxHashMap::default());
+    (Analysis::build(Arc::new(Vfs::new()), Arc::new(ProjectSetup::new(&root, cfg, FxHashMap::default()))), root)
+}
+
+fn hover_at(a: &Analysis, root: &std::path::Path, file: &str, text: &str, needle: &str) -> String {
+    use dvi_syntax::SourceProvider;
+    let f = a.vfs.file_id(&root.join(file));
+    let off = text.find(needle).unwrap_or_else(|| panic!("{needle}")) as u32;
+    a.hover(f, off).map(|h| h.0).unwrap_or_default()
+}
+
+/// `wreal` (Cadence's real-valued net) in ports, nets, arrays and initialized lists is a
+/// built-in net type; a module named `wreal` is still one.
+#[test]
+fn wreal_is_a_net_type() {
+    let text = "module wreal (input real a);\nendmodule\n\
+                module m (input wreal vin, output wreal vout, v);\n  input v;\n  wreal v;\n  wreal arr[3:0];\n  wreal p = 1.5, q;\n  wreal u_inst (p);\n  wreal u_arr[1:0] (p);\n  assign vout = vin;\nendmodule\n\
+                module top;\n  wreal a, b;\n  real r;\n  m u (.vin(a), .vout(b), .v(a));\n  initial r = b;\nendmodule\n";
+    let (a, root) = project("wreal", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    assert!(hover_at(&a, &root, "t.sv", text, "vin,").contains("wreal vin"));
+    assert!(hover_at(&a, &root, "t.sv", text, "a, b;").contains("wreal a"));
+    // The instance of the module named `wreal` resolves to it.
+    use dvi_syntax::SourceProvider;
+    let f = a.vfs.file_id(&root.join("t.sv"));
+    let off = text.find("wreal u_inst").unwrap() as u32;
+    assert_eq!(a.goto_definition(f, off).iter().map(|l| l.range.start.line).collect::<Vec<_>>(), vec![0]);
+}
+
+/// Xcelium's `` `wrealZState `` and `` `wrealXState `` are predefined: they expand, `` `ifdef ``
+/// sees them, and the project's own definition or `+undefine+` replaces them.
+#[test]
+fn xcelium_rnm_macros_are_predefined() {
+    let text = "module m (input wreal vin, output wreal vout);\n  assign vout = (vin > 0.5) ? vin : `wrealZState;\n\
+                initial if (vout === `wrealXState) $display(\"x\");\n\
+                `ifndef wrealZState\n  undeclared_thing u();\n`endif\nendmodule\n";
+    let (a, root) = project("wrealz", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let h = hover_at(&a, &root, "t.sv", text, "wrealZState;");
+    assert!(h.contains("Predefined by Xcelium") && !h.contains("command line"), "{h}");
+    // `+define+` replaces it; `+undefine+` removes it.
+    let (a, root) = project_build("wrealz-def", "+define+wrealZState=2.0\nt.sv\n", &[("t.sv", text)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    assert!(hover_at(&a, &root, "t.sv", text, "wrealZState;").contains("Defined on the command line"));
+    let (a, _) = project_build("wrealz-undef", "+undefine+wrealZState\nt.sv\n", &[("t.sv", text)]);
+    let p = problems(&a);
+    assert!(p.iter().any(|m| m.contains("`wrealZState is not defined")), "{p:?}");
+    // A `define in the code replaces it too.
+    let own = format!("`define wrealZState 9.0\n{text}");
+    let (a, root) = project("wrealz-own", &[("t.sv", &own)]);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    assert!(hover_at(&a, &root, "t.sv", &own, "wrealZState;").contains("9.0"));
+}
+
+/// A system task or function (a PLI/VPI one such as `$my_plusargs`, or a standard one) has a
+/// hover saying what it is; `$root` and `$unit` have none of it.
+#[test]
+fn system_routines_have_a_hover() {
+    let text = "module m;\n  string s;\n  initial begin\n    if ($my_plusargs(\"MODE=%s\", s)) $display(s);\n    $root.m.s = \"x\";\n  end\nendmodule\n";
+    let (a, root) = project("systask", &[("t.sv", text)]);
+    let h = hover_at(&a, &root, "t.sv", text, "$my_plusargs");
+    // Also with the cursor just after the name.
+    assert!(hover_at(&a, &root, "t.sv", text, "(\"MODE").contains("`$my_plusargs`"));
+    assert!(h.contains("`$my_plusargs`") && h.contains("PLI/VPI"), "{h}");
+    assert!(hover_at(&a, &root, "t.sv", text, "$display").contains("`$display`"));
+    assert!(!hover_at(&a, &root, "t.sv", text, "$root").contains("system task"));
+}
+
+fn tree_lines(nodes: &[dvi_analysis::ide::views::HierNode], depth: usize, out: &mut Vec<String>) {
+    for n in nodes {
+        out.push(format!("{}{}:{}{}", "  ".repeat(depth), n.name, n.definition, n.bound.as_deref().map(|b| format!(" (bind {b})")).unwrap_or_default()));
+        tree_lines(&n.children, depth + 1, out);
+    }
+}
+
+/// The instances a module-type `bind` adds show under every instance of the target, with the
+/// bound module's own children; once also when the bind is in a header compiled twice; not
+/// for a bind limited to listed instances (not followed).
+#[test]
+fn bound_instances_are_in_the_design_hierarchy() {
+    let files = [
+        ("rtl.sv", "module leaf; endmodule\nmodule core; leaf u_leaf(); endmodule\nmodule top; core u_a(); core u_b(); endmodule\n"),
+        ("sva.sv", "module core_sva; leaf u_chk(); endmodule\n"),
+        ("binds.svh", "`ifndef BINDS_SVH\n`define BINDS_SVH\n`define bind_by_type(MODULE, NAME) bind MODULE MODULE``_sva NAME();\n`bind_by_type(core, u_sva)\n`endif\n"),
+        ("tb.sv", "`include \"binds.svh\"\nmodule tb; top dut(); endmodule\nbind core : u_a core_sva u_only_a();\n"),
+        ("tb2.sv", "`include \"binds.svh\"\nmodule tb2; endmodule\n"),
+    ];
+    let (a, _) = project_build("bindhier", "+incdir+.\nrtl.sv\nsva.sv\ntb.sv\ntb2.sv\n-top tb\n", &files);
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let mut lines = Vec::new();
+    tree_lines(&a.design_hierarchy(Some("tb"), 1000), 0, &mut lines);
+    assert_eq!(
+        lines,
+        [
+            "tb:tb",
+            "  dut:top",
+            "    u_a:core",
+            "      u_leaf:leaf",
+            "      u_sva:core_sva (bind binds.svh:4)",
+            "        u_chk:leaf",
+            "    u_b:core",
+            "      u_leaf:leaf",
+            "      u_sva:core_sva (bind binds.svh:4)",
+            "        u_chk:leaf",
+        ]
+    );
+}
+
+/// A bound instance's parameter values: a constant is evaluated; one naming something (the
+/// target module's names) is not, rather than read where the `bind` is written. A `bind` in a
+/// file opened outside the build does not change the design.
+#[test]
+fn bound_instance_parameters_and_open_files() {
+    let files = [
+        ("rtl.sv", "localparam int W = 1;\nmodule core #(parameter W = 4); endmodule\nmodule top; core #(.W(8)) u_c(); endmodule\n"),
+        ("chk.sv", "module chk #(parameter P = 2); endmodule\nbind core chk #(.P(3)) u_k();\nbind core chk #(.P(W)) u_w();\n"),
+        ("extra.sv", "bind core chk u_extra();\n"),
+    ];
+    let (a, root) = project_build("bindparams", "rtl.sv\nchk.sv\n-top top\n", &files);
+    let tree = a.design_hierarchy(Some("top"), 1000);
+    let u_c = &tree[0].children[0];
+    let p = |n: &str| u_c.children.iter().find(|c| c.name == n).map(|c| (c.params[0].value.clone(), c.bound.is_some()));
+    assert_eq!(p("u_k"), Some((Some("3".to_string()), true)));
+    assert_eq!(p("u_w"), Some((None, true)));
+    // Opened outside the build: its bind is not part of the design.
+    use dvi_syntax::SourceProvider;
+    let f = a.vfs.file_id(&root.join("extra.sv"));
+    let b = a.add_adhoc(f);
+    let tree = b.design_hierarchy(Some("top"), 1000);
+    let names: Vec<&str> = tree[0].children[0].children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["u_k", "u_w"]);
+}

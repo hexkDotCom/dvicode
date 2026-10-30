@@ -61,6 +61,10 @@ pub struct HierNode {
     /// An array of instances: its range (`[0:3]`, or why it is not known).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub array: Option<String>,
+    /// Added by a `bind` (`bind fifo fifo_sva u_sva (.*);`): where the statement is
+    /// (`binds.sv:12`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
 }
 
 /// A component of the UVM verification hierarchy (or, with `TreeQuery::objects`, an object).
@@ -1077,6 +1081,7 @@ impl Analysis {
                 params: top.shown,
                 presence: None,
                 array: None,
+                bound: None,
             };
             let key = self.decl_key(self.canonical(t));
             let mut stack = vec![(key, values_hash(&node.params))];
@@ -1125,6 +1130,7 @@ impl Analysis {
                     params: Vec::new(),
                     presence: mark,
                     array: None,
+                    bound: None,
                 });
             }
         };
@@ -1149,14 +1155,14 @@ impl Analysis {
                     let wpath = format!("{path}.{name}");
                     let wpin = pin_below(pin, &keyed(&name, dup));
                     cx.names.push(name.clone());
-                    let (nodes, stop) = self.hier_child(&child, scope, def_name, &wpath, wpin, w, stack, truncated, &mut own, frame, cx, presence.clone());
+                    let (nodes, stop) = self.hier_child(&child, scope, def_name, &wpath, wpin, w, stack, truncated, &mut own, frame, cx, presence.clone(), None);
                     cx.names.pop();
                     kids.extend(nodes);
                     wrapper = Some((name, kids, mark, own, dup, first));
                     stop
                 }
                 None => {
-                    let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, presence);
+                    let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, presence, None);
                     out.extend(nodes);
                     stop
                 }
@@ -1167,20 +1173,55 @@ impl Analysis {
             }
         }
         flush(&mut out, wrapper.take());
+        // The instances `bind` adds to every instance of this definition, after its own.
+        if self.decl(scope).kind.is_definition() {
+            for b in self.bound_instances(def_name) {
+                let child = super::elab::Child { decl: b.decl, presence: super::elab::Presence::Elaborated, iterations: None, name: self.decl(b).name.clone(), implicit: None };
+                let span = self.decl(b).span;
+                let file = self.vfs.path(span.file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let at = format!("{file}:{}", self.to_range(span).map_or(0, |r| r.start.line + 1));
+                let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, None, Some((b, at)));
+                out.extend(nodes);
+                if stop {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The instances `bind` statements add to each instance of the module (or interface)
+    /// `def_name`: `bind fifo fifo_sva u_sva (.*);`. Once each, also when a header with the
+    /// statement is compiled more than once. Binds to instance paths, or limited to listed
+    /// instances (`bind fifo : u_a ...`), are not followed.
+    pub(crate) fn bound_instances(&self, def_name: &str) -> Vec<DeclRef> {
+        let mut seen = FxHashSet::default();
+        let mut out = Vec::new();
+        for b in self.global.binds.get(def_name).into_iter().flatten() {
+            let d = self.decl(*b);
+            // Files opened outside the build do not change the design.
+            if d.has(dflags::BIND_LIMITED) || self.unit(b.unit).kind == UnitKind::AdHoc {
+                continue;
+            }
+            if seen.insert((d.span, d.name.clone(), d.ty.as_ref().map(|t| t.text.clone()))) {
+                out.push(*b);
+            }
+        }
         out
     }
 
     /// The nodes of one child of a scope, and whether the walk of the scope stops there (a
-    /// limit).
+    /// limit). `bound`: an instance a `bind` adds (in its own unit), and where the statement is.
     #[allow(clippy::too_many_arguments)]
-    fn hier_child(&self, child: &super::elab::Child, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx, presence: Option<String>) -> (Vec<HierNode>, bool) {
+    fn hier_child(&self, child: &super::elab::Child, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx, presence: Option<String>, bound: Option<(DeclRef, String)>) -> (Vec<HierNode>, bool) {
         let mut out = Vec::new();
-        let u = self.unit(scope.unit);
+        let unit = bound.as_ref().map_or(scope.unit, |(b, _)| b.unit);
+        let u = self.unit(unit);
         let c = child.decl;
         let d = u.parsed.decl(c);
         match d.kind {
             // A `bind` adds its instance to the target, not to the module it is written in.
-            DeclKind::Instance if d.has(dflags::BOUND) => {}
+            DeclKind::Instance if d.has(dflags::BOUND) && bound.is_none() => {}
             DeclKind::Instance => {
                 let dup = sibling(seen, &d.name);
                 let child_pin = pin_below(pin, &keyed(&d.name, dup));
@@ -1196,7 +1237,7 @@ impl Analysis {
                     *truncated = true;
                     return (out, pin.is_none());
                 };
-                let cr = DeclRef { unit: scope.unit, decl: c };
+                let cr = DeclRef { unit, decl: c };
                 let def = self.type_of(cr);
                 let loc = self.decl_location(cr);
                 let def_loc = def.and_then(|m| self.decl_location(m));
@@ -1221,6 +1262,7 @@ impl Analysis {
                     params: Vec::new(),
                     presence,
                     array,
+                    bound: bound.map(|(_, at)| at),
                 };
                 let matched = if w.q.target.is_some() {
                     w.hit(&node.name, &node.definition, def_name, "")
@@ -1318,6 +1360,7 @@ impl Analysis {
                             params: Vec::new(),
                             presence: mark,
                             array: None,
+                            bound: None,
                         });
                     } else {
                         out.extend(kids);
