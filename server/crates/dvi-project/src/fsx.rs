@@ -296,7 +296,9 @@ mod tests {
         assert!(read(dir.join(r"chain\a.sv")).is_err_and(|e| e.kind() == ErrorKind::PermissionDenied));
         assert_eq!(blocked(dir.join(r"to_real\a.sv")), None);
         netpath::set_allowed_hosts(None);
-        assert!(FOLDERS.read().unwrap().is_none(), "forgotten when the hosts change");
+        // Other tests may fill the cache again meanwhile: only this test's links are looked at.
+        let left = FOLDERS.read().unwrap().as_ref().is_some_and(|m| ["to_host", "chain", "to_real", "unknown"].iter().any(|l| m.contains_key(&dir.join(l))));
+        assert!(!left, "forgotten when the hosts change");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
