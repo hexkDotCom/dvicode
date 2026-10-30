@@ -227,7 +227,8 @@ async function run() {
     const h = await c.sendRequest('dvicode/designHierarchy', { top: null });
     const s = (n) => `${n.name}${n.children.length ? '(' + n.children.map(s).join(',') + ')' : ''}`;
     const text = h.map(s).join(' ');
-    if (!text.startsWith('tb_top(dut(u_fifo,g_mon[0](u_mon),g_mon[1](u_mon)))')) throw new Error(text);
+    // `bind fifo fifo_sva u_sva` adds u_sva to every fifo instance.
+    if (!text.startsWith('tb_top(dut(u_fifo(u_sva),g_mon[0](u_mon(u_sva)),g_mon[1](u_mon(u_sva))))')) throw new Error(text);
     return text;
   });
 
@@ -376,7 +377,7 @@ async function run() {
     try {
       await v.design.setFilter('mon');
       const design = (await allNodes(v.design)).join(' ');
-      if (design !== 'tb_top tb_top.dut tb_top.dut.g_mon[0] tb_top.dut.g_mon[0].u_mon tb_top.dut.g_mon[1] tb_top.dut.g_mon[1].u_mon') throw new Error(`design: ${design}`);
+      if (design !== 'tb_top tb_top.dut tb_top.dut.g_mon[0] tb_top.dut.g_mon[0].u_mon tb_top.dut.g_mon[0].u_mon.u_sva tb_top.dut.g_mon[1] tb_top.dut.g_mon[1].u_mon tb_top.dut.g_mon[1].u_mon.u_sva') throw new Error(`design: ${design}`);
       await v.verification.setFilter('drv');
       const verif = (await allNodes(v.verification)).join(' ');
       if (verif !== 'demo_full_test demo_full_test.env demo_full_test.env.agents[i] demo_full_test.env.agents[i].drv') throw new Error(`verification: ${verif}`);
