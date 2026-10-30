@@ -303,7 +303,7 @@ JUnit report.
 ```yaml
 repos:
   - repo: https://github.com/hexkDotCom/dvicode
-    rev: v0.8.0
+    rev: v0.9.0
     hooks:
       - id: dvicode-lint
 ```

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (preview)
 
 - Real-number models: `wreal` nets and ports (`input wreal vdd`) are read as Cadence's
   real-valued net type, and Xcelium's predefined `` `wrealZState `` and `` `wrealXState `` are

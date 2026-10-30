@@ -13,7 +13,7 @@ inputs:
   version:
     description: 'The DVICode release to use (a version such as 0.8.0)'
     required: false
-    default: '0.8.0'
+    default: '0.9.0'
   path:
     description: 'The project folder'
     required: false
