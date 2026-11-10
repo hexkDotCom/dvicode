@@ -2522,6 +2522,11 @@ struct TreeParams {
     objects: Option<bool>,
     /// Design Hierarchy: generate branches proven not elaborated are shown.
     inactive: Option<bool>,
+    /// Design Hierarchy: names from a top to a node that was cut: only it and what is below
+    /// it are returned (with the nodes on the way).
+    root: Option<Vec<String>>,
+    /// With `root`: the revision of the tree the node is in; another one answers `stale`.
+    revision: Option<i64>,
 }
 
 /// `dvicode/structure`: the Structure of a file.
@@ -2626,6 +2631,15 @@ fn view_tree(a: &Analysis, p: TreeParams, models: &RegisterModels) -> Value {
     let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
     match p.view.as_str() {
         "design" => {
+            if let Some(root) = p.root {
+                if p.revision.is_some_and(|r| u64::try_from(r).ok() != Some(a.revision)) {
+                    return json!({ "revision": a.revision, "stale": true });
+                }
+                q.reveal = root;
+                q.subtree = true;
+                q.filter = None;
+                q.target = None;
+            }
             let (roots, meta) = a.design_tree(nonempty(p.top).as_deref(), &q);
             json!({ "revision": a.revision, "incomplete": meta.incomplete, "matches": meta.matches, "roots": roots })
         }

@@ -398,3 +398,34 @@ test.describe('choosing the compile context', () => {
     assert.match(none, /A compile context was chosen for this file \(from \[b\.sv\].*it is kept[\s\S]*\*\*Not compiled\.\*\*/);
   });
 });
+
+test.describe('subtrees loaded later', () => {
+  test.it('take the place of the node at the names, with whether it is cut', () => {
+    const name = (n) => (n.dup ? `${n.name}#${n.dup}` : n.name);
+    const roots = [{ name: 'top', truncated: false, children: [{ name: 'a', children: [], truncated: true, cut: 'nodes' }, { name: 'a', dup: 2, children: [], truncated: true, cut: 'nodes' }] }];
+    const fresh = [{ name: 'top', truncated: false, children: [{ name: 'a', dup: 2, truncated: false, children: [{ name: 'x', children: [], truncated: false }] }] }];
+    const cut = (n) => n.truncated && n.cut === 'nodes';
+    assert.equal(vm.spliceSubtree(roots, fresh, ['top', 'a#2'], name, cut), true);
+    assert.deepEqual(roots[0].children[1], fresh[0].children[0]);
+    assert.equal(roots[0].children[1].cut, undefined, 'no longer cut');
+    assert.equal(roots[0].children[0].cut, 'nodes', 'its sibling of the same name stays as it was');
+    assert.equal(vm.spliceSubtree(roots, fresh, ['top', 'b'], name, cut), false);
+    // An answer for a parent that cuts again a child loaded before keeps what was loaded.
+    const later = [{ name: 'top', truncated: false, children: [{ name: 'a', children: [{ name: 'y', children: [], truncated: false }], truncated: false }, { name: 'a', dup: 2, children: [], truncated: true, cut: 'nodes' }] }];
+    assert.equal(vm.spliceSubtree(roots, later, ['top'], name, cut), true);
+    assert.deepEqual(roots[0].children.map((c) => [name(c), c.children.map((x) => x.name)]), [['a', ['y']], ['a#2', ['x']]]);
+  });
+  test.it('place again only the branch below a node', () => {
+    const name = (n) => n.name;
+    const roots = [{ name: 'top', children: [{ name: 'p', children: [{ name: 'old', children: [] }] }, { name: 'q', children: [] }] }];
+    const tree = vm.placeTree(roots, name);
+    const p = tree.byNames.get(vm.namesKey(['top', 'p']))[0];
+    const q = tree.byNames.get(vm.namesKey(['top', 'q']))[0];
+    roots[0].children[0].children = [{ name: 'n1', children: [] }, { name: 'n2', children: [] }];
+    vm.replacePlaced(tree, p, name);
+    assert.equal(tree.byNames.get(vm.namesKey(['top', 'p', 'old'])), undefined);
+    assert.deepEqual(p.children.map((c) => c.names.join('.')), ['top.p.n1', 'top.p.n2']);
+    assert.ok(tree.byKey.has(p.children[1].key));
+    assert.equal(tree.byNames.get(vm.namesKey(['top', 'q']))[0], q, 'the rest keeps its places');
+  });
+});

@@ -394,6 +394,27 @@ async function run() {
     }
   });
 
+  await test('design hierarchy: nodes cut at the node limit load when expanded', async () => {
+    const api = vscode.extensions.getExtension('hexk.dvicode').exports;
+    await api.ready();
+    const v = api.views();
+    const full = (await allNodes(v.design)).join(' ');
+    v.design.testMaxNodes = 2;
+    try {
+      await v.design.refresh();
+      const description = v.design.view.description ?? '';
+      if (!description.includes('cut at the node limit')) throw new Error(`description: ${description}`);
+      const shown = (await v.design.getChildren()).map((i) => i.placed.names.join('.')).join(' ');
+      // Expanding every node loads what was cut.
+      const loaded = (await allNodes(v.design)).join(' ');
+      if (loaded !== full) throw new Error(`loaded: ${loaded} | full: ${full}`);
+      return `${shown} -> ${loaded.split(' ').length} nodes`;
+    } finally {
+      v.design.testMaxNodes = undefined;
+      await v.design.refresh();
+    }
+  });
+
   await test('register model view: maps, registers, fields on demand', async () => {
     const api = vscode.extensions.getExtension('hexk.dvicode').exports;
     await api.ready();

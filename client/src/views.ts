@@ -23,6 +23,8 @@ import {
   namesKey,
   occurrences,
   placeTree,
+  replacePlaced,
+  spliceSubtree,
   registerDescription,
   registerTooltip,
   targetKey,
@@ -181,6 +183,13 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   /** Changes with each filter, so items get new ids and the matches show expanded. */
   private filterGen = 0;
   private tree: PlacedTree<N> | undefined;
+  /** The nodes the tree is placed from (subtrees loaded later are put into them). */
+  private raw: N[] = [];
+  /** Subtrees being loaded, by the request generation and the names of their node: one
+   * request each. */
+  private readonly below = new Map<string, Promise<void>>();
+  /** Subtrees asked for in the tree shown (`revision:names`): each once, until it is fetched again. */
+  private readonly asked = new Set<string>();
   private items = new Map<string, Item<N>>();
   private roots: Item<N>[] = [];
   /** The analysis revision of the tree shown. */
@@ -210,6 +219,8 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   latest = -1;
   /** Changes when the top, test, filter or server changes: older follows stop. */
   private paramGen = 0;
+  /** For tests: the node limit of the whole tree's request (the engine's default otherwise). */
+  testMaxNodes: number | undefined;
 
   constructor(
     readonly name: ViewName,
@@ -229,6 +240,18 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   /** Takes what else the answer holds (the tests). */
   protected onResult(r: TreeResult<N>): void {
     void r;
+  }
+
+  /** Whether more of what is below `n` can be loaded on its own (the view loads it when the
+   * node is expanded). */
+  protected canLoadMore(n: N): boolean {
+    void n;
+    return false;
+  }
+
+  /** Whether expanding `n` loads what is below it (not with a filter: the tree shows matches). */
+  protected mayLoad(n: N): boolean {
+    return this.filter === undefined && this.canLoadMore(n);
   }
 
   attach(view: vscode.TreeView<Item<N>>): void {
@@ -255,6 +278,11 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
 
   async getChildren(e?: Item<N>): Promise<Item<N>[]> {
     if (e) {
+      const names = e.placed.names;
+      if (this.mayLoad(e.node) && !this.asked.has(`${this.revision}:${namesKey(names)}`)) {
+        await this.loadBelow(names);
+        return this.itemByNames(names)?.kids ?? e.kids;
+      }
       return e.kids;
     }
     if (!this.attempted) {
@@ -263,6 +291,76 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       await this.loading;
     }
     return this.roots;
+  }
+
+  /** Loads what is below the node at `names` (cut at the node limit) into the tree. */
+  private loadBelow(names: string[]): Promise<void> {
+    const key = `${this.gen}:${namesKey(names)}`;
+    const running = this.below.get(key);
+    if (running) {
+      return running;
+    }
+    const p = this.fetchBelow(names, false).finally(() => this.below.delete(key));
+    this.below.set(key, p);
+    return p;
+  }
+
+  private async fetchBelow(names: string[], again: boolean): Promise<void> {
+    const c = this.conn.client();
+    if (!c) {
+      return;
+    }
+    const gen = this.gen;
+    const revision = this.revision;
+    const asked = `${revision}:${namesKey(names)}`;
+    this.asked.add(asked);
+    let r: TreeResult<N> & { stale?: boolean };
+    try {
+      r = await c.sendRequest<TreeResult<N> & { stale?: boolean }>('dvicode/tree', { view: this.name, ...this.params(), filter: null, reveal: null, root: names, revision, maxNodes: 100000 });
+    } catch {
+      // Expanding the node again asks again.
+      this.asked.delete(asked);
+      return;
+    }
+    // The tree was replaced meanwhile (another revision, top, filter or server).
+    if (gen !== this.gen || revision !== this.revision) {
+      return;
+    }
+    if (r.stale) {
+      // The tree shown is older than the code: fetched again with the node, then its subtree.
+      if (again) {
+        return;
+      }
+      await this.refresh(names);
+      const item = this.itemByNames(names);
+      if (item && this.mayLoad(item.node) && !this.asked.has(`${this.revision}:${namesKey(names)}`)) {
+        await this.fetchBelow(names, true);
+      }
+      return;
+    }
+    const placed = this.tree?.byNames.get(namesKey(names))?.[0];
+    const item = placed && this.items.get(placed.key);
+    if (!placed || !item || !this.tree || !spliceSubtree(this.raw, r.roots, names, (n, root) => this.nameOf(n, root), (n) => this.canLoadMore(n))) {
+      return;
+    }
+    // Only this branch is placed and made again; the item keeps its identity.
+    const drop = (items: Item<N>[]): void => {
+      for (const i of items) {
+        this.items.delete(i.placed.key);
+        drop(i.kids);
+      }
+    };
+    drop(item.kids);
+    replacePlaced(this.tree, placed, (n, root) => this.nameOf(n, root));
+    const remade = this.makeItem(placed, item.parent, false);
+    item.description = remade.description;
+    item.tooltip = remade.tooltip;
+    item.iconPath = remade.iconPath;
+    if (remade.collapsibleState === vscode.TreeItemCollapsibleState.None) {
+      item.collapsibleState = vscode.TreeItemCollapsibleState.None;
+    }
+    item.kids = this.makeItems(placed.children, item);
+    this.emitter.fire(item);
   }
 
   /** Fetches the tree again (`reveal`: names of a node to include beyond the node limit). */
@@ -374,6 +472,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
         ...this.params(),
         filter: this.filter ?? null,
         reveal: reveal ?? null,
+        ...(this.testMaxNodes ? { maxNodes: this.testMaxNodes } : {}),
       });
       if (gen !== this.gen || (wanted && !wanted())) {
         return;
@@ -385,6 +484,7 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
       this.matches = r.matches;
       this.error = undefined;
       this.stale = r.revision < this.latest;
+      this.asked.clear();
       this.setTree(r.roots);
     } catch (e) {
       if (gen !== this.gen) {
@@ -401,23 +501,28 @@ export abstract class TreeBase<N extends TreeNode> implements vscode.TreeDataPro
   }
 
   private setTree(roots: N[]): void {
+    this.raw = roots;
     const tree = placeTree(roots, (n, root) => this.nameOf(n, root));
     this.tree = tree;
     // An item of the tree replaced would keep all of it.
     this.revealed = undefined;
     this.items.clear();
+    this.roots = this.makeItems(tree.roots, undefined);
+  }
+
+  /** The items of placed nodes and of what is below them, put into `items`. */
+  private makeItems(ps: Placed<N>[], parent: Item<N> | undefined): Item<N>[] {
     const prefix = this.filter ? `f${this.filterGen}:` : '';
-    const make = (ps: Placed<N>[], parent: Item<N> | undefined): Item<N>[] =>
-      ps.map((p) => {
-        // With a filter the parents of matches are open.
-        const item = this.makeItem(p, parent, this.filter !== undefined || (parent === undefined && this.expandRoots(tree)));
-        item.endpoint = this.conn.endpoint();
-        item.id = `${this.name}:${prefix}${p.key}`;
-        this.items.set(p.key, item);
-        item.kids = make(p.children, item);
-        return item;
-      });
-    this.roots = make(tree.roots, undefined);
+    const tree = this.tree;
+    return ps.map((p) => {
+      // With a filter the parents of matches are open.
+      const item = this.makeItem(p, parent, this.filter !== undefined || (parent === undefined && tree !== undefined && this.expandRoots(tree)));
+      item.endpoint = this.conn.endpoint();
+      item.id = `${this.name}:${prefix}${p.key}`;
+      this.items.set(p.key, item);
+      item.kids = this.makeItems(p.children, item);
+      return item;
+    });
   }
 
   /** Whether root nodes show open. */
@@ -672,9 +777,14 @@ export class DesignHierarchy extends TreeBase<HierNode> {
     return keyedName(n.name, n.dup);
   }
 
+  protected canLoadMore(n: HierNode): boolean {
+    return n.truncated && (n.cut === 'nodes' || n.cut === 'visits');
+  }
+
   protected makeItem(p: Placed<HierNode>, parent: Item<HierNode> | undefined, expand: boolean): Item<HierNode> {
     const n = p.node;
-    const state = n.children.length ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
+    // A node cut at the node limit expands to load what is below it.
+    const state = n.children.length || this.mayLoad(n) ? (expand ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed) : vscode.TreeItemCollapsibleState.None;
     const item = new Item(p, parent, n.name, state);
     item.description = hierDescription(n);
     item.contextValue = 'dvicode.hierNode';

@@ -2356,3 +2356,19 @@ fn lint_and_the_problem_limit() {
     assert!((8..=9).contains(&shown), "{shown}");
     c.shutdown();
 }
+
+#[test]
+fn design_subtree_request_and_stale() {
+    let root = project("dsubtree", &[("d.sv", "module leaf; endmodule\nmodule blk;\n  leaf a();\n  leaf b();\n  leaf c();\nendmodule\nmodule top;\n  blk x();\n  blk y();\nendmodule\n")]);
+    let (mut c, _) = Client::start(&root, Value::Null);
+    let t = c.request_ok("dvicode/tree", json!({ "view": "design", "top": "top", "filter": null, "reveal": null, "maxNodes": 2 }));
+    let y = &t["roots"][0]["children"][1];
+    assert_eq!((y["name"].as_str(), y["cut"].as_str()), (Some("y"), Some("nodes")), "{t}");
+    // The node cut, alone with what is below it.
+    let s = c.request_ok("dvicode/tree", json!({ "view": "design", "top": "top", "root": ["top", "y"], "revision": t["revision"] }));
+    let kids = s["roots"][0]["children"].as_array().cloned().unwrap_or_default();
+    assert_eq!((kids.len(), kids[0]["children"].as_array().map(|v| v.len())), (1, Some(3)), "{s}");
+    // Asked for in another revision of the tree: stale.
+    let stale = c.request_ok("dvicode/tree", json!({ "view": "design", "top": "top", "root": ["top", "y"], "revision": -1 }));
+    assert_eq!(stale["stale"], true);
+}

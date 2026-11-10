@@ -258,11 +258,14 @@ pub struct TreeQuery {
     pub objects: bool,
     /// Design Hierarchy: generate branches proven not elaborated are shown (marked).
     pub inactive: bool,
+    /// Design Hierarchy: only the node at `reveal` and what is below it (the nodes on the way
+    /// to it are returned, without their other children): to load a node that was cut.
+    pub subtree: bool,
 }
 
 impl TreeQuery {
     pub fn new(max_nodes: usize) -> TreeQuery {
-        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000, ports: true, objects: false, inactive: false }
+        TreeQuery { filter: None, target: None, reveal: Vec::new(), max_nodes, max_matches: 5_000, max_visits: 2_000_000, ports: true, objects: false, inactive: false, subtree: false }
     }
 }
 
@@ -318,6 +321,12 @@ struct Walk<'q> {
 impl Walk<'_> {
     fn new(q: &TreeQuery) -> Walk<'_> {
         Walk { q, nodes_left: q.max_nodes, visits_left: q.max_visits, meta: TreeMeta::default(), slots: 0 }
+    }
+
+    /// With [`TreeQuery::subtree`]: a child whose rest of the path (`child_pin`) is `None`,
+    /// under a scope above the node asked for (`pin` not yet used up), is not walked.
+    fn off_path(&self, pin: Option<&[String]>, child_pin: Option<&[String]>) -> bool {
+        self.q.subtree && pin.is_some_and(|p| !p.is_empty()) && child_pin.is_none()
     }
 
     /// The match or visit limit was reached: nothing more is looked at.
@@ -1115,6 +1124,9 @@ impl Analysis {
             }
         }
         for t in tops {
+            if q.subtree && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
+                continue;
+            }
             if w.stopped() && !q.reveal.first().is_some_and(|r| *r == self.decl(t).name) {
                 break;
             }
@@ -1294,6 +1306,10 @@ impl Analysis {
                     let (name, mut kids, mark, mut own, dup, first, mut cut) = wrapper.take().unwrap();
                     let wpath = format!("{path}.{name}");
                     let wpin = pin_below(pin, &keyed(&name, dup));
+                    if w.off_path(pin, wpin) {
+                        wrapper = Some((name, kids, mark, own, dup, first, cut));
+                        continue;
+                    }
                     cx.names.push(name.clone());
                     let (nodes, stop) = self.hier_child(&child, scope, def_name, &wpath, wpin, w, stack, &mut cut, &mut own, frame, cx, presence.clone(), None, pending);
                     cx.names.pop();
@@ -1354,6 +1370,9 @@ impl Analysis {
             DeclKind::Instance => {
                 let dup = sibling(seen, &d.name);
                 let child_pin = pin_below(pin, &keyed(&d.name, dup));
+                if w.off_path(pin, child_pin) {
+                    return (out, false);
+                }
                 if w.stopped() && child_pin.is_none() {
                     *truncated = true;
                     return (out, pin.is_none());
@@ -1459,6 +1478,11 @@ impl Analysis {
                     None => vec![(name.clone(), None, presence.clone())],
                 };
                 for (copy, genvar, mark) in copies {
+                    let dup = if named { sibling(seen, &copy) } else { None };
+                    let (gen_path, gen_pin) = if named { (format!("{path}.{copy}"), pin_below(pin, &keyed(&copy, dup))) } else { (path.to_string(), pin) };
+                    if w.off_path(pin, gen_pin) {
+                        continue;
+                    }
                     // Every generated scope counts against the budget, with or without nodes.
                     if !w.visit() && pin.is_none() {
                         *truncated = true;
@@ -1469,8 +1493,6 @@ impl Analysis {
                         return (out, true);
                     }
                     let bframe = cx.elab.block_frame(gr, frame, genvar);
-                    let dup = if named { sibling(seen, &copy) } else { None };
-                    let (gen_path, gen_pin) = if named { (format!("{path}.{copy}"), pin_below(pin, &keyed(&copy, dup))) } else { (path.to_string(), pin) };
                     let mut own = FxHashMap::default();
                     let level = if named { &mut own } else { &mut *seen };
                     if named {

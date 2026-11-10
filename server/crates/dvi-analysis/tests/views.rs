@@ -559,3 +559,51 @@ fn design_cut_reasons_and_wrappers() {
     let (t, meta) = a.design_tree(Some("top"), &q);
     assert_eq!((meta.incomplete, t[0].cut), (Some("matches"), Some("matches")));
 }
+
+fn subtree(path: &[&str], max_nodes: usize) -> TreeQuery {
+    let mut q = TreeQuery::new(max_nodes);
+    q.reveal = path.iter().map(|s| s.to_string()).collect();
+    q.subtree = true;
+    q
+}
+
+/// A node that was cut is asked for again by its path: it comes with what is below it, and
+/// the nodes on the way without their other children. Duplicate names, generate copies, binds
+/// (also written in an instance off the path) and recursions are as in the whole tree.
+#[test]
+fn design_subtree_of_a_cut_node() {
+    let leaves = |name: &str, n: usize| format!("module {name};\n{}endmodule\n", (0..n).map(|i| format!("  leaf u_{i}();\n")).collect::<String>());
+    let src = format!(
+        "module leaf; endmodule\nmodule chk; endmodule\n{}{}module writer;\n  bind blk_small chk by_writer();\nendmodule\nmodule top;\n  blk_big blk_a();\n  blk_small blk_b();\n  if (1) begin : dd blk_small d(); end else begin : dd blk_small d(); end\n  for (genvar i = 0; i < 2; i++) begin : g\n    blk_small s();\n  end\n  writer w();\nendmodule\nmodule self_ref;\n  self_ref again();\nendmodule\n",
+        leaves("blk_big", 50),
+        leaves("blk_small", 3)
+    );
+    let (a, _) = project("dsubtree", &[("d.sv", &src)]);
+    // The whole tree, cut: blk_b has no children shown.
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(10));
+    let b = t[0].children.iter().find(|c| c.name == "blk_b").unwrap();
+    assert_eq!((b.children.len(), b.cut), (0, Some("nodes")));
+    // blk_b alone, with its leaves and the instance a bind written in `w` adds.
+    let (t, meta) = a.design_tree(Some("top"), &subtree(&["top", "blk_b"], 100));
+    assert_eq!(paths(&t), ["top", "top.blk_b", "top.blk_b.u_0", "top.blk_b.u_1", "top.blk_b.u_2", "top.blk_b.by_writer"]);
+    assert_eq!((t[0].children[0].cut, meta.incomplete), (None, None));
+    // A large node: all of it.
+    let (t, _) = a.design_tree(Some("top"), &subtree(&["top", "blk_a"], 100));
+    assert_eq!((t[0].children[0].children.len(), t[0].children[0].cut), (50, None));
+    // The second of two siblings with one name (branches shown when not elaborated).
+    let mut q = subtree(&["top", "dd#2"], 100);
+    q.inactive = true;
+    let (t, _) = a.design_tree(Some("top"), &q);
+    let dd2 = &t[0].children[0];
+    assert_eq!((dd2.name.as_str(), dd2.dup, dd2.children.len()), ("dd", Some(2), 1), "{:?}", paths(&t));
+    // In a generate copy: the copy on the way, not the other.
+    let (t, _) = a.design_tree(Some("top"), &subtree(&["top", "g[1]", "s"], 100));
+    assert_eq!(paths(&t)[..3], ["top", "top.g[1]", "top.g[1].s"]);
+    assert_eq!(t[0].children.len(), 1);
+    // Still too large for the limit (the node on the way takes one): cut again.
+    let (t, meta) = a.design_tree(Some("top"), &subtree(&["top", "blk_a"], 10));
+    assert_eq!((t[0].children[0].children.len(), t[0].children[0].cut, meta.incomplete), (9, Some("nodes"), Some("nodes")));
+    // A recursion stays one.
+    let (t, _) = a.design_tree(Some("self_ref"), &subtree(&["self_ref", "again"], 100));
+    assert_eq!((t[0].children[0].children.len(), t[0].children[0].cut), (0, Some("recursion")));
+}

@@ -31,9 +31,82 @@ export function namesKey(names: string[]): string {
   return JSON.stringify(names);
 }
 
+/**
+ * Puts the node at `names` in `fresh` (a `dvicode/tree` answer for that node only) in place of
+ * the node at `names` in `roots`: what is below it, and whether and why it is cut. A node below
+ * it that the answer cuts (`cut`) but `roots` has loaded keeps what was loaded. Whether both
+ * were found.
+ */
+export function spliceSubtree<N extends TreeNode>(roots: N[], fresh: N[], names: string[], nameOf: (n: N, root: boolean) => string, cut: (n: N) => boolean): boolean {
+  const find = (nodes: N[]): N | undefined => {
+    let level = nodes;
+    let cur: N | undefined;
+    for (let i = 0; i < names.length; i++) {
+      cur = level.find((n) => nameOf(n, i === 0) === names[i]);
+      if (!cur) {
+        return undefined;
+      }
+      level = cur.children as N[];
+    }
+    return cur;
+  };
+  const old = find(roots);
+  const got = find(fresh);
+  if (!old || !got || names.length === 0) {
+    return false;
+  }
+  const keep = (was: N, now: N): void => {
+    const before = new Map((was.children as N[]).map((c) => [nameOf(c, false), c]));
+    now.children = (now.children as N[]).map((c) => {
+      const b = before.get(nameOf(c, false));
+      if (!b) {
+        return c;
+      }
+      if (cut(c) && !cut(b)) {
+        return b;
+      }
+      keep(b, c);
+      return c;
+    });
+  };
+  keep(old, got);
+  const o = old as unknown as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    delete o[k];
+  }
+  Object.assign(o, got);
+  return true;
+}
+
 /** Places the nodes of a tree; `nameOf` names a node (`root`: a node at the top). */
 export function placeTree<N extends TreeNode>(roots: N[], nameOf: (n: N, root: boolean) => string): PlacedTree<N> {
   const tree: PlacedTree<N> = { roots: [], byKey: new Map(), byNames: new Map(), truncated: false };
+  tree.roots = placeBelow(tree, undefined, roots, nameOf);
+  return tree;
+}
+
+/** Places again what is below `p` (its node's children changed): the nodes that were below it
+ * leave the tree's maps. */
+export function replacePlaced<N extends TreeNode>(tree: PlacedTree<N>, p: Placed<N>, nameOf: (n: N, root: boolean) => string): void {
+  const drop = (ps: Placed<N>[]): void => {
+    for (const q of ps) {
+      tree.byKey.delete(q.key);
+      const nk = namesKey(q.names);
+      const rest = (tree.byNames.get(nk) ?? []).filter((x) => x !== q);
+      if (rest.length) {
+        tree.byNames.set(nk, rest);
+      } else {
+        tree.byNames.delete(nk);
+      }
+      drop(q.children);
+    }
+  };
+  drop(p.children);
+  p.children = placeBelow(tree, p, p.node.children as N[], nameOf);
+}
+
+/** Places `nodes` below `parent` (the roots without one) into `tree`'s maps. */
+function placeBelow<N extends TreeNode>(tree: PlacedTree<N>, parent: Placed<N> | undefined, nodes: N[], nameOf: (n: N, root: boolean) => string): Placed<N>[] {
   const place = (nodes: N[], parent: Placed<N> | undefined): Placed<N>[] => {
     const seen = new Map<string, number>();
     // Segments given: a sibling literally named `r#2` does not share the second `r`'s.
@@ -59,8 +132,7 @@ export function placeTree<N extends TreeNode>(roots: N[], nameOf: (n: N, root: b
       return p;
     });
   };
-  tree.roots = place(roots, undefined);
-  return tree;
+  return place(nodes, parent);
 }
 
 /** Nodes of a tree in the order the view shows them (depth first). */
@@ -781,8 +853,8 @@ export function hierTooltip(n: HierInfo, path: string): string {
   if (n.bound) {
     lines.push(`Added by the \`bind\` at ${n.bound}`);
   }
-  if (n.truncated && n.cut === 'nodes') {
-    lines.push('*Not every instance below is listed: the view is cut at the node limit.*');
+  if (n.truncated && (n.cut === 'nodes' || n.cut === 'visits')) {
+    lines.push('*Not every instance below is listed (the view is cut at the node limit): expanding the node loads them.*');
   }
   if (n.params?.length) {
     const origin: Record<string, string> = { default: 'default', override: 'given', defparam: 'defparam', local: 'localparam' };
