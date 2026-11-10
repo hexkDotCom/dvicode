@@ -2669,6 +2669,11 @@ impl BindIndex {
         self.by_module.is_empty() && self.by_last.is_empty()
     }
 
+    /// Whether some `bind` may put an instance into an instance of the definition `def`.
+    pub fn may_go_into(&self, def: (u32, u32)) -> bool {
+        self.by_module.contains_key(&def) || self.by_last.values().flatten().any(|p| p.module.is_none_or(|m| m == def))
+    }
+
     /// The instances binds put into the instance at `names` (its path from the top: generate
     /// copies are `g[1]`) of the definition `def`, with `anc` the instances above it and itself,
     /// and `reach` the definitions elaborated in the design (a statement written in one exists):

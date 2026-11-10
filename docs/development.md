@@ -61,7 +61,7 @@ IDE queries run without an editor; `LINE` and `COL` count from 1, like in the ed
 | `--expand F:LINE:COL` | macro expansion |
 | `--outline F` | document symbols |
 | `--fixes F` | quick fixes of a file |
-| `--hier TOP` or `--hier -` | design hierarchy |
+| `--hier TOP` or `--hier -` | design hierarchy (`--max-nodes N`: nodes at most, 2000 by default) |
 | `--uvm TEST` or `--uvm -` | verification hierarchy |
 | `--uvm-tests -` or `--uvm-tests objects` | every test's verification hierarchy (with objects), and the time each took |
 | `--symbols QUERY` | workspace symbols |

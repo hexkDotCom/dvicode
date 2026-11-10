@@ -60,6 +60,8 @@ interface HierNode extends TreeNode {
   array?: string;
   /** Added by a `bind`: where the statement is. */
   bound?: string;
+  /** With `truncated`, why the children are cut: `nodes` (the node limit) or `recursion`. */
+  cut?: string;
 }
 
 interface FileNode extends TreeNode {

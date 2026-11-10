@@ -16,7 +16,8 @@ USAGE:
                                                 or the folder was read, on stderr).
                                                 Queries: --goto/--hover/--refs/--impl/--sig/
                                                 --complete/--calls F:LINE:COL, --outline F,
-                                                --fixes F, --hier TOP|-, --uvm TEST|-,
+                                                --fixes F, --hier TOP|- (--max-nodes N,
+                                                default 2000), --uvm TEST|-,
                                                 --symbols Q, --expand F:LINE:COL, --files -
                                                 --queries FILE: one query per line; panics
                                                 are reported and each query is timed

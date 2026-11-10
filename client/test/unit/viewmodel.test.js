@@ -153,8 +153,9 @@ test.describe('view texts', () => {
     assert.equal(vm.viewDescription({ ...base, position: { index: 1, count: 3 } }), '2 of 3');
     assert.equal(vm.viewDescription({ ...base, position: { index: 0, count: 5000, more: true } }), '1 of 5000+');
     assert.equal(vm.viewDescription({ ...base, position: { index: 0, count: 1 } }), undefined);
-    // The node limit is shown on the nodes (…), not in the description.
-    assert.equal(vm.viewDescription({ ...base, incomplete: 'nodes' }), undefined);
+    // The node limit is said in the description too (the nodes cut show …).
+    assert.equal(vm.viewDescription({ ...base, incomplete: 'nodes' }), 'cut at the node limit');
+    assert.equal(vm.viewDescription({ ...base, scope: 'top tb', incomplete: 'nodes' }), 'top tb · cut at the node limit');
     assert.equal(vm.viewDescription({ ...base, scope: 'top tb', stale: true }), 'top tb · out of date: Refresh');
   });
   test.it('shows the first message that applies', () => {
@@ -339,6 +340,9 @@ test.describe('design hierarchy parameters', () => {
     const n = node({ name: 'u_sva', definition: 'fifo_sva', bound: 'binds.sv:12' });
     assert.equal(vm.hierDescription(n), 'fifo_sva · bind');
     assert.ok(vm.hierTooltip(n, 'top.u_fifo.u_sva').includes('Added by the `bind` at binds.sv:12'));
+    // A cut at the node limit is said; a recursion is said by its presence instead.
+    assert.ok(vm.hierTooltip({ ...n, truncated: true, cut: 'nodes' }, 'top.u_fifo.u_sva').includes('cut at the node limit'));
+    assert.ok(!vm.hierTooltip({ ...n, truncated: true, cut: 'recursion' }, 'top.u_fifo.u_sva').includes('node limit'));
   });
 });
 

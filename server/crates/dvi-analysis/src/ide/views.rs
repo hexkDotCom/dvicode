@@ -65,6 +65,15 @@ pub struct HierNode {
     /// (`binds.sv:12`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound: Option<String>,
+    /// With `truncated`, why the children are cut: the limit the request reached (`nodes`,
+    /// `visits` or `matches`, as [`TreeMeta::incomplete`]: asked for again, the node shows
+    /// more), or `recursion` (not followed: the definition contains itself with the same
+    /// parameter values, or 64 levels of instances).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut: Option<&'static str>,
+    /// While the tree is built: the walk below this instance that is still to be done.
+    #[serde(skip)]
+    slot: Option<usize>,
 }
 
 /// A component of the UVM verification hierarchy (or, with `TreeQuery::objects`, an object).
@@ -302,11 +311,13 @@ struct Walk<'q> {
     nodes_left: usize,
     visits_left: usize,
     meta: TreeMeta,
+    /// Walks below instances deferred so far (see [`Descent`]).
+    slots: usize,
 }
 
 impl Walk<'_> {
     fn new(q: &TreeQuery) -> Walk<'_> {
-        Walk { q, nodes_left: q.max_nodes, visits_left: q.max_visits, meta: TreeMeta::default() }
+        Walk { q, nodes_left: q.max_nodes, visits_left: q.max_visits, meta: TreeMeta::default(), slots: 0 }
     }
 
     /// The match or visit limit was reached: nothing more is looked at.
@@ -367,6 +378,46 @@ impl Walk<'_> {
             self.meta.incomplete = Some("nodes");
         }
         pinned.then_some(false)
+    }
+}
+
+/// An instance listed whose walk is done after its siblings are listed: what the walk needs.
+struct Descent<'p> {
+    /// Its node's [`HierNode::slot`].
+    slot: usize,
+    def: DeclRef,
+    path: String,
+    pin: Option<&'p [String]>,
+    frame: Arc<Frame>,
+    /// The walk's state below it: names, ancestors, recursion stack and `bind` depth.
+    names: Vec<SmolStr>,
+    anc: Vec<Ancestor>,
+    stack: Vec<((u32, u32), u64)>,
+    in_bound: usize,
+}
+
+/// Puts the walks done after listing ([`Descent`]) into their nodes.
+fn fill_slots(nodes: &mut [HierNode], done: &mut FxHashMap<usize, (Vec<HierNode>, bool)>) {
+    for n in nodes {
+        match n.slot.take() {
+            Some(s) => {
+                if let Some((kids, cut)) = done.remove(&s) {
+                    n.children = kids;
+                    n.truncated |= cut;
+                }
+            }
+            None => fill_slots(&mut n.children, done),
+        }
+    }
+}
+
+/// A cut that is not a recursion is the limit the request reached ([`HierNode::cut`]).
+fn name_cuts(nodes: &mut [HierNode], why: &'static str) {
+    for n in nodes {
+        if n.truncated && n.cut.is_none() {
+            n.cut = Some(why);
+        }
+        name_cuts(&mut n.children, why);
     }
 }
 
@@ -1092,37 +1143,112 @@ impl Analysis {
                 presence: None,
                 array: None,
                 bound: None,
+                cut: None,
+                slot: None,
             };
             let key = self.decl_key(self.canonical(t));
             let mut stack = vec![(key, values_hash(&node.params))];
             cx.anc = vec![Ancestor { module: key, def: t, frame: top.frame.clone(), depth: 1 }];
             cx.names = names;
             if !w.stopped() {
-                node.children = self.hier_walk(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated, &mut FxHashMap::default(), &top.frame, &mut cx);
+                node.children = self.hier_scope(t, &name, &name, pin, &mut w, &mut stack, &mut node.truncated, &top.frame, &mut cx);
             }
             if matched || !node.children.is_empty() || pin.is_some() {
                 roots.push(node);
             }
         }
+        name_cuts(&mut roots, w.meta.incomplete.unwrap_or("nodes"));
         (roots, w.meta)
+    }
+
+    /// The nodes of `scope` (an instance's definition, or a top). Without a filter or a target,
+    /// every child shown is listed before the walk goes below any of them, so that a large
+    /// first subtree cannot take the whole node limit from its siblings.
+    #[allow(clippy::too_many_arguments)]
+    fn hier_scope<'p>(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&'p [String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, frame: &Arc<Frame>, cx: &mut ElabCx) -> Vec<HierNode> {
+        let mut pending = Vec::new();
+        let mut out = self.hier_walk(scope, def_name, path, pin, w, stack, truncated, &mut FxHashMap::default(), frame, cx, &mut pending);
+        if pending.is_empty() {
+            return out;
+        }
+        let mut done: FxHashMap<usize, (Vec<HierNode>, bool)> = FxHashMap::default();
+        for d in pending {
+            let slot = d.slot;
+            // Nothing more can be added (and the path to reveal is not below): whether nodes
+            // would be is read from the source, without elaborating.
+            let below = if d.pin.is_none() && (w.nodes_left == 0 || w.stopped() || self.cancelled()) { (Vec::new(), self.may_have_nodes(d.def, d.in_bound, cx)) } else { self.hier_descend(d, w, cx) };
+            done.insert(slot, below);
+        }
+        fill_slots(&mut out, &mut done);
+        out
+    }
+
+    /// Whether the definition `def` may have nodes below it: an instance or a generate block in
+    /// its source (whether the block is elaborated is not looked at), or a `bind` into it
+    /// (none below a bound instance: `in_bound`).
+    fn may_have_nodes(&self, def: DeclRef, in_bound: usize, cx: &ElabCx) -> bool {
+        fn any(p: &dvi_syntax::ast::ParsedUnit, scope: DeclId) -> bool {
+            p.decl(scope).children.iter().any(|&c| {
+                let d = p.decl(c);
+                match d.kind {
+                    DeclKind::Instance => !d.has(dflags::BOUND),
+                    DeclKind::Generate => true,
+                    DeclKind::Block => any(p, c),
+                    _ => false,
+                }
+            })
+        }
+        any(&self.unit(def.unit).parsed, def.decl) || (in_bound == 0 && cx.elab.binds.may_go_into(self.decl_key(self.canonical(def))))
+    }
+
+    /// The walk below an instance: now with a filter or a target (whether the instance is
+    /// shown depends on what is below it), after its siblings are listed otherwise.
+    fn hier_later<'p>(&self, node: &mut HierNode, mut d: Descent<'p>, w: &mut Walk, cx: &mut ElabCx, pending: &mut Vec<Descent<'p>>) {
+        if w.q.filter.is_some() || w.q.target.is_some() {
+            let (kids, cut) = self.hier_descend(d, w, cx);
+            node.children = kids;
+            node.truncated |= cut;
+        } else {
+            w.slots += 1;
+            d.slot = w.slots;
+            node.slot = Some(w.slots);
+            pending.push(d);
+        }
+    }
+
+    /// Walks below an instance with the state it was listed in: its nodes, and whether they
+    /// are cut.
+    fn hier_descend(&self, d: Descent, w: &mut Walk, cx: &mut ElabCx) -> (Vec<HierNode>, bool) {
+        let names = std::mem::replace(&mut cx.names, d.names);
+        let anc = std::mem::replace(&mut cx.anc, d.anc);
+        let in_bound = std::mem::replace(&mut cx.in_bound, d.in_bound);
+        let mut stack = d.stack;
+        let mut truncated = false;
+        let name = self.decl(d.def).name.to_string();
+        let kids = self.hier_scope(d.def, &name, &d.path, d.pin, w, &mut stack, &mut truncated, &d.frame, cx);
+        cx.names = names;
+        cx.anc = anc;
+        cx.in_bound = in_bound;
+        (kids, truncated)
     }
 
     /// `seen`: names of the siblings so far (unnamed blocks add to their parent's level);
     /// `frame`: the values of the instance (and generate blocks) `scope` is in.
     #[allow(clippy::too_many_arguments)]
-    fn hier_walk(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx) -> Vec<HierNode> {
+    fn hier_walk<'p>(&self, scope: DeclRef, def_name: &str, path: &str, pin: Option<&'p [String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx, pending: &mut Vec<Descent<'p>>) -> Vec<HierNode> {
         let mut out = Vec::new();
         if self.cancelled() {
             return out;
         }
         // The implicit block of a body without `begin` being filled: its name, nodes, mark,
-        // own sibling names and number among its siblings.
-        type Wrapper = (SmolStr, Vec<HierNode>, Option<String>, FxHashMap<String, u32>, Option<u32>, Option<HierNode>);
+        // own sibling names, number among its siblings, and whether its nodes are cut.
+        type Wrapper = (SmolStr, Vec<HierNode>, Option<String>, FxHashMap<String, u32>, Option<u32>, Option<HierNode>, bool);
         let mut wrapper: Option<Wrapper> = None;
-        let flush = |out: &mut Vec<HierNode>, wr: Option<Wrapper>| {
-            if let Some((name, kids, mark, _, dup, first)) = wr {
+        // Whether a wrapper left out (no nodes) was cut: its parent is then.
+        let flush = |out: &mut Vec<HierNode>, wr: Option<Wrapper>| -> bool {
+            if let Some((name, kids, mark, _, dup, first, cut)) = wr {
                 if kids.is_empty() && mark.is_none() {
-                    return;
+                    return cut;
                 }
                 let at = first.as_ref().or(kids.first());
                 out.push(HierNode {
@@ -1135,17 +1261,21 @@ impl Analysis {
                     def_uri: None,
                     def_line: 0,
                     children: kids,
-                    truncated: false,
+                    truncated: cut,
                     dup,
                     params: Vec::new(),
                     presence: mark,
                     array: None,
                     bound: None,
+                    cut: None,
+                    slot: None,
                 });
             }
+            false
         };
         let children = cx.elab.children(scope, frame);
-        for child in children {
+        let count = children.len();
+        for (ci, child) in children.into_iter().enumerate() {
             let presence = match &child.presence {
                 Presence::Elaborated => None,
                 Presence::NotElaborated if !cx.inactive => continue,
@@ -1153,36 +1283,40 @@ impl Analysis {
                 Presence::Undetermined(why) => Some(format!("undetermined: {why}")),
             };
             if wrapper.as_ref().is_some_and(|x| Some(&x.0) != child.implicit.as_ref()) {
-                flush(&mut out, wrapper.take());
+                *truncated |= flush(&mut out, wrapper.take());
             }
             let stop = match &child.implicit {
                 Some(n) => {
                     if wrapper.is_none() {
                         let dup = sibling(seen, n);
-                        wrapper = Some((n.clone(), Vec::new(), presence.clone(), FxHashMap::default(), dup, None));
+                        wrapper = Some((n.clone(), Vec::new(), presence.clone(), FxHashMap::default(), dup, None, false));
                     }
-                    let (name, mut kids, mark, mut own, dup, first) = wrapper.take().unwrap();
+                    let (name, mut kids, mark, mut own, dup, first, mut cut) = wrapper.take().unwrap();
                     let wpath = format!("{path}.{name}");
                     let wpin = pin_below(pin, &keyed(&name, dup));
                     cx.names.push(name.clone());
-                    let (nodes, stop) = self.hier_child(&child, scope, def_name, &wpath, wpin, w, stack, truncated, &mut own, frame, cx, presence.clone(), None);
+                    let (nodes, stop) = self.hier_child(&child, scope, def_name, &wpath, wpin, w, stack, &mut cut, &mut own, frame, cx, presence.clone(), None, pending);
                     cx.names.pop();
                     kids.extend(nodes);
-                    wrapper = Some((name, kids, mark, own, dup, first));
+                    wrapper = Some((name, kids, mark, own, dup, first, cut));
+                    // The scope's children after the wrapper (or its binds) are left out too.
+                    if stop && (ci + 1 < count || (!cx.elab.binds.is_empty() && cx.in_bound == 0)) {
+                        *truncated = true;
+                    }
                     stop
                 }
                 None => {
-                    let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, presence, None);
+                    let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, presence, None, pending);
                     out.extend(nodes);
                     stop
                 }
             };
             if stop {
-                flush(&mut out, wrapper.take());
+                *truncated |= flush(&mut out, wrapper.take());
                 return out;
             }
         }
-        flush(&mut out, wrapper.take());
+        *truncated |= flush(&mut out, wrapper.take());
         // The instances `bind`s add to this instance, after its own; none below a bound instance
         // (IEEE 1800 23.11: a bind does not reach into what another bind added).
         if self.decl(scope).kind.is_definition() && cx.in_bound == 0 {
@@ -1195,7 +1329,7 @@ impl Analysis {
                 if let Some(e) = element {
                     at.push_str(&format!(", into {e} only"));
                 }
-                let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, None, Some((b, at)));
+                let (nodes, stop) = self.hier_child(&child, scope, def_name, path, pin, w, stack, truncated, seen, frame, cx, None, Some((b, at)), pending);
                 out.extend(nodes);
                 if stop {
                     break;
@@ -1208,7 +1342,7 @@ impl Analysis {
     /// The nodes of one child of a scope, and whether the walk of the scope stops there (a
     /// limit). `bound`: an instance a `bind` adds (in its own unit), and where the statement is.
     #[allow(clippy::too_many_arguments)]
-    fn hier_child(&self, child: &super::elab::Child, scope: DeclRef, def_name: &str, path: &str, pin: Option<&[String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx, presence: Option<String>, bound: Option<(DeclRef, String)>) -> (Vec<HierNode>, bool) {
+    fn hier_child<'p>(&self, child: &super::elab::Child, scope: DeclRef, def_name: &str, path: &str, pin: Option<&'p [String]>, w: &mut Walk, stack: &mut Vec<((u32, u32), u64)>, truncated: &mut bool, seen: &mut FxHashMap<String, u32>, frame: &Arc<Frame>, cx: &mut ElabCx, presence: Option<String>, bound: Option<(DeclRef, String)>, pending: &mut Vec<Descent<'p>>) -> (Vec<HierNode>, bool) {
         let mut out = Vec::new();
         let unit = bound.as_ref().map_or(scope.unit, |(b, _)| b.unit);
         let u = self.unit(unit);
@@ -1262,6 +1396,8 @@ impl Analysis {
                     presence,
                     array,
                     bound: bound.as_ref().map(|(_, at)| at.clone()),
+                    cut: None,
+                    slot: None,
                 };
                 let matched = if w.q.target.is_some() {
                     w.hit(&node.name, &node.definition, def_name, "")
@@ -1281,28 +1417,28 @@ impl Analysis {
                     // values (a recursion that counts down), it goes on to depth 64.
                     if stack.contains(&entry) {
                         node.truncated = true;
+                        node.cut = Some("recursion");
                         node.presence.get_or_insert_with(|| "not followed: it contains itself with the same parameter values".into());
                     } else if stack.len() >= 64 {
                         node.truncated = true;
+                        node.cut = Some("recursion");
                         node.presence.get_or_insert_with(|| "not followed: 64 levels of instances".into());
                     } else {
-                        stack.push(entry);
-                        cx.anc.push(Ancestor { module: key, def: m, frame: ip.frame.clone(), depth: cx.names.len() });
-                        let m_name = self.decl(m).name.to_string();
-                        cx.in_bound += usize::from(bound.is_some());
-                        node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default(), &ip.frame, cx);
-                        cx.in_bound -= usize::from(bound.is_some());
-                        cx.anc.pop();
-                        stack.pop();
+                        let mut below = stack.clone();
+                        below.push(entry);
+                        let mut anc = cx.anc.clone();
+                        anc.push(Ancestor { module: key, def: m, frame: ip.frame.clone(), depth: cx.names.len() });
+                        let d = Descent { slot: 0, def: m, path: child_path.clone(), pin: child_pin, frame: ip.frame.clone(), names: cx.names.clone(), anc, stack: below, in_bound: cx.in_bound + usize::from(bound.is_some()) };
+                        self.hier_later(&mut node, d, w, cx, pending);
                     }
                     cx.names.pop();
                 } else if let Some(m) = def {
                     let key = self.decl_key(m);
                     if !stack.iter().any(|(k, _)| *k == key) && stack.len() < 64 {
-                        stack.push((key, 0));
-                        let m_name = self.decl(m).name.to_string();
-                        node.children = self.hier_walk(m, &m_name, &child_path, child_pin, w, stack, &mut node.truncated, &mut FxHashMap::default(), frame, cx);
-                        stack.pop();
+                        let mut below = stack.clone();
+                        below.push((key, 0));
+                        let d = Descent { slot: 0, def: m, path: child_path.clone(), pin: child_pin, frame: frame.clone(), names: cx.names.clone(), anc: cx.anc.clone(), stack: below, in_bound: cx.in_bound };
+                        self.hier_later(&mut node, d, w, cx, pending);
                     }
                 }
                 if matched || !node.children.is_empty() || child_pin.is_some() {
@@ -1340,11 +1476,16 @@ impl Analysis {
                     if named {
                         cx.names.push(SmolStr::new(&copy));
                     }
-                    let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, truncated, level, &bframe, cx);
+                    // A block shown as a node has its own mark; an unnamed one cuts its parent's.
+                    let mut own_cut = false;
+                    let cut = if named || mark.is_some() { &mut own_cut } else { &mut *truncated };
+                    let kids = self.hier_walk(gr, def_name, &gen_path, gen_pin, w, stack, cut, level, &bframe, cx, pending);
                     if named {
                         cx.names.pop();
                     }
                     if kids.is_empty() && mark.is_none() {
+                        // Left out: when it was cut, what it would show is missing here.
+                        *truncated |= own_cut;
                         continue;
                     }
                     if named || mark.is_some() {
@@ -1359,12 +1500,14 @@ impl Analysis {
                             def_uri: None,
                             def_line: 0,
                             children: kids,
-                            truncated: false,
+                            truncated: own_cut,
                             dup,
                             params: Vec::new(),
                             presence: mark,
                             array: None,
                             bound: None,
+                            cut: None,
+                            slot: None,
                         });
                     } else {
                         out.extend(kids);

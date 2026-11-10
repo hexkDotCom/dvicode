@@ -369,7 +369,7 @@ export function viewDescription(s: ViewState): string | undefined {
     parts.push(`filter '${s.filter}': ${n.toLocaleString('en-US')} ${n === 1 ? 'match' : 'matches'}`);
   }
   const inc = incompleteText(s.incomplete, s.matches ?? 0);
-  if (inc && (s.filter || s.incomplete !== 'nodes')) {
+  if (inc) {
     parts.push(inc);
   }
   if (s.stale) {
@@ -735,6 +735,8 @@ export interface HierInfo {
   array?: string;
   /** Added by a `bind`: where the statement is (`binds.sv:12`). */
   bound?: string;
+  /** With `truncated`, why the children are cut: `nodes` (the node limit) or `recursion`. */
+  cut?: string;
 }
 
 /** A parameter's value as shown: its value, else `?`. */
@@ -778,6 +780,9 @@ export function hierTooltip(n: HierInfo, path: string): string {
   }
   if (n.bound) {
     lines.push(`Added by the \`bind\` at ${n.bound}`);
+  }
+  if (n.truncated && n.cut === 'nodes') {
+    lines.push('*Not every instance below is listed: the view is cut at the node limit.*');
   }
   if (n.params?.length) {
     const origin: Record<string, string> = { default: 'default', override: 'given', defparam: 'defparam', local: 'localparam' };

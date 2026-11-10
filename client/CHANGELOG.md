@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Design Hierarchy: a large first subtree no longer hides the instances after it. Every child
+  of a node shown is listed before the view goes below them, the view says when it is cut at
+  the node limit, and a node whose children are cut says so in its tooltip (a recursion is told
+  apart). `dvicode-server check --hier` takes `--max-nodes N`.
+
 ## 0.9.0 (preview)
 
 - Real-number models: `wreal` nets and ports (`input wreal vdd`) are read as Cadence's

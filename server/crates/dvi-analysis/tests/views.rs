@@ -74,13 +74,16 @@ fn design_limits_and_revealing_a_node() {
     let (a, _) = project("dlimits", &[("d.sv", DESIGN)]);
     let mut q = TreeQuery::new(2);
     let (t, meta) = a.design_tree(Some("top"), &q);
-    assert_eq!(paths(&t), ["top", "top.c0", "top.c0.u_rx_fifo"]);
+    // A node's children are listed before what is below them; the generate block left out is
+    // a cut of its parent.
+    assert_eq!(paths(&t), ["top", "top.c0", "top.c1"]);
     assert_eq!(meta.incomplete, Some("nodes"));
-    assert!(t[0].children[0].truncated);
+    assert_eq!((t[0].truncated, t[0].cut), (true, Some("nodes")));
+    assert_eq!((t[0].children[0].truncated, t[0].children[0].cut), (true, Some("nodes")));
     // A node beyond the limit is returned with its parents when asked for.
     q.reveal = vec!["top".into(), "c1".into(), "u_tx_fifo".into()];
     let p = paths(&a.design_tree(Some("top"), &q).0);
-    assert_eq!(p, ["top", "top.c0", "top.c0.u_rx_fifo", "top.c1", "top.c1.u_tx_fifo"]);
+    assert_eq!(p, ["top", "top.c0", "top.c1", "top.c1.u_tx_fifo"]);
     // The match limit stops the search.
     let mut q = query("fifo");
     q.max_matches = 1;
@@ -497,4 +500,62 @@ fn elaboration_limits_recursion_and_hover_lists() {
     assert_eq!(rows[0], "- `77` in `top.u`", "the defparam sets top.u only: {h}");
     assert_eq!(rows[1], "- `0` in `top.a[0].u`");
     assert_eq!(rows[10], "- and 21 other values in 21 instances");
+}
+
+/// A large first subtree does not take the node limit from its siblings: every child of a node
+/// shown is listed before what is below them, and each node whose children are cut says so.
+#[test]
+fn design_limit_lists_siblings_before_subtrees() {
+    let leaves = |name: &str, n: usize| format!("module {name};\n{}endmodule\n", (0..n).map(|i| format!("  leaf u_{i}();\n")).collect::<String>());
+    let src = format!("module leaf; endmodule\n{}{}module top;\n  blk_big blk_a();\n  blk_small blk_b();\n  blk_small blk_c();\n  blk_small blk_d();\nendmodule\n", leaves("blk_big", 50), leaves("blk_small", 3));
+    let (a, _) = project("dsiblings", &[("d.sv", &src)]);
+    let (t, meta) = a.design_tree(Some("top"), &TreeQuery::new(20));
+    let top = &t[0];
+    let kids: Vec<(&str, usize, Option<&str>)> = top.children.iter().map(|c| (c.name.as_str(), c.children.len(), c.cut)).collect();
+    assert_eq!(kids, [("blk_a", 16, Some("nodes")), ("blk_b", 0, Some("nodes")), ("blk_c", 0, Some("nodes")), ("blk_d", 0, Some("nodes"))]);
+    assert_eq!((top.truncated, top.cut, meta.incomplete), (false, None, Some("nodes")));
+    // With room for everything, nothing is cut.
+    let (t, meta) = a.design_tree(Some("top"), &TreeQuery::new(1000));
+    assert_eq!((t[0].children.iter().map(|c| c.children.len()).collect::<Vec<_>>(), meta.incomplete), (vec![50, 3, 3, 3], None));
+    // Fewer slots than children: the node itself is cut.
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(3));
+    assert_eq!((t[0].children.len(), t[0].cut), (3, Some("nodes")));
+    // The cut is in the JSON; nodes not cut carry neither it nor the walk's bookkeeping.
+    let json = serde_json::to_value(&t[0]).unwrap();
+    assert_eq!(json["cut"], "nodes");
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1000));
+    let json = serde_json::to_value(&t[0]).unwrap();
+    assert!(json.get("cut").is_none() && json.get("slot").is_none(), "{json}");
+}
+
+/// A generate block shown as a node has its own cut; one left out for lack of room cuts its
+/// parent. A recursion is a cut of its own kind, not a limit of the request.
+#[test]
+fn design_limit_cuts_generate_blocks_and_recursions() {
+    let src = "module leaf; endmodule\nmodule top;\n  for (genvar i = 0; i < 2; i++) begin : g\n    leaf u0();\n    leaf u1();\n    leaf u2();\n  end\nendmodule\nmodule self_ref;\n  self_ref again();\nendmodule\n";
+    let (a, _) = project("dgencut", &[("d.sv", src)]);
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(2));
+    assert_eq!(paths(&t), ["top", "top.g[0]", "top.g[0].u0", "top.g[0].u1"]);
+    let g0 = &t[0].children[0];
+    assert_eq!((g0.truncated, g0.cut), (true, Some("nodes")));
+    assert_eq!((t[0].truncated, t[0].cut), (true, Some("nodes")), "g[1] left out");
+    let (t, _) = a.design_tree(Some("self_ref"), &TreeQuery::new(1000));
+    let again = &t[0].children[0];
+    assert_eq!((again.truncated, again.cut), (true, Some("recursion")));
+}
+
+/// Review cases: a stop inside an implicit block marks the parent whose later children are
+/// left out; a cut by the match or visit limit says so (asking with more nodes does not help).
+#[test]
+fn design_cut_reasons_and_wrappers() {
+    let src = "module leaf; endmodule\nmodule top;\n  if (1) leaf a(), b();\n  leaf after_wrapper();\nendmodule\n";
+    let (a, _) = project("dwrapcut", &[("d.sv", src)]);
+    let (t, _) = a.design_tree(Some("top"), &TreeQuery::new(1));
+    assert_eq!((t[0].truncated, t[0].cut), (true, Some("nodes")), "{:?}", paths(&t));
+    let src = "module leaf; endmodule\nmodule top;\n  leaf u0(), u1();\nendmodule\n";
+    let (a, _) = project("dmatchcut", &[("d.sv", src)]);
+    let mut q = query("u");
+    q.max_matches = 1;
+    let (t, meta) = a.design_tree(Some("top"), &q);
+    assert_eq!((meta.incomplete, t[0].cut), (Some("matches"), Some("matches")));
 }

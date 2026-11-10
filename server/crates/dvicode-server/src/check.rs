@@ -37,6 +37,8 @@ pub fn run(args: &[String]) -> i32 {
     let mut env: FxHashMap<String, String> = FxHashMap::default();
     // Seconds one query may take before the process gives up (0: no limit).
     let mut query_timeout = 0u64;
+    // `--hier`: nodes returned at most.
+    let mut hier_nodes = 2000usize;
     // Queries from a file: catch panics and time each one (used by scripts/corpus).
     let mut sweep = false;
     let mut fuzz = crate::fuzz::Options { edits: 0, ..Default::default() };
@@ -97,6 +99,14 @@ pub fn run(args: &[String]) -> i32 {
             "--query-timeout" => {
                 i += 1;
                 query_timeout = args.get(i).and_then(|m| m.parse().ok()).unwrap_or(0);
+            }
+            "--max-nodes" => {
+                i += 1;
+                let Some(n) = args.get(i).and_then(|m| m.parse::<usize>().ok()) else {
+                    eprintln!("check: --max-nodes needs a number");
+                    return 2;
+                };
+                hier_nodes = n;
             }
             "--queries" => {
                 i += 1;
@@ -251,11 +261,11 @@ pub fn run(args: &[String]) -> i32 {
             *c = (format!("{q} {arg}"), std::time::Instant::now());
         }
         if !sweep {
-            run_query(&a, q, arg);
+            run_query(&a, q, arg, hier_nodes);
             continue;
         }
         let t = std::time::Instant::now();
-        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_query(&a, q, arg))) {
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_query(&a, q, arg, hier_nodes))) {
             let m = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
             println!("!! internal error: {m}");
             eprintln!("dvicode check: internal error in {q} {arg}: {m}");
@@ -329,7 +339,7 @@ fn show_loc(l: &lsp_types::Location) -> String {
     format!("{}:{}:{}", l.uri.path(), l.range.start.line + 1, l.range.start.character + 1)
 }
 
-fn run_query(a: &Analysis, q: &str, arg: &str) {
+fn run_query(a: &Analysis, q: &str, arg: &str, hier_nodes: usize) {
     println!("== {q} {arg}");
     match q {
         "--format-twice" => {
@@ -468,7 +478,7 @@ fn run_query(a: &Analysis, q: &str, arg: &str) {
             }
         }
         "--hier" => {
-            let v = a.design_hierarchy(if arg.is_empty() || arg == "-" { None } else { Some(arg) }, 2000);
+            let v = a.design_hierarchy(if arg.is_empty() || arg == "-" { None } else { Some(arg) }, hier_nodes);
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         }
         "--uvm" => {
