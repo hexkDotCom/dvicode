@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1 (preview)
 
 - Design Hierarchy: a large first subtree no longer hides the instances after it. Every child
   of a node shown is listed before the view goes below them, the view says when it is cut at
